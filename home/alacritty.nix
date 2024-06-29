@@ -12,7 +12,7 @@
       colors.draw_bold_text_with_bright_colors = false;
       cursor.unfocused_hollow = true;
       font = {
-        size = 18.0;
+        size = 14.0;
         normal = {
           family = "Iosevka Comfy";
           style = "SemiLight";
