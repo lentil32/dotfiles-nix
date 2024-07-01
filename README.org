@@ -19,3 +19,4 @@
 * References
 - [[https://daiderd.com/nix-darwin/manual/index.html][Darwin Configuration Options]]
 - [[https://nix-community.github.io/home-manager/options.xhtml][Appendix A. Home Manager Configuration Options]]
+- [[https://mynixos.com/][MyNixOS]]
