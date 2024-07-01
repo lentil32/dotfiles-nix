@@ -47,6 +47,8 @@
     zstd
     caddy
     gnupg
+
+    nodePackages.js-beautify
   ];
 
   programs = {
