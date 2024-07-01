@@ -29,6 +29,7 @@
     pyenv
 
     # LSPs and formatters
+    ispell
     nixfmt-rfc-style
     ruff
     taplo
