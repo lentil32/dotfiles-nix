@@ -19,7 +19,6 @@
   environment.systemPackages = with pkgs; [
     cyberduck
     git
-    just
   ];
   environment.variables.EDITOR = "vim";
 
