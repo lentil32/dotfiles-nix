@@ -24,13 +24,24 @@
     nmap # A utility for network discovery and security auditing
 
     # programming
+    cmake
+    devenv
     llvm
     opam
+    freetype
+    pkg-config # matplotlib requires it
+
+    # python
+    pipenv
+    poetry
     pyenv
 
     # LSPs and formatters
+    black
     ispell
+    multimarkdown
     nixfmt-rfc-style
+    pyright
     ruff
     taplo
 
@@ -38,6 +49,7 @@
     iosevka-comfy.comfy
 
     # misc
+    caddy
     cowsay
     file
     which
@@ -46,8 +58,6 @@
     gnutar
     gawk
     zstd
-    caddy
-    gnupg
 
     nodePackages.js-beautify
   ];
@@ -63,18 +73,12 @@
         batwatch
       ];
     };
-    eza = {
-      enable = true;
-    };
     direnv = {
       enable = true;
       nix-direnv.enable = true;
     };
-    thefuck = {
-      enable = true;
-    };
-    zoxide = {
-      enable = true;
-    };
+    eza.enable = true;
+    thefuck.enable = true;
+    zoxide.enable = true;
   };
 }

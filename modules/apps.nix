@@ -16,10 +16,7 @@
   # But on macOS, it's less stable than homebrew.
   #
   # Related Discussion: https://discourse.nixos.org/t/darwin-again/29331
-  environment.systemPackages = with pkgs; [
-    cyberduck
-    git
-  ];
+  environment.systemPackages = with pkgs; [ git ];
   environment.variables.EDITOR = "vim";
 
   # TODO To make this work, homebrew need to be installed manually, see https://brew.sh
@@ -55,14 +52,13 @@
       "aria2" # download tool
       "curl" # no not install curl via nixpkgs, it's not working well on macOS!
       "emacs-plus"
-      "gnu-tar"
       "httpie" # http client
+      "libtool" # Needed by Emacs multivterm compilation step
       "wget"
 
       # Signing git commits in macOS
       # Set up a GPG key for signing Git commits on MacOS (M1)
       # Reference: https://gist.github.com/phortuin/cf24b1cca3258720c71ad42977e1ba57
-      "gnupg"
       "pinentry-mac"
     ];
 
@@ -92,7 +88,9 @@
       "transmission"
 
       # Development
+      "cyberduck"
       "insomnia" # REST client
+      "xquartz" # Open-source version of the X.Org X Window System
     ];
   };
 }
