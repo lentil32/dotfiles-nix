@@ -24,12 +24,11 @@
       # customize dock
       dock = {
         autohide = true;
-        orientation = "left";
         show-recents = false; # disable recent apps
 
         # customize Hot Corners
-        wvous-tl-corner = 2; # top-left - Mission Control
-        wvous-tr-corner = 13; # top-right - Lock Screen
+        wvous-tl-corner = 13; # top-left - Lock Screen
+        wvous-tr-corner = 2; # top-right - Mission Control
         wvous-bl-corner = 3; # bottom-left - Application Windows
         wvous-br-corner = 4; # bottom-right - Desktop
       };
@@ -159,9 +158,6 @@
   # Create /etc/zshrc that loads the nix-darwin environment.
   # this is required if you want to use darwin's default shell - zsh
   programs.zsh.enable = true;
-  programs.gnupg.agent.enable = true;
-
-  # Create /etc/shells
   environment.shells = [ pkgs.zsh ];
 
   # Services
@@ -175,6 +171,7 @@
     };
   };
 
+  # Set your time zone.
   time.timeZone = "Asia/Tokyo";
 
   # Fonts

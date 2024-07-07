@@ -16,7 +16,12 @@
   # But on macOS, it's less stable than homebrew.
   #
   # Related Discussion: https://discourse.nixos.org/t/darwin-again/29331
-  environment.systemPackages = with pkgs; [ git ];
+  environment.systemPackages = with pkgs; [
+    git
+    vim
+    man-pages
+    man-pages-posix
+  ];
   environment.variables.EDITOR = "vim";
 
   # TODO To make this work, homebrew need to be installed manually, see https://brew.sh

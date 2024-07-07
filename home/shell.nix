@@ -26,6 +26,14 @@
       ];
     };
     dotDir = ".config/zsh";
+    sessionVariables = {
+      MANPAGER = "sh -c 'col -bx | bat -l man -p'";
+      MANROFFOPT = "-c";
+    };
+    shellGlobalAliases = {
+      "-h" = "-h 2>&1 | bat --language=help --style=plain";
+      "--help" = "--help 2>&1 | bat --language=help --style=plain";
+    };
     shellAliases = rec {
       ".." = "cd ..";
       # Reference: https://github.com/starcraft66/os-config/blob/master/home-manager/programs/zsh.nix
@@ -57,11 +65,9 @@
       sysu = "systemctl --user";
       jnsu = "journalctl --user";
       zreload = "export ZSH_RELOADING_SHELL=1; source $ZDOTDIR/.zshenv; source $ZDOTDIR/.zshrc; unset ZSH_RELOADING_SHELL";
-    };
-  };
 
-  home.shellAliases = {
-    urldecode = "python3 -c 'import sys, urllib.parse as ul; print(ul.unquote_plus(sys.stdin.read()))'";
-    urlencode = "python3 -c 'import sys, urllib.parse as ul; print(ul.quote_plus(sys.stdin.read()))'";
+      urldecode = "python3 -c 'import sys, urllib.parse as ul; print(ul.unquote_plus(sys.stdin.read()))'";
+      urlencode = "python3 -c 'import sys, urllib.parse as ul; print(ul.quote_plus(sys.stdin.read()))'";
+    };
   };
 }

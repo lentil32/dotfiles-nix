@@ -8,13 +8,14 @@
     p7zip
 
     # utils
+    bottom
     fasd
     fd
     fzf
     glow # markdown previewer in terminal
+    pngpaste
     ripgrep
     jq
-    bottom
     yt-dlp
     yq-go # yaml processer https://github.com/mikefarah/yq
     wireguard-tools
@@ -25,19 +26,26 @@
 
     # programming
     cmake
-    devenv
+    go
     llvm
     opam
-    freetype
-    pkg-config # matplotlib requires it
 
     # python
     pipenv
     poetry
     pyenv
 
+    # rust
+    rustc
+    cargo
+    clippy
+    rustfmt
+
     # LSPs and formatters
     black
+    clang-tools
+    gopls
+    gotools
     ispell
     multimarkdown
     nixfmt-rfc-style
@@ -51,6 +59,7 @@
     # misc
     caddy
     cowsay
+    exercism
     file
     which
     tree
@@ -81,4 +90,6 @@
     thefuck.enable = true;
     zoxide.enable = true;
   };
+
+  nixpkgs.overlays = [ ];
 }
