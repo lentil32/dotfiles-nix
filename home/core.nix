@@ -26,7 +26,6 @@
 
     # programming
     cmake
-    go
     llvm
     opam
 
@@ -87,6 +86,7 @@
       nix-direnv.enable = true;
     };
     eza.enable = true;
+    go.enable = true;
     thefuck.enable = true;
     zoxide.enable = true;
   };
