@@ -69,12 +69,15 @@
 
     # `brew install --cask`
     casks = [
-      # browsers
+      # Browsers
       "arc"
+      # Needed by leetcode.el.
+      # Reference: https://github.com/kaiwk/leetcode.el/issues/104
+      "brave-browser"
       "firefox@developer-edition"
       # "google-chrome"
 
-      # productivity
+      # Productivity
       "hammerspoon"
       "karabiner-elements"
       "monitorcontrol"

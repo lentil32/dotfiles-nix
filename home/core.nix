@@ -65,6 +65,7 @@
     gnused
     gnutar
     gawk
+    pandoc
     zstd
 
     nodePackages.js-beautify
