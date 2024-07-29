@@ -3,7 +3,11 @@
 
   # the nixConfig here only affects the flake itself, not the system configuration!
   nixConfig = {
-    substituters = [ "https://cache.nixos.org" ];
+    substituters = [
+      "https://cache.nixos.org"
+      "https://nix-community.cachix.org"
+    ];
+    trusted-public-keys = [ "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=" ];
   };
 
   inputs = {
@@ -20,6 +24,11 @@
       url = "github:LnL7/nix-darwin/master";
       inputs.nixpkgs.follows = "nixpkgs-darwin";
     };
+    darwin-emacs = {
+      url = "github:c4710n/nix-darwin-emacs";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    emacs.url = "github:cmacrae/emacs";
   };
 
   outputs =
@@ -27,6 +36,7 @@
       self,
       nixpkgs,
       darwin,
+      darwin-emacs,
       home-manager,
       ...
     }@inputs:
@@ -44,6 +54,11 @@
       darwinConfigurations."${hostname}" = darwin.lib.darwinSystem {
         inherit system specialArgs;
         modules = [
+
+          {
+
+            nixpkgs.overlays = [ darwin-emacs.overlays.emacs ];
+          }
           ./modules/nix-core.nix
           ./modules/system.nix
           ./modules/apps.nix

@@ -160,8 +160,8 @@
   programs.zsh.enable = true;
   environment.shells = [ pkgs.zsh ];
 
-  # Services
   services = {
+    emacs.enable = true;
     skhd = {
       enable = true;
     };

@@ -89,6 +89,4 @@
     thefuck.enable = true;
     zoxide.enable = true;
   };
-
-  nixpkgs.overlays = [ ];
 }

@@ -48,7 +48,6 @@
     taps = [
       "homebrew/bundle"
       "homebrew/services"
-      "d12frosted/emacs-plus"
       "koekeishiya/formulae"
     ];
 
@@ -56,7 +55,6 @@
     brews = [
       "aria2" # download tool
       "curl" # no not install curl via nixpkgs, it's not working well on macOS!
-      "emacs-plus"
       "httpie" # http client
       "libtool" # Needed by Emacs multivterm compilation step
       "wget"

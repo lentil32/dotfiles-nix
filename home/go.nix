@@ -15,8 +15,6 @@
     enable = true;
     goPath = ".go";
     goBin = ".go/bin";
-    packages = {
-
-    };
+    packages = { };
   };
 }

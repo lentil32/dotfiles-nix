@@ -7,6 +7,7 @@
     ./alacritty.nix
     ./git.nix
     ./go.nix
+    ./spacemacs.nix
     ./starship.nix
   ];
 
