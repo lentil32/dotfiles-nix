@@ -42,13 +42,14 @@
     # otherwise Apple Store will refuse to install them.
     # For details, see https://github.com/mas-cli/mas
     masApps = {
+      Structured = 1499198946;
+      WireGuard = 1451685025;
       Xcode = 497799835;
     };
 
     taps = [
       "homebrew/bundle"
       "homebrew/services"
-      "koekeishiya/formulae"
     ];
 
     # `brew install`
