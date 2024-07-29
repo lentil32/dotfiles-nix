@@ -27,10 +27,10 @@
         show-recents = false; # disable recent apps
 
         # customize Hot Corners
-        wvous-tl-corner = 4; # top-left - Desktop
+        wvous-tl-corner = 13; # top-left - Lock Screen
         wvous-tr-corner = 2; # top-right - Mission Control
-        wvous-bl-corner = 3; # bottom-left - Application Windows
-        wvous-br-corner = 13; # bottom-right - Lock Screen
+        wvous-bl-corner = 10; # bottom-left - Put Display to Sleep
+        wvous-br-corner = 3; # bottom-right - Application Windows
       };
 
       # customize finder

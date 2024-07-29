@@ -90,6 +90,7 @@
       # IM & audio & remote desktop & meeting
       # "telegram"
       "discord"
+      "spotify"
 
       "anki"
       "iina" # video player
