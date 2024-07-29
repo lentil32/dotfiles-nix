@@ -56,6 +56,7 @@
 
     # misc
     caddy
+    coreutils
     cowsay
     exercism
     file

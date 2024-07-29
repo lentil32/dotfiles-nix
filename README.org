@@ -11,7 +11,7 @@
 - [[https://nix.dev/manual/nix/2.22/installation/uninstall][Uninstalling Nix - Nix Reference Manual]]
 
 * Links
-- [[https://github.com/nix-community/nurl][nix-community/nurl: Generate Nix fetcher calls from repository URLs [maintainer=@figsoda]]]
+- [[https://github.com/nix-community/nurl][nix-community/nurl: Generate Nix fetcher calls from repository URLs]]
 
 * See also
 - [[https://github.com/ryan4yin/nix-darwin-kickstarter][ryan4yin/nix-darwin-kickstarter: A beginner-friendly nix-darwin + home-manager + flakes startup configuration]]
