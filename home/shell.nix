@@ -29,6 +29,7 @@
     sessionVariables = {
       MANPAGER = "sh -c 'col -bx | bat -l man -p'";
       MANROFFOPT = "-c";
+      PATH = "$GOBIN:$PATH";
     };
     shellGlobalAliases = {
       "-h" = "-h 2>&1 | bat --language=help --style=plain";

@@ -2,10 +2,11 @@
 {
   # import sub modules
   imports = [
-    ./shell.nix
     ./core.nix
-    ./git.nix
+    ./shell.nix
     ./alacritty.nix
+    ./git.nix
+    ./go.nix
     ./starship.nix
   ];
 

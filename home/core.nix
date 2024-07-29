@@ -13,6 +13,7 @@
     fd
     fzf
     glow # markdown previewer in terminal
+    nurl
     pngpaste
     ripgrep
     jq
@@ -43,8 +44,6 @@
     # LSPs and formatters
     black
     clang-tools
-    gopls
-    gotools
     ispell
     multimarkdown
     nixfmt-rfc-style
@@ -87,7 +86,6 @@
       nix-direnv.enable = true;
     };
     eza.enable = true;
-    go.enable = true;
     thefuck.enable = true;
     zoxide.enable = true;
   };
