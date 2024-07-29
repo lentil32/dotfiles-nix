@@ -1,1 +1,11 @@
-TODO change hotcornor settings: Lock/MC/Display Sleep/App Win
+* DONE Tapping homebrew/cask-versions
+Error: homebrew/cask-versions was deprecated. This tap is now empty and all its contents were either deleted or migrated.
+Tapping homebrew/cask-versions has failed!
+Tapping homebrew/cask-fonts
+Error: homebrew/cask-fonts was deprecated. This tap is now empty and all its contents were either deleted or migrated.
+Tapping homebrew/cask-fonts has failed!
+* DONE just variable syntax
+* DONE readme - use just
+* DONE apply merge in nix-darwin: use fonts.packages
+* DONE change hotcornor settings: Lock/MC/Display Sleep/App Win
+CLOSED: [2024-07-28 Sun 19:27]
