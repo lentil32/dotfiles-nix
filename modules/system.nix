@@ -160,6 +160,12 @@
   programs.zsh.enable = true;
   environment.shells = [ pkgs.zsh ];
 
+  # GPG
+  programs.gnupg.agent = {
+    enable = true;
+    enableSSHSupport = true;
+  };
+
   services = {
     emacs.enable = true;
     skhd = {

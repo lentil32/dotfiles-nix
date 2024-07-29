@@ -1,4 +1,4 @@
-{ username, ... }:
+{ pkgs, username, ... }:
 {
   # import sub modules
   imports = [
@@ -26,6 +26,13 @@
     # the Home Manager release notes for a list of state version
     # changes in each release.
     stateVersion = "24.05";
+
+    file.".gnupg/gpg-agent.conf".text = ''
+      max-cache-ttl 18000
+      default-cache-ttl 18000
+      pinentry-program ${pkgs.pinentry_mac}/bin/pinentry-mac
+      enable-ssh-support
+    '';
   };
 
   # Let Home Manager install and manage itself.
