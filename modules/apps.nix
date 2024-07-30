@@ -63,7 +63,7 @@
       # Signing git commits in macOS
       # Set up a GPG key for signing Git commits on MacOS (M1)
       # Reference: https://gist.github.com/phortuin/cf24b1cca3258720c71ad42977e1ba57
-      "pinentry-mac"
+      # "pinentry-mac"
     ];
 
     # `brew install --cask`

@@ -62,6 +62,7 @@
     file
     which
     tree
+    gnupg
     gnused
     gnutar
     gawk
