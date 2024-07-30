@@ -88,7 +88,6 @@
       nix-direnv.enable = true;
     };
     eza.enable = true;
-    thefuck.enable = true;
     zoxide.enable = true;
   };
 }
