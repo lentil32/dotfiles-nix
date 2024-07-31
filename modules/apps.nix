@@ -77,6 +77,7 @@
       # "google-chrome"
 
       # Productivity
+      "amethyst"
       "hammerspoon"
       "karabiner-elements"
       "monitorcontrol"

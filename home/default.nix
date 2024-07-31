@@ -45,6 +45,7 @@
       # The default key to sign with. If this option is not used, the default key is
       # the first key found in the secret keyring
 
+      # TODO Put your own PGP key
       default-key 0xC69D0D84EE437EDA60F39326ED44A29A1A3B09B1
 
 
