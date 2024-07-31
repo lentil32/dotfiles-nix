@@ -185,6 +185,9 @@
                                --option   "window.dimensions.lines=8"              \
                                           "window.dimensions.columns=100"          \
                                --command  zsh -is eval "countbomb 1"
+
+        alt + shift - p : yabai -m space --focus prev
+        alt + shift - n : yabai -m space --focus next
       '';
     };
     yabai = {
