@@ -179,15 +179,15 @@
         # Floating terminal!
         # Issue with alacritty: https://github.com/koekeishiya/yabai/issues/1250
         # Solution: Using `alacritty` under `Alacritty.app`.
-        # TODO Replace path with `pkgs.something` like syntax
+        # TODO Replace path with `pkgs.something`-like syntax
         hyper + fn - space : /Applications/Alacritty.app/Contents/MacOS/alacritty  \
                                --title    "floating terminal"                      \
                                --option   "window.dimensions.lines=8"              \
                                           "window.dimensions.columns=100"          \
                                --command  zsh -is eval "countbomb 1"
 
-        alt + shift - p : yabai -m space --focus prev
-        alt + shift - n : yabai -m space --focus next
+        cmd + alt + ctrl + shift - tab : yabai -m space --focus prev
+        cmd + alt + ctrl - tab : yabai -m space --focus next
       '';
     };
     yabai = {
