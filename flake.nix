@@ -48,6 +48,9 @@
       useremail = "lentil32@icloud.com";
       system = "aarch64-darwin"; # aarch64-darwin or x86_64-darwin
       hostname = "lentil32-MacBookPro";
+      nixpkgsConfig = {
+        overlays = [ darwin-emacs.overlays.emacs ];
+      };
 
       specialArgs = inputs // {
         inherit username useremail hostname;
@@ -57,17 +60,13 @@
       darwinConfigurations."${hostname}" = darwin.lib.darwinSystem {
         inherit system specialArgs;
         modules = [
-
-          {
-
-            nixpkgs.overlays = [ darwin-emacs.overlays.emacs ];
-          }
           ./modules/nix-core.nix
           ./modules/system.nix
           ./modules/apps.nix
           ./modules/host-users.nix
           home-manager.darwinModules.home-manager
           {
+            nixpkgs = nixpkgsConfig;
             home-manager.useGlobalPkgs = true;
             home-manager.useUserPackages = true;
             home-manager.extraSpecialArgs = specialArgs;

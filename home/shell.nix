@@ -25,8 +25,10 @@
         "fasd"
       ];
     };
-    dotDir = ".config/zsh";
+    dotDir = ".config/zsh"; # Relative path from $HOME
     sessionVariables = {
+      VISUAL = "emacsclient -a=vim";
+      EDITOR = "emacsclient -a=vim";
       MANPAGER = "sh -c 'col -bx | bat -l man -p'";
       MANROFFOPT = "-c";
       PATH = "$GOBIN:$PATH";
@@ -37,6 +39,7 @@
     };
     shellAliases = rec {
       ".." = "cd ..";
+
       # Reference: https://github.com/starcraft66/os-config/blob/master/home-manager/programs/zsh.nix
       # Alias eza for ls command: https://gist.github.com/AppleBoiy/04a249b6f64fd0fe1744aff759a0563b
       ls = "eza";

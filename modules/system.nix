@@ -167,8 +167,9 @@
     enableSSHSupport = true;
   };
 
-  services = {
-    emacs.enable = true;
+  services.emacs = {
+    enable = true;
+    package = pkgs.emacs-29;
   };
 
   # Set your time zone.
