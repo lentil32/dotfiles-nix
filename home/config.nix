@@ -162,9 +162,9 @@
       if.app-id = 'org.alacritty'
       run = 'move-node-to-workspace 1' # mnemonics T - Terminal
 
-      # [[on-window-detected]]
-      # if.app-id = 'org.gnu.Emacs'
-      # run = 'move-node-to-workspace 2' # mnemonics I - IDE
+      [[on-window-detected]]
+      if.app-id = 'org.gnu.Emacs'
+      run = 'move-node-to-workspace 2' # mnemonics I - IDE
 
       [[on-window-detected]]
       if.app-id = 'company.thebrowser.Browser'
@@ -266,16 +266,19 @@
       j = 'resize height +50'
       k = 'resize height -50'
       l = 'resize width +50'
+
       enter = 'mode main'
       esc = 'mode main'
 
       # open programs
       [mode.programs.binding]
+      a = [ 'exec-and-forget open -a Arc',                          'mode main' ]
       c = [ 'exec-and-forget open -na "Google Chrome"',             'mode main' ]
       e = [ 'exec-and-forget ${pkgs.emacs}/bin/emacsclient -ca ""', 'mode main' ]
       f = [ 'exec-and-forget open -na "Firefox Developer Edition"', 'mode main' ]
-      r = [ 'exec-and-forget open -a Raycast',                      'mode main' ]
       p = [ 'exec-and-forget open -a Enpass',                       'mode main' ]
+      r = [ 'exec-and-forget open -a Raycast',                      'mode main' ]
+
       enter = 'mode main'
       esc = 'mode main'
     '';
