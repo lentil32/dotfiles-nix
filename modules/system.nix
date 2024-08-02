@@ -75,6 +75,7 @@
         NSAutomaticSpellingCorrectionEnabled = false; # disable auto spelling correction
         NSNavPanelExpandedStateForSaveMode = true; # expand save panel by default
         NSNavPanelExpandedStateForSaveMode2 = true;
+        NSWindowShouldDragOnGesture = true; # Move windows by holding ctrl+cmd and dragging any part of the window (not necessarily the window title)
       };
 
       # Customize settings that not supported by nix-darwin directly
@@ -168,59 +169,6 @@
 
   services = {
     emacs.enable = true;
-    skhd = {
-      enable = true;
-      skhdConfig = ''
-        # Open apps
-        hyper - return : open -na "Alacritty"
-        hyper + fn - f : open "$HOME/Programming"
-        hyper + fn - e : open -a "Enpass"
-
-        # Floating terminal!
-        # Issue with alacritty: https://github.com/koekeishiya/yabai/issues/1250
-        # Solution: Using `alacritty` under `Alacritty.app`.
-        # TODO Replace path with `pkgs.something`-like syntax
-        hyper + fn - space : /Applications/Alacritty.app/Contents/MacOS/alacritty  \
-                               --title    "floating terminal"                      \
-                               --option   "window.dimensions.lines=8"              \
-                                          "window.dimensions.columns=100"          \
-                               --command  zsh -is eval "countbomb 1"
-
-        cmd + alt + ctrl + shift - tab : yabai -m space --focus prev
-        cmd + alt + ctrl - tab : yabai -m space --focus next
-      '';
-    };
-    yabai = {
-      enable = true;
-      enableScriptingAddition = true;
-      config = {
-        layout = "float";
-      };
-      extraConfig = ''
-        # Space
-        yabai -m space 1 --label emacs
-        yabai -m space 2 --label browser
-        yabai -m space 3 --label media
-        yabai -m space 4 --label terminal
-        yabai -m space 5 --label discord
-        yabai -m space 6 --label telegram
-
-        #################### App specific Rules ####################
-        # manage=off : Make float, i.e., no tiling
-        # sticky=on  : Show topmost and on all spaces
-        alias ymr="yabai -m rule --add"
-
-        # Prevent apps open in topmost
-
-        ymr space=emacs      app="^Emacs$"
-        ymr space=terminal   app="^Alacritty$"
-        ymr space=media      app="^Spotify$"
-        ymr space=media      app="^YouTube$"
-        ymr space=media      app="^YouTube Music$"
-        ymr space=media      app="^Qup$"
-        ymr space=discord    app="^Discord$"
-      '';
-    };
   };
 
   # Set your time zone.

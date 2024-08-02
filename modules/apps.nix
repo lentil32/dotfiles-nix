@@ -50,6 +50,7 @@
     taps = [
       "homebrew/bundle"
       "homebrew/services"
+      "nikitabobko/tap"
     ];
 
     # `brew install`
@@ -77,7 +78,7 @@
       # "google-chrome"
 
       # Productivity
-      "amethyst"
+      "aerospace"
       "hammerspoon"
       "karabiner-elements"
       "monitorcontrol"
