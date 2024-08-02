@@ -167,7 +167,7 @@
       # run = 'move-node-to-workspace 2' # mnemonics I - IDE
 
       [[on-window-detected]]
-      if.app-id = [ 'company.thebrowser.Browser' ]
+      if.app-id = 'company.thebrowser.Browser'
       run = 'move-node-to-workspace 3' # mnemonics W - Web browser
 
       [[on-window-detected]]
