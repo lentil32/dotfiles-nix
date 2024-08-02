@@ -28,7 +28,6 @@
     dotDir = ".config/zsh"; # Relative path from $HOME
     sessionVariables = {
       VISUAL = "emacsclient -a=vim";
-      EDITOR = "emacsclient -a=vim";
       MANPAGER = "sh -c 'col -bx | bat -l man -p'";
       MANROFFOPT = "-c";
       PATH = "$GOBIN:$PATH";
