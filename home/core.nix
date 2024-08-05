@@ -35,11 +35,13 @@
     poetry
     pyenv
 
-    # rust
-    rustc
-    cargo
-    clippy
-    rustfmt
+    # Rust overlay
+    (rust-bin.stable.latest.default.override {
+      extensions = [
+        "rust-analyzer"
+        "clippy"
+      ];
+    })
 
     # LSPs and formatters
     black
@@ -88,6 +90,7 @@
       nix-direnv.enable = true;
     };
     eza.enable = true;
+    java.enable = true;
     zoxide.enable = true;
   };
 }

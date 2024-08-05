@@ -74,6 +74,7 @@
       # Needed by leetcode.el.
       # Reference: https://github.com/kaiwk/leetcode.el/issues/104
       "brave-browser"
+      "firefox"
       "firefox@developer-edition"
       # "google-chrome"
 
@@ -101,6 +102,9 @@
       "cyberduck"
       "insomnia" # REST client
       "xquartz" # Open-source version of the X.Org X Window System
+
+      # Fun
+      "prismlauncher" # Minecraft
     ];
   };
 }

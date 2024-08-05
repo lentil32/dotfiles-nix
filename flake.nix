@@ -29,9 +29,12 @@
     };
     darwin-emacs = {
       url = "github:c4710n/nix-darwin-emacs";
-      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs.follows = "nixpkgs-darwin";
     };
-    emacs.url = "github:cmacrae/emacs";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs-darwin";
+    };
   };
 
   outputs =
@@ -39,8 +42,9 @@
       self,
       nixpkgs,
       darwin,
-      darwin-emacs,
       home-manager,
+      darwin-emacs,
+      rust-overlay,
       ...
     }@inputs:
     let
@@ -49,7 +53,10 @@
       system = "aarch64-darwin"; # aarch64-darwin or x86_64-darwin
       hostname = "lentil32-MacBookPro";
       nixpkgsConfig = {
-        overlays = [ darwin-emacs.overlays.emacs ];
+        overlays = [
+          darwin-emacs.overlays.emacs
+          rust-overlay.overlays.default
+        ];
       };
 
       specialArgs = inputs // {
