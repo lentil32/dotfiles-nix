@@ -28,7 +28,7 @@
       inputs.nixpkgs.follows = "nixpkgs-darwin";
     };
     darwin-emacs = {
-      url = "github:c4710n/nix-darwin-emacs";
+      url = "github:lentil32/nix-darwin-emacs";
       inputs.nixpkgs.follows = "nixpkgs-darwin";
     };
     rust-overlay = {

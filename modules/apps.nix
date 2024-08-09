@@ -90,7 +90,6 @@
       # "visual-studio-code"
 
       # IM & audio & remote desktop & meeting
-      # "telegram"
       "discord"
       "spotify"
 

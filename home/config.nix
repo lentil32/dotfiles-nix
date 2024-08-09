@@ -158,13 +158,13 @@
       outer.top =        0
       outer.right =      0
 
-      [[on-window-detected]]
-      if.app-id = 'org.gnu.Emacs'
-      run = 'move-node-to-workspace 2' # mnemonics I - IDE
+      # [[on-window-detected]]
+      # if.app-id = 'org.gnu.Emacs'
+      # run = 'move-node-to-workspace 2' # mnemonics I - IDE
 
-      [[on-window-detected]]
-      if.app-id = 'company.thebrowser.Browser'
-      run = 'move-node-to-workspace 3' # mnemonics W - Web browser
+      # [[on-window-detected]]
+      # if.app-id = 'company.thebrowser.Browser'
+      # run = 'move-node-to-workspace 3' # mnemonics W - Web browser
 
       [[on-window-detected]]
       if.app-id = 'com.spotify.client'
