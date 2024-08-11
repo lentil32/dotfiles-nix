@@ -26,6 +26,8 @@
       /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
     '';
 
+    startup.chime = false;
+
     defaults = {
       menuExtraClock.Show24Hour = true; # show 24 hour clock
 
@@ -100,6 +102,7 @@
         NSGlobalDomain = {
           # Add a context menu item for showing the Web Inspector in web views
           WebKitDeveloperExtras = true;
+          "com.apple.sound.uiaudio.enabled" = 0; # disable user interface sound effects
         };
         "com.apple.finder" = {
           ShowExternalHardDrivesOnDesktop = true;
@@ -178,11 +181,6 @@
   programs.gnupg.agent = {
     enable = true;
     enableSSHSupport = true;
-  };
-
-  services.emacs = {
-    enable = true;
-    package = pkgs.emacs-29;
   };
 
   # Set your time zone.
