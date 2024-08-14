@@ -35,6 +35,8 @@
       dock = {
         autohide = true;
         show-recents = false; # disable recent apps
+        mru-spaces = false;
+        orientation = "right";
 
         # customize Hot Corners
         wvous-tl-corner = 13; # top-left - Lock Screen
