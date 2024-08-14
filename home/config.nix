@@ -158,6 +158,10 @@
       outer.top =        0
       outer.right =      0
 
+      [workspace-to-monitor-force-assignment]
+      2 = 'main'
+      6 = 'secondary'
+
       # [[on-window-detected]]
       # if.app-id = 'org.gnu.Emacs'
       # run = 'move-node-to-workspace 2' # mnemonics I - IDE

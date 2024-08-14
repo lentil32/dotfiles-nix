@@ -30,6 +30,7 @@
 
     defaults = {
       menuExtraClock.Show24Hour = true; # show 24 hour clock
+      spaces.spans-displays = false; # displays have separate Spaces
 
       # customize dock
       dock = {
@@ -119,9 +120,6 @@
           # Avoid creating .DS_Store files on network or USB volumes
           DSDontWriteNetworkStores = true;
           DSDontWriteUSBStores = true;
-        };
-        "com.apple.spaces" = {
-          "spans-displays" = 0; # Display have seperate spaces
         };
         "com.apple.WindowManager" = {
           EnableStandardClickToShowDesktop = 0; # Click wallpaper to reveal desktop
