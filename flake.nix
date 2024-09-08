@@ -28,7 +28,7 @@
       inputs.nixpkgs.follows = "nixpkgs-darwin";
     };
     darwin-emacs = {
-      url = "github:lentil32/nix-darwin-emacs";
+      url = "github:nix-giant/nix-darwin-emacs";
       inputs.nixpkgs.follows = "nixpkgs-darwin";
     };
     rust-overlay = {
@@ -82,6 +82,6 @@
         ];
       };
       # nix code formatter
-      formatter.${system} = nixpkgs.legacyPackages.${system}.nixfmt-rfc-style;
+      formatter.${system} = nixpkgs.legacyPackages.${system}.nixfmt;
     };
 }

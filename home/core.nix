@@ -55,6 +55,7 @@
 
     # fonts
     iosevka-comfy.comfy
+    source-sans-pro
 
     # misc
     caddy
@@ -69,9 +70,12 @@
     gnutar
     gawk
     pandoc
+    typst
+    typstfmt
     zstd
 
     nodePackages.js-beautify
+    nodePackages.pnpm
   ];
 
   programs = {
