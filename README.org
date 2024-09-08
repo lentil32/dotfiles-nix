@@ -1,26 +1,27 @@
-* Prerequisites
+* My Own Declarative macOS Setup
+** Prerequisites
 - [[https://brew.sh/][Homebrew — The Missing Package Manager for macOS (or Linux)]] (Don't
   install Homebrew using Nix)
 
-* Run
+** Run
 #+begin_src bash
   make
 #+end_src
 
-* Troubleshooting
+** Troubleshooting
 - [[https://nix.dev/manual/nix/2.22/installation/uninstall][Uninstalling Nix - Nix Reference Manual]]
 
-* Links
+** Links
 - [[https://github.com/nix-community/nurl][nix-community/nurl: Generate Nix fetcher calls from repository URLs]]
 
-* See also
+** See also
 - [[https://github.com/ryan4yin/nix-darwin-kickstarter][ryan4yin/nix-darwin-kickstarter: A beginner-friendly nix-darwin + home-manager + flakes startup configuration]]
 - [[https://evantravers.com/articles/2024/02/06/switching-to-nix-darwin-and-flakes/][Switching to nix-darwin and Flakes]]
 - [[https://github.com/okkdev/dotnix][okkdev/dotnix: ❄️ macOS home-manager nix config]]
 - [[https://wickedchicken.github.io/post/macos-nix-setup/][MacOS Nix Setup (an alternative to Homebrew)]]
 
 
-* References
+** References
 - [[https://daiderd.com/nix-darwin/manual/index.html][Darwin Configuration Options]]
 - [[https://nix-community.github.io/home-manager/options.xhtml][Appendix A. Home Manager Configuration Options]]
 - [[https://mynixos.com/][MyNixOS]]

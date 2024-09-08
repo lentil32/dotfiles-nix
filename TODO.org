@@ -9,3 +9,5 @@ Tapping homebrew/cask-fonts has failed!
 * DONE apply merge in nix-darwin: use fonts.packages
 * DONE change hotcornor settings: Lock/MC/Display Sleep/App Win
 CLOSED: [2024-07-28 Sun 19:27]
+
+* TODO Alias meh key
