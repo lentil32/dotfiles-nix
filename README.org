@@ -1,9 +1,13 @@
-* My Own Declarative macOS Setup
-** Prerequisites
-- [[https://brew.sh/][Homebrew — The Missing Package Manager for macOS (or Linux)]] (Don't
-  install Homebrew using Nix)
+* macOS dotfiles in Nix 
+My own declarative and pure macOS setup with ~nix-darwin~ and ~home-manager~
 
-** Run
+** Prerequisites
+- [[https://nixos.org/download/][Nix]]
+- [[https://brew.sh/][Homebrew]] (Don't install Homebrew using Nix!)
+
+** Install
+1. Find a word ~TODO~ in files and review the information
+2. And then, run:
 #+begin_src bash
   make
 #+end_src
