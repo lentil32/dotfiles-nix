@@ -162,13 +162,9 @@
       2 = 'main'
       6 = 'secondary'
 
-      # [[on-window-detected]]
-      # if.app-id = 'org.gnu.Emacs'
-      # run = 'move-node-to-workspace 2' # mnemonics I - IDE
-
-      # [[on-window-detected]]
-      # if.app-id = 'company.thebrowser.Browser'
-      # run = 'move-node-to-workspace 3' # mnemonics W - Web browser
+      [[on-window-detected]]
+      if.app-id = 'company.thebrowser.Browser'
+      run = 'move-node-to-workspace 3' # mnemonics W - Web browser
 
       [[on-window-detected]]
       if.app-id = 'com.spotify.client'
@@ -177,6 +173,10 @@
       [[on-window-detected]]
       if.app-id = 'com.hnc.Discord'
       run = 'move-node-to-workspace 5' # mnemonics S - Social Network
+
+      # Not implemented yet: https://github.com/nikitabobko/AeroSpace/issues/224
+      # [key-mapping.key-notation-to-key-code]
+      # meh = 'ctrl-alt-cmd'
 
       [mode.main.binding]
       # All possible keys:
@@ -264,7 +264,7 @@
 
       # open programs
       [mode.programs.binding]
-      a = [ 'exec-and-forget open -a Arc',                                       'mode main' ]
+      a = [ 'exec-and-forget open -a Anki',                                      'mode main' ]
       c = [ 'exec-and-forget open -na "Google Chrome"',                          'mode main' ]
       e = [ 'exec-and-forget ${pkgs.emacs}/bin/emacsclient -ca "open -a Emacs"', 'mode main' ]
       f = [ 'exec-and-forget open -na "Firefox Developer Edition"',              'mode main' ]

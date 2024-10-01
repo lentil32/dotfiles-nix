@@ -32,8 +32,10 @@
     enable = true;
 
     onActivation = {
+      # Fetch the newest stable branch of Homebrew's git repo. Set false to prevent updating emacs
       autoUpdate = false;
-      # 'zap': uninstalls all formulae(and related files) not listed here.
+      upgrade = true; # Upgrade outdated casks, formulae, and App Store apps
+      # 'zap': uninstalls all formulae(and related files) not listed in the generated Brewfile
       cleanup = "zap";
     };
 
@@ -59,7 +61,9 @@
       "curl" # no not install curl via nixpkgs, it's not working well on macOS!
       "httpie" # http client
       "libtool" # Needed by Emacs multivterm compilation step
+      "sqlfmt"
       "wget"
+      "yt-dlp"
 
       # Signing git commits in macOS
       # Set up a GPG key for signing Git commits on MacOS (M1)
@@ -93,6 +97,7 @@
 
       # IM & audio & remote desktop & meeting
       "discord"
+      "microsoft-teams"
       "spotify"
 
       "anki"

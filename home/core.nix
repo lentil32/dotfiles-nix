@@ -11,13 +11,13 @@
     bottom
     fasd
     fd
+    ffmpeg
     fzf
     glow # markdown previewer in terminal
     nurl
     pngpaste
     ripgrep
     jq
-    yt-dlp
     yq-go # yaml processer https://github.com/mikefarah/yq
     wireguard-tools
 
@@ -93,7 +93,12 @@
       enable = true;
       nix-direnv.enable = true;
     };
-    eza.enable = true;
+    eza = {
+      enable = true;
+      git = true;
+      icons = true;
+      enableZshIntegration = true;
+    };
     java.enable = true;
     zoxide.enable = true;
   };

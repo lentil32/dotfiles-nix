@@ -11,6 +11,7 @@
 ###################################################################################
 {
   system = {
+    stateVersion = 5;
     # activationScripts are executed every time you boot the system or run `nixos-rebuild` / `darwin-rebuild`.
     activationScripts.setFileLimit.text = ''
       ulimit -Sn 10240
@@ -171,9 +172,6 @@
   # this is required if you want to use darwin's default shell - zsh
   programs.zsh = {
     enable = true;
-    loginShellInit = ''
-      ulimit -Sn 10240
-    '';
   };
   environment.shells = [ pkgs.zsh ];
 
