@@ -15,9 +15,14 @@
     fzf
     glow # markdown previewer in terminal
     nurl
+    # Signing git commits in macOS
+    # Set up a GPG key for signing Git commits on MacOS (M1)
+    # Reference: https://gist.github.com/phortuin/cf24b1cca3258720c71ad42977e1ba57
+    pinentry_mac
     pngpaste
     ripgrep
     jq
+    yarn
     yq-go # yaml processer https://github.com/mikefarah/yq
     wireguard-tools
 
@@ -95,7 +100,6 @@
     eza = {
       enable = true;
       git = true;
-      icons = true;
       enableZshIntegration = true;
     };
     java.enable = true;

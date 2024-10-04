@@ -2,8 +2,10 @@
 {
   home = {
     file.".gnupg/gpg-agent.conf".text = ''
-      allow-emacs-pinentry
-      allow-loopback-pinentry
+      max-cache-ttl 18000
+      default-cache-ttl 18000
+      pinentry-program ${pkgs.pinentry_mac}/bin/pinentry-mac
+      enable-ssh-support
     '';
 
     file.".gnupg/gpg.conf".text = ''
