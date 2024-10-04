@@ -27,8 +27,10 @@
 
     # programming
     cmake
+    corepack_latest # Node.js dependency bridge
     llvm
     opam
+    volta # JavaScript command line tools manager
 
     # python
     pipenv
@@ -73,9 +75,6 @@
     typst
     typstfmt
     zstd
-
-    nodePackages.js-beautify
-    nodePackages.pnpm
   ];
 
   programs = {

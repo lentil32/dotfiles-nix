@@ -59,16 +59,13 @@
     brews = [
       "aria2" # download tool
       "curl" # no not install curl via nixpkgs, it's not working well on macOS!
+      "docker"
+      "docker-compose"
       "httpie" # http client
       "libtool" # Needed by Emacs multivterm compilation step
       "sqlfmt"
       "wget"
       "yt-dlp"
-
-      # Signing git commits in macOS
-      # Set up a GPG key for signing Git commits on MacOS (M1)
-      # Reference: https://gist.github.com/phortuin/cf24b1cca3258720c71ad42977e1ba57
-      # "pinentry-mac"
     ];
 
     # `brew install --cask`
@@ -106,7 +103,9 @@
 
       # Development
       "cyberduck"
+      "orbstack"
       "insomnia" # REST client
+      "postman"
       "xquartz" # Open-source version of the X.Org X Window System
 
       # Fun

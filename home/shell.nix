@@ -32,6 +32,13 @@
       MANROFFOPT = "-c";
       PATH = "$GOBIN:$PATH";
     };
+    envExtra = ''
+      export PNPM_HOME="$HOME/Library/pnpm"
+      case ":$PATH:" in
+        *":$PNPM_HOME:"*) ;;
+        *) export PATH="$PNPM_HOME:$PATH" ;;
+      esac
+    '';
     shellGlobalAliases = {
       "-h" = "-h 2>&1 | bat --language=help --style=plain";
       "--help" = "--help 2>&1 | bat --language=help --style=plain";
