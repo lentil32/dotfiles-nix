@@ -30,14 +30,17 @@
       VISUAL = "emacsclient -a=vim";
       MANPAGER = "sh -c 'col -bx | bat -l man -p'";
       MANROFFOPT = "-c";
-      PATH = "$GOBIN:$PATH";
     };
-    envExtra = ''
+    initExtra = ''
+      export PATH = "$GOBIN:$PATH";
       export PNPM_HOME="$HOME/Library/pnpm"
       case ":$PATH:" in
         *":$PNPM_HOME:"*) ;;
         *) export PATH="$PNPM_HOME:$PATH" ;;
       esac
+      export PYENV_ROOT="$HOME/.pyenv"
+      [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
+      eval "$(pyenv init -)"
     '';
     shellGlobalAliases = {
       "-h" = "-h 2>&1 | bat --language=help --style=plain";

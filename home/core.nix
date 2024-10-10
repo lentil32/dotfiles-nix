@@ -31,13 +31,15 @@
     nmap # A utility for network discovery and security auditing
 
     # programming
+    bats # Bash automated testing
     cmake
     corepack_latest # Node.js dependency bridge
     llvm
     opam
-    volta # JavaScript command line tools manager
 
     # python
+    autoflake # remove unused imports
+    isort # sort imports
     pipenv
     poetry
     pyenv
@@ -58,7 +60,9 @@
     nixfmt-rfc-style
     pyright
     ruff
+    shfmt
     taplo
+    yapf
 
     # fonts
     iosevka-comfy.comfy
