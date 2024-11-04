@@ -53,6 +53,7 @@
       "homebrew/bundle"
       "homebrew/services"
       "nikitabobko/tap"
+      "th-ch/youtube-music"
     ];
 
     # `brew install`
@@ -95,6 +96,7 @@
       # IM & audio & remote desktop & meeting
       "discord"
       "microsoft-teams"
+      "youtube-music" # Open-source YouTube Music client
       "spotify"
 
       "anki"
