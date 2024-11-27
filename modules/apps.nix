@@ -112,6 +112,7 @@
 
       # Fun
       "prismlauncher" # Minecraft
+      "dungeon-crawl-stone-soup-tiles"
     ];
   };
 }

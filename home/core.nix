@@ -24,6 +24,7 @@
     jq
     yarn
     yq-go # yaml processer https://github.com/mikefarah/yq
+    websocat
     wireguard-tools
 
     aria2 # A lightweight multi-protocol & multi-source command-line download utility
@@ -43,6 +44,7 @@
     pipenv
     poetry
     pyenv
+    pyright
 
     # Rust overlay
     (rust-bin.stable.latest.default.override {
@@ -58,7 +60,6 @@
     ispell
     multimarkdown
     nixfmt-rfc-style
-    pyright
     ruff
     shfmt
     taplo
