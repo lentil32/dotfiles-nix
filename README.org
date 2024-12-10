@@ -1,8 +1,8 @@
-* macOS dotfiles in Nix 
+* macOS dotfiles in Nix
 My own declarative and pure macOS setup with ~nix-darwin~ and ~home-manager~
 
 ** Prerequisites
-- [[https://nixos.org/download/][Nix]]
+- [[https://docs.determinate.systems/getting-started/][Nix with Determinate Installer]]
 - [[https://brew.sh/][Homebrew]] (Don't install Homebrew using Nix!)
 
 ** Install
