@@ -37,14 +37,7 @@
     corepack_latest # Node.js dependency bridge
     llvm
     opam
-
-    # python
-    autoflake # remove unused imports
-    isort # sort imports
-    pipenv
-    poetry
-    pyenv
-    pyright
+    mysql84
 
     # Rust overlay
     (rust-bin.stable.latest.default.override {
@@ -55,7 +48,6 @@
     })
 
     # LSPs and formatters
-    black
     clang-tools
     ispell
     multimarkdown

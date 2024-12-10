@@ -177,6 +177,10 @@
       run = 'move-node-to-workspace 4' # mnemonics M - Media
 
       [[on-window-detected]]
+      if.app-id = 'com.vanejung.elpy'
+      run = 'move-node-to-workspace 4' # mnemonics M - Media
+
+      [[on-window-detected]]
       if.app-id = 'com.hnc.Discord'
       run = 'move-node-to-workspace 5' # mnemonics S - Social Network
 
