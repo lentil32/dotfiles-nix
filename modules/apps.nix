@@ -61,11 +61,11 @@
     brews = [
       "aria2" # download tool
       "curl" # no not install curl via nixpkgs, it's not working well on macOS!
-      "docker"
       "docker-compose"
       "httpie" # http client
       "libtool" # Needed by Emacs multivterm compilation step
       "sqlfmt"
+      "supabase/tap/supabase"
       "wget"
       "yt-dlp"
     ];
@@ -92,6 +92,7 @@
       "scroll-reverser"
       "stats" # beautiful system monitor
 
+      "cursor"
       # "visual-studio-code"
 
       # IM & audio & remote desktop & meeting
@@ -106,7 +107,7 @@
 
       # Development
       "cyberduck"
-      "orbstack"
+      "docker"
       "insomnia" # REST client
       "postman"
       "xquartz" # Open-source version of the X.Org X Window System

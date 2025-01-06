@@ -277,7 +277,7 @@
       a = [ 'exec-and-forget open -a Anki',                                      'mode main' ]
       c = [ 'exec-and-forget open -na "Google Chrome"',                          'mode main' ]
       e = [ 'exec-and-forget ${pkgs.emacs}/bin/emacsclient -ca "open -a Emacs"', 'mode main' ]
-      f = [ 'exec-and-forget open -na "Firefox Developer Edition"',              'mode main' ]
+      f = [ 'exec-and-forget open -na "Firefox"',                                'mode main' ]
       p = [ 'exec-and-forget open -a Enpass',                                    'mode main' ]
       r = [ 'exec-and-forget open -a Raycast',                                   'mode main' ]
 

@@ -47,11 +47,13 @@
       ];
     })
 
-    # LSPs and formatters
+    # LSPs, formatters, linters
     clang-tools
+    eslint
     ispell
     multimarkdown
     nixfmt-rfc-style
+    prettierd
     ruff
     shfmt
     taplo
@@ -90,6 +92,9 @@
         batwatch
       ];
     };
+    bun = {
+      enable = true;
+    };
     direnv = {
       enable = true;
       nix-direnv.enable = true;
@@ -100,6 +105,14 @@
       enableZshIntegration = true;
     };
     java.enable = true;
+    texlive = {
+      enable = true;
+      extraPackages = tpkgs: {
+        inherit (tpkgs)
+          collection-latexextra
+          ;
+      };
+    };
     zoxide.enable = true;
   };
 }

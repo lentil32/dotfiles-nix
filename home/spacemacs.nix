@@ -1,6 +1,6 @@
 { pkgs, config, ... }:
 {
-  home.packages = [ pkgs.emacs-29 ];
+  home.packages = [ pkgs.emacs-30 ];
   home.file.".emacs.d" = {
     source = pkgs.fetchFromGitHub {
       owner = "syl20bnr";
