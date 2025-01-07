@@ -165,6 +165,11 @@
       6 = 'secondary'
 
       [[on-window-detected]]
+      if.app-id = 'org.gnu.Emacs'
+      if.workspace = '2'
+      run = ['layout floating']
+
+      [[on-window-detected]]
       if.app-id = 'company.thebrowser.Browser'
       run = 'move-node-to-workspace 3' # mnemonics W - Web browser
 

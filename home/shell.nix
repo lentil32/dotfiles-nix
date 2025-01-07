@@ -61,7 +61,7 @@
       # specialty views
       lS = "eza -1";
       lt = "eza --tree --level=2";
-      "l." = "eza -a | grep -E '^\.'";
+      "l." = "eza -a | grep -E '^.'";
       tree = "${ls} --tree";
       cdtemp = "cd `mktemp -d`";
       cp = "cp -iv";
