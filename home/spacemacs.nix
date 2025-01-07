@@ -5,8 +5,8 @@
     source = pkgs.fetchFromGitHub {
       owner = "syl20bnr";
       repo = "spacemacs";
-      rev = "9ec2da8d3d7ea9603f5f9a7580168db8440a90ed";
-      hash = "sha256-kUiu+tbBjzs/u8LPhCSVlF4uCWIoupTYcqhqq9bz8kY=";
+      rev = "124ffa9fda4094e81c02b3334ac2214d624a0807";
+      hash = "sha256-bnLtyyMaRRYWl0q600eeIC48tBxSXZAuIseLsln3EoU=";
     };
     recursive = true;
   };
