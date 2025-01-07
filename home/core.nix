@@ -38,6 +38,10 @@
     llvm
     opam
     mysql84
+    nodePackages_latest.ts-node
+    turbo
+    typescript
+    typescript-language-server
 
     # Rust overlay
     (rust-bin.stable.latest.default.override {
@@ -53,7 +57,7 @@
     ispell
     multimarkdown
     nixfmt-rfc-style
-    prettierd
+    nodePackages_latest.prettier
     ruff
     shfmt
     taplo
@@ -107,11 +111,7 @@
     java.enable = true;
     texlive = {
       enable = true;
-      extraPackages = tpkgs: {
-        inherit (tpkgs)
-          collection-latexextra
-          ;
-      };
+      extraPackages = tpkgs: { inherit (tpkgs) collection-latexextra; };
     };
     zoxide.enable = true;
   };
