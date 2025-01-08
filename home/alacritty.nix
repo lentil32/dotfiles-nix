@@ -9,7 +9,14 @@
         color = "#ffffff";
         duration = 0;
       };
-      colors.draw_bold_text_with_bright_colors = false;
+      colors = {
+        draw_bold_text_with_bright_colors = false;
+        # Solarized
+        # primary = {
+        #    background= "0x002b36";
+        #    foreground= "0x839496";
+        # };
+      };
       cursor.unfocused_hollow = true;
       font = {
         size = 14.0;

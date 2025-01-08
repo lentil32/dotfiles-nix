@@ -38,7 +38,6 @@
     llvm
     opam
     mysql84
-    nodePackages_latest.ts-node
     turbo
     typescript
     typescript-language-server
@@ -111,7 +110,7 @@
     java.enable = true;
     texlive = {
       enable = true;
-      extraPackages = tpkgs: { inherit (tpkgs) collection-latexextra; };
+      extraPackages = tpkgs: { inherit (tpkgs) collection-latexextra dvipng; };
     };
     zoxide.enable = true;
   };

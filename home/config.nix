@@ -164,10 +164,10 @@
       2 = 'main'
       6 = 'secondary'
 
-      [[on-window-detected]]
-      if.app-id = 'org.gnu.Emacs'
-      if.workspace = '2'
-      run = ['layout floating']
+      # [[on-window-detected]]
+      # if.app-id = 'org.gnu.Emacs'
+      # if.workspace = '2'
+      # run = ['layout floating']
 
       [[on-window-detected]]
       if.app-id = 'company.thebrowser.Browser'
@@ -279,12 +279,12 @@
 
       # open programs
       [mode.programs.binding]
-      a = [ 'exec-and-forget open -a Anki',                                      'mode main' ]
-      c = [ 'exec-and-forget open -na "Google Chrome"',                          'mode main' ]
-      e = [ 'exec-and-forget ${pkgs.emacs}/bin/emacsclient -ca "open -a Emacs"', 'mode main' ]
-      f = [ 'exec-and-forget open -na "Firefox"',                                'mode main' ]
-      p = [ 'exec-and-forget open -a Enpass',                                    'mode main' ]
-      r = [ 'exec-and-forget open -a Raycast',                                   'mode main' ]
+      a = [ 'exec-and-forget open -a Anki',                                         'mode main' ]
+      c = [ 'exec-and-forget open -na "Google Chrome"',                             'mode main' ]
+      e = [ 'exec-and-forget ${pkgs.emacs-30}/bin/emacsclient -ca "open -a Emacs"', 'mode main' ]
+      f = [ 'exec-and-forget open -na "Firefox"',                                   'mode main' ]
+      p = [ 'exec-and-forget open -a Enpass',                                       'mode main' ]
+      r = [ 'exec-and-forget open -a Raycast',                                      'mode main' ]
 
       enter = 'mode main'
       esc = 'mode main'
