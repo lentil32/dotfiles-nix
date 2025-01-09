@@ -174,20 +174,28 @@
       run = 'move-node-to-workspace 3' # mnemonics W - Web browser
 
       [[on-window-detected]]
+      if.app-id = 'com.linear'
+      run = 'move-node-to-workspace 4'
+
+      [[on-window-detected]]
+      if.app-id = 'com.tinyspeck.slackmacgap'
+      run = 'move-node-to-workspace 5'
+
+      [[on-window-detected]]
       if.app-id = 'com.spotify.client'
-      run = 'move-node-to-workspace 4' # mnemonics M - Media
+      run = 'move-node-to-workspace 6' # mnemonics M - Media
 
       [[on-window-detected]]
       if.app-id = 'com.github.th-ch.youtube-music'
-      run = 'move-node-to-workspace 4' # mnemonics M - Media
+      run = 'move-node-to-workspace 6' # mnemonics M - Media
 
       [[on-window-detected]]
       if.app-id = 'com.vanejung.elpy'
-      run = 'move-node-to-workspace 4' # mnemonics M - Media
+      run = 'move-node-to-workspace 6' # mnemonics M - Media
 
       [[on-window-detected]]
       if.app-id = 'com.hnc.Discord'
-      run = 'move-node-to-workspace 5' # mnemonics S - Social Network
+      run = 'move-node-to-workspace 7' # mnemonics S - Social Network
 
       # Not implemented yet: https://github.com/nikitabobko/AeroSpace/issues/224
       # [key-mapping.key-notation-to-key-code]

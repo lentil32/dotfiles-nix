@@ -87,6 +87,7 @@
       "aerospace"
       "hammerspoon"
       "karabiner-elements"
+      "linear-linear"
       "monitorcontrol"
       "raycast"
       "scroll-reverser"
@@ -99,6 +100,7 @@
       "discord"
       "microsoft-teams"
       "youtube-music" # Open-source YouTube Music client
+      "slack"
       "spotify"
 
       "anki"
