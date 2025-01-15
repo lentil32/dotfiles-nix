@@ -14,26 +14,26 @@
   };
 
   inputs = {
-    nixpkgs-darwin.url = "github:nixos/nixpkgs/nixpkgs-24.11-darwin";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-24.11-darwin";
     # home-manager, used for managing user configuration
     home-manager = {
       url = "github:nix-community/home-manager/release-24.11";
       # The `follows` keyword in inputs is used for inheritance.
       # Here, `inputs.nixpkgs` of home-manager is kept consistent with the `inputs.nixpkgs` of the current flake,
       # to avoid problems caused by different versions of nixpkgs dependencies.
-      inputs.nixpkgs.follows = "nixpkgs-darwin";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
-    darwin = {
-      url = "github:LnL7/nix-darwin/master";
-      inputs.nixpkgs.follows = "nixpkgs-darwin";
+    nix-darwin = {
+      url = "github:LnL7/nix-darwin/nix-darwin-24.11";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
-    darwin-emacs = {
-      url = "github:nix-giant/nix-darwin-emacs";
-      inputs.nixpkgs.follows = "nixpkgs-darwin";
+    nix-darwin-emacs = {
+      url = "github:lentil32/nix-darwin-emacs";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs-darwin";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
@@ -41,9 +41,9 @@
     {
       self,
       nixpkgs,
-      darwin,
+      nix-darwin,
       home-manager,
-      darwin-emacs,
+      nix-darwin-emacs,
       rust-overlay,
       ...
     }@inputs:
@@ -55,7 +55,7 @@
       uid = 502;
       nixpkgsConfig = {
         overlays = [
-          darwin-emacs.overlays.emacs
+          nix-darwin-emacs.overlays.emacs
           rust-overlay.overlays.default
         ];
       };
@@ -70,7 +70,7 @@
       };
     in
     {
-      darwinConfigurations."${hostname}" = darwin.lib.darwinSystem {
+      darwinConfigurations."${hostname}" = nix-darwin.lib.darwinSystem {
         inherit system specialArgs;
         modules = [
           ./modules/nix-core.nix
