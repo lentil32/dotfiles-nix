@@ -1,4 +1,9 @@
-{ pkgs, ... }:
+{
+  pkgs,
+  pkgs-unstable,
+  system,
+  ...
+}:
 {
   home.packages = with pkgs; [
     # archives
@@ -14,6 +19,7 @@
     ffmpeg
     fzf
     glow # markdown previewer in terminal
+    lefthook
     nurl
     # Signing git commits in macOS
     # Set up a GPG key for signing Git commits on MacOS (M1)
@@ -52,6 +58,7 @@
 
     # LSPs, formatters, linters
     clang-tools
+    emacs-lsp-booster
     eslint
     ispell
     multimarkdown
@@ -60,6 +67,7 @@
     ruff
     shfmt
     taplo
+    vscode-langservers-extracted
     yapf
 
     # fonts
@@ -97,6 +105,8 @@
     };
     bun = {
       enable = true;
+      package = pkgs-unstable.bun;
+      settings.telemetry = false;
     };
     direnv = {
       enable = true;

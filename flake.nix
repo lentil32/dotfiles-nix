@@ -15,6 +15,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-24.11-darwin";
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     # home-manager, used for managing user configuration
     home-manager = {
       url = "github:nix-community/home-manager/release-24.11";
@@ -41,6 +42,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-unstable,
       nix-darwin,
       home-manager,
       nix-darwin-emacs,
@@ -52,20 +54,24 @@
       useremail = "lentil32@icloud.com";
       system = "aarch64-darwin"; # aarch64-darwin or x86_64-darwin
       hostname = "lentil32-MacBookPro";
-      uid = 502;
+      uid = 502; # User ID should match existing system user
       nixpkgsConfig = {
-        overlays = [
+        overlays = with inputs; [
           nix-darwin-emacs.overlays.emacs
           rust-overlay.overlays.default
         ];
       };
+      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs-unstable = nixpkgs-unstable.legacyPackages.${system};
 
       specialArgs = inputs // {
         inherit
+          pkgs-unstable
           username
           useremail
           hostname
           uid
+          system
           ;
       };
     in
@@ -88,6 +94,6 @@
         ];
       };
       # nix code formatter
-      formatter.${system} = nixpkgs.legacyPackages.${system}.nixfmt-rfc-style;
+      formatter.${system} = pkgs.nixfmt-rfc-style;
     };
 }
