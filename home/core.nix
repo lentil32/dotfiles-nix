@@ -63,7 +63,6 @@
     ispell
     multimarkdown
     nixfmt-rfc-style
-    nodePackages_latest.prettier
     ruff
     shfmt
     taplo

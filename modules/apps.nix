@@ -94,6 +94,7 @@
       "stats" # beautiful system monitor
 
       "cursor"
+      "lm-studio"
       # "visual-studio-code"
 
       # IM & audio & remote desktop & meeting
