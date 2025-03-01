@@ -5,12 +5,12 @@
     ./config.nix
     ./core.nix
     ./shell.nix
+    ./spacemacs.nix
 
     ./alacritty.nix
     ./git.nix
     ./go.nix
     ./python.nix
-    ./spacemacs.nix
     ./starship.nix
   ];
 

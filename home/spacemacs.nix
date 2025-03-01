@@ -1,13 +1,16 @@
-{ pkgs, config, ... }:
+{ pkgs, lib, ... }:
 {
-  home.packages = [ pkgs.emacs-30 ];
-  #  home.file.".emacs.d" = {
-  #    source = pkgs.fetchFromGitHub {
-  #      owner = "syl20bnr";
-  #      repo = "spacemacs";
-  #      rev = "124ffa9fda4094e81c02b3334ac2214d624a0807";
-  #      hash = "sha256-bnLtyyMaRRYWl0q600eeIC48tBxSXZAuIseLsln3EoU=";
-  #    };
-  #    recursive = true;
-  #  };
+  home.packages = [ pkgs.emacs-30 pkgs.git ];
+
+  home.activation.updateSpacemacs = lib.hm.dag.entryAfter ["writeBoundary"] ''
+    if [ ! -d ~/.emacs.d ]; then
+      ${pkgs.git}/bin/git clone https://github.com/syl20bnr/spacemacs ~/.emacs.d
+      cd ~/.emacs.d
+      ${pkgs.git}/bin/git checkout develop
+    else
+      cd ~/.emacs.d
+      ${pkgs.git}/bin/git checkout develop
+      ${pkgs.git}/bin/git pull
+    fi
+  '';
 }
