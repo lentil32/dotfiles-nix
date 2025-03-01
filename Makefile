@@ -34,6 +34,8 @@ darwin-debug:
 #
 ############################################################################
 
+update-emacs:
+	gh repo sync lentil32/nix-darwin-emacs --source nix-giant/nix-darwin-emacs
 
 update:
 	nix flake update
