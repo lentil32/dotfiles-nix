@@ -28,7 +28,7 @@
     dotDir = ".config/zsh"; # Relative path from $HOME
     sessionVariables = {
       VISUAL = "emacsclient -a=vim";
-      MANPAGER = "sh -c 'col -bx | bat -l man -p'";
+      MANPAGER = "sh -c 'col -b | bat -l man -p'";
       MANROFFOPT = "-c";
     };
     initExtra = ''
@@ -45,7 +45,6 @@
       export SAM_CLI_TELEMETRY=0
     '';
     shellGlobalAliases = {
-      "-h" = "-h 2>&1 | bat --language=help --style=plain";
       "--help" = "--help 2>&1 | bat --language=help --style=plain";
     };
     shellAliases = rec {
