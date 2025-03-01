@@ -45,6 +45,9 @@ gc:
 # garbage collect all unused nix store entries
 	sudo nix store gc --debug
 
+gc-all:
+	nix-collect-garbage -d
+
 
 fmt:
 # format the nix files in this repo
