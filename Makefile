@@ -1,4 +1,4 @@
-# just is a command runner, Justfile is very similar to Makefile, but simpler.
+.PHONY: darwin darwin-debug update-emacs update update-all history gc fmt clean
 
 # TODO update hostname here!
 hostname := lentil32-MacBookPro
@@ -39,6 +39,8 @@ update-emacs:
 
 update:
 	nix flake update
+
+update-all: update update-emacs
 
 history:
 	nix profile history --profile /nix/var/nix/profiles/system

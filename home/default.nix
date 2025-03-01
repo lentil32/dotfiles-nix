@@ -2,7 +2,6 @@
 {
   # import sub modules
   imports = [
-    ./config.nix
     ./core.nix
     ./shell.nix
     ./spacemacs.nix
@@ -12,6 +11,10 @@
     ./go.nix
     ./python.nix
     ./starship.nix
+
+    # Configs
+    ./aerospace.nix
+    ./gpg.nix
   ];
 
   # Home Manager needs a bit of information about you and the

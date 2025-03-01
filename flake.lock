@@ -68,11 +68,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1740277172,
-        "narHash": "sha256-V7zujVuMc3o0jrS4NY+1QtrkkEn3Ptpn9PlsTitQ58M=",
+        "lastModified": 1740795727,
+        "narHash": "sha256-o0l7FoXc6akbKKfPCGYd7/40R8Wmm8Br3a85TsCt26M=",
         "owner": "lentil32",
         "repo": "nix-darwin-emacs",
-        "rev": "2aa1589e1e0dab56615924e6b6051daaaf0dd11a",
+        "rev": "6ee9227e91ff34220069445013f020ec4acc92f9",
         "type": "github"
       },
       "original": {
