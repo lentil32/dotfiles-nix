@@ -1,7 +1,8 @@
-{ pkgs
-, pkgs-unstable
-, system
-, ...
+{
+  pkgs,
+  pkgs-unstable,
+  system,
+  ...
 }:
 {
   home.packages = with pkgs; [
@@ -25,6 +26,7 @@
     ffmpeg
     fzf
     glow # markdown previewer in terminal
+    gh
     keycastr # keystroke visualizer
     lefthook
     nurl

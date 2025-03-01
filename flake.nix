@@ -40,16 +40,17 @@
   };
 
   outputs =
-    { self
-    , systems
-    , nixpkgs
-    , nixpkgs-unstable
-    , nix-darwin
-    , home-manager
-    , nix-darwin-emacs
-    , rust-overlay
-    , treefmt-nix
-    , ...
+    {
+      self,
+      systems,
+      nixpkgs,
+      nixpkgs-unstable,
+      nix-darwin,
+      home-manager,
+      nix-darwin-emacs,
+      rust-overlay,
+      treefmt-nix,
+      ...
     }@inputs:
     let
       username = "starush";

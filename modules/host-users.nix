@@ -1,8 +1,9 @@
-{ pkgs
-, username
-, hostname
-, uid
-, ...
+{
+  pkgs,
+  username,
+  hostname,
+  uid,
+  ...
 }@args:
 #############################################################
 #
