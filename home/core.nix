@@ -1,8 +1,7 @@
-{
-  pkgs,
-  pkgs-unstable,
-  system,
-  ...
+{ pkgs
+, pkgs-unstable
+, system
+, ...
 }:
 {
   home.packages = with pkgs; [
@@ -12,13 +11,21 @@
     unzip
     p7zip
 
+    # AI
+    pkgs-unstable.aider-chat
+
     # utils
+    awscli2
     bottom
+    colima # docker runtime with minimal setup
+    convmv
+    docker
     fasd
     fd
     ffmpeg
     fzf
     glow # markdown previewer in terminal
+    keycastr # keystroke visualizer
     lefthook
     nurl
     # Signing git commits in macOS
@@ -60,6 +67,7 @@
     clang-tools
     emacs-lsp-booster
     eslint
+    hadolint # docker linter
     ispell
     multimarkdown
     nixfmt-rfc-style
@@ -86,6 +94,7 @@
     gnutar
     gawk
     pandoc
+    postgresql
     typst
     typstfmt
     zstd

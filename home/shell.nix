@@ -1,8 +1,7 @@
-{
-  pkgs,
-  config,
-  lib,
-  ...
+{ pkgs
+, config
+, lib
+, ...
 }:
 {
   # Options: https://mynixos.com/home-manager/options/programs.zsh
@@ -42,6 +41,7 @@
       export PYENV_ROOT="$HOME/.pyenv"
       [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
       eval "$(pyenv init -)"
+      export SAM_CLI_TELEMETRY=0
     '';
     shellGlobalAliases = {
       "-h" = "-h 2>&1 | bat --language=help --style=plain";

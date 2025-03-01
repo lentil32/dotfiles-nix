@@ -57,7 +57,7 @@
 
       # customize trackpad
       trackpad = {
-        Clicking = false;
+        Clicking = true;
         TrackpadRightClick = true; # enable two finger right click
         TrackpadThreeFingerDrag = true; # enable three finger drag
       };

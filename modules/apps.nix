@@ -45,7 +45,6 @@
     # otherwise Apple Store will refuse to install them.
     # For details, see https://github.com/mas-cli/mas
     masApps = {
-      Structured = 1499198946;
       WireGuard = 1451685025;
       Xcode = 497799835;
     };
@@ -61,7 +60,6 @@
     brews = [
       "aria2" # download tool
       "curl" # no not install curl via nixpkgs, it's not working well on macOS!
-      "docker-compose"
       "httpie" # http client
       "libtool" # Needed by Emacs multivterm compilation step
       "sqlfmt"
@@ -72,6 +70,9 @@
 
     # `brew install --cask`
     casks = [
+      "1password"
+      "1password-cli"
+
       # Browsers
       "arc"
 
@@ -110,7 +111,6 @@
 
       # Development
       "cyberduck"
-      "docker"
       "insomnia" # REST client
       "postman"
       "xquartz" # Open-source version of the X.Org X Window System

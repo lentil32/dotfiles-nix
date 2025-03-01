@@ -62,10 +62,6 @@
       # This should contains things specific to a local environment, such as IDE, OS, or editor.
       # This shouldn't contain anything created or used by project command line build tools.
 
-      # IDEs
-      ".idea"
-      ".vscode"
-
       # Vim
       "tags"
       "/.vim/"

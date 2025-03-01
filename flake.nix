@@ -36,18 +36,20 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    treefmt-nix.url = "github:numtide/treefmt-nix";
   };
 
   outputs =
-    {
-      self,
-      nixpkgs,
-      nixpkgs-unstable,
-      nix-darwin,
-      home-manager,
-      nix-darwin-emacs,
-      rust-overlay,
-      ...
+    { self
+    , systems
+    , nixpkgs
+    , nixpkgs-unstable
+    , nix-darwin
+    , home-manager
+    , nix-darwin-emacs
+    , rust-overlay
+    , treefmt-nix
+    , ...
     }@inputs:
     let
       username = "starush";
@@ -61,6 +63,10 @@
           rust-overlay.overlays.default
         ];
       };
+
+      eachSystem = f: nixpkgs.lib.genAttrs (import systems) (system: f nixpkgs.legacyPackages.${system});
+
+      treefmtEval = eachSystem (pkgs: treefmt-nix.lib.evalModule pkgs ./treefmt.nix);
       pkgs = nixpkgs.legacyPackages.${system};
       pkgs-unstable = nixpkgs-unstable.legacyPackages.${system};
 
@@ -93,7 +99,9 @@
           }
         ];
       };
-      # nix code formatter
-      formatter.${system} = pkgs.nixfmt-rfc-style;
+      formatter = eachSystem (pkgs: treefmtEval.${pkgs.system}.config.build.wrapper);
+      checks = eachSystem (pkgs: {
+        formatting = treefmtEval.${pkgs.system}.config.build.check self;
+      });
     };
 }
