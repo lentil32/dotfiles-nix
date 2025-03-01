@@ -1,7 +1,6 @@
 .PHONY: darwin darwin-debug update-emacs update update-all history gc fmt clean
 
-# TODO update hostname here!
-hostname := lentil32-MacBookPro
+hostname := $(shell hostname)
 
 ############################################################################
 #
@@ -9,12 +8,6 @@ hostname := lentil32-MacBookPro
 #
 ############################################################################
 
-#  TODO Feel free to remove this target if you don't need a proxy to speed up the build process
-# darwin-set-proxy:
-#   sudo python3 scripts/darwin_set_proxy.py
-#
-
-# darwin: darwin-set-proxy
 darwin:
 	nix build .#darwinConfigurations.${hostname}.system \
 	  --extra-experimental-features 'nix-command flakes'
