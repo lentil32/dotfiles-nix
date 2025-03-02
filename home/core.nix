@@ -35,6 +35,7 @@
     # Reference: https://gist.github.com/phortuin/cf24b1cca3258720c71ad42977e1ba57
     pinentry_mac
     pngpaste
+    python3Packages.playwright # web scraper. `aider` uses it
     ripgrep
     jq
     yarn

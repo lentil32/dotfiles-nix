@@ -27,13 +27,16 @@ darwin-debug:
 #
 ############################################################################
 
+update-flake:
+	nix flake update
+
 update-emacs:
 	gh repo sync lentil32/nix-darwin-emacs --source nix-giant/nix-darwin-emacs
 
-update:
-	nix flake update
+update-all: update-emacs update-flake
 
-update-all: update update-emacs
+deploy-flake: update-flake darwin
+deploy-all: update-all darwin
 
 history:
 	nix profile history --profile /nix/var/nix/profiles/system
