@@ -18,9 +18,7 @@
     # utils
     awscli2
     bottom
-    colima # docker runtime with minimal setup
     convmv
-    docker
     fasd
     fd
     ffmpeg
@@ -70,7 +68,6 @@
     clang-tools
     emacs-lsp-booster
     eslint
-    hadolint # docker linter
     ispell
     multimarkdown
     nixfmt-rfc-style

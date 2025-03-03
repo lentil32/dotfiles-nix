@@ -7,6 +7,7 @@
     ./spacemacs.nix
 
     ./alacritty.nix
+    ./docker.nix
     ./git.nix
     ./go.nix
     ./python.nix
