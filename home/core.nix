@@ -13,7 +13,7 @@
     p7zip
 
     # AI
-    pkgs-unstable.aider-chat
+    aider-chat
 
     # utils
     awscli2

@@ -62,6 +62,10 @@
         overlays = with inputs; [
           nix-darwin-emacs.overlays.emacs
           rust-overlay.overlays.default
+          (final: prev: {
+            pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
+          })
+          (import ./overlays/aider-latest-flake.nix)
         ];
       };
 

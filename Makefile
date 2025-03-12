@@ -27,14 +27,19 @@ darwin-debug:
 #
 ############################################################################
 
-update-flake:
-	nix flake update
-
 update-emacs:
 	gh repo sync lentil32/nix-darwin-emacs --source nix-giant/nix-darwin-emacs
 
-update-all: update-emacs update-flake
+update-aider:
+	./scripts/update-aider.sh ./overlays/aider-latest-flake.nix
 
+update-flake:
+	nix flake update
+
+update-all: update-emacs update-aider update-flake
+
+deploy-emacs: update-emacs darwin
+deploy-aider: update-aider darwin
 deploy-flake: update-flake darwin
 deploy-all: update-all darwin
 

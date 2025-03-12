@@ -32,7 +32,8 @@
       MANROFFOPT = "-c";
     };
     initExtra = ''
-      export PATH="$HOME/.bun/bin:$GOBIN:$PATH";
+      export BUNBIN="$HOME/.bun/bin";
+      export PATH="$HOME/.local/bin:$BUNBIN:$GOBIN:$PATH";
       export PNPM_HOME="$HOME/Library/pnpm"
       export NODE_PATH="$HOME/.bun/install/global/node_modules"
       case ":$PATH:" in

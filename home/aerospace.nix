@@ -62,10 +62,10 @@
     2 = 'main'
     6 = 'secondary'
 
-    # [[on-window-detected]]
-    # if.app-id = 'org.gnu.Emacs'
-    # if.workspace = '2'
-    # run = ['layout floating']
+    [[on-window-detected]]
+    if.app-id = 'org.gnu.Emacs'
+    if.workspace = '2'
+    run = ['layout floating']
 
     [[on-window-detected]]
     if.app-id = 'company.thebrowser.Browser'
