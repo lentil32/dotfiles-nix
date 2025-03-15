@@ -64,6 +64,7 @@
       "libtool" # Needed by Emacs multivterm compilation step
       "sqlfmt"
       "supabase/tap/supabase"
+      "uv"
       "wget"
       "yt-dlp"
     ];

@@ -2,7 +2,7 @@ final: prev: {
   aider-chat =
     let
       unstable = prev.pkgs-unstable;
-      version = "0.76.2";
+      version = "0.75.2";
     in
     unstable.aider-chat.overridePythonAttrs (oldAttrs: {
       version = version;
@@ -10,7 +10,7 @@ final: prev: {
         owner = "Aider-AI";
         repo = "aider";
         tag = "v${version}";
-        hash = "sha256-5pmzqlFQEAACAqF12FGTHkyJjpnpuGUe0Y0cpQ0z2Bg=";
+        hash = "sha256-+XpvAnxsv6TbsJwTAgNdJtZxxoPXQ9cxRVUaFZCnS8w=";
       };
 
       dependencies =
