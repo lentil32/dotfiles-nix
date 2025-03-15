@@ -5,6 +5,7 @@
   ...
 }:
 {
+  programs.bash.enable = true;
   # Options: https://mynixos.com/home-manager/options/programs.zsh
   programs.zsh = {
     enable = true;
@@ -27,23 +28,11 @@
     };
     dotDir = ".config/zsh"; # Relative path from $HOME
     sessionVariables = {
-      VISUAL = "emacsclient -a=vim";
-      MANPAGER = "sh -c 'col -b | bat -l man -p'";
-      MANROFFOPT = "-c";
     };
+
     initExtra = ''
-      export BUNBIN="$HOME/.bun/bin";
-      export PATH="$HOME/.local/bin:$BUNBIN:$GOBIN:$PATH";
-      export PNPM_HOME="$HOME/Library/pnpm"
-      export NODE_PATH="$HOME/.bun/install/global/node_modules"
-      case ":$PATH:" in
-        *":$PNPM_HOME:"*) ;;
-        *) export PATH="$PNPM_HOME:$PATH" ;;
-      esac
-      export PYENV_ROOT="$HOME/.pyenv"
       [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
       eval "$(pyenv init -)"
-      export SAM_CLI_TELEMETRY=0
     '';
     shellGlobalAliases = {
       "--help" = "--help 2>&1 | bat --language=help --style=plain";

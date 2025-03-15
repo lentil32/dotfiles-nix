@@ -6,6 +6,7 @@
     ./shell.nix
     ./spacemacs.nix
 
+    ./aider-chat.nix
     ./alacritty.nix
     ./docker.nix
     ./git.nix
@@ -33,6 +34,20 @@
     # the Home Manager release notes for a list of state version
     # changes in each release.
     stateVersion = "24.11";
+
+    sessionVariables = {
+      VISUAL = "emacsclient -a=vim";
+      MANPAGER = "sh -c 'col -b | bat -l man -p'";
+      MANROFFOPT = "-c";
+
+      SAM_CLI_TELEMETRY = "0";
+
+      BUNBIN = "$HOME/.bun/bin";
+      PNPM_HOME = "$HOME/Library/pnpm";
+      NODE_PATH = "$HOME/.bun/install/global/node_modules";
+      PYENV_ROOT = "$HOME/.pyenv";
+      PATH = "$GOBIN:$BUNBIN:$PNPM_HOME:$HOME/.local/bin:$PATH";
+    };
   };
 
   # Let Home Manager install and manage itself.
