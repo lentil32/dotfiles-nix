@@ -54,7 +54,7 @@
 
       # why the hell not?
       help.autocorrect = "prompt";
-      commit.verbose = true;
+      # commit.verbose = true; I use Magit, so don't need it
       rerere = {
         enabled = true;
         autoupdate = true;
