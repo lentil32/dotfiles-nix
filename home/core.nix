@@ -76,10 +76,6 @@
     yaml-language-server
     yapf
 
-    # fonts
-    iosevka-comfy.comfy
-    source-sans-pro
-
     # misc
     caddy
     coreutils

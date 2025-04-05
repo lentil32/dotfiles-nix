@@ -186,8 +186,12 @@
   fonts = {
     packages = with pkgs; [
       # icon fonts
-      material-design-icons
+      cascadia-code
       font-awesome
+      iosevka
+      iosevka-comfy.comfy
+      material-design-icons
+      source-sans-pro
 
       # nerdfonts
       # https://github.com/NixOS/nixpkgs/blob/nixos-24.05/pkgs/data/fonts/nerdfonts/shas.nix
