@@ -48,6 +48,7 @@
     llvm
     opam
     mysql84
+    nodejs_23
     turbo
     typescript
     typescript-language-server
@@ -65,12 +66,14 @@
     emacs-lsp-booster
     eslint
     ispell
+    lua-language-server
     multimarkdown
     nixfmt-rfc-style
     ruff
     shfmt
     taplo
     vscode-langservers-extracted
+    yaml-language-server
     yapf
 
     # fonts

@@ -109,6 +109,7 @@
 
       "anki"
       "iina" # video player
+      "ogdesign-eagle"
       "transmission"
 
       # Development
