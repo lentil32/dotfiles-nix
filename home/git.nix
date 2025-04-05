@@ -23,9 +23,54 @@
       }
     ];
 
+    # https://blog.gitbutler.com/how-git-core-devs-configure-git/
     extraConfig = {
+      github.user = "lentil32";
+      core.autocrlf = "input";
+      log.date = "iso";
+
+      # clearly makes git better
+      column.ui = "auto";
+      branch.sort = "-committerdate";
+      tag.sort = "version:refname";
       init.defaultBranch = "main";
-      push.autoSetupRemote = true;
+      diff = {
+        algorithm = "histogram";
+        colorMoved = "plain";
+        mnemonicPrefix = true;
+        renames = true;
+        submodule = "log";
+      };
+      push = {
+        default = "simple";
+        autoSetupRemote = true;
+        followTags = true;
+      };
+      fetch = {
+        prune = true;
+        pruneTags = true;
+        all = true;
+      };
+
+      # why the hell not?
+      help.autocorrect = "prompt";
+      commit.verbose = true;
+      rerere = {
+        enabled = true;
+        autoupdate = true;
+      };
+      rebase = {
+        autoSquash = true;
+        autoStash = true;
+        updateRefs = true;
+      };
+
+      # a matter of taste (uncomment if you dare)
+      core = {
+        fsmonitor = true;
+        untrackedCache = true;
+      };
+      merge.conflictstyle = "zdiff3";
       pull.rebase = true;
     };
 
@@ -44,18 +89,14 @@
     aliases = {
       # common aliases
       br = "branch";
+      ci = "commit";
       co = "checkout";
-      st = "status";
-      ls = ''log --pretty=format:"%C(yellow)%h%Cred%d\\ %Creset%s%Cblue\\ [%cn]" --decorate'';
-      ll = ''log --pretty=format:"%C(yellow)%h%Cred%d\\ %Creset%s%Cblue\\ [%cn]" --decorate --numstat'';
-      cm = "commit -m";
-      ca = "commit -am";
-      dc = "diff --cached";
-      amend = "commit --amend -m";
-
-      # aliases for submodule
-      update = "submodule update --init --recursive";
-      foreach = "submodule foreach";
+      st = "status -s";
+      dump = "cat-file -p";
+      type = "cat-file -t";
+      hist = "log --pretty=format:\"%h %ad | %s%d [%an]\" --graph --date=short";
+      lol = "log --graph --oneline --decorate --color --all";
+      wow = "log --graph --oneline --decorate --color --all --simplify-by-decoration";
     };
 
     ignores = [
