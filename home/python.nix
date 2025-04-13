@@ -6,7 +6,6 @@
     isort # sort imports
     pipenv
     poetry
-    pyenv
     pyright
   ];
 }

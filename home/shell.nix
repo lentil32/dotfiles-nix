@@ -30,10 +30,6 @@
     sessionVariables = {
     };
 
-    initExtra = ''
-      [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
-      eval "$(pyenv init -)"
-    '';
     shellGlobalAliases = {
       "--help" = "--help 2>&1 | bat --language=help --style=plain";
     };

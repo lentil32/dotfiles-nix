@@ -45,7 +45,6 @@
       BUNBIN = "$HOME/.bun/bin";
       PNPM_HOME = "$HOME/Library/pnpm";
       NODE_PATH = "$HOME/.bun/install/global/node_modules";
-      PYENV_ROOT = "$HOME/.pyenv";
       PATH = "$GOBIN:$BUNBIN:$PNPM_HOME:$HOME/.local/bin:$PATH";
     };
   };
