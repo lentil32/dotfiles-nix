@@ -1,5 +1,8 @@
 { pkgs, ... }:
 {
+  programs.aerospace = {
+    enable = true;
+  };
   xdg.configFile."aerospace/aerospace.toml".text = ''
     # Reference: https://github.com/i3/i3/blob/next/etc/config
 
