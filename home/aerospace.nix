@@ -68,36 +68,36 @@
 
       on-window-detected = [
         {
-          if.app-id = "org.gnu.Emacs";
-          if.workspace = "2";
+          "if.app-id" = "org.gnu.Emacs";
+          "if.workspace" = "2";
           run = [ "layout floating" ];
         }
         {
-          if.app-id = "company.thebrowser.Browser";
+          "if.app-id" = "company.thebrowser.Browser";
           run = "move-node-to-workspace 3"; # mnemonics W - Web browser
         }
         {
-          if.app-id = "com.linear";
+          "if.app-id" = "com.linear";
           run = "move-node-to-workspace 4";
         }
         {
-          if.app-id = "com.tinyspeck.slackmacgap";
+          "if.app-id" = "com.tinyspeck.slackmacgap";
           run = "move-node-to-workspace 4";
         }
         {
-          if.app-id = "com.spotify.client";
+          "if.app-id" = "com.spotify.client";
           run = "move-node-to-workspace 10"; # mnemonics M - Media
         }
         {
-          if.app-id = "com.github.th-ch.youtube-music";
+          "if.app-id" = "com.github.th-ch.youtube-music";
           run = "move-node-to-workspace 10"; # mnemonics M - Media
         }
         {
-          if.app-id = "com.vanejung.elpy";
+          "if.app-id" = "com.vanejung.elpy";
           run = "move-node-to-workspace 10"; # mnemonics M - Media
         }
         {
-          if.app-id = "com.hnc.Discord";
+          "if.app-id" = "com.hnc.Discord";
           run = "move-node-to-workspace 9"; # mnemonics S - Social Network
         }
       ];
