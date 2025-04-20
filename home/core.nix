@@ -76,6 +76,9 @@
     yaml-language-server
     yapf
 
+    # Productivity
+    pkgs-unstable.aerospace
+
     # misc
     caddy
     coreutils

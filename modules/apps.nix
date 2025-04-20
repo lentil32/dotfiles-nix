@@ -52,7 +52,6 @@
     taps = [
       "homebrew/bundle"
       "homebrew/services"
-      "nikitabobko/tap"
       "th-ch/youtube-music"
     ];
 
@@ -87,7 +86,6 @@
       # "google-chrome"
 
       # Productivity
-      "aerospace"
       "hammerspoon"
       "karabiner-elements"
       "linear-linear"

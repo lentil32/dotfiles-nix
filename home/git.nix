@@ -79,13 +79,6 @@
       signByDefault = true;
     };
 
-    delta = {
-      enable = true;
-      options = {
-        features = "side-by-side";
-      };
-    };
-
     aliases = {
       # common aliases
       br = "branch";
