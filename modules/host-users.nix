@@ -23,6 +23,7 @@
     shell = pkgs.zsh;
     uid = uid;
   };
+  system.primaryUser = username;
 
   nix.settings.trusted-users = [ username ];
 }

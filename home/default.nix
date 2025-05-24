@@ -1,4 +1,9 @@
-{ pkgs, username, ... }:
+{
+  pkgs,
+  username,
+  config,
+  ...
+}:
 {
   # import sub modules
   imports = [
@@ -6,7 +11,6 @@
     ./shell.nix
     ./spacemacs.nix
 
-    ./aider-chat.nix
     ./alacritty.nix
     ./docker.nix
     ./git.nix
@@ -33,7 +37,7 @@
     # You can update Home Manager without changing this value. See
     # the Home Manager release notes for a list of state version
     # changes in each release.
-    stateVersion = "24.11";
+    stateVersion = "25.05";
 
     sessionVariables = {
       VISUAL = "emacsclient -a=vim";
@@ -45,8 +49,15 @@
       BUNBIN = "$HOME/.bun/bin";
       PNPM_HOME = "$HOME/Library/pnpm";
       NODE_PATH = "$HOME/.bun/install/global/node_modules";
-      PATH = "$GOBIN:$BUNBIN:$PNPM_HOME:$HOME/.local/bin:$PATH";
     };
+
+    sessionPath = [
+      "$GOBIN"
+      "$BUNBIN"
+      "${config.home.sessionVariables.PNPM_HOME}"
+      "$HOME/.local/bin"
+    ];
+
   };
 
   # Let Home Manager install and manage itself.

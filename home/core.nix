@@ -34,6 +34,7 @@
     jq
     yarn
     yq-go # yaml processer https://github.com/mikefarah/yq
+    wabt
     websocat
     wireguard-tools
 
@@ -42,13 +43,17 @@
     nmap # A utility for network discovery and security auditing
 
     # programming
+    (aider-chat.withOptional {
+      withPlaywright = true;
+      withBedrock = true;
+    })
     bats # Bash automated testing
     cmake
     corepack_latest # Node.js dependency bridge
     llvm
     opam
     mysql84
-    nodejs_23
+    nodejs_24
     turbo
     typescript
     typescript-language-server
@@ -64,7 +69,6 @@
     # LSPs, formatters, linters
     clang-tools
     emacs-lsp-booster
-    eslint
     ispell
     lua-language-server
     multimarkdown

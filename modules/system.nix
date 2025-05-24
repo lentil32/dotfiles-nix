@@ -12,6 +12,7 @@
 {
   system = {
     stateVersion = 5;
+
     # activationScripts are executed every time you boot the system or run `nixos-rebuild` / `darwin-rebuild`.
 
     # Set user shell without giving overwhelming permission on it
@@ -19,7 +20,7 @@
     # activationScripts.setZshAsShell.text = ''
     #   dscl . -create /Users/${username} UserShell /run/current-system/sw/bin/zsh
     # '';
-    activationScripts.postUserActivation.text = ''
+    activationScripts.postActivation.text = ''
       # activateSettings -u will reload the settings from the database and apply them to the current session,
       # so we do not need to logout and login again to make the changes take effect.
       /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
@@ -164,7 +165,8 @@
   };
 
   # Add ability to used TouchID for sudo authentication
-  security.pam.enableSudoTouchIdAuth = true;
+  security.pam.services.sudo_local.touchIdAuth = true;
+  security.pam.services.sudo_local.watchIdAuth = true;
 
   # Create /etc/zshrc that loads the nix-darwin environment.
   # this is required if you want to use darwin's default shell - zsh
@@ -193,18 +195,14 @@
       material-design-icons
       source-sans-pro
 
-      # nerdfonts
-      # https://github.com/NixOS/nixpkgs/blob/nixos-24.05/pkgs/data/fonts/nerdfonts/shas.nix
-      (nerdfonts.override {
-        fonts = [
-          # symbols icon only
-          "NerdFontsSymbolsOnly"
-          # Characters
-          "Iosevka"
-          "FiraCode"
-          "JetBrainsMono"
-        ];
-      })
+      # NerdFonts
+      # symbols icon only
+      nerd-fonts.symbols-only
+
+      # Characters
+      nerd-fonts.iosevka
+      nerd-fonts.fira-code
+      nerd-fonts.jetbrains-mono
     ];
   };
 }

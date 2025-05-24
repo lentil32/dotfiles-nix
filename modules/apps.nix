@@ -59,7 +59,6 @@
     brews = [
       "aria2" # download tool
       "curl" # no not install curl via nixpkgs, it's not working well on macOS!
-      "httpie" # http client
       "libb2" # Python needs arm64 version of this
       "libtool" # Needed by Emacs multivterm compilation step
       "sqlfmt"
@@ -117,8 +116,9 @@
       "xquartz" # Open-source version of the X.Org X Window System
 
       # Fun
-      "prismlauncher" # Minecraft
       "dungeon-crawl-stone-soup-tiles"
+      "millie"
+      "prismlauncher" # Minecraft
     ];
   };
 }

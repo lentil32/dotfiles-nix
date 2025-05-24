@@ -51,12 +51,12 @@
     #                 Monitor pattern is the same as for 'workspace-to-monitor-force-assignment'.
     #                 See: https://nikitabobko.github.io/AeroSpace/guide#assign-workspaces-to-monitors
     [gaps]
-    inner.horizontal = 0
-    inner.vertical =   0
-    outer.left =       0
-    outer.bottom =     65
-    outer.top =        0
-    outer.right =      0
+    inner.horizontal = 8
+    inner.vertical =   8
+    outer.left =       8
+    outer.bottom =     8
+    outer.top =        8
+    outer.right =      8
 
     [workspace-to-monitor-force-assignment]
     2 = 'main'
@@ -65,7 +65,6 @@
     [[on-window-detected]]
     if.app-id = 'org.gnu.Emacs'
     if.workspace = '2'
-    run = ['layout floating']
 
     [[on-window-detected]]
     if.app-id = 'company.thebrowser.Browser'
@@ -88,12 +87,12 @@
     run = 'move-node-to-workspace 10' # mnemonics M - Media
 
     [[on-window-detected]]
-    if.app-id = 'com.vanejung.elpy'
-    run = 'move-node-to-workspace 10' # mnemonics M - Media
-
-    [[on-window-detected]]
     if.app-id = 'com.hnc.Discord'
     run = 'move-node-to-workspace 9' # mnemonics S - Social Network
+
+    [[on-window-detected]]
+    if.app-id = 'com.vanejung.elpy'
+    run = 'move-node-to-workspace 10' # mnemonics M - Media
 
     # Not implemented yet: https://github.com/nikitabobko/AeroSpace/issues/224
     # [key-mapping.key-notation-to-key-code]
