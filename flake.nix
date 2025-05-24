@@ -1,7 +1,6 @@
 {
   description = "Declarative macOS configuration with nix-darwin + Home Manager";
 
-  # the nixConfig here only affects the flake itself, not the system configuration!
   nixConfig = {
     substituters = [
       "https://cache.nixos.org"
@@ -16,33 +15,30 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-25.05-darwin";
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    # home-manager, used for managing user configuration
+
     home-manager = {
       url = "github:nix-community/home-manager/release-25.05";
-      # The `follows` keyword in inputs is used for inheritance.
-      # Here, `inputs.nixpkgs` of home-manager is kept consistent with the `inputs.nixpkgs` of the current flake,
-      # to avoid problems caused by different versions of nixpkgs dependencies.
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
     nix-darwin = {
       url = "github:LnL7/nix-darwin/nix-darwin-25.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
     nix-darwin-emacs = {
       url = "github:lentil32/nix-darwin-emacs";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+
+    rust-overlay.url = "github:oxalica/rust-overlay";
     treefmt-nix.url = "github:numtide/treefmt-nix";
+    flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
     {
       self,
-      systems,
       nixpkgs,
       nixpkgs-unstable,
       nix-darwin,
@@ -50,14 +46,36 @@
       nix-darwin-emacs,
       rust-overlay,
       treefmt-nix,
+      flake-utils,
       ...
     }@inputs:
+
     let
+      # ---------------- Common user data ----------------
       username = "starush";
       useremail = "lentil32@icloud.com";
-      system = "aarch64-darwin"; # aarch64-darwin or x86_64-darwin
-      hostname = "lentil32-MacBookPro";
-      uid = 502; # User ID should match existing system user
+
+      # ---------------- Per-host declarations ----------------
+      macBookProHost = "lentil32-MacBookPro";
+      macMiniM1Host = "lentil32-MacMiniM1";
+
+      machines = {
+        ${macBookProHost} = {
+          system = "aarch64-darwin";
+          hostname = macBookProHost;
+          uid = 502;
+          extraModulesDir = ./. + "/modules/${macBookProHost}";
+        };
+
+        # ${macMiniM1Host} = {
+        #   system      = "aarch64-darwin";
+        #   hostname    = macMiniM1Host;
+        #   uid         = 500;
+        # };
+      };
+
+      defaultMachine = machines.${macBookProHost};
+
       nixpkgsConfig = {
         overlays = with inputs; [
           nix-darwin-emacs.overlays.emacs
@@ -68,44 +86,70 @@
         ];
       };
 
-      eachSystem = f: nixpkgs.lib.genAttrs (import systems) (system: f nixpkgs.legacyPackages.${system});
+      # Return a list of <dir>/<file>.nix for all regular *.nix files in <dir>.
+      listNixModules =
+        dir:
+        builtins.map (name: dir + "/${name}") (
+          builtins.filter (
+            n: (builtins.readDir dir).${n} == "regular" && builtins.match ".*\\.nix" n != null
+          ) (builtins.attrNames (builtins.readDir dir))
+        );
 
-      treefmtEval = eachSystem (pkgs: treefmt-nix.lib.evalModule pkgs ./treefmt.nix);
-      pkgs = nixpkgs.legacyPackages.${system};
-      pkgs-unstable = nixpkgs-unstable.legacyPackages.${system};
+      treefmtEval = system: treefmt-nix.lib.evalModule nixpkgs.legacyPackages.${system} ./treefmt.nix;
 
-      specialArgs = inputs // {
-        inherit
-          pkgs-unstable
-          username
-          useremail
-          hostname
-          uid
-          system
-          ;
+      pkgs = nixpkgs.legacyPackages.${defaultMachine.system};
+      pkgs-unstable = nixpkgs-unstable.legacyPackages.${defaultMachine.system};
+
+      baseSpecialArgs = inputs // {
+        inherit pkgs-unstable username useremail;
       };
+
     in
     {
-      darwinConfigurations."${hostname}" = nix-darwin.lib.darwinSystem {
-        inherit system specialArgs;
-        modules = [
-          ./modules/nix-core.nix
-          ./modules/system.nix
-          ./modules/apps.nix
-          ./modules/host-users.nix
-          home-manager.darwinModules.home-manager
-          {
-            nixpkgs = nixpkgsConfig;
-            home-manager.useGlobalPkgs = true;
-            home-manager.useUserPackages = true;
-            home-manager.extraSpecialArgs = specialArgs;
-            home-manager.users.${username} = import ./home;
-          }
-        ];
+      # ╔════════════════════════════════════════════════════════════╗
+      # ║      Build a darwinConfiguration for every machine        ║
+      # ╚════════════════════════════════════════════════════════════╝
+      darwinConfigurations = builtins.mapAttrs (
+        name: machine:
+        let
+          system = machine.system;
+          specialArgs = baseSpecialArgs // {
+            inherit (machine) hostname uid system;
+          };
+        in
+        nix-darwin.lib.darwinSystem {
+          inherit system specialArgs;
+
+          # base + host-specific + trailing common modules
+          modules =
+            [
+              ./modules/nix-core.nix
+              ./modules/system.nix
+            ]
+            ++ (
+              if machine ? extraModulesDir then
+                listNixModules machine.extraModulesDir
+              else
+                (machine.extraModules or [ ])
+            )
+            ++ [
+              ./modules/host-users.nix
+              home-manager.darwinModules.home-manager
+              {
+                nixpkgs = nixpkgsConfig;
+                home-manager.useGlobalPkgs = true;
+                home-manager.useUserPackages = true;
+                home-manager.extraSpecialArgs = specialArgs;
+                home-manager.users.${username} = import ./home;
+              }
+            ];
+        }
+      ) machines;
+
+      formatter.${defaultMachine.system} = (treefmtEval defaultMachine.system).config.build.wrapper;
+
+      checks.${defaultMachine.system} = {
+        formatting = (treefmtEval defaultMachine.system).config.build.check self;
       };
-      formatter = eachSystem (pkgs: treefmtEval.${pkgs.system}.config.build.wrapper);
-      checks = eachSystem (pkgs: {
-        formatting = treefmtEval.${pkgs.system}.config.build.check self;
-      });
     };
 }

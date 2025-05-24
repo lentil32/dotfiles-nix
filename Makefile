@@ -52,10 +52,11 @@ gc:
 gc-all:
 	nix-collect-garbage -d
 
-
 fmt:
-# format the nix files in this repo
 	nix fmt
+
+check:
+	nix flake check
 
 clean:
 	rm -rf result
