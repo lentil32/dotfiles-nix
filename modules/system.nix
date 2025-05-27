@@ -195,6 +195,8 @@
       material-design-icons
       source-sans-pro
 
+      julia-mono
+
       # NerdFonts
       # symbols icon only
       nerd-fonts.symbols-only

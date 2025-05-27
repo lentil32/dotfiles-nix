@@ -85,6 +85,8 @@
       # "google-chrome"
 
       # Productivity
+      "chatgpt"
+      "claude"
       "hammerspoon"
       "karabiner-elements"
       "linear-linear"

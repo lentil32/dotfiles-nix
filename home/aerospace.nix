@@ -63,8 +63,18 @@
     6 = 'secondary'
 
     [[on-window-detected]]
+    if.app-id = 'com.anthropic.claudefordesktop'
+    run = 'move-node-to-workspace 1'
+
+
+    [[on-window-detected]]
+    if.app-id = 'com.openai.chat'
+    run = 'move-node-to-workspace 1'
+
+    [[on-window-detected]]
     if.app-id = 'org.gnu.Emacs'
-    if.workspace = '2'
+    run = 'move-node-to-workspace 2'
+
 
     [[on-window-detected]]
     if.app-id = 'company.thebrowser.Browser'
