@@ -30,7 +30,6 @@
     # Reference: https://gist.github.com/phortuin/cf24b1cca3258720c71ad42977e1ba57
     pinentry_mac
     pngpaste
-    ripgrep
     jq
     yarn
     yq-go # yaml processer https://github.com/mikefarah/yq
@@ -81,7 +80,6 @@
     yapf
 
     # Productivity
-    pkgs-unstable.aerospace
 
     # misc
     caddy
@@ -120,6 +118,8 @@
     };
     direnv = {
       enable = true;
+      enableZshIntegration = true;
+      mise.enable = true;
       nix-direnv.enable = true;
     };
     eza = {
@@ -128,9 +128,33 @@
       enableZshIntegration = true;
     };
     java.enable = true;
+    mise = {
+      enable = true;
+      enableZshIntegration = true;
+      globalConfig = {
+        alias = {
+          nix = "aqua:https://github.com/joshbode/mise-nix";
+        };
+        settings = {
+          idiomatic_version_file_enable_tools = [ "bun" ];
+        };
+        # Not works yet... due to hook non-existence
+        # tools = {
+        #   "nix" = "latest";
+        # };
+      };
+    };
     texlive = {
       enable = true;
       extraPackages = tpkgs: { inherit (tpkgs) collection-latexextra dvipng; };
+    };
+    ripgrep = {
+      enable = true;
+      arguments = [
+        "--max-columns=150"
+        "--max-columns-preview"
+        "--smart-case"
+      ];
     };
     zoxide.enable = true;
   };

@@ -61,6 +61,13 @@
         x = 0;
         y = 0;
       };
+      keyboard.bindings = [
+        {
+          key = "Return";
+          mods = "Shift";
+          chars = "\\n";
+        }
+      ];
     };
   };
 }

@@ -20,7 +20,6 @@
 
     # Configs
     ./config.nix
-    ./aerospace.nix
     ./gpg.nix
   ];
 

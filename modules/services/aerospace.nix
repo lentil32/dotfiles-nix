@@ -1,20 +1,22 @@
-{ pkgs, ... }:
+{ pkgs, pkgs-unstable, ... }:
 {
   services.aerospace = {
     enable = true;
+    package = pkgs-unstable.aerospace;
     settings = {
       # You can use it to add commands that run after login to macOS user session.
       # 'start-at-login' needs to be 'true' for 'after-login-command' to work
       # Available commands: https://nikitabobko.github.io/AeroSpace/commands
-      after-login-command = [];
+      after-login-command = [ ];
 
       # You can use it to add commands that run after AeroSpace startup.
       # 'after-startup-command' is run after 'after-login-command'
       # Available commands : https://nikitabobko.github.io/AeroSpace/commands
-      after-startup-command = [];
+      after-startup-command = [ ];
 
       # Start AeroSpace at login
-      start-at-login = true;
+      # Note: This is managed by nix-darwin service, not by aerospace itself
+      start-at-login = false;
 
       # Normalizations. See: https://nikitabobko.github.io/AeroSpace/guide#normalization
       # i3 doesn't have "normalizations" feature that why we disable them here.
@@ -41,7 +43,7 @@
       # Drop it from your config, if you don't like this behavior
       # See https://nikitabobko.github.io/AeroSpace/guide#on-focus-changed-callbacks
       # See https://nikitabobko.github.io/AeroSpace/commands#move-mouse
-      on-focused-monitor-changed = ["move-mouse monitor-lazy-center"];
+      on-focused-monitor-changed = [ "move-mouse monitor-lazy-center" ];
 
       # Gaps between windows (inner-*) and between monitor edges (outer-*).
       # Possible values:
@@ -72,10 +74,6 @@
         {
           "if".app-id = "com.openai.chat";
           run = "move-node-to-workspace 1";
-        }
-        {
-          "if".app-id = "org.gnu.Emacs";
-          run = "move-node-to-workspace 2";
         }
         {
           "if".app-id = "company.thebrowser.Browser";
@@ -199,13 +197,34 @@
 
       # open programs
       mode.programs.binding = {
-        a       = [ "exec-and-forget open -a Anki"                                         "mode main" ];
-        c       = [ "exec-and-forget open -na \"Google Chrome\""                           "mode main" ];
-        e       = [ "exec-and-forget ${pkgs.emacs-30}/bin/emacsclient -ca \"open -a Emacs\"" "mode main" ];
-        f       = [ "exec-and-forget open -na \"Firefox\""                                 "mode main" ];
-        shift-f = [ "exec-and-forget open -na \"Firefox Developer Edition\""               "mode main" ];
-        p       = [ "exec-and-forget open -a Enpass"                                       "mode main" ];
-        r       = [ "exec-and-forget open -a Raycast"                                      "mode main" ];
+        a = [
+          "exec-and-forget open -a Anki"
+          "mode main"
+        ];
+        c = [
+          "exec-and-forget open -na \"Google Chrome\""
+          "mode main"
+        ];
+        e = [
+          "exec-and-forget ${pkgs.emacs-30}/bin/emacsclient -ca \"open -a Emacs\""
+          "mode main"
+        ];
+        f = [
+          "exec-and-forget open -na \"Firefox\""
+          "mode main"
+        ];
+        shift-f = [
+          "exec-and-forget open -na \"Firefox Developer Edition\""
+          "mode main"
+        ];
+        p = [
+          "exec-and-forget open -a Enpass"
+          "mode main"
+        ];
+        r = [
+          "exec-and-forget open -a Raycast"
+          "mode main"
+        ];
 
         enter = "mode main";
         esc = "mode main";

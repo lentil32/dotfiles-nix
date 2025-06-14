@@ -125,6 +125,7 @@
             [
               ./modules/nix-core.nix
               ./modules/system.nix
+              ./modules/services/aerospace.nix
             ]
             ++ (
               if machine ? extraModulesDir then

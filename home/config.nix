@@ -21,7 +21,7 @@
           "DISABLE_BUG_COMMAND": "1"
         },
         "preferredNotifChannel": "terminal_bell",
-        "includeCoAuthoredBy": "true"
+        "includeCoAuthoredBy": "false"
       }
     '';
   };
