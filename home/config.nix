@@ -20,8 +20,8 @@
           "DISABLE_TELEMETRY": "1",
           "DISABLE_BUG_COMMAND": "1"
         },
-        "preferredNotifChannel": "terminal_bell",
-        "includeCoAuthoredBy": "false"
+        "model": "opus",
+        "preferredNotifChannel": "terminal_bell"
       }
     '';
   };

@@ -89,19 +89,19 @@
         }
         {
           "if".app-id = "com.spotify.client";
-          run = "move-node-to-workspace 10"; # mnemonics M - Media
+          run = "move-node-to-workspace 9"; # mnemonics M - Media
         }
         {
           "if".app-id = "com.github.th-ch.youtube-music";
-          run = "move-node-to-workspace 10"; # mnemonics M - Media
-        }
-        {
-          "if".app-id = "com.hnc.Discord";
-          run = "move-node-to-workspace 9"; # mnemonics S - Social Network
+          run = "move-node-to-workspace 9"; # mnemonics M - Media
         }
         {
           "if".app-id = "com.vanejung.elpy";
-          run = "move-node-to-workspace 10"; # mnemonics M - Media
+          run = "move-node-to-workspace 9"; # mnemonics M - Media
+        }
+        {
+          "if".app-id = "com.hnc.Discord";
+          run = "move-node-to-workspace 10"; # mnemonics S - Social Network
         }
       ];
 

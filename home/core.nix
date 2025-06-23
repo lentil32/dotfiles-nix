@@ -55,15 +55,17 @@
     nodejs_24
     turbo
     typescript
-    typescript-language-server
 
     # Rust overlay
     (rust-bin.stable.latest.default.override {
+      targets = [ "wasm32-unknown-unknown" ];
       extensions = [
         "rust-analyzer"
         "clippy"
       ];
     })
+    wasm-pack
+    wasm-bindgen-cli
 
     # LSPs, formatters, linters
     clang-tools
@@ -72,9 +74,11 @@
     lua-language-server
     multimarkdown
     nixfmt-rfc-style
+    pkgs-unstable.typescript-go
     ruff
     shfmt
     taplo
+    typescript-language-server
     vscode-langservers-extracted
     yaml-language-server
     yapf

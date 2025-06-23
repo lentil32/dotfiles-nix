@@ -5,9 +5,9 @@
     gogetdoc
     gomodifytags
     gopkgs
-    gopls
+    # gopls commented out 2025-06-19: buggy with gotools
     gotests
-    gotools
+    # gotools
     impl
     reftools
   ];
