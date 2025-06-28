@@ -13,10 +13,12 @@
 
     ./alacritty.nix
     ./docker.nix
+    ./ghostty.nix
     ./git.nix
     ./go.nix
     ./python.nix
     ./starship.nix
+    ./tmux.nix
 
     # Configs
     ./config.nix
