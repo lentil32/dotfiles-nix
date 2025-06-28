@@ -13,7 +13,7 @@
 
     ./alacritty.nix
     ./docker.nix
-    ./ghostty.nix
+    # ./ghostty.nix
     ./git.nix
     ./go.nix
     ./python.nix
@@ -23,6 +23,9 @@
     # Configs
     ./config.nix
     ./gpg.nix
+
+    # Scripts
+    ./scripts
   ];
 
   # Home Manager needs a bit of information about you and the

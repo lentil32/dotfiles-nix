@@ -5,14 +5,21 @@
       {
         "permissions": {
           "allow": [
-            "Bash(ls:*)",
             "Bash(find:*)",
-            "Bash(rg:*)",
             "Bash(git add:*)",
-            "Read(node_modules/**)",
-            "Bash(nr test:*)",
+            "Bash(git fetch:*)"
+            "Bash(git show:*)",
+            "Bash(git worktree:*)",
+            "Bash(grep:*)",
+            "Bash(ls:*)",
+            "Bash(mkdir:*)",
+            "Bash(nr format:*)",
             "Bash(nr lint:*)",
-            "Bash(nr format:*)"
+            "Bash(nr test:*)",
+            "Bash(rg:*)",
+            "Read(node_modules/**)"
+            "mcp__context7__get-library-docs",
+            "mcp__context7__resolve-library-id",
           ],
           "deny": []
         },

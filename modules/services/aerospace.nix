@@ -32,7 +32,7 @@
       accordion-padding = 30;
 
       # Possible values: tiles|accordion
-      default-root-container-layout = "tiles";
+      default-root-container-layout = "accordion";
 
       # Possible values: horizontal|vertical|auto
       # 'auto' means: wide monitor (anything wider than high) gets horizontal orientation,
@@ -103,6 +103,18 @@
           "if".app-id = "com.hnc.Discord";
           run = "move-node-to-workspace 10"; # mnemonics S - Social Network
         }
+        {
+          "if".app-id = "com.mitchellh.ghostty";
+          run = "layout tiling";
+        }
+        {
+          "if".app-id = "com.apple.finder";
+          run = "layout floating";
+        }
+        {
+          "if".app-id = "in.sinew.Enpass-Desktop";
+          run = "layout floating";
+        }
       ];
 
       # Not implemented yet: https://github.com/nikitabobko/AeroSpace/issues/224
@@ -125,7 +137,7 @@
 
         # All possible commands: https://nikitabobko.github.io/AeroSpace/commands
 
-        ctrl-alt-cmd-enter = "exec-and-forget open -na Alacritty";
+        ctrl-alt-cmd-enter = "exec-and-forget open -a Ghostty";
 
         ctrl-alt-cmd-h = "focus left";
         ctrl-alt-cmd-j = "focus down";

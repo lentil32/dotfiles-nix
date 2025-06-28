@@ -113,6 +113,7 @@
 
       # Development
       "cyberduck"
+      "ghostty"
       "insomnia" # REST client
       "postman"
       "xquartz" # Open-source version of the X.Org X Window System

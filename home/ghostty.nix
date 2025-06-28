@@ -1,3 +1,4 @@
+# As of 1.1.13, buggy
 { pkgs-unstable, ... }:
 {
   programs.ghostty = {

@@ -10,7 +10,8 @@
       #   -l    Do not mute the system volume
       #   -s    Put the entire system to sleep instead of just the display
 
-      idleTimeThreshold=0.5
+      # Using milliseconds to avoid floating point issues
+      idleTimeThresholdMs=500
       muteVolume=true
       sleepCommand="displaysleepnow"
 
@@ -30,8 +31,8 @@
         esac
       done
 
-      getSystemIdleTime() {
-        ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print int($NF/1000000000)}'
+      getSystemIdleTimeMs() {
+        ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print int($NF/1000000)}'
       }
 
       if $muteVolume; then
@@ -41,7 +42,7 @@
       caffeinate -s &
       caffeinate_pid=$!
 
-      while (($(getSystemIdleTime) < idleTimeThreshold)); do
+      while [[ $(getSystemIdleTimeMs) -lt $idleTimeThresholdMs ]]; do
         sleep 0.1
       done
 

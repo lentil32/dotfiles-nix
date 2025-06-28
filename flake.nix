@@ -34,6 +34,10 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     flake-utils.url = "github:numtide/flake-utils";
+
+    ghostty = {
+      url = "github:ghostty-org/ghostty";
+    };
   };
 
   outputs =
@@ -47,6 +51,7 @@
       rust-overlay,
       treefmt-nix,
       flake-utils,
+      ghostty,
       ...
     }@inputs:
 
@@ -80,6 +85,7 @@
         overlays = with inputs; [
           nix-darwin-emacs.overlays.emacs
           rust-overlay.overlays.default
+          ghostty.overlays.default
           (final: prev: {
             pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
           })
@@ -101,7 +107,7 @@
       pkgs-unstable = nixpkgs-unstable.legacyPackages.${defaultMachine.system};
 
       baseSpecialArgs = inputs // {
-        inherit pkgs-unstable username useremail;
+        inherit pkgs-unstable username useremail ghostty;
       };
 
     in
