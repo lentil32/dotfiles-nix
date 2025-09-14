@@ -126,6 +126,8 @@
       # See header comment for why these aren't ignored globally:
       # *.log
 
+      ".direnv"
+
       "_note.md"
       "_note.org"
       "_notes"

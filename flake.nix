@@ -131,6 +131,7 @@
             [
               ./modules/nix-core.nix
               ./modules/system.nix
+              ./modules/ulimits.nix
               ./modules/services/aerospace.nix
             ]
             ++ (

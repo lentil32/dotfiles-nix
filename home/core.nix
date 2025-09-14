@@ -16,6 +16,7 @@
     awscli2
     bottom
     convmv
+    csvkit # Claude Code loves it
     fasd
     fd
     ffmpeg
@@ -23,6 +24,7 @@
     glow # markdown previewer in terminal
     gh
     keycastr # keystroke visualizer
+    killport
     lefthook
     nurl
     # Signing git commits in macOS
@@ -42,10 +44,10 @@
     nmap # A utility for network discovery and security auditing
 
     # programming
-    (aider-chat.withOptional {
-      withPlaywright = true;
-      withBedrock = true;
-    })
+    # (pkgs-unstable.aider-chat.withOptional {
+    #   withPlaywright = true;
+    #   withBedrock = true;
+    # })
     bats # Bash automated testing
     cmake
     corepack_latest # Node.js dependency bridge
@@ -70,6 +72,7 @@
     # LSPs, formatters, linters
     clang-tools
     emacs-lsp-booster
+    eslint # maybe needed by flycheck
     ispell
     lua-language-server
     multimarkdown
@@ -84,6 +87,8 @@
     yapf
 
     # Productivity
+
+    # LLM
 
     # misc
     caddy

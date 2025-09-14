@@ -58,10 +58,12 @@
     # `brew install`
     brews = [
       "aria2" # download tool
-      "curl" # no not install curl via nixpkgs, it's not working well on macOS!
+      "codex" # GPT
       "libb2" # Python needs arm64 version of this
       "libtool" # Needed by Emacs multivterm compilation step
+      "nss" # Caddy uses it
       "sqlfmt"
+      "sst/tap/opencode"
       "supabase/tap/supabase"
       "uv"
       "wget"
@@ -72,6 +74,7 @@
     casks = [
       "1password"
       "1password-cli"
+      "cloudflare-warp"
 
       # Browsers
       "arc"
@@ -90,9 +93,9 @@
       "hammerspoon"
       "karabiner-elements"
       "linear-linear"
+      "linearmouse"
       "monitorcontrol"
       "raycast"
-      "scroll-reverser"
       "stats" # beautiful system monitor
 
       "cursor"
