@@ -50,7 +50,6 @@
     };
 
     taps = [
-      "homebrew/bundle"
       "homebrew/services"
       "th-ch/youtube-music"
     ];
@@ -58,7 +57,7 @@
     # `brew install`
     brews = [
       "aria2" # download tool
-      "codex" # GPT
+      "gemini-cli"
       "libb2" # Python needs arm64 version of this
       "libtool" # Needed by Emacs multivterm compilation step
       "nss" # Caddy uses it
@@ -85,7 +84,7 @@
 
       "firefox"
       "firefox@developer-edition"
-      # "google-chrome"
+      "google-chrome"
 
       # Productivity
       "chatgpt"
@@ -97,6 +96,9 @@
       "monitorcontrol"
       "raycast"
       "stats" # beautiful system monitor
+
+      # LLM
+      "codex" # GPT
 
       "cursor"
       "lm-studio"
@@ -125,6 +127,9 @@
       "dungeon-crawl-stone-soup-tiles"
       "millie"
       "prismlauncher" # Minecraft
+
+      # Utility
+      "jordanbaird-ice"
     ];
   };
 }

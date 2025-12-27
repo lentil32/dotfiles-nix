@@ -69,11 +69,11 @@
       on-window-detected = [
         {
           "if".app-id = "com.anthropic.claudefordesktop";
-          run = "move-node-to-workspace 1";
+          run = "move-node-to-workspace 3";
         }
         {
           "if".app-id = "com.openai.chat";
-          run = "move-node-to-workspace 1";
+          run = "move-node-to-workspace 3";
         }
         {
           "if".app-id = "company.thebrowser.Browser";

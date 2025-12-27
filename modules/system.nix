@@ -182,7 +182,7 @@
   };
 
   # Set your time zone.
-  time.timeZone = "Asia/Tokyo";
+  time.timeZone = "America/Los_Angeles";
 
   # Fonts
   fonts = {

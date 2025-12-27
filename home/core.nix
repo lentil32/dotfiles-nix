@@ -30,6 +30,7 @@
     # Signing git commits in macOS
     # Set up a GPG key for signing Git commits on MacOS (M1)
     # Reference: https://gist.github.com/phortuin/cf24b1cca3258720c71ad42977e1ba57
+    pass
     pinentry_mac
     pngpaste
     jq
@@ -52,9 +53,9 @@
     cmake
     corepack_latest # Node.js dependency bridge
     llvm
-    opam
     mysql84
     nodejs_24
+    opam
     turbo
     typescript
 
@@ -149,6 +150,7 @@
           nix = "aqua:https://github.com/joshbode/mise-nix";
         };
         settings = {
+          experimental = true;
           idiomatic_version_file_enable_tools = [ "bun" ];
         };
         # Not works yet... due to hook non-existence
