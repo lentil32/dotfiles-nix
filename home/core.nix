@@ -77,6 +77,7 @@
     ispell
     lua-language-server
     multimarkdown
+    nil
     nixfmt-rfc-style
     pkgs-unstable.typescript-go
     ruff
