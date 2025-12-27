@@ -165,8 +165,7 @@
         # See: https://nikitabobko.github.io/AeroSpace/guide#floating-windows
         # ctrl-alt-cmd-space = 'focus toggle_tiling_floating'
 
-        # `focus parent`/`focus child` are not yet supported, and it's not clear whether they
-        # should be supported at all https://github.com/nikitabobko/AeroSpace/issues/5
+        # `focus parent`/`focus child` not supported (won't implement)
         # ctrl-alt-cmd-a = 'focus parent'
 
         ctrl-alt-cmd-1 = "workspace 1";

@@ -38,6 +38,35 @@
     ghostty = {
       url = "github:ghostty-org/ghostty";
     };
+
+    # Homebrew management
+    nix-homebrew.url = "github:zhaofengli/nix-homebrew";
+
+    # Homebrew taps (declarative)
+    homebrew-core = {
+      url = "github:homebrew/homebrew-core";
+      flake = false;
+    };
+    homebrew-cask = {
+      url = "github:homebrew/homebrew-cask";
+      flake = false;
+    };
+    homebrew-services = {
+      url = "github:homebrew/homebrew-services";
+      flake = false;
+    };
+    homebrew-pear = {
+      url = "github:pear-devs/homebrew-pear";
+      flake = false;
+    };
+    homebrew-sst = {
+      url = "github:sst/homebrew-tap";
+      flake = false;
+    };
+    homebrew-supabase = {
+      url = "github:supabase/homebrew-tap";
+      flake = false;
+    };
   };
 
   outputs =
@@ -52,6 +81,13 @@
       treefmt-nix,
       flake-utils,
       ghostty,
+      nix-homebrew,
+      homebrew-core,
+      homebrew-cask,
+      homebrew-services,
+      homebrew-pear,
+      homebrew-sst,
+      homebrew-supabase,
       ...
     }@inputs:
 
@@ -150,6 +186,30 @@
                 home-manager.extraSpecialArgs = specialArgs;
                 home-manager.users.${username} = import ./home;
               }
+              # Homebrew management
+              nix-homebrew.darwinModules.nix-homebrew
+              {
+                nix-homebrew = {
+                  enable = true;
+                  user = username;
+                  mutableTaps = false;
+                  taps = {
+                    "homebrew/homebrew-core" = homebrew-core;
+                    "homebrew/homebrew-cask" = homebrew-cask;
+                    "homebrew/homebrew-services" = homebrew-services;
+                    "pear-devs/homebrew-pear" = homebrew-pear;
+                    "sst/homebrew-tap" = homebrew-sst;
+                    "supabase/homebrew-tap" = homebrew-supabase;
+                  };
+                };
+              }
+              # Sync homebrew.taps with nix-homebrew taps
+              (
+                { config, ... }:
+                {
+                  homebrew.taps = builtins.attrNames config.nix-homebrew.taps;
+                }
+              )
             ];
         }
       ) machines;
