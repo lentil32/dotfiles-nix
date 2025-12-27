@@ -1,4 +1,4 @@
-.PHONY: darwin darwin-debug update-emacs update update-all history gc fmt clean
+.PHONY: darwin darwin-debug update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc gc-all fmt check clean help
 
 hostname := $(shell hostname)
 
@@ -50,7 +50,7 @@ gc:
 	sudo nix store gc --debug
 
 gc-all:
-	nix-collect-garbage -d
+	sudo nix-collect-garbage -d
 
 fmt:
 	nix fmt
@@ -60,3 +60,14 @@ check:
 
 clean:
 	rm -rf result
+
+help:
+	@echo "darwin       - Build and apply system configuration"
+	@echo "darwin-debug - Build with verbose output"
+	@echo "update-flake - Update flake.lock"
+	@echo "deploy-flake - Update flake.lock and rebuild"
+	@echo "gc           - Remove generations older than 7 days"
+	@echo "gc-all       - Full garbage collection"
+	@echo "fmt          - Format Nix files"
+	@echo "check        - Run flake checks"
+	@echo "clean        - Remove result symlink"

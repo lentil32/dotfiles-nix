@@ -143,7 +143,12 @@
       pkgs-unstable = nixpkgs-unstable.legacyPackages.${defaultMachine.system};
 
       baseSpecialArgs = inputs // {
-        inherit pkgs-unstable username useremail ghostty;
+        inherit
+          pkgs-unstable
+          username
+          useremail
+          ghostty
+          ;
       };
 
     in
@@ -163,54 +168,53 @@
           inherit system specialArgs;
 
           # base + host-specific + trailing common modules
-          modules =
-            [
-              ./modules/nix-core.nix
-              ./modules/system.nix
-              ./modules/ulimits.nix
-              ./modules/services/aerospace.nix
-            ]
-            ++ (
-              if machine ? extraModulesDir then
-                listNixModules machine.extraModulesDir
-              else
-                (machine.extraModules or [ ])
-            )
-            ++ [
-              ./modules/host-users.nix
-              home-manager.darwinModules.home-manager
-              {
-                nixpkgs = nixpkgsConfig;
-                home-manager.useGlobalPkgs = true;
-                home-manager.useUserPackages = true;
-                home-manager.extraSpecialArgs = specialArgs;
-                home-manager.users.${username} = import ./home;
-              }
-              # Homebrew management
-              nix-homebrew.darwinModules.nix-homebrew
-              {
-                nix-homebrew = {
-                  enable = true;
-                  user = username;
-                  mutableTaps = false;
-                  taps = {
-                    "homebrew/homebrew-core" = homebrew-core;
-                    "homebrew/homebrew-cask" = homebrew-cask;
-                    "homebrew/homebrew-services" = homebrew-services;
-                    "pear-devs/homebrew-pear" = homebrew-pear;
-                    "sst/homebrew-tap" = homebrew-sst;
-                    "supabase/homebrew-tap" = homebrew-supabase;
-                  };
+          modules = [
+            ./modules/nix-core.nix
+            ./modules/system.nix
+            ./modules/ulimits.nix
+            ./modules/services/aerospace.nix
+          ]
+          ++ (
+            if machine ? extraModulesDir then
+              listNixModules machine.extraModulesDir
+            else
+              (machine.extraModules or [ ])
+          )
+          ++ [
+            ./modules/host-users.nix
+            home-manager.darwinModules.home-manager
+            {
+              nixpkgs = nixpkgsConfig;
+              home-manager.useGlobalPkgs = true;
+              home-manager.useUserPackages = true;
+              home-manager.extraSpecialArgs = specialArgs;
+              home-manager.users.${username} = import ./home;
+            }
+            # Homebrew management
+            nix-homebrew.darwinModules.nix-homebrew
+            {
+              nix-homebrew = {
+                enable = true;
+                user = username;
+                mutableTaps = false;
+                taps = {
+                  "homebrew/homebrew-core" = homebrew-core;
+                  "homebrew/homebrew-cask" = homebrew-cask;
+                  "homebrew/homebrew-services" = homebrew-services;
+                  "pear-devs/homebrew-pear" = homebrew-pear;
+                  "sst/homebrew-tap" = homebrew-sst;
+                  "supabase/homebrew-tap" = homebrew-supabase;
                 };
+              };
+            }
+            # Sync homebrew.taps with nix-homebrew taps
+            (
+              { config, ... }:
+              {
+                homebrew.taps = builtins.attrNames config.nix-homebrew.taps;
               }
-              # Sync homebrew.taps with nix-homebrew taps
-              (
-                { config, ... }:
-                {
-                  homebrew.taps = builtins.attrNames config.nix-homebrew.taps;
-                }
-              )
-            ];
+            )
+          ];
         }
       ) machines;
 

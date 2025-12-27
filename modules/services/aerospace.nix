@@ -1,4 +1,8 @@
 { pkgs, pkgs-unstable, ... }:
+let
+  meh = "ctrl-alt-cmd";
+  hyper = "ctrl-alt-cmd-shift";
+in
 {
   services.aerospace = {
     enable = true;
@@ -117,10 +121,6 @@
         }
       ];
 
-      # Not implemented yet: https://github.com/nikitabobko/AeroSpace/issues/224
-      # [key-mapping.key-notation-to-key-code]
-      # meh = 'ctrl-alt-cmd'
-
       mode.main.binding = {
         # All possible keys:
         # - Letters.        a, b, c, ..., z
@@ -137,63 +137,63 @@
 
         # All possible commands: https://nikitabobko.github.io/AeroSpace/commands
 
-        ctrl-alt-cmd-enter = "exec-and-forget open -a Ghostty";
+        "${meh}-enter" = "exec-and-forget open -a Ghostty";
 
-        ctrl-alt-cmd-h = "focus left";
-        ctrl-alt-cmd-j = "focus down";
-        ctrl-alt-cmd-k = "focus up";
-        ctrl-alt-cmd-l = "focus right";
+        "${meh}-h" = "focus left";
+        "${meh}-j" = "focus down";
+        "${meh}-k" = "focus up";
+        "${meh}-l" = "focus right";
 
-        ctrl-alt-cmd-shift-h = "move left";
-        ctrl-alt-cmd-shift-j = "move down";
-        ctrl-alt-cmd-shift-k = "move up";
-        ctrl-alt-cmd-shift-l = "move right";
+        "${hyper}-h" = "move left";
+        "${hyper}-j" = "move down";
+        "${hyper}-k" = "move up";
+        "${hyper}-l" = "move right";
 
         # Consider using 'join-with' command as a 'split' replacement if you want to enable normalizations
-        ctrl-alt-cmd-shift-v = "split horizontal";
-        ctrl-alt-cmd-v = "split vertical";
+        "${hyper}-v" = "split horizontal";
+        "${meh}-v" = "split vertical";
 
-        ctrl-alt-cmd-f = "fullscreen";
+        "${meh}-f" = "fullscreen";
 
-        ctrl-alt-cmd-s = "layout v_accordion"; # 'layout stacking' in i3
-        ctrl-alt-cmd-w = "layout h_accordion"; # 'layout tabbed' in i3
-        ctrl-alt-cmd-e = "layout tiles horizontal vertical"; # 'layout toggle split' in i3
+        "${meh}-s" = "layout v_accordion"; # 'layout stacking' in i3
+        "${meh}-w" = "layout h_accordion"; # 'layout tabbed' in i3
+        "${meh}-e" = "layout tiles horizontal vertical"; # 'layout toggle split' in i3
 
-        ctrl-alt-cmd-shift-space = "layout floating tiling"; # 'floating toggle' in i3
+        "${hyper}-space" = "layout floating tiling"; # 'floating toggle' in i3
 
         # Not supported, because this command is redundant in AeroSpace mental model.
         # See: https://nikitabobko.github.io/AeroSpace/guide#floating-windows
-        # ctrl-alt-cmd-space = 'focus toggle_tiling_floating'
+        # ${meh}-space = 'focus toggle_tiling_floating'
 
         # `focus parent`/`focus child` not supported (won't implement)
-        # ctrl-alt-cmd-a = 'focus parent'
+        # ${meh}-a = 'focus parent'
 
-        ctrl-alt-cmd-1 = "workspace 1";
-        ctrl-alt-cmd-2 = "workspace 2";
-        ctrl-alt-cmd-3 = "workspace 3";
-        ctrl-alt-cmd-4 = "workspace 4";
-        ctrl-alt-cmd-5 = "workspace 5";
-        ctrl-alt-cmd-6 = "workspace 6";
-        ctrl-alt-cmd-7 = "workspace 7";
-        ctrl-alt-cmd-8 = "workspace 8";
-        ctrl-alt-cmd-9 = "workspace 9";
-        ctrl-alt-cmd-0 = "workspace 10";
+        "${meh}-1" = "workspace 1";
+        "${meh}-2" = "workspace 2";
+        "${meh}-3" = "workspace 3";
+        "${meh}-4" = "workspace 4";
+        "${meh}-5" = "workspace 5";
+        "${meh}-6" = "workspace 6";
+        "${meh}-7" = "workspace 7";
+        "${meh}-8" = "workspace 8";
+        "${meh}-9" = "workspace 9";
+        "${meh}-0" = "workspace 10";
 
-        ctrl-alt-cmd-shift-1 = "move-node-to-workspace 1";
-        ctrl-alt-cmd-shift-2 = "move-node-to-workspace 2";
-        ctrl-alt-cmd-shift-3 = "move-node-to-workspace 3";
-        ctrl-alt-cmd-shift-4 = "move-node-to-workspace 4";
-        ctrl-alt-cmd-shift-5 = "move-node-to-workspace 5";
-        ctrl-alt-cmd-shift-6 = "move-node-to-workspace 6";
-        ctrl-alt-cmd-shift-7 = "move-node-to-workspace 7";
-        ctrl-alt-cmd-shift-8 = "move-node-to-workspace 8";
-        ctrl-alt-cmd-shift-9 = "move-node-to-workspace 9";
-        ctrl-alt-cmd-shift-0 = "move-node-to-workspace 10";
+        "${hyper}-1" = "move-node-to-workspace 1";
+        "${hyper}-2" = "move-node-to-workspace 2";
+        "${hyper}-3" = "move-node-to-workspace 3";
+        "${hyper}-4" = "move-node-to-workspace 4";
+        "${hyper}-5" = "move-node-to-workspace 5";
+        "${hyper}-6" = "move-node-to-workspace 6";
+        "${hyper}-7" = "move-node-to-workspace 7";
+        "${hyper}-8" = "move-node-to-workspace 8";
+        "${hyper}-9" = "move-node-to-workspace 9";
+        "${hyper}-0" = "move-node-to-workspace 10";
 
-        ctrl-alt-cmd-shift-c = "reload-config";
+        "${hyper}-c" = "reload-config";
 
-        ctrl-alt-cmd-r = "mode resize";
-        ctrl-alt-cmd-shift-p = "mode programs";
+        "${meh}-r" = "mode resize";
+        "${hyper}-p" = "mode programs";
       };
 
       mode.resize.binding = {
