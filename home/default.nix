@@ -16,6 +16,7 @@
     # ./ghostty.nix
     ./git.nix
     ./go.nix
+    ./neovim.nix
     ./python.nix
     ./starship.nix
     ./tmux.nix
