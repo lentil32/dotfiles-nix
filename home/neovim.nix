@@ -1,5 +1,15 @@
-{ pkgs, ... }:
 {
+  pkgs,
+  inputs,
+  ...
+}:
+let
+  nixCats = inputs.nixCats;
+in
+{
+  imports = [ nixCats.homeModule ];
+
+  # Yazi file manager
   programs.yazi = {
     enable = true;
     enableZshIntegration = true;
@@ -10,238 +20,159 @@
         rev = "eca186171c5f2011ce62712f95f699308251c749";
         hash = "sha256-xcz2+zepICZ3ji0Hm0SSUBSaEpabWUrIdG7JmxUl/ts=";
       };
+      smart-enter = pkgs.fetchFromGitHub {
+        owner = "yazi-rs";
+        repo = "plugins";
+        rev = "03cdd4b5b15341b3c0d0f4c850d633fadd05a45f";
+        hash = "sha256-5dMAJ6W/L66XuH4CCwRRFpKSLy0ZDFIABAYleFX0AsQ=";
+      } + "/smart-enter.yazi";
+      vcs-files = pkgs.fetchFromGitHub {
+        owner = "yazi-rs";
+        repo = "plugins";
+        rev = "03cdd4b5b15341b3c0d0f4c850d633fadd05a45f";
+        hash = "sha256-5dMAJ6W/L66XuH4CCwRRFpKSLy0ZDFIABAYleFX0AsQ=";
+      } + "/vcs-files.yazi";
     };
     initLua = ''
       require("starship"):setup()
+      require("zoxide"):setup({ update_db = true })
     '';
+    # Use new 'mgr' instead of deprecated 'manager'
+    # See: https://github.com/sxyazi/yazi/pull/2803
+    keymap = {
+      mgr.prepend_keymap = [
+        {
+          on = "l";
+          run = "plugin smart-enter";
+          desc = "Enter the child directory, or open the file";
+        }
+        {
+          on = [ "g" "s" ];
+          run = ''shell 'nvim -c "Neogit"' --block'';
+          desc = "Open Neogit";
+        }
+        {
+          on = [ "g" "f" ];
+          run = "plugin vcs-files";
+          desc = "Show Git file changes";
+        }
+      ];
+    };
   };
 
-  programs.neovim = {
+  # Neovide (GUI frontend for neovim)
+  programs.neovide = {
     enable = true;
-    vimAlias = true;
-    defaultEditor = true;
+  };
 
-    extraPackages = with pkgs; [
-      ripgrep
-      fd
-      biome # TS/JS formatter & linter
-    ];
+  # nixCats neovim configuration
+  nixCats = {
+    enable = true;
+    packageNames = [ "nvim" ];
+    luaPath = "${../nvim}";
 
-    plugins = with pkgs.vimPlugins; [
-      # Theme (same as spacemacs)
+    categoryDefinitions.replace =
       {
-        plugin = modus-themes-nvim;
-        type = "lua";
-        config = ''
-          require("modus-themes").setup({})
-          vim.cmd.colorscheme("modus_vivendi")
-        '';
-      }
-
-      # Core
-      lazy-nvim
-      plenary-nvim
-
-      # Fuzzy finder (like consult/vertico)
-      telescope-fzf-native-nvim
+        pkgs,
+        settings,
+        categories,
+        extra,
+        name,
+        mkPlugin,
+        ...
+      }@packageDef:
       {
-        plugin = telescope-nvim;
-        type = "lua";
-        config = ''
-          require("telescope").setup({})
-          require("telescope").load_extension("fzf")
-        '';
-      }
+        # Plugins that load at startup
+        startupPlugins = {
+          general = with pkgs.vimPlugins; [
+            modus-themes-nvim
+            plenary-nvim
+            lze
+            telescope-fzf-native-nvim
+            snacks-nvim
+          ];
 
-      # Which-key (SPC menu like spacemacs)
-      {
-        plugin = which-key-nvim;
-        type = "lua";
-        config = ''require("which-key").setup({ delay = 300 })'';
-      }
+          completion = with pkgs.vimPlugins; [
+            blink-cmp
+          ];
+        };
 
-      # File manager
-      {
-        plugin = yazi-nvim;
-        type = "lua";
-        config = ''require("yazi").setup({ open_for_directories = true })'';
-      }
+        # Plugins loaded via lze (packadd)
+        optionalPlugins = {
+          general = with pkgs.vimPlugins; [
+            which-key-nvim
+            telescope-nvim
+            yazi-nvim
+            diffview-nvim
+          ];
 
-      # Git (like magit)
-      diffview-nvim
-      {
-        plugin = neogit;
-        type = "lua";
-        config = ''
-          require("neogit").setup({
-            integrations = { diffview = true, telescope = true },
-          })
-        '';
-      }
-      {
-        plugin = gitsigns-nvim;
-        type = "lua";
-        config = ''require("gitsigns").setup({})'';
-      }
+          git = with pkgs.vimPlugins; [
+            neogit
+            gitsigns-nvim
+            grug-far-nvim
+          ];
 
-      # Org mode
-      {
-        plugin = orgmode;
-        type = "lua";
-        config = ''
-          require("orgmode").setup({
-            org_agenda_files = { "~/org/**/*" },
-            org_default_notes_file = "~/org/refile.org",
-          })
-        '';
-      }
+          treesitter = with pkgs.vimPlugins; [
+            nvim-treesitter.withAllGrammars
+          ];
 
-      # Treesitter
-      {
-        plugin = nvim-treesitter.withAllGrammars;
-        type = "lua";
-        config = ''
-          require("nvim-treesitter.configs").setup({
-            highlight = { enable = true },
-            indent = { enable = true },
-          })
-        '';
-      }
+          lsp = with pkgs.vimPlugins; [
+            nvim-lspconfig
+            conform-nvim
+          ];
 
-      # LSP (like eglot)
-      {
-        plugin = nvim-lspconfig;
-        type = "lua";
-        config = ''
-          local lsp = require("lspconfig")
-          lsp.nil_ls.setup({})        -- Nix
-          lsp.rust_analyzer.setup({}) -- Rust
-          lsp.lua_ls.setup({ settings = { Lua = { diagnostics = { globals = { "vim" } } } } })
-          lsp.ruff.setup({})          -- Python
-          lsp.biome.setup({})         -- TS/JS linting
-        '';
-      }
+          typescript = with pkgs.vimPlugins; [
+            typescript-tools-nvim
+          ];
 
-      # TypeScript (better than ts_ls)
-      {
-        plugin = typescript-tools-nvim;
-        type = "lua";
-        config = ''
-          require("typescript-tools").setup({
-            settings = {
-              tsserver_file_preferences = {
-                includeInlayParameterNameHints = "all",
-                includeInlayFunctionParameterTypeHints = true,
-                includeInlayVariableTypeHints = true,
-              },
-            },
-          })
-        '';
-      }
+          org = with pkgs.vimPlugins; [
+            orgmode
+          ];
+        };
 
-      # Formatting
-      {
-        plugin = conform-nvim;
-        type = "lua";
-        config = ''
-          require("conform").setup({
-            formatters_by_ft = {
-              javascript = { "biome" },
-              typescript = { "biome" },
-              javascriptreact = { "biome" },
-              typescriptreact = { "biome" },
-              json = { "biome" },
-            },
-            format_on_save = {
-              timeout_ms = 500,
-              lsp_fallback = true,
-            },
-          })
-        '';
-      }
+        # External packages (LSPs, formatters, etc.)
+        lspsAndRuntimeDeps = {
+          general = with pkgs; [
+            ripgrep
+            fd
+          ];
 
-      # Completion
-      cmp-nvim-lsp
-      cmp-buffer
-      cmp-path
-      {
-        plugin = nvim-cmp;
-        type = "lua";
-        config = ''
-          local cmp = require("cmp")
-          cmp.setup({
-            mapping = cmp.mapping.preset.insert({
-              ["<C-Space>"] = cmp.mapping.complete(),
-              ["<CR>"] = cmp.mapping.confirm({ select = true }),
-              ["<Tab>"] = cmp.mapping.select_next_item(),
-              ["<S-Tab>"] = cmp.mapping.select_prev_item(),
-            }),
-            sources = cmp.config.sources(
-              { { name = "nvim_lsp" }, { name = "orgmode" } },
-              { { name = "buffer" }, { name = "path" } }
-            ),
-          })
-        '';
-      }
-    ];
+          lsp = with pkgs; [
+            nil
+            rust-analyzer
+            lua-language-server
+            ruff
+          ];
 
-    extraLuaConfig = ''
-      vim.g.mapleader = " "
-      vim.g.maplocalleader = ","
+          typescript = with pkgs; [
+            biome
+            nodePackages.typescript-language-server
+          ];
+        };
+      };
 
-      vim.opt.number = true
-      vim.opt.relativenumber = true
-      vim.opt.expandtab = true
-      vim.opt.shiftwidth = 2
-      vim.opt.ignorecase = true
-      vim.opt.smartcase = true
-      vim.opt.termguicolors = true
-      vim.opt.clipboard = "unnamedplus"
-      vim.opt.undofile = true
+    packageDefinitions.replace = {
+      nvim =
+        { pkgs, name, ... }:
+        {
+          settings = {
+            aliases = [
+              "vim"
+              "vi"
+            ];
+            wrapRc = true;
+          };
 
-      -- Spacemacs-style keybindings
-      local wk = require("which-key")
-      wk.add({
-        { "<leader>/", "<cmd>Telescope live_grep<cr>", desc = "Search project" },
-
-        { "<leader>f", group = "file" },
-        { "<leader>ff", "<cmd>Yazi<cr>", desc = "Browse files" },
-        { "<leader>fr", "<cmd>Telescope oldfiles<cr>", desc = "Recent files" },
-        { "<leader>fs", "<cmd>w<cr>", desc = "Save" },
-
-        { "<leader>p", group = "project" },
-        { "<leader>pf", "<cmd>Telescope find_files<cr>", desc = "Find file" },
-
-        { "<leader>b", group = "buffer" },
-        { "<leader>bb", "<cmd>Telescope buffers<cr>", desc = "Buffers" },
-        { "<leader>bd", "<cmd>bdelete<cr>", desc = "Delete" },
-
-        { "<leader>s", group = "search" },
-        { "<leader>sp", "<cmd>Telescope live_grep<cr>", desc = "Project" },
-        { "<leader>ss", "<cmd>Telescope current_buffer_fuzzy_find<cr>", desc = "Buffer" },
-
-        { "<leader>g", group = "git" },
-        { "<leader>gs", "<cmd>Neogit<cr>", desc = "Status" },
-
-        { "<leader>o", group = "org" },
-        { "<leader>oa", "<cmd>lua require('orgmode').action('agenda.prompt')<cr>", desc = "Agenda" },
-        { "<leader>oc", "<cmd>lua require('orgmode').action('capture.prompt')<cr>", desc = "Capture" },
-
-        { "<leader>l", group = "lsp" },
-        { "<leader>la", vim.lsp.buf.code_action, desc = "Action" },
-        { "<leader>ld", vim.lsp.buf.definition, desc = "Definition" },
-        { "<leader>lf", "<cmd>lua require('conform').format()<cr>", desc = "Format" },
-        { "<leader>lr", vim.lsp.buf.rename, desc = "Rename" },
-        { "<leader>lh", vim.lsp.buf.hover, desc = "Hover" },
-        { "<leader>li", "<cmd>TSToolsOrganizeImports<cr>", desc = "Organize imports" },
-        { "<leader>lu", "<cmd>TSToolsRemoveUnused<cr>", desc = "Remove unused" },
-        { "<leader>lm", "<cmd>TSToolsAddMissingImports<cr>", desc = "Add missing imports" },
-
-        { "<leader>w", group = "window" },
-        { "<leader>wv", "<cmd>vsplit<cr>", desc = "Vsplit" },
-        { "<leader>ws", "<cmd>split<cr>", desc = "Split" },
-        { "<leader>wd", "<cmd>close<cr>", desc = "Close" },
-      })
-    '';
+          categories = {
+            general = true;
+            git = true;
+            lsp = true;
+            treesitter = true;
+            completion = true;
+            typescript = true;
+            org = true;
+          };
+        };
+    };
   };
 }

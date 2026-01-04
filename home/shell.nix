@@ -9,6 +9,7 @@
   # Options: https://mynixos.com/home-manager/options/programs.zsh
   programs.zsh = {
     enable = true;
+    dotDir = "${config.xdg.configHome}/zsh";
     prezto = {
       enable = true;
       pmodules = [
@@ -26,9 +27,18 @@
         "fasd"
       ];
     };
-    dotDir = ".config/zsh"; # Relative path from $HOME
     sessionVariables = {
     };
+    initContent = ''
+      # Yazi wrapper - cd to directory on exit
+      function y() {
+        local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
+        command yazi "$@" --cwd-file="$tmp"
+        IFS= read -r -d "" cwd < "$tmp"
+        [ -n "$cwd" ] && [ "$cwd" != "$PWD" ] && builtin cd -- "$cwd"
+        rm -f -- "$tmp"
+      }
+    '';
 
     shellGlobalAliases = {
       "--help" = "--help 2>&1 | bat --language=help --style=plain";

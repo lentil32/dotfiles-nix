@@ -13,16 +13,16 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-25.05-darwin";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-25.11-darwin";
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
     home-manager = {
-      url = "github:nix-community/home-manager/release-25.05";
+      url = "github:nix-community/home-manager/release-25.11";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
     nix-darwin = {
-      url = "github:LnL7/nix-darwin/nix-darwin-25.05";
+      url = "github:LnL7/nix-darwin/nix-darwin-25.11";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -38,6 +38,8 @@
     ghostty = {
       url = "github:ghostty-org/ghostty";
     };
+
+    nixCats.url = "github:BirdeeHub/nixCats-nvim";
 
     # Homebrew management
     nix-homebrew.url = "github:zhaofengli/nix-homebrew";
@@ -88,6 +90,7 @@
       homebrew-pear,
       homebrew-sst,
       homebrew-supabase,
+      nixCats,
       ...
     }@inputs:
 
@@ -144,6 +147,7 @@
 
       baseSpecialArgs = inputs // {
         inherit
+          inputs
           pkgs-unstable
           username
           useremail

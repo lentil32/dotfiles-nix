@@ -34,7 +34,6 @@
     pinentry_mac
     pngpaste
     jq
-    yarn
     yq-go # yaml processer https://github.com/mikefarah/yq
     wabt
     websocat
@@ -107,7 +106,7 @@
     pandoc
     postgresql
     typst
-    typstfmt
+    typstyle
     zstd
   ];
 

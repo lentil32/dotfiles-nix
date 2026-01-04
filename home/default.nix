@@ -15,7 +15,6 @@
     ./docker.nix
     # ./ghostty.nix
     ./git.nix
-    ./go.nix
     ./neovim.nix
     ./python.nix
     ./starship.nix
@@ -58,7 +57,6 @@
     };
 
     sessionPath = [
-      "$GOBIN"
       "$BUNBIN"
       "${config.home.sessionVariables.PNPM_HOME}"
       "$HOME/.local/bin"
