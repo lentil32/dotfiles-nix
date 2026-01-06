@@ -13,7 +13,6 @@
 
     ./alacritty.nix
     ./docker.nix
-    # ./ghostty.nix
     ./git.nix
     ./neovim.nix
     ./python.nix

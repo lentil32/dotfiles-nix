@@ -201,6 +201,7 @@
                 enable = true;
                 user = username;
                 mutableTaps = false;
+                # In Homebrew, the repo part of all taps always have homebrew- prepended.
                 taps = {
                   "homebrew/homebrew-core" = homebrew-core;
                   "homebrew/homebrew-cask" = homebrew-cask;

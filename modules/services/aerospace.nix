@@ -92,6 +92,10 @@ in
           run = "move-node-to-workspace 4";
         }
         {
+          "if".app-id = "com.neovide.neovide";
+          run = "move-node-to-workspace 2";
+        }
+        {
           "if".app-id = "com.spotify.client";
           run = "move-node-to-workspace 9"; # mnemonics M - Media
         }

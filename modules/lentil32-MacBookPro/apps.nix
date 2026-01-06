@@ -139,7 +139,7 @@ in
     enable = true;
 
     onActivation = {
-      autoUpdate = false;
+      autoUpdate = true;
       upgrade = true;
       cleanup = "zap";
     };

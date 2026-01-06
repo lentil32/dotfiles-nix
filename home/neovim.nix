@@ -22,18 +22,22 @@ in
         rev = "eca186171c5f2011ce62712f95f699308251c749";
         hash = "sha256-xcz2+zepICZ3ji0Hm0SSUBSaEpabWUrIdG7JmxUl/ts=";
       };
-      smart-enter = pkgs.fetchFromGitHub {
-        owner = "yazi-rs";
-        repo = "plugins";
-        rev = "03cdd4b5b15341b3c0d0f4c850d633fadd05a45f";
-        hash = "sha256-5dMAJ6W/L66XuH4CCwRRFpKSLy0ZDFIABAYleFX0AsQ=";
-      } + "/smart-enter.yazi";
-      vcs-files = pkgs.fetchFromGitHub {
-        owner = "yazi-rs";
-        repo = "plugins";
-        rev = "03cdd4b5b15341b3c0d0f4c850d633fadd05a45f";
-        hash = "sha256-5dMAJ6W/L66XuH4CCwRRFpKSLy0ZDFIABAYleFX0AsQ=";
-      } + "/vcs-files.yazi";
+      smart-enter =
+        pkgs.fetchFromGitHub {
+          owner = "yazi-rs";
+          repo = "plugins";
+          rev = "03cdd4b5b15341b3c0d0f4c850d633fadd05a45f";
+          hash = "sha256-5dMAJ6W/L66XuH4CCwRRFpKSLy0ZDFIABAYleFX0AsQ=";
+        }
+        + "/smart-enter.yazi";
+      vcs-files =
+        pkgs.fetchFromGitHub {
+          owner = "yazi-rs";
+          repo = "plugins";
+          rev = "03cdd4b5b15341b3c0d0f4c850d633fadd05a45f";
+          hash = "sha256-5dMAJ6W/L66XuH4CCwRRFpKSLy0ZDFIABAYleFX0AsQ=";
+        }
+        + "/vcs-files.yazi";
       projects = pkgs.fetchFromGitHub {
         owner = "MasouShizuka";
         repo = "projects.yazi";
@@ -61,32 +65,50 @@ in
           desc = "Enter the child directory, or open the file";
         }
         {
-          on = [ "g" "s" ];
+          on = [
+            "g"
+            "s"
+          ];
           run = ''shell 'nvim -c "Neogit"' --block'';
           desc = "Open Neogit";
         }
         {
-          on = [ "g" "f" ];
+          on = [
+            "g"
+            "f"
+          ];
           run = "plugin vcs-files";
           desc = "Show Git file changes";
         }
         {
-          on = [ "g" "p" ];
+          on = [
+            "g"
+            "p"
+          ];
           run = "plugin projects";
           desc = "Switch project";
         }
         {
-          on = [ "g" "P" ];
+          on = [
+            "g"
+            "P"
+          ];
           run = "plugin projects --args=save";
           desc = "Save as project";
         }
         {
-          on = [ "f" "r" ];
+          on = [
+            "f"
+            "r"
+          ];
           run = "plugin fr rg";
           desc = "Search file by content (rg)";
         }
         {
-          on = [ "f" "a" ];
+          on = [
+            "f"
+            "a"
+          ];
           run = "plugin fr rga";
           desc = "Search file by content (rga)";
         }
@@ -97,6 +119,12 @@ in
   # Neovide (GUI frontend for neovim)
   programs.neovide = {
     enable = true;
+    settings = {
+      font = {
+        normal = [ "Iosevka Nerd Font" ];
+        size = 14.0;
+      };
+    };
   };
 
   # nixCats neovim configuration
@@ -138,11 +166,14 @@ in
             which-key-nvim
             yazi-nvim
             diffview-nvim
+            flash-nvim
+            nvim-surround
           ];
 
           git = with pkgs.vimPlugins; [
             neogit
             gitsigns-nvim
+            agitator-nvim
           ];
 
           treesitter = with pkgs.vimPlugins; [
