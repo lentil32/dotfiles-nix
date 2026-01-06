@@ -73,6 +73,20 @@ function M.setup()
     gh = { enabled = true },
   })
 
+  do
+    local ok, placement = pcall(require, "snacks.image.placement")
+    if ok and not placement._unhide_patch then
+      placement._unhide_patch = true
+      local orig_update = placement.update
+      function placement:update(...)
+        if self.hidden and self:ready() and #self:wins() > 0 then
+          self.hidden = false
+        end
+        return orig_update(self, ...)
+      end
+    end
+  end
+
   local dashboard = require("snacks.dashboard")
   local dashboard_cls = dashboard.Dashboard
   local orig_size = dashboard_cls.size

@@ -54,10 +54,21 @@ function M.setup()
     end, { desc = "Paste to terminal" })
   end
 
+  -- Emacs-style line navigation in insert mode.
+  vim.keymap.set("i", "<C-a>", "<C-o>^", { desc = "Line start (first non-blank)" })
+  vim.keymap.set("i", "<C-e>", function()
+    if vim.fn.pumvisible() == 1 then
+      return "<C-e>"
+    end
+    return "<C-o>$"
+  end, { expr = true, replace_keycodes = true, desc = "Line end" })
+
   local term_group = vim.api.nvim_create_augroup("UserTermKeymaps", { clear = true })
   vim.api.nvim_create_autocmd("TermOpen", {
     group = term_group,
     callback = function(args)
+      vim.opt_local.number = false
+      vim.opt_local.relativenumber = false
       vim.keymap.set("t", "<Esc>", [[<C-\><C-n>]], {
         buffer = args.buf,
         silent = true,
@@ -82,10 +93,6 @@ function M.setup()
     end,
   })
 
-  vim.keymap.set("t", "<leader>bj", helpers.show_project_root, {
-    silent = true,
-    desc = "Project root",
-  })
 end
 
 function M.list()

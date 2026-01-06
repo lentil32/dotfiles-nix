@@ -22,16 +22,14 @@ return {
         columns = { "icon", "permissions", "size", "mtime" },
         win_options = {
           winbar = "%!v:lua.get_oil_winbar()",
+          number = false,
+          relativenumber = false,
         },
         keymaps = {
           ["q"] = "actions.close",
-          ["h"] = "actions.parent",
-          ["l"] = "actions.select",
           ["<BS>"] = "actions.parent",
           ["."] = "actions.toggle_hidden",
-          ["<S-CR>"] = function()
-            require("config.helpers").oil_select_other_window()
-          end,
+          ["<S-CR>"] = { "actions.select", opts = { vertical = true } },
           ["<localleader>c"] = function()
             require("oil").save()
           end,
@@ -39,9 +37,6 @@ return {
             require("oil").discard_all_changes()
           end,
           ["<localleader>p"] = function()
-            require("oil").open_preview()
-          end,
-          ["<leader><CR>"] = function()
             require("oil").open_preview()
           end,
         },
