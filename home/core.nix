@@ -34,6 +34,7 @@
     pinentry_mac
     pngpaste
     jq
+    imagemagick
     yq-go # yaml processer https://github.com/mikefarah/yq
     wabt
     websocat
@@ -55,6 +56,7 @@
     llvm
     mysql84
     nodejs_24
+    mermaid-cli
     opam
     turbo
     typescript
@@ -98,6 +100,7 @@
     cowsay
     exercism
     file
+    ghostscript
     which
     tree
     gnupg

@@ -32,6 +32,18 @@ return {
           ["<S-CR>"] = function()
             require("config.helpers").oil_select_other_window()
           end,
+          ["<localleader>c"] = function()
+            require("oil").save()
+          end,
+          ["<localleader>k"] = function()
+            require("oil").discard_all_changes()
+          end,
+          ["<localleader>p"] = function()
+            require("oil").open_preview()
+          end,
+          ["<leader><CR>"] = function()
+            require("oil").open_preview()
+          end,
         },
       })
     end,

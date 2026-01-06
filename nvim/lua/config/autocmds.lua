@@ -42,6 +42,7 @@ function M.setup()
         return
       end
       vim.api.nvim_win_call(win, function()
+        vim.w.oil_last_buf = bufnr
         vim.cmd("lcd " .. vim.fn.fnameescape(dir))
       end)
     end,
@@ -62,6 +63,36 @@ function M.setup()
         return
       end
       snacks.rename.on_rename_file(first.src_url, first.dest_url)
+    end,
+  })
+
+  local image_group = vim.api.nvim_create_augroup("UserSnacksImageFallback", { clear = true })
+  vim.api.nvim_create_autocmd({ "BufReadPost", "BufWinEnter" }, {
+    group = image_group,
+    callback = function(event)
+      local bufnr = event.buf
+      if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+      end
+      if vim.b[bufnr].snacks_image_attempted then
+        return
+      end
+      if vim.bo[bufnr].buftype ~= "" or vim.bo[bufnr].filetype == "image" then
+        return
+      end
+      local name = vim.api.nvim_buf_get_name(bufnr)
+      if name == "" or vim.fn.filereadable(name) ~= 1 then
+        return
+      end
+      local ok, snacks = pcall(require, "snacks")
+      if not ok then
+        return
+      end
+      if not snacks.image or not snacks.image.supports_file or not snacks.image.supports_file(name) then
+        return
+      end
+      vim.b[bufnr].snacks_image_attempted = true
+      snacks.image.buf.attach(bufnr)
     end,
   })
 end

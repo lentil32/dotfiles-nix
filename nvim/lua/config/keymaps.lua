@@ -7,6 +7,16 @@ local function snacks()
 end
 
 local function delete_current_buffer()
+  local buf = vim.api.nvim_get_current_buf()
+  local oil_buf = vim.w.oil_last_buf
+  if oil_buf and oil_buf ~= buf and vim.api.nvim_buf_is_valid(oil_buf) then
+    local ok, oil_util = pcall(require, "oil.util")
+    if ok and oil_util.is_oil_bufnr(oil_buf) then
+      vim.api.nvim_win_set_buf(0, oil_buf)
+      snacks().bufdelete.delete({ buf = buf })
+      return
+    end
+  end
   snacks().bufdelete()
 end
 
