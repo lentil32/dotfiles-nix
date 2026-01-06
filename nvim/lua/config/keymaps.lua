@@ -106,7 +106,13 @@ function M.list()
         end
         snacks().picker.files({ cwd = vim.fn.expand(dir) })
       end, desc = "Find file (Snacks in dir)" },
-    { "<leader>fj", "<cmd>Yazi<cr>", desc = "Jump to directory" },
+    { "<leader>fj", function()
+        local path = vim.fn.expand("%:p:h")
+        if path == "" then
+          path = vim.fn.getcwd()
+        end
+        helpers.open_oil(path)
+      end, desc = "Jump to directory (Oil)" },
     { "<leader>fr", function() snacks().picker.recent() end, desc = "Recent files" },
     { "<leader>fs", "<cmd>w<cr>", desc = "Save" },
     { "<leader>fy", group = "yank" },
@@ -124,7 +130,7 @@ function M.list()
     { "<leader>pd", function()
         snacks().picker.files({ cmd = "fd", args = { "--type", "d" } })
       end, desc = "Find directory" },
-    { "<leader>pD", "<cmd>Yazi cwd<cr>", desc = "Dired (Yazi)" },
+    { "<leader>pD", function() helpers.open_oil(helpers.project_root()) end, desc = "Dired (Oil)" },
     { "<leader>pr", function() snacks().picker.recent({ filter = { cwd = true } }) end, desc = "Recent files" },
     { "<leader>pb", function() snacks().picker.buffers({ filter = { cwd = true } }) end, desc = "Project buffers" },
     { "<leader>ps", function() snacks().picker.grep() end, desc = "Search in project" },

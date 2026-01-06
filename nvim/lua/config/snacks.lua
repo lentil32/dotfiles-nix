@@ -38,7 +38,7 @@ function M.setup()
       sections = {
         { section = "header" },
         { section = "keys", gap = 1, padding = 1 },
-        helpers.dashboard_recent_files_with_yazi({ limit = 5, padding = 1 }),
+        helpers.dashboard_recent_files_with_oil({ limit = 5, padding = 1 }),
       },
     },
     terminal = {

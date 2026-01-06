@@ -16,22 +16,19 @@ function M.agitator()
   return require("agitator")
 end
 
-function M.open_yazi(path)
+function M.open_oil(path)
   if not path or path == "" then
     return
   end
-  if not package.loaded["yazi"] then
-    pcall(vim.cmd, "packadd yazi.nvim")
-  end
-  local ok, yazi = pcall(require, "yazi")
-  if ok then
-    yazi.yazi(nil, path)
+  local ok, oil = pcall(require, "oil")
+  if ok and vim.fn.isdirectory(path) == 1 then
+    oil.open(path)
   else
     vim.cmd("edit " .. vim.fn.fnameescape(path))
   end
 end
 
-function M.dashboard_recent_files_with_yazi(opts)
+function M.dashboard_recent_files_with_oil(opts)
   return function()
     local Snacks = require("snacks")
     local items = Snacks.dashboard.sections.recent_files(opts or {})()
@@ -39,7 +36,7 @@ function M.dashboard_recent_files_with_yazi(opts)
       local path = item.file
       item.action = function()
         if path and vim.fn.isdirectory(path) == 1 then
-          M.open_yazi(path)
+          M.open_oil(path)
         else
           vim.cmd("edit " .. vim.fn.fnameescape(path))
         end
@@ -98,7 +95,7 @@ function M.bat_preview(ctx)
   return Snacks.picker.preview.cmd(cmd, ctx, { term = true })
 end
 
-function M.show_project_root()
+local function resolve_project_root()
   local root
   local ok, project = pcall(require, "project")
   if ok and project.get_project_root then
@@ -115,6 +112,15 @@ function M.show_project_root()
   if not root or root == "" then
     root = vim.fn.getcwd()
   end
+  return root
+end
+
+function M.project_root()
+  return resolve_project_root()
+end
+
+function M.show_project_root()
+  local root = resolve_project_root()
   root = vim.fn.fnamemodify(root, ":~")
   vim.notify(root, vim.log.levels.INFO, { title = "Project root" })
 end

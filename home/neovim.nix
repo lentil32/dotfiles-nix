@@ -151,8 +151,9 @@ in
             plenary-nvim
             lze
             snacks-nvim
-            grug-far-nvim # needed by yazi.nvim for replace
+            grug-far-nvim # search/replace
             project-nvim # projectile-like project management
+            oil-nvim
           ];
 
           completion = with pkgs.vimPlugins; [
@@ -164,7 +165,6 @@ in
         optionalPlugins = {
           general = with pkgs.vimPlugins; [
             which-key-nvim
-            yazi-nvim
             diffview-nvim
             flash-nvim
             nvim-surround
