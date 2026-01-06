@@ -29,6 +29,9 @@ return {
           ["l"] = "actions.select",
           ["<BS>"] = "actions.parent",
           ["."] = "actions.toggle_hidden",
+          ["<S-CR>"] = function()
+            require("config.helpers").oil_select_other_window()
+          end,
         },
       })
     end,

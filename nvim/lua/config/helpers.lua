@@ -28,6 +28,42 @@ function M.open_oil(path)
   end
 end
 
+function M.focus_other_window()
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  if #wins > 1 then
+    local cur = vim.api.nvim_get_current_win()
+    for i, win in ipairs(wins) do
+      if win == cur then
+        vim.api.nvim_set_current_win(wins[(i % #wins) + 1])
+        return
+      end
+    end
+  else
+    vim.cmd("vsplit")
+  end
+end
+
+function M.oil_select_other_window()
+  local ok, oil = pcall(require, "oil")
+  if not ok then
+    return
+  end
+
+  local entry = oil.get_cursor_entry()
+  if not entry then
+    return
+  end
+
+  local dir = oil.get_current_dir()
+  if not dir then
+    return
+  end
+
+  local path = vim.fs.joinpath(dir, entry.name)
+  M.focus_other_window()
+  M.open_oil(path)
+end
+
 function M.dashboard_recent_files_with_oil(opts)
   return function()
     local Snacks = require("snacks")
@@ -126,18 +162,7 @@ function M.show_project_root()
 end
 
 function M.goto_definition_other_window()
-  local wins = vim.api.nvim_tabpage_list_wins(0)
-  if #wins > 1 then
-    local cur = vim.api.nvim_get_current_win()
-    for i, win in ipairs(wins) do
-      if win == cur then
-        vim.api.nvim_set_current_win(wins[(i % #wins) + 1])
-        break
-      end
-    end
-  else
-    vim.cmd("vsplit")
-  end
+  M.focus_other_window()
   vim.lsp.buf.definition()
 end
 
