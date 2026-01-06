@@ -228,6 +228,10 @@ in
           "exec-and-forget open -na \"Firefox Developer Edition\""
           "mode main"
         ];
+        n = [
+          "exec-and-forget open -a Neovide"
+          "mode main"
+        ];
         p = [
           "exec-and-forget open -a Enpass"
           "mode main"

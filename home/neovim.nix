@@ -1,5 +1,6 @@
 {
   pkgs,
+  pkgs-unstable,
   inputs,
   ...
 }:
@@ -12,6 +13,7 @@ in
   # Yazi file manager
   programs.yazi = {
     enable = true;
+    package = pkgs-unstable.yazi;
     enableZshIntegration = true;
     plugins = {
       starship = pkgs.fetchFromGitHub {
@@ -32,6 +34,18 @@ in
         rev = "03cdd4b5b15341b3c0d0f4c850d633fadd05a45f";
         hash = "sha256-5dMAJ6W/L66XuH4CCwRRFpKSLy0ZDFIABAYleFX0AsQ=";
       } + "/vcs-files.yazi";
+      projects = pkgs.fetchFromGitHub {
+        owner = "MasouShizuka";
+        repo = "projects.yazi";
+        rev = "eed0657a833f56ea69f3531c89ecc7bad761d611";
+        hash = "sha256-5J0eqffUzI0GodpqwzmaQJtfh75kEbbIwbR8pFH/ZmU=";
+      };
+      fr = pkgs.fetchFromGitHub {
+        owner = "lpnh";
+        repo = "fr.yazi";
+        rev = "aa88cd4d4345c07345275291c1a236343f834c86";
+        hash = "sha256-3D1mIQpEDik0ppPQo+/NIhCxEu/XEnJMJ0HiAFxlOE4=";
+      };
     };
     initLua = ''
       require("starship"):setup()
@@ -55,6 +69,26 @@ in
           on = [ "g" "f" ];
           run = "plugin vcs-files";
           desc = "Show Git file changes";
+        }
+        {
+          on = [ "g" "p" ];
+          run = "plugin projects";
+          desc = "Switch project";
+        }
+        {
+          on = [ "g" "P" ];
+          run = "plugin projects --args=save";
+          desc = "Save as project";
+        }
+        {
+          on = [ "f" "r" ];
+          run = "plugin fr rg";
+          desc = "Search file by content (rg)";
+        }
+        {
+          on = [ "f" "a" ];
+          run = "plugin fr rga";
+          desc = "Search file by content (rga)";
         }
       ];
     };
@@ -88,8 +122,9 @@ in
             modus-themes-nvim
             plenary-nvim
             lze
-            telescope-fzf-native-nvim
             snacks-nvim
+            grug-far-nvim # needed by yazi.nvim for replace
+            project-nvim # projectile-like project management
           ];
 
           completion = with pkgs.vimPlugins; [
@@ -101,7 +136,6 @@ in
         optionalPlugins = {
           general = with pkgs.vimPlugins; [
             which-key-nvim
-            telescope-nvim
             yazi-nvim
             diffview-nvim
           ];
@@ -109,7 +143,6 @@ in
           git = with pkgs.vimPlugins; [
             neogit
             gitsigns-nvim
-            grug-far-nvim
           ];
 
           treesitter = with pkgs.vimPlugins; [
@@ -135,6 +168,7 @@ in
           general = with pkgs; [
             ripgrep
             fd
+            bat
           ];
 
           lsp = with pkgs; [
