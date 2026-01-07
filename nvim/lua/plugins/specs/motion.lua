@@ -14,6 +14,16 @@ return {
     },
   },
   {
+    "hop.nvim",
+    event = "DeferredUIEnter",
+    after = function()
+      require("hop").setup({})
+    end,
+    keys = {
+      { "gs", function() require("hop").hint_words() end, mode = { "n", "x", "o" }, desc = "Hop word" },
+    },
+  },
+  {
     "nvim-surround",
     event = "DeferredUIEnter",
     after = function()

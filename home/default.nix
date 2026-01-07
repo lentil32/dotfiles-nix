@@ -18,6 +18,7 @@
     ./python.nix
     ./starship.nix
     ./tmux.nix
+    ./wezterm.nix
 
     # Configs
     ./config.nix

@@ -44,7 +44,7 @@ function M.setup()
     },
     terminal = {
       enabled = true,
-      win = { style = "terminal", position = "float", border = "rounded" },
+      win = { style = "terminal", position = "bottom", height = 0.35 },
     },
     image = {
       enabled = true,

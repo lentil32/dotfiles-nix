@@ -18,7 +18,6 @@
     convmv
     csvkit # Claude Code loves it
     fasd
-    fd
     ffmpeg
     fzf
     glow # markdown previewer in terminal

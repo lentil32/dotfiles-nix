@@ -8,11 +8,6 @@ function M.org_action(action)
   end
 end
 
-function M.agitator()
-  vim.cmd.packadd("agitator.nvim")
-  return require("agitator")
-end
-
 function M.open_oil(path)
   if not path or path == "" then
     return

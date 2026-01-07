@@ -20,6 +20,7 @@ return {
       ---@type oil.SetupOpts
       local oil_opts = {
         default_file_explorer = true,
+        watch_for_changes = true,
         columns = { "icon", "permissions", "size", "mtime" },
         win_options = {
           winbar = "%!v:lua.get_oil_winbar()",
@@ -30,7 +31,7 @@ return {
           ["q"] = "actions.close",
           ["<BS>"] = "actions.parent",
           ["."] = "actions.toggle_hidden",
-          ["<S-CR>"] = { "actions.select", opts = { vertical = true } },
+          ["<S-CR>"] = { "actions.select", opts = { vertical = true, split = "belowright" } },
           ["<localleader>c"] = function()
             require("oil").save()
           end,

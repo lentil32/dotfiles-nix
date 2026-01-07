@@ -34,46 +34,49 @@ function M.setup()
   local sidekick_opts = {}
   sidekick.setup(sidekick_opts)
 
-  vim.keymap.set("<tab>", function()
+  local Snacks = _G.Snacks or require("snacks")
+
+  Snacks.keymap.set("n", "<tab>", function()
     -- if there is a next edit, jump to it, otherwise apply it if any
     if not require("sidekick").nes_jump_or_apply() then
       return "<Tab>" -- fallback to normal tab
     end
+    return ""
   end, { expr = true, desc = "Goto/Apply Next Edit Suggestion" })
 
-  vim.keymap.set({ "n", "t", "i", "x" }, "<c-.>", function()
+  Snacks.keymap.set({ "n", "t", "i", "x" }, "<c-.>", function()
     call_cli("toggle")
   end, { desc = "Sidekick toggle" })
 
-  vim.keymap.set("<leader>aa", function()
+  Snacks.keymap.set("n", "<leader>aa", function()
     call_cli("toggle")
   end, { desc = "Sidekick toggle CLI" })
 
-  vim.keymap.set("<leader>as", function()
+  Snacks.keymap.set("n", "<leader>as", function()
     call_cli("select")
   end, { desc = "Sidekick select CLI" })
 
-  vim.keymap.set("<leader>ad", function()
+  Snacks.keymap.set("n", "<leader>ad", function()
     call_cli("close")
   end, { desc = "Sidekick detach CLI session" })
 
-  vim.keymap.set({ "n", "x" }, "<leader>at", function()
+  Snacks.keymap.set({ "n", "x" }, "<leader>at", function()
     call_cli("send", { msg = "{this}" })
   end, { desc = "Sidekick send this" })
 
-  vim.keymap.set("<leader>af", function()
+  Snacks.keymap.set("n", "<leader>af", function()
     call_cli("send", { msg = "{file}" })
   end, { desc = "Sidekick send file" })
 
-  vim.keymap.set("x", "<leader>av", function()
+  Snacks.keymap.set("x", "<leader>av", function()
     call_cli("send", { msg = "{selection}" })
   end, { desc = "Sidekick send selection" })
 
-  vim.keymap.set({ "n", "x" }, "<leader>ap", function()
+  Snacks.keymap.set({ "n", "x" }, "<leader>ap", function()
     call_cli("prompt")
   end, { desc = "Sidekick prompt" })
 
-  vim.keymap.set("<leader>ac", function()
+  Snacks.keymap.set("n", "<leader>ac", function()
     require("sidekick.cli").toggle({ name = "codex", focus = true })
   end, { desc = "Sidekick Toggle Claude" })
 end

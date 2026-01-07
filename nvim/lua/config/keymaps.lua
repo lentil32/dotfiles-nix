@@ -39,14 +39,16 @@ local function git_init()
 end
 
 function M.setup()
+  local Snacks = _G.Snacks or require("snacks")
+
   if vim.g.neovide then
-    vim.keymap.set("n", "<D-s>", "<cmd>w<CR>", { desc = "Save" })
-    vim.keymap.set("v", "<D-c>", '"+y', { desc = "Copy" })
-    vim.keymap.set("n", "<D-v>", '"+P', { desc = "Paste" })
-    vim.keymap.set("v", "<D-v>", '"+P', { desc = "Paste" })
-    vim.keymap.set("c", "<D-v>", "<C-R>+", { desc = "Paste" })
-    vim.keymap.set("i", "<D-v>", '<ESC>l"+Pli', { desc = "Paste" })
-    vim.keymap.set("t", "<D-v>", function()
+    Snacks.keymap.set("n", "<D-s>", "<cmd>w<CR>", { desc = "Save" })
+    Snacks.keymap.set("v", "<D-c>", '"+y', { desc = "Copy" })
+    Snacks.keymap.set("n", "<D-v>", '"+P', { desc = "Paste" })
+    Snacks.keymap.set("v", "<D-v>", '"+P', { desc = "Paste" })
+    Snacks.keymap.set("c", "<D-v>", "<C-R>+", { desc = "Paste" })
+    Snacks.keymap.set("i", "<D-v>", '<ESC>l"+Pli', { desc = "Paste" })
+    Snacks.keymap.set("t", "<D-v>", function()
       local chan = vim.b.terminal_job_id
       if chan then
         vim.fn.chansend(chan, vim.fn.getreg("+"))
@@ -55,13 +57,19 @@ function M.setup()
   end
 
   -- Emacs-style line navigation in insert mode.
-  vim.keymap.set("i", "<C-a>", "<C-o>^", { desc = "Line start (first non-blank)" })
-  vim.keymap.set("i", "<C-e>", function()
+  Snacks.keymap.set("i", "<C-a>", "<C-o>^", { desc = "Line start (first non-blank)" })
+  Snacks.keymap.set("i", "<C-e>", function()
     if vim.fn.pumvisible() == 1 then
       return "<C-e>"
     end
     return "<C-o>$"
   end, { expr = true, replace_keycodes = true, desc = "Line end" })
+
+  -- Drag lines like Spacemacs drag-stuff.
+  Snacks.keymap.set("n", "]e", "<cmd>m .+1<cr>==", { desc = "Move line down" })
+  Snacks.keymap.set("n", "[e", "<cmd>m .-2<cr>==", { desc = "Move line up" })
+  Snacks.keymap.set("x", "]e", ":m '>+1<cr>gv=gv", { desc = "Move selection down" })
+  Snacks.keymap.set("x", "[e", ":m '<-2<cr>gv=gv", { desc = "Move selection up" })
 
   local term_group = vim.api.nvim_create_augroup("UserTermKeymaps", { clear = true })
   vim.api.nvim_create_autocmd("TermOpen", {
@@ -69,18 +77,18 @@ function M.setup()
     callback = function(args)
       vim.opt_local.number = false
       vim.opt_local.relativenumber = false
-      vim.keymap.set("t", "<Esc>", [[<C-\><C-n>]], {
+      Snacks.keymap.set("t", "<Esc>", [[<C-\><C-n>]], {
         buffer = args.buf,
         silent = true,
         desc = "Exit terminal mode",
       })
-      vim.keymap.set("t", "<C-g>", "<Esc>", {
+      Snacks.keymap.set("t", "<C-g>", "<Esc>", {
         buffer = args.buf,
         silent = true,
         desc = "Send Esc to terminal",
       })
       -- Neovide GUI doesn't pass Ctrl-V correctly to terminal; send it explicitly.
-      vim.keymap.set("t", "<C-v>", function()
+      Snacks.keymap.set("t", "<C-v>", function()
         local chan = vim.b.terminal_job_id
         if chan then
           vim.fn.chansend(chan, "\x16")
@@ -203,8 +211,8 @@ function M.list()
     -- Git
     { "<leader>g", group = "git" },
     { "<leader>gs", "<cmd>Neogit<cr>", desc = "Status" },
-    { "<leader>gb", function() helpers.agitator().git_blame_toggle() end, desc = "Blame (toggle)" },
-    { "<leader>gt", function() helpers.agitator().git_time_machine() end, desc = "Time machine" },
+    { "<leader>gb", function() snacks().git.blame_line() end, desc = "Blame line" },
+    { "<leader>gt", function() snacks().picker.git_log_file() end, desc = "Log file" },
     { "<leader>gi", git_init, desc = "Git init" },
     { "<leader>gp", function() snacks().picker.gh_pr() end, desc = "GitHub PRs" },
   })

@@ -166,6 +166,7 @@ in
           general = with pkgs.vimPlugins; [
             which-key-nvim
             flash-nvim
+            hop-nvim
             nvim-surround
             sidekick-nvim
           ];
@@ -173,7 +174,6 @@ in
           git = with pkgs.vimPlugins; [
             neogit
             gitsigns-nvim
-            agitator-nvim
           ];
 
           treesitter = with pkgs.vimPlugins; [
