@@ -165,9 +165,9 @@ in
         optionalPlugins = {
           general = with pkgs.vimPlugins; [
             which-key-nvim
-            diffview-nvim
             flash-nvim
             nvim-surround
+            sidekick-nvim
           ];
 
           git = with pkgs.vimPlugins; [

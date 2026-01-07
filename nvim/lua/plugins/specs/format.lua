@@ -1,7 +1,7 @@
 return {
   {
     "conform.nvim",
-    event = "BufWritePre",
+    event = { "BufReadPre", "BufNewFile" },
     after = function()
       require("conform").setup({
         formatters_by_ft = {

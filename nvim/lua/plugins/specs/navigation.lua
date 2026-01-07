@@ -17,7 +17,8 @@ return {
         end
       end
 
-      require("oil").setup({
+      ---@type oil.SetupOpts
+      local oil_opts = {
         default_file_explorer = true,
         columns = { "icon", "permissions", "size", "mtime" },
         win_options = {
@@ -40,7 +41,9 @@ return {
             require("oil").open_preview()
           end,
         },
-      })
+      }
+
+      require("oil").setup(oil_opts)
     end,
   },
 }

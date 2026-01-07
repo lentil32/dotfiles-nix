@@ -3,10 +3,7 @@ local M = {}
 function M.org_action(action)
   return function()
     vim.cmd.packadd("orgmode")
-    require("orgmode").setup({
-      org_agenda_files = { "~/org/**/*" },
-      org_default_notes_file = "~/org/refile.org",
-    })
+    require("config.org").setup()
     require("orgmode").action(action)
   end
 end

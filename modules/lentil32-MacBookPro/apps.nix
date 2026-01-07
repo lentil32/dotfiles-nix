@@ -140,7 +140,7 @@ in
 
     onActivation = {
       autoUpdate = true;
-      upgrade = true;
+      upgrade = false;
       cleanup = "zap";
     };
 

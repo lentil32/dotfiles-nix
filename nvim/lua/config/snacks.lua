@@ -3,7 +3,8 @@ local helpers = require("config.helpers")
 local M = {}
 
 function M.setup()
-  require("snacks").setup({
+  ---@type snacks.Config
+  local snacks_opts = {
     styles = {
       dashboard = {
         -- Avoid double BufDelete/BufWipeout callbacks in snacks.nvim.
@@ -60,6 +61,7 @@ function M.setup()
       sources = {
         files = {
           cmd = "rg",
+          hidden = true,
           preview = helpers.bat_preview,
         },
         grep = { preview = helpers.bat_preview },
@@ -71,7 +73,9 @@ function M.setup()
       },
     },
     gh = { enabled = true },
-  })
+  }
+
+  require("snacks").setup(snacks_opts)
 
   do
     local ok, placement = pcall(require, "snacks.image.placement")

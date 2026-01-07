@@ -4,7 +4,7 @@ return {
     cmd = "Neogit",
     after = function()
       require("neogit").setup({
-        integrations = { diffview = true },
+        integrations = { diffview = false, snacks = true },
         mappings = {
           popup = {
             ["O"] = "ResetPopup",
