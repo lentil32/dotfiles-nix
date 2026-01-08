@@ -61,11 +61,11 @@ function M.setup()
         files = {
           cmd = "rg",
           hidden = true,
-          preview = helpers.bat_preview,
+          preview = helpers.picker_preview,
         },
-        grep = { preview = helpers.bat_preview },
-        grep_buffers = { preview = helpers.bat_preview },
-        recent = { preview = helpers.bat_preview },
+        grep = { preview = helpers.picker_preview },
+        grep_buffers = { preview = helpers.picker_preview },
+        recent = { preview = helpers.picker_preview },
         projects = {
           patterns = { ".git", "package.json", "Cargo.toml", "flake.nix", "Makefile" },
         },

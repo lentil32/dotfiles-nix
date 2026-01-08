@@ -203,6 +203,8 @@ in
               bat
               imagemagick
               mermaid-cli
+              typst
+              tectonic
             ];
 
           lsp = with pkgs; [

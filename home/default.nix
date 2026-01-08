@@ -1,5 +1,6 @@
 {
   pkgs,
+  lib,
   username,
   config,
   ...
@@ -54,6 +55,8 @@
       BUNBIN = "$HOME/.bun/bin";
       PNPM_HOME = "$HOME/Library/pnpm";
       NODE_PATH = "$HOME/.bun/install/global/node_modules";
+    } // lib.optionalAttrs pkgs.stdenv.targetPlatform.isDarwin {
+      PUPPETEER_EXECUTABLE_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
     };
 
     sessionPath = [
