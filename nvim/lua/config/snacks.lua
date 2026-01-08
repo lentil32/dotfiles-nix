@@ -1,4 +1,6 @@
-local helpers = require("config.helpers")
+local oil = require("config.oil")
+local org = require("config.org")
+local preview = require("config.snacks_preview")
 
 local M = {}
 
@@ -25,7 +27,7 @@ function M.setup()
           { icon = " ", key = "g", desc = "Find Text", action = ":lua Snacks.picker.grep()" },
           { icon = " ", key = "r", desc = "Recent Files", action = ":lua Snacks.picker.recent()" },
           { icon = " ", key = "s", desc = "Git Status", action = ":Neogit" },
-          { icon = " ", key = "o", desc = "Org Agenda", action = helpers.org_action("agenda.prompt") },
+          { icon = " ", key = "o", desc = "Org Agenda", action = org.org_action("agenda.prompt") },
           { icon = " ", key = "q", desc = "Quit", action = ":qa" },
         },
         header = [[
@@ -39,7 +41,7 @@ function M.setup()
       sections = {
         { section = "header" },
         { section = "keys", gap = 1, padding = 1 },
-        helpers.dashboard_recent_files_with_oil({ limit = 5, padding = 1 }),
+        oil.dashboard_recent_files_with_oil({ limit = 5, padding = 1 }),
       },
     },
     terminal = {
@@ -61,11 +63,11 @@ function M.setup()
         files = {
           cmd = "rg",
           hidden = true,
-          preview = helpers.picker_preview,
+          preview = preview.picker_preview,
         },
-        grep = { preview = helpers.picker_preview },
-        grep_buffers = { preview = helpers.picker_preview },
-        recent = { preview = helpers.picker_preview },
+        grep = { preview = preview.picker_preview },
+        grep_buffers = { preview = preview.picker_preview },
+        recent = { preview = preview.picker_preview },
         projects = {
           patterns = { ".git", "package.json", "Cargo.toml", "flake.nix", "Makefile" },
         },

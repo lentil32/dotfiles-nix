@@ -14,4 +14,12 @@ function M.setup()
   })
 end
 
+function M.org_action(action)
+  return function()
+    vim.cmd.packadd("orgmode")
+    M.setup()
+    require("orgmode").action(action)
+  end
+end
+
 return M

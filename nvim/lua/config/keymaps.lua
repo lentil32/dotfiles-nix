@@ -1,4 +1,9 @@
-local helpers = require("config.helpers")
+local buffers = require("config.buffer")
+local oil = require("config.oil")
+local org = require("config.org")
+local project = require("config.project")
+local util = require("config.util")
+local window = require("config.window")
 
 local M = {}
 
@@ -6,40 +11,8 @@ local function snacks()
   return _G.Snacks or require("snacks")
 end
 
-local function delete_current_buffer()
-  local buf = vim.api.nvim_get_current_buf()
-  local oil_buf = vim.w.oil_last_buf
-  if oil_buf and oil_buf ~= buf and vim.api.nvim_buf_is_valid(oil_buf) then
-    local ok, oil_util = pcall(require, "oil.util")
-    if ok and oil_util.is_oil_bufnr(oil_buf) then
-      vim.api.nvim_win_set_buf(0, oil_buf)
-      snacks().bufdelete.delete({ buf = buf })
-      return
-    end
-  end
-  snacks().bufdelete()
-end
-
-local function kill_window_and_buffer()
-  local buf = vim.api.nvim_get_current_buf()
-  do
-    local ok, Snacks = pcall(require, "snacks")
-    if ok and vim.b[buf].snacks_terminal then
-      for _, term in ipairs(Snacks.terminal.list()) do
-        if term.buf == buf then
-          term:close()
-          pcall(vim.cmd, "bwipeout! " .. buf)
-          return
-        end
-      end
-    end
-  end
-  if #vim.api.nvim_list_wins() > 1 then
-    vim.cmd("close")
-  end
-  local is_terminal = vim.bo[buf].buftype == "terminal" or vim.bo[buf].filetype == "snacks_terminal"
-  snacks().bufdelete.delete({ buf = buf, force = is_terminal, wipe = is_terminal })
-end
+local delete_current_buffer = buffers.delete_current_buffer
+local kill_window_and_buffer = buffers.kill_window_and_buffer
 
 local function git_init()
   local out = vim.fn.system({ "git", "init" })
@@ -51,7 +24,7 @@ local function git_init()
 end
 
 function M.setup()
-  local Snacks = _G.Snacks or require("snacks")
+  local Snacks = snacks()
 
   if vim.g.neovide then
     Snacks.keymap.set("n", "<D-s>", "<cmd>w<CR>", { desc = "Save" })
@@ -87,8 +60,13 @@ function M.setup()
   vim.api.nvim_create_autocmd("TermOpen", {
     group = term_group,
     callback = function(args)
-      vim.opt_local.number = false
-      vim.opt_local.relativenumber = false
+      local win = vim.fn.bufwinid(args.buf)
+      if win ~= -1 then
+        util.set_win_opts(win, { number = false, relativenumber = false })
+      else
+        vim.opt_local.number = false
+        vim.opt_local.relativenumber = false
+      end
       Snacks.keymap.set("t", "<Esc>", [[<C-\><C-n>]], {
         buffer = args.buf,
         silent = true,
@@ -115,6 +93,10 @@ function M.setup()
 end
 
 function M.list()
+  local Snacks = snacks()
+  local picker = Snacks.picker
+  local terminal = Snacks.terminal
+  local bufdelete = Snacks.bufdelete
   local keymaps = {}
   local function add(list)
     vim.list_extend(keymaps, list)
@@ -122,15 +104,16 @@ function M.list()
 
   add({
     -- Top-level
-    { "<leader>/",     function() snacks().picker.grep() end,     desc = "Search project" },
+    { "<leader>/",     function() picker.grep() end,     desc = "Search project" },
+    { "<leader>*",     function() picker.grep({ search = vim.fn.expand("<cword>") }) end, desc = "Search project (word)" },
     { "<leader><Tab>", "<cmd>b#<cr>",                             desc = "Last buffer" },
-    { "<leader>'",     function() snacks().terminal.toggle() end, desc = "Terminal" },
+    { "<leader>'",     function() terminal.toggle() end, desc = "Terminal" },
   })
 
   add({
     -- File
     { "<leader>f",  group = "file" },
-    { "<leader>ff", function() snacks().picker.files() end, desc = "Find file" },
+    { "<leader>ff", function() picker.files() end, desc = "Find file" },
     {
       "<leader>fF",
       function()
@@ -142,7 +125,7 @@ function M.list()
         if dir == nil or dir == "" then
           return
         end
-        snacks().picker.files({ cwd = vim.fn.expand(dir) })
+        picker.files({ cwd = vim.fn.expand(dir) })
       end,
       desc = "Find file (Snacks in dir)"
     },
@@ -153,11 +136,11 @@ function M.list()
         if path == "" then
           path = vim.fn.getcwd()
         end
-        helpers.open_oil(path)
+        oil.open_oil(path)
       end,
       desc = "Jump to directory (Oil)"
     },
-    { "<leader>fr",  function() snacks().picker.recent() end,                   desc = "Recent files" },
+    { "<leader>fr",  function() picker.recent() end,                   desc = "Recent files" },
     { "<leader>fs",  "<cmd>w<cr>",                                              desc = "Save" },
     { "<leader>fy",  group = "yank" },
     { "<leader>fyy", function() vim.fn.setreg("+", vim.fn.expand("%:t")) end,   desc = "Filename" },
@@ -169,26 +152,26 @@ function M.list()
   add({
     -- Project
     { "<leader>p",  group = "project" },
-    { "<leader>pp", function() snacks().picker.projects() end, desc = "Switch project" },
-    { "<leader>pf", function() snacks().picker.files() end,    desc = "Find file" },
+    { "<leader>pp", function() picker.projects() end, desc = "Switch project" },
+    { "<leader>pf", function() picker.files() end,    desc = "Find file" },
     {
       "<leader>pd",
       function()
-        snacks().picker.files({ cmd = "fd", args = { "--type", "d" } })
+        picker.files({ cmd = "fd", args = { "--type", "d" } })
       end,
       desc = "Find directory"
     },
-    { "<leader>pD", function() helpers.open_oil(helpers.project_root()) end,                             desc = "Dired (Oil)" },
-    { "<leader>pr", function() snacks().picker.recent({ filter = { cwd = true } }) end,                  desc = "Recent files" },
-    { "<leader>pb", function() snacks().picker.buffers({ filter = { cwd = true } }) end,                 desc = "Project buffers" },
-    { "<leader>ps", function() snacks().picker.grep() end,                                               desc = "Search in project" },
+    { "<leader>pD", function() oil.open_oil(project.project_root()) end,                                 desc = "Dired (Oil)" },
+    { "<leader>pr", function() picker.recent({ filter = { cwd = true } }) end,                  desc = "Recent files" },
+    { "<leader>pb", function() picker.buffers({ filter = { cwd = true } }) end,                 desc = "Project buffers" },
+    { "<leader>ps", function() picker.grep() end,                                               desc = "Search in project" },
     { "<leader>pR", function() require("grug-far").open({ prefills = { paths = vim.fn.getcwd() } }) end, desc = "Replace in project" },
-    { "<leader>p'", function() snacks().terminal.toggle() end,                                           desc = "Terminal" },
+    { "<leader>p'", function() terminal.toggle() end,                                           desc = "Terminal" },
     {
       "<leader>pk",
       function()
         local cwd = vim.fn.getcwd()
-        snacks().bufdelete.delete({
+        bufdelete.delete({
           filter = function(buf)
             if not vim.api.nvim_buf_is_loaded(buf) then
               return false
@@ -214,8 +197,8 @@ function M.list()
   add({
     -- Buffer
     { "<leader>b",  group = "buffer" },
-    { "<leader>bb", function() snacks().picker.buffers() end,       desc = "Buffers" },
-    { "<leader>bj", helpers.show_project_root,                      desc = "Project root" },
+    { "<leader>bb", function() picker.buffers() end,       desc = "Buffers" },
+    { "<leader>bj", project.show_project_root,                      desc = "Project root" },
     { "<leader>bd", delete_current_buffer,                          desc = "Delete" },
     { "<leader>bn", "<cmd>bnext<cr>",                               desc = "Next" },
     { "<leader>bp", "<cmd>bprev<cr>",                               desc = "Prev" },
@@ -226,15 +209,15 @@ function M.list()
   add({
     -- Search
     { "<leader>s",  group = "search" },
-    { "<leader>sp", function() snacks().picker.grep() end,  desc = "Project" },
-    { "<leader>ss", function() snacks().picker.lines() end, desc = "Buffer" },
+    { "<leader>sp", function() picker.grep() end,  desc = "Project" },
+    { "<leader>ss", function() picker.lines() end, desc = "Buffer" },
   })
 
   add({
     -- Goto
     { "g",  group = "goto" },
     { "gd", vim.lsp.buf.definition,               desc = "Definition" },
-    { "gD", helpers.goto_definition_other_window, desc = "Definition (other window)" },
+    { "gD", window.goto_definition_other_window, desc = "Definition (other window)" },
     { "gr", vim.lsp.buf.references,               desc = "References" },
   })
 
@@ -243,16 +226,16 @@ function M.list()
     { "<leader>g",  group = "git" },
     { "<leader>gs", "<cmd>Neogit<cr>",                             desc = "Status" },
     { "<leader>gb", "<cmd>GitBlameToggle<cr>",                     desc = "Blame line" },
-    { "<leader>gt", function() snacks().picker.git_log_file() end, desc = "Log file" },
+    { "<leader>gt", function() picker.git_log_file() end, desc = "Log file" },
     { "<leader>gi", git_init,                                      desc = "Git init" },
-    { "<leader>gp", function() snacks().picker.gh_pr() end,        desc = "GitHub PRs" },
+    { "<leader>gp", function() picker.gh_pr() end,        desc = "GitHub PRs" },
   })
 
   add({
     -- Errors/Diagnostics
     { "<leader>e",  group = "errors" },
-    { "<leader>el", function() snacks().picker.diagnostics_buffer() end,        desc = "List (buffer)" },
-    { "<leader>eL", function() snacks().picker.diagnostics() end,               desc = "List (project)" },
+    { "<leader>el", function() picker.diagnostics_buffer() end,        desc = "List (buffer)" },
+    { "<leader>eL", function() picker.diagnostics() end,               desc = "List (project)" },
     { "<leader>en", function() vim.diagnostic.goto_next() end,                  desc = "Next" },
     { "<leader>ep", function() vim.diagnostic.goto_prev() end,                  desc = "Previous" },
     { "<leader>ex", function() vim.diagnostic.open_float() end,                 desc = "Explain" },
@@ -276,8 +259,8 @@ function M.list()
     -- Applications
     { "<leader>a",   group = "applications" },
     { "<leader>ao",  group = "org" },
-    { "<leader>aoa", helpers.org_action("agenda.prompt"),  desc = "Agenda" },
-    { "<leader>aoc", helpers.org_action("capture.prompt"), desc = "Capture" },
+    { "<leader>aoa", org.org_action("agenda.prompt"),  desc = "Agenda" },
+    { "<leader>aoc", org.org_action("capture.prompt"), desc = "Capture" },
   })
 
   add({

@@ -1,19 +1,16 @@
+local util = require("config.util")
+
 local M = {}
 
 local function get_sidekick()
-  local ok, sidekick = pcall(require, "sidekick")
-  if not ok then
-    return nil
-  end
-  return sidekick
+  return util.try_require("sidekick")
 end
 
 local function call_cli(method, opts)
-  local ok, cli = pcall(require, "sidekick.cli")
-  if not ok then
-    return
+  local cli = util.try_require("sidekick.cli")
+  if cli and cli[method] then
+    cli[method](opts)
   end
-  cli[method](opts)
 end
 
 function M.nes_jump_or_apply()
