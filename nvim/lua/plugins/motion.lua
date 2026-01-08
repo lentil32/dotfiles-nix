@@ -1,6 +1,7 @@
 return {
   {
     "flash.nvim",
+    for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
       require("flash").setup({})
@@ -15,6 +16,7 @@ return {
   },
   {
     "hop.nvim",
+    for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
       require("hop").setup({})
@@ -25,6 +27,7 @@ return {
   },
   {
     "nvim-surround",
+    for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
       require("nvim-surround").setup({})

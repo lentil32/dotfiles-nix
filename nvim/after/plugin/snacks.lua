@@ -1,16 +1,11 @@
-local ok = pcall(require, "snacks")
-if not ok then
-  return
-end
-
 if vim.g.snacks_patch_applied then
   return
 end
 vim.g.snacks_patch_applied = true
 
 do
-  local ok_placement, placement = pcall(require, "snacks.image.placement")
-  if ok_placement and not placement._unhide_patch then
+  local placement = require("snacks.image.placement")
+  if not placement._unhide_patch then
     placement._unhide_patch = true
     local orig_update = placement.update
     function placement:update(...)
@@ -23,10 +18,7 @@ do
 end
 
 do
-  local ok_dashboard, dashboard = pcall(require, "snacks.dashboard")
-  if not ok_dashboard then
-    return
-  end
+  local dashboard = require("snacks.dashboard")
   local dashboard_cls = dashboard.Dashboard
   local orig_size = dashboard_cls.size
   local orig_update = dashboard_cls.update

@@ -1,6 +1,7 @@
 return {
   {
     "nvim-lspconfig",
+    for_cat = "lsp",
     event = "BufReadPre",
     after = function()
       local capabilities = require("blink.cmp").get_lsp_capabilities()

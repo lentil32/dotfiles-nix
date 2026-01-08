@@ -1,6 +1,7 @@
 return {
   {
     "neogit",
+    for_cat = "git",
     cmd = "Neogit",
     after = function()
       require("neogit").setup({
@@ -75,6 +76,7 @@ return {
   },
   {
     "gitsigns.nvim",
+    for_cat = "git",
     event = "BufReadPre",
     after = function()
       require("gitsigns").setup({})
@@ -82,6 +84,7 @@ return {
   },
   {
     "git-blame.nvim",
+    for_cat = "git",
     cmd = { "GitBlameToggle", "GitBlameEnable", "GitBlameDisable" },
     after = function()
       require("gitblame").setup({

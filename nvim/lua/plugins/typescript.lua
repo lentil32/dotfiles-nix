@@ -1,6 +1,7 @@
 return {
   {
     "typescript-tools.nvim",
+    for_cat = "typescript",
     ft = { "typescript", "typescriptreact", "javascript", "javascriptreact" },
     after = function()
       local capabilities = require("blink.cmp").get_lsp_capabilities()

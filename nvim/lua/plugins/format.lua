@@ -1,6 +1,7 @@
 return {
   {
     "conform.nvim",
+    for_cat = "lsp",
     event = { "BufReadPre", "BufNewFile" },
     after = function()
       require("conform").setup({

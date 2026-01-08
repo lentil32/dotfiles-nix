@@ -1,9 +1,4 @@
-local ok, blink = pcall(require, "blink.cmp")
-if not ok then
-  return
-end
-
-blink.setup({
+require("blink.cmp").setup({
   keymap = {
     preset = "default",
     ["<C-space>"] = { "show", "show_documentation", "hide_documentation" },
