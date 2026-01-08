@@ -25,8 +25,8 @@ local function kill_window_and_buffer()
   if #vim.api.nvim_list_wins() > 1 then
     vim.cmd("close")
   end
-  local force = vim.bo[buf].buftype == "terminal"
-  snacks().bufdelete.delete({ buf = buf, force = force })
+  local is_terminal = vim.bo[buf].buftype == "terminal"
+  snacks().bufdelete.delete({ buf = buf, force = is_terminal, wipe = is_terminal })
 end
 
 local function git_init()
