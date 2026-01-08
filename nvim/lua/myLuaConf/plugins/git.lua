@@ -5,7 +5,8 @@ return {
     cmd = "Neogit",
     after = function()
       require("neogit").setup({
-        integrations = { diffview = false, snacks = false },
+        integrations = { diffview = true, snacks = true },
+        graph_style = "unicode",
         commit_editor = {
           kind = "tab",
           staged_diff_split_kind = "vsplit",
@@ -92,5 +93,10 @@ return {
         enabled = false,
       })
     end,
+  },
+  {
+    "vim-flog",
+    for_cat = "git",
+    cmd = { "Flog", "Flogsplit" },
   },
 }

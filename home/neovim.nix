@@ -174,8 +174,10 @@ in
 
           git = with pkgs.vimPlugins; [
             neogit
+            diffview-nvim
             gitsigns-nvim
             git-blame-nvim
+            vim-flog
           ];
 
           treesitter = with pkgs.vimPlugins; [
