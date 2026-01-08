@@ -1,1 +1,0 @@
-require("lze").load("plugins")

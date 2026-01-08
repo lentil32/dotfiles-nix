@@ -150,6 +150,7 @@ in
             modus-themes-nvim
             plenary-nvim
             lze
+            lzextras
             snacks-nvim
             grug-far-nvim # search/replace
             project-nvim # projectile-like project management
@@ -183,7 +184,17 @@ in
 
           lsp = with pkgs.vimPlugins; [
             nvim-lspconfig
+            mason-nvim
+            mason-lspconfig-nvim
+            lazydev-nvim
+          ];
+
+          format = with pkgs.vimPlugins; [
             conform-nvim
+          ];
+
+          lint = with pkgs.vimPlugins; [
+            nvim-lint
           ];
 
           typescript = with pkgs.vimPlugins; [
@@ -237,6 +248,8 @@ in
             general = true;
             git = true;
             lsp = true;
+            format = true;
+            lint = true;
             treesitter = true;
             completion = true;
             typescript = true;

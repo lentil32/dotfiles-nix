@@ -1,7 +1,7 @@
-return {
+require("lze").load({
   {
     "conform.nvim",
-    for_cat = "lsp",
+    for_cat = "format",
     event = { "BufReadPre", "BufNewFile" },
     after = function()
       require("conform").setup({
@@ -19,4 +19,4 @@ return {
       })
     end,
   },
-}
+})

@@ -1,7 +1,7 @@
----@param lang string
+---@param _ string
 ---@param type snacks.image.Type
 ---@return boolean
-local function conceal_math(lang, type)
+local function conceal_math(_, type)
   return type == "math"
 end
 

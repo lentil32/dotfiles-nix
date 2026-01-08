@@ -1,12 +1,16 @@
-local oil = require("config.oil")
-local org = require("config.org")
-local preview = require("config.snacks_preview")
+local oil = require("myLuaConf.oil")
+local org = require("myLuaConf.org")
+local preview = require("myLuaConf.plugins.snacks_preview")
 
 local M = {}
 
-function M.setup()
-  ---@type snacks.Config
-  local snacks_opts = {
+local function snacks()
+  return _G.Snacks or require("snacks")
+end
+
+---@return snacks.Config
+local function opts()
+  return {
     styles = {
       dashboard = {
         -- Avoid double BufDelete/BufWipeout callbacks in snacks.nvim.
@@ -27,7 +31,7 @@ function M.setup()
           { icon = " ", key = "g", desc = "Find Text", action = ":lua Snacks.picker.grep()" },
           { icon = " ", key = "r", desc = "Recent Files", action = ":lua Snacks.picker.recent()" },
           { icon = " ", key = "s", desc = "Git Status", action = ":Neogit" },
-          { icon = " ", key = "o", desc = "Org Agenda", action = org.org_action("agenda.prompt") },
+          { icon = " ", key = "o", desc = "Org Agenda", action = org.action("agenda.prompt") },
           { icon = " ", key = "q", desc = "Quit", action = ":qa" },
         },
         header = [[
@@ -36,7 +40,7 @@ function M.setup()
  ██╔██╗ ██║ █████╗  ██║   ██║ ██║   ██║ ██║ ██╔████╔██║
  ██║╚██╗██║ ██╔══╝  ██║   ██║ ╚██╗ ██╔╝ ██║ ██║╚██╔╝██║
  ██║ ╚████║ ███████╗╚██████╔╝  ╚████╔╝  ██║ ██║ ╚═╝ ██║
- ╚═╝  ╚═══╝ ╚══════╝ ╚═════╝    ╚═══╝   ╚═╝ ╚═╝     ╚═╝]],
+ ╚═╝  ╚═══╝ ╚═════╝  ╚═════╝   ╚═══╝   ╚═╝ ╚═╝     ╚═╝]],
       },
       sections = {
         { section = "header" },
@@ -48,7 +52,7 @@ function M.setup()
       enabled = true,
       win = { style = "terminal", position = "bottom", height = 0.35 },
     },
-    image = require("config.snacks_image"),
+    image = require("myLuaConf.plugins.snacks_image"),
     picker = {
       enabled = true,
       main = { current = true },
@@ -75,8 +79,10 @@ function M.setup()
     },
     gh = { enabled = true },
   }
+end
 
-  require("snacks").setup(snacks_opts)
+function M.setup()
+  snacks().setup(opts())
 end
 
 return M

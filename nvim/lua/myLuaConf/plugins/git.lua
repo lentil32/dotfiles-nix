@@ -7,6 +7,7 @@ return {
       require("neogit").setup({
         integrations = { diffview = false, snacks = false },
         commit_editor = {
+          kind = "tab",
           staged_diff_split_kind = "vsplit",
         },
         builders = {

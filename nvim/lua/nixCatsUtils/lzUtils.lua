@@ -1,7 +1,8 @@
+local util = require("myLuaConf.util")
 local M = {}
 
 local function get_cat_enabled(cat, default)
-  if vim.g[ [[nixCats-special-rtp-entry-nixCats]] ] ~= nil then
+  if util.get_var(nil, "nixCats-special-rtp-entry-nixCats") ~= nil then
     if type(_G.nixCats) == "function" then
       return _G.nixCats(cat) or false
     end

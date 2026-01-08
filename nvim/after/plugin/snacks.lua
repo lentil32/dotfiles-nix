@@ -1,18 +1,20 @@
-if vim.g.snacks_patch_applied then
+local util = require("snacks.util")
+
+if util.var(nil, "snacks_patch_applied", false) then
   return
 end
 vim.g.snacks_patch_applied = true
 
 do
-  local placement = require("snacks.image.placement")
-  if not placement._unhide_patch then
-    placement._unhide_patch = true
+  if not util.var(nil, "snacks_image_unhide_patch", false) then
+    vim.g.snacks_image_unhide_patch = true
+    local placement = require("snacks.image.placement")
     local orig_update = placement.update
-    function placement:update(...)
+    function placement:update()
       if self.hidden and self:ready() and #self:wins() > 0 then
         self.hidden = false
       end
-      return orig_update(self, ...)
+      return orig_update(self)
     end
   end
 end
@@ -30,7 +32,7 @@ do
     return orig_size(self)
   end
 
-  function dashboard_cls:update(...)
+  function dashboard_cls:update()
     if not self.win or not vim.api.nvim_win_is_valid(self.win) then
       return
     end
@@ -41,6 +43,6 @@ do
       end
       self.win = win
     end
-    return orig_update(self, ...)
+    return orig_update(self)
   end
 end

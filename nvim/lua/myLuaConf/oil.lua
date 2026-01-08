@@ -1,14 +1,37 @@
-local util = require("config.util")
-local window = require("config.window")
+local util = require("myLuaConf.util")
+local Snacks = require("snacks")
 
 local M = {}
+
+local function ensure_other_window()
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local cur = vim.api.nvim_get_current_win()
+  if #wins > 1 then
+    for i, win in ipairs(wins) do
+      if win == cur then
+        return wins[(i % #wins) + 1], false
+      end
+    end
+  end
+  vim.cmd("vsplit")
+  local new_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_set_current_win(cur)
+  return new_win, true
+end
+
+local function focus_other_window()
+  local target = ensure_other_window()
+  if target and vim.api.nvim_win_is_valid(target) then
+    vim.api.nvim_set_current_win(target)
+  end
+end
 
 local function oil_winbar()
   local oil = util.try_require("oil")
   if not oil then
     return ""
   end
-  local winid = vim.g.statusline_winid
+  local winid = tonumber(util.get_var(nil, "statusline_winid"))
   if not winid or winid == 0 then
     return ""
   end
@@ -124,13 +147,12 @@ function M.oil_select_other_window()
   end
 
   local path = vim.fs.joinpath(dir, entry.name)
-  window.focus_other_window()
+  focus_other_window()
   M.open_oil(path)
 end
 
 function M.dashboard_recent_files_with_oil(opts)
   return function()
-    local Snacks = require("snacks")
     local items = Snacks.dashboard.sections.recent_files(opts or {})()
     for _, item in ipairs(items) do
       local path = item.file

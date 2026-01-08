@@ -1,4 +1,4 @@
-local util = require("config.util")
+local util = require("myLuaConf.util")
 
 local M = {}
 
@@ -64,7 +64,7 @@ local function attach_doc_preview(buf, path, ctx)
   if vim.api.nvim_buf_get_name(buf) == "" then
     pcall(vim.api.nvim_buf_set_name, buf, path)
   end
-  if vim.bo[buf].filetype ~= ft then
+  if util.get_buf_opt(buf, "filetype", "") ~= ft then
     util.set_buf_opts(buf, { filetype = ft })
   end
   local snacks = util.try_require("snacks")

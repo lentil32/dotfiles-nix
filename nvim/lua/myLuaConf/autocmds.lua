@@ -1,3 +1,5 @@
+local util = require("myLuaConf.util")
+
 local M = {}
 
 function M.setup()
@@ -7,12 +9,12 @@ function M.setup()
     group = group,
     callback = function()
       vim.schedule(function()
-        if vim.bo.buftype ~= "" then
+        if util.get_buf_opt(0, "buftype", "") ~= "" then
           return
         end
         local bufs = vim.tbl_filter(function(b)
           return vim.api.nvim_buf_is_valid(b)
-            and vim.bo[b].buflisted
+            and util.get_buf_opt(b, "buflisted", false)
             and vim.api.nvim_buf_get_name(b) ~= ""
         end, vim.api.nvim_list_bufs())
         if #bufs == 0 then
@@ -42,7 +44,13 @@ function M.setup()
         return
       end
       vim.api.nvim_win_call(win, function()
-        vim.w.oil_last_buf = bufnr
+        local map = util.get_var(nil, "oil_last_buf", {})
+        if type(map) ~= "table" then
+          map = {}
+        end
+        ---@cast map table<number, number>
+        map[win] = bufnr
+        vim.g.oil_last_buf = map
         vim.cmd("lcd " .. vim.fn.fnameescape(dir))
       end)
     end,
@@ -65,7 +73,6 @@ function M.setup()
       snacks.rename.on_rename_file(first.src_url, first.dest_url)
     end,
   })
-
 end
 
 return M

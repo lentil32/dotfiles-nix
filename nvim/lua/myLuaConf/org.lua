@@ -7,14 +7,13 @@ function M.setup()
     return
   end
   configured = true
-
   require("orgmode").setup({
     org_agenda_files = { "~/org/**/*" },
     org_default_notes_file = "~/org/refile.org",
   })
 end
 
-function M.org_action(action)
+function M.action(action)
   return function()
     vim.cmd.packadd("orgmode")
     M.setup()
