@@ -186,7 +186,7 @@ function M.list()
     {
       "<leader>pI",
       function()
-        require("project.project").set_pwd(vim.fn.getcwd(), "manual")
+        require("project.api").set_pwd(vim.fn.getcwd(), "manual")
         vim.notify("Project cache invalidated", vim.log.levels.INFO)
       end,
       desc = "Invalidate cache"
