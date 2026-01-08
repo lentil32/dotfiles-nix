@@ -46,9 +46,7 @@ function M.setup()
       enabled = true,
       win = { style = "terminal", position = "bottom", height = 0.35 },
     },
-    image = {
-      enabled = true,
-    },
+    image = require("config.snacks_image"),
     picker = {
       enabled = true,
       win = {

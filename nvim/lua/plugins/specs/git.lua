@@ -80,4 +80,13 @@ return {
       require("gitsigns").setup({})
     end,
   },
+  {
+    "git-blame.nvim",
+    cmd = { "GitBlameToggle", "GitBlameEnable", "GitBlameDisable" },
+    after = function()
+      require("gitblame").setup({
+        enabled = false,
+      })
+    end,
+  },
 }

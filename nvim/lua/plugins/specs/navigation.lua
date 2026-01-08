@@ -13,7 +13,7 @@ return {
           if dir then
             return vim.fn.fnamemodify(dir, ":~")
           end
-          return vim.api.nvim_buf_get_name(bufnr)
+          return ""
         end
       end
 
@@ -32,6 +32,9 @@ return {
           ["<BS>"] = "actions.parent",
           ["."] = "actions.toggle_hidden",
           ["<S-CR>"] = { "actions.select", opts = { vertical = true, split = "belowright" } },
+          ["gs"] = function()
+            require("hop").hint_words()
+          end,
           ["<localleader>c"] = function()
             require("oil").save()
           end,

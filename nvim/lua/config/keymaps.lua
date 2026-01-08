@@ -211,7 +211,7 @@ function M.list()
     -- Git
     { "<leader>g", group = "git" },
     { "<leader>gs", "<cmd>Neogit<cr>", desc = "Status" },
-    { "<leader>gb", function() snacks().git.blame_line() end, desc = "Blame line" },
+    { "<leader>gb", "<cmd>GitBlameToggle<cr>", desc = "Blame line" },
     { "<leader>gt", function() snacks().picker.git_log_file() end, desc = "Log file" },
     { "<leader>gi", git_init, desc = "Git init" },
     { "<leader>gp", function() snacks().picker.gh_pr() end, desc = "GitHub PRs" },
