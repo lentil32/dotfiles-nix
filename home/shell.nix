@@ -38,6 +38,9 @@
         [ -n "$cwd" ] && [ "$cwd" != "$PWD" ] && builtin cd -- "$cwd"
         rm -f -- "$tmp"
       }
+
+      # Ensure Emacs keybindings in ZLE
+      bindkey -e
     '';
 
     shellGlobalAliases = {
@@ -85,4 +88,5 @@
       gcauto = ''git commit -m "$(claude -p "Look at the staged git changes and create a summarizing git commit title. Only respond with the title and no affirmation.")"'';
     };
   };
+
 }

@@ -2,6 +2,7 @@ local buffers = require("myLuaConf.buffer")
 local oil = require("myLuaConf.oil")
 local org = require("myLuaConf.org")
 local project = require("myLuaConf.project")
+local readline = require("myLuaConf.readline")
 local util = require("myLuaConf.util")
 
 local M = {}
@@ -18,6 +19,7 @@ local function git_init()
     vim.notify(out, vim.log.levels.ERROR)
   end
 end
+
 
 function M.setup()
   local Snacks = snacks()
@@ -65,6 +67,14 @@ function M.setup()
       })
     end,
   })
+
+  -- Emacs/readline-style bindings (insert).
+  Snacks.keymap.set("i", "<C-a>", readline.beginning_of_line, { desc = "Beginning of line" })
+  Snacks.keymap.set("i", "<C-e>", readline.end_of_line, { desc = "End of line" })
+  Snacks.keymap.set("i", "<C-t>", readline.transpose_chars, { desc = "Transpose chars" })
+  Snacks.keymap.set("i", "<M-f>", readline.forward_word, { desc = "Forward word" })
+  Snacks.keymap.set("i", "<M-b>", readline.backward_word, { desc = "Backward word" })
+  Snacks.keymap.set("i", "<M-d>", readline.kill_word, { desc = "Kill word" })
 end
 
 function M.list()

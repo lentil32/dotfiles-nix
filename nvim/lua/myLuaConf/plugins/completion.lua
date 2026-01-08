@@ -8,7 +8,6 @@ return {
         keymap = {
           preset = "default",
           ["<C-space>"] = { "show", "show_documentation", "hide_documentation" },
-          ["<C-e>"] = { "hide" },
           ["<CR>"] = { "accept", "fallback" },
           ["<Tab>"] = {
             "accept",
