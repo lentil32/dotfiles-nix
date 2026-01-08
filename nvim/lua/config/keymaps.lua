@@ -22,10 +22,22 @@ end
 
 local function kill_window_and_buffer()
   local buf = vim.api.nvim_get_current_buf()
+  do
+    local ok, Snacks = pcall(require, "snacks")
+    if ok and vim.b[buf].snacks_terminal then
+      for _, term in ipairs(Snacks.terminal.list()) do
+        if term.buf == buf then
+          term:close()
+          pcall(vim.cmd, "bwipeout! " .. buf)
+          return
+        end
+      end
+    end
+  end
   if #vim.api.nvim_list_wins() > 1 then
     vim.cmd("close")
   end
-  local is_terminal = vim.bo[buf].buftype == "terminal"
+  local is_terminal = vim.bo[buf].buftype == "terminal" or vim.bo[buf].filetype == "snacks_terminal"
   snacks().bufdelete.delete({ buf = buf, force = is_terminal, wipe = is_terminal })
 end
 
