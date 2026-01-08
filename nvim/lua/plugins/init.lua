@@ -1,5 +1,11 @@
-local lze = require("lze")
-
-require("config").setup()
-
-lze.load(require("plugins.specs"))
+return {
+  { import = "plugins.ui" },
+  { import = "plugins.motion" },
+  { import = "plugins.git" },
+  { import = "plugins.ai" },
+  { import = "plugins.org" },
+  { import = "plugins.syntax" },
+  { import = "plugins.lsp" },
+  { import = "plugins.typescript" },
+  { import = "plugins.format" },
+}
