@@ -1,6 +1,7 @@
 local colorscheme = require("myLuaConf.colorscheme")
 local keymaps = require("myLuaConf.keymaps")
 local snacks = require("myLuaConf.snacks")
+local util = require("myLuaConf.util")
 
 colorscheme.apply()
 snacks.setup()
@@ -85,6 +86,17 @@ require("lze").load({
       Snacks.keymap.set("n", "<leader>ac", function()
         require("sidekick.cli").toggle({ name = "codex", focus = true })
       end, { desc = "Sidekick Toggle Claude" })
+    end,
+  },
+  {
+    "smear-cursor.nvim",
+    for_cat = "general",
+    event = "DeferredUIEnter",
+    after = function()
+      if util.get_var(nil, "neovide") then
+        return
+      end
+      require("smear_cursor").setup({})
     end,
   },
   { import = "myLuaConf.plugins.completion" },

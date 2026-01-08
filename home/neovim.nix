@@ -169,6 +169,7 @@ in
             flash-nvim
             hop-nvim
             nvim-surround
+            smear-cursor-nvim
             sidekick-nvim
           ];
 
