@@ -1,22 +1,17 @@
-local util = require("config.util")
+local project_api = require("project.api")
 
 local M = {}
 
 local function resolve_project_root()
   local root
-  local project = util.try_require("project")
-  local project_api = util.try_require("project.api")
-  local get_root = project_api and project_api.get_project_root or (project and project.get_project_root)
-  if get_root then
-    local buf = vim.api.nvim_get_current_buf()
-    if vim.bo[buf].buftype ~= "terminal" then
-      root = get_root(buf)
-    else
-      local alt = vim.fn.bufnr("#")
-      if alt > 0 and vim.bo[alt].buftype ~= "terminal" then
-        root = get_root(alt)
-      end
+  local buf = vim.api.nvim_get_current_buf()
+  if vim.bo[buf].buftype == "terminal" then
+    local alt = vim.fn.bufnr("#")
+    if alt > 0 and vim.bo[alt].buftype ~= "terminal" then
+      root = project_api.get_project_root(alt)
     end
+  else
+    root = project_api.get_project_root(buf)
   end
   if not root or root == "" then
     root = vim.fn.getcwd()
