@@ -49,6 +49,7 @@ function M.setup()
     image = require("config.snacks_image"),
     picker = {
       enabled = true,
+      main = { current = true },
       win = {
         input = {
           keys = {
