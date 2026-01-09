@@ -50,7 +50,12 @@ local function opts()
     },
     terminal = {
       enabled = true,
-      win = { style = "terminal", position = "bottom", height = 0.35 },
+      win = {
+        style = "terminal",
+        position = "bottom",
+        height = 0.35,
+        bo = { buflisted = true },
+      },
     },
     image = require("myLuaConf.plugins.snacks_image"),
     picker = {

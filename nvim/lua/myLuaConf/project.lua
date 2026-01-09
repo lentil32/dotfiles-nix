@@ -15,6 +15,7 @@ function M.setup()
   project.setup({
     use_lsp = true,
     patterns = { ".git", "package.json", "Cargo.toml", "flake.nix", "Makefile" },
+    allow_different_owners = true,
     silent_chdir = true,
     show_hidden = true,
   })
