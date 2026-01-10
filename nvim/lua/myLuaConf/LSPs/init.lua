@@ -96,27 +96,17 @@ require("lze").load({
     },
   },
   {
-    "typescript-tools.nvim",
-    for_cat = "typescript",
-    ft = { "typescript", "typescriptreact", "javascript", "javascriptreact" },
-    after = function()
-      local caps = capabilities
-      if not caps then
-        local blink = util.try_require("blink.cmp")
-        if blink and blink.get_lsp_capabilities then
-          caps = blink.get_lsp_capabilities()
-        end
-      end
-      require("typescript-tools").setup({
-        capabilities = caps,
-        settings = {
-          tsserver_file_preferences = {
-            includeInlayParameterNameHints = "all",
-            includeInlayFunctionParameterTypeHints = true,
-            includeInlayVariableTypeHints = true,
-          },
-        },
-      })
-    end,
+    "vtsls",
+    enabled = nixCats("lsp") or false,
+    lsp = {
+      filetypes = {
+        "javascript",
+        "javascriptreact",
+        "javascript.jsx",
+        "typescript",
+        "typescriptreact",
+        "typescript.tsx",
+      },
+    },
   },
 })

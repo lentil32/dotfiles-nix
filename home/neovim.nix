@@ -201,7 +201,7 @@ in
           ];
 
           typescript = with pkgs.vimPlugins; [
-            typescript-tools-nvim
+            nvim-vtsls
           ];
 
           org = with pkgs.vimPlugins; [
@@ -230,7 +230,7 @@ in
 
           typescript = with pkgs; [
             biome
-            nodePackages.typescript-language-server
+            vtsls
           ];
         };
       };
