@@ -34,6 +34,7 @@
     pngpaste
     jq
     imagemagick
+    slack-cli
     yq-go # yaml processer https://github.com/mikefarah/yq
     wabt
     websocat

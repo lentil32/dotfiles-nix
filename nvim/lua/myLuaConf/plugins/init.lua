@@ -34,7 +34,15 @@ require("lze").load({
     for_cat = "general",
     event = "BufReadPre",
     after = function()
-      require("sidekick").setup({})
+      require("sidekick").setup({
+        cli = {
+          win = {
+            keys = {
+              close_wx = { "<leader>wx", "close", mode = "nt", desc = "Close Sidekick" },
+            },
+          },
+        },
+      })
 
       local Snacks = _G.Snacks or require("snacks")
       local function call_cli(method, opts)

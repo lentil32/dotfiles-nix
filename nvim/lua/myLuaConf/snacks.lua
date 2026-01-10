@@ -50,6 +50,7 @@ local function opts()
     },
     terminal = {
       enabled = true,
+      auto_insert = false,
       win = {
         style = "terminal",
         position = "bottom",
