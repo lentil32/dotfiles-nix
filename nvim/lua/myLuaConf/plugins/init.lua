@@ -38,7 +38,7 @@ require("lze").load({
         cli = {
           win = {
             keys = {
-              close_wx = { "<leader>wx", "close", mode = "nt", desc = "Close Sidekick" },
+              close_wx = { "<leader>wx", "close", mode = "n", desc = "Close Sidekick" },
             },
           },
         },

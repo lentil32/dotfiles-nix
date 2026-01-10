@@ -7,6 +7,7 @@ let
     { cask = "1password"; }
     { cask = "1password-cli"; }
     { cask = "cloudflare-warp"; }
+    { formulae = "cloudflared"; }
 
     # Browsers
     { cask = "arc"; }
@@ -42,7 +43,7 @@ let
       cask = "codex";
     }
     { formulae = "gemini-cli"; }
-    { formulae = "sst/tap/opencode"; }
+    { formulae = "anomalyco/tap/opencode"; }
 
     # IM & audio & video
     { cask = "discord"; }
@@ -91,6 +92,10 @@ let
     {
       desc = "Caddy uses it";
       formulae = "nss";
+    }
+    {
+      desc = "Slack CLI for developing Slack App";
+      cask = "slack-cli";
     }
     { formulae = "sqlfmt"; }
     { formulae = "supabase/tap/supabase"; }

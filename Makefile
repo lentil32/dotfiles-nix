@@ -33,7 +33,7 @@ update-emacs:
 update-flake:
 	nix flake update
 
-update-all: update-emacs update-flake
+update-all: update-flake
 
 deploy-emacs: update-emacs darwin
 deploy-flake: update-flake darwin
