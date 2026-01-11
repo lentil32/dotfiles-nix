@@ -153,7 +153,6 @@ in
             lzextras
             snacks-nvim
             grug-far-nvim # search/replace
-            project-nvim # projectile-like project management
             oil-nvim
           ];
 
