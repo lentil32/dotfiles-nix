@@ -25,7 +25,8 @@ make clean         # Remove the ./result symlink
 ## Coding Style & Naming Conventions
 - Nix formatting is handled by `nix fmt`/`make fmt` (nixfmt via treefmt). Keep changes `nixfmt`-clean.
 - Follow existing file patterns: system modules in `modules/*.nix`, host overrides in `modules/<hostname>/`, user configs in `home/*.nix`.
-- Lua in `nvim/` follows the project’s existing style (2-space indentation where present).
+- Lua in `nvim/` follows the project’s existing style.
+- DO NOT care about backward compatibility unless user mentioned to do so.
 
 ## Testing Guidelines
 - There is no dedicated test suite; the primary check is `nix flake check` (`make check`).
