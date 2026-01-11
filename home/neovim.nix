@@ -157,14 +157,27 @@ in
           installPhase = ''
             runHook preInstall
             mkdir -p $out/lua
-            lib=$(find target -type f \( -name "libproject_root.*" -o -name "project_root.dll" \) | head -n 1)
+            lib=""
+            if [ -f target/release/libproject_root.dylib ]; then
+              lib=target/release/libproject_root.dylib
+            elif [ -f target/release/libproject_root.so ]; then
+              lib=target/release/libproject_root.so
+            elif [ -f target/release/project_root.dll ]; then
+              lib=target/release/project_root.dll
+            else
+              lib=$(find target -type f \( -name "libproject_root.dylib" -o -name "libproject_root.so" -o -name "project_root.dll" \) | head -n 1)
+            fi
             if [ -z "$lib" ]; then
               echo "project_root library not found" >&2
               exit 1
             fi
             case "$lib" in
               *.dll) cp "$lib" "$out/lua/project_root.dll" ;;
-              *) cp "$lib" "$out/lua/project_root.so" ;;
+              *.dylib|*.so) cp "$lib" "$out/lua/project_root.so" ;;
+              *)
+                echo "project_root library not found: $lib" >&2
+                exit 1
+                ;;
             esac
             runHook postInstall
           '';

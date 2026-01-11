@@ -6,7 +6,7 @@ use std::{
 
 use once_cell::sync::Lazy;
 
-use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
+use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts, OptionScope};
 use nvim_oxi::api::types::{AutocmdCallbackArgs, LogLevel};
 use nvim_oxi::api::{self, Buffer};
 use nvim_oxi::conversion::FromObject;
@@ -47,7 +47,36 @@ impl Default for State {
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State::default()));
 
+fn debug_enabled() -> bool {
+    if let Ok(value) = api::get_var::<bool>("project_root_debug") {
+        return value;
+    }
+    if let Ok(value) = api::get_var::<i64>("project_root_debug") {
+        return value != 0;
+    }
+    if let Ok(value) = api::get_var::<f64>("project_root_debug") {
+        return value != 0.0;
+    }
+    if let Ok(value) = api::get_var::<NvimString>("project_root_debug") {
+        let value = value.to_string_lossy().to_ascii_lowercase();
+        return matches!(value.as_str(), "1" | "true" | "yes" | "on");
+    }
+    false
+}
+
+fn debug_log<F>(build: F)
+where
+    F: FnOnce() -> String,
+{
+    if !debug_enabled() {
+        return;
+    }
+    let message = build();
+    let _ = api::notify(&message, LogLevel::Info, &Dictionary::new());
+}
+
 fn normalize_path(path: &str) -> Option<PathBuf> {
+    let path = path.strip_prefix("file://").unwrap_or(path);
     if path.is_empty() {
         return None;
     }
@@ -130,30 +159,88 @@ fn set_buf_root(buf: &Buffer, root: Option<&str>, path: Option<&str>) -> Result<
 
 fn get_path_from_buffer(buf: &Buffer) -> Result<Option<PathBuf>> {
     if !buf.is_valid() {
+        debug_log(|| "get_path_from_buffer: buffer invalid".to_string());
         return Ok(None);
     }
     let name = buf.get_name()?;
     if name.as_os_str().is_empty() {
+        debug_log(|| {
+            format!(
+                "get_path_from_buffer: buf={} empty name",
+                buf.handle()
+            )
+        });
         return Ok(None);
     }
     let mut path = name.to_string_lossy().into_owned();
+    debug_log(|| {
+        format!(
+            "get_path_from_buffer: buf={} name='{}'",
+            buf.handle(),
+            path
+        )
+    });
     if let Some(stripped) = path.strip_prefix("oil://") {
         path = stripped.to_string();
+        debug_log(|| {
+            format!(
+                "get_path_from_buffer: buf={} oil path='{}'",
+                buf.handle(),
+                path
+            )
+        });
     }
 
     let bt: NvimString = api::get_option_value(
         "buftype",
-        &OptionOpts::builder().buffer(buf.clone()).build(),
+        &OptionOpts::builder()
+            .scope(OptionScope::Local)
+            .buffer(buf.clone())
+            .build(),
     )?;
     if !bt.is_empty() {
+        debug_log(|| {
+            format!(
+                "get_path_from_buffer: buf={} buftype='{}' -> skip",
+                buf.handle(),
+                bt.to_string_lossy()
+            )
+        });
         return Ok(None);
     }
 
     if has_uri_scheme(&path) && !path.starts_with("file://") {
+        debug_log(|| {
+            format!(
+                "get_path_from_buffer: buf={} uri scheme in '{}' -> skip",
+                buf.handle(),
+                path
+            )
+        });
         return Ok(None);
     }
 
-    Ok(normalize_path(&path))
+    let normalized = normalize_path(&path);
+    debug_log(|| {
+        let value = normalized
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<none>".to_string());
+        format!(
+            "get_path_from_buffer: buf={} normalized='{}'",
+            buf.handle(),
+            value
+        )
+    });
+    Ok(normalized)
+}
+
+fn cached_or_refresh_root(buf: &Buffer) -> Result<Option<String>> {
+    if let Some(root) = cached_root_for_buffer(buf)? {
+        return Ok(Some(root));
+    }
+
+    refresh_root_for_buffer(buf)
 }
 
 fn root_from_path(path: &Path) -> Option<PathBuf> {
@@ -162,6 +249,7 @@ fn root_from_path(path: &Path) -> Option<PathBuf> {
         state.root_indicators.clone()
     };
     if indicators.is_empty() {
+        debug_log(|| "root_from_path: no indicators".to_string());
         return None;
     }
 
@@ -173,6 +261,14 @@ fn root_from_path(path: &Path) -> Option<PathBuf> {
     loop {
         for indicator in &indicators {
             if current.join(indicator).exists() {
+                debug_log(|| {
+                    format!(
+                        "root_from_path: path='{}' found='{}' via '{}'",
+                        path.display(),
+                        current.display(),
+                        indicator
+                    )
+                });
                 return Some(current);
             }
         }
@@ -181,16 +277,30 @@ fn root_from_path(path: &Path) -> Option<PathBuf> {
         }
     }
 
+    debug_log(|| {
+        format!(
+            "root_from_path: path='{}' no root (indicators={:?})",
+            path.display(),
+            indicators
+        )
+    });
     None
 }
 
 fn refresh_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
     if !buf.is_valid() {
+        debug_log(|| "refresh_root_for_buffer: buffer invalid".to_string());
         return Ok(None);
     }
     let path = match get_path_from_buffer(buf)? {
         Some(path) => path,
         None => {
+            debug_log(|| {
+                format!(
+                    "refresh_root_for_buffer: buf={} no path",
+                    buf.handle()
+                )
+            });
             set_buf_root(buf, None, None)?;
             return Ok(None);
         }
@@ -199,6 +309,14 @@ fn refresh_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
     let path_string = path.to_string_lossy().into_owned();
     let root = root_from_path(&path).map(|root| root.to_string_lossy().into_owned());
     set_buf_root(buf, root.as_deref(), Some(&path_string))?;
+    debug_log(|| {
+        format!(
+            "refresh_root_for_buffer: buf={} path='{}' root='{}'",
+            buf.handle(),
+            path_string,
+            root.as_deref().unwrap_or("<none>")
+        )
+    });
 
     Ok(root)
 }
@@ -213,28 +331,71 @@ fn get_cached_root(buf: &Buffer, path: &str) -> Option<String> {
 
 fn cached_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
     let Some(path) = get_path_from_buffer(buf)? else {
+        debug_log(|| {
+            format!(
+                "cached_root_for_buffer: buf={} no path",
+                buf.handle()
+            )
+        });
         return Ok(None);
     };
     let path_string = path.to_string_lossy().into_owned();
-    Ok(get_cached_root(buf, &path_string))
+    let cached = get_cached_root(buf, &path_string);
+    debug_log(|| {
+        format!(
+            "cached_root_for_buffer: buf={} path='{}' cached='{}'",
+            buf.handle(),
+            path_string,
+            cached.as_deref().unwrap_or("<none>")
+        )
+    });
+    Ok(cached)
 }
 
 fn get_project_root() -> Result<Option<String>> {
     let buf = api::get_current_buf();
-    if let Some(root) = cached_root_for_buffer(&buf)? {
+    debug_log(|| {
+        format!(
+            "get_project_root: current buf={}",
+            buf.handle()
+        )
+    });
+    if let Some(root) = cached_or_refresh_root(&buf)? {
+        debug_log(|| {
+            format!(
+                "get_project_root: current buf={} root='{}'",
+                buf.handle(),
+                root
+            )
+        });
         return Ok(Some(root));
     }
 
     let alt: i64 = api::call_function("bufnr", nvim_oxi::Array::from_iter(["#"]))?;
     if alt <= 0 {
+        debug_log(|| "get_project_root: no alternate buffer".to_string());
         return Ok(None);
     }
     let Ok(handle) = i32::try_from(alt) else {
+        debug_log(|| {
+            format!(
+                "get_project_root: alternate buffer handle overflow (value={})",
+                alt
+            )
+        });
         return Ok(None);
     };
     let alt_buf = Buffer::from(handle);
 
-    cached_root_for_buffer(&alt_buf)
+    let alt_root = cached_or_refresh_root(&alt_buf)?;
+    debug_log(|| {
+        format!(
+            "get_project_root: alternate buf={} root='{}'",
+            handle,
+            alt_root.as_deref().unwrap_or("<none>")
+        )
+    });
+    Ok(alt_root)
 }
 
 fn setup_autocmd() -> Result<()> {
@@ -297,10 +458,11 @@ fn setup(config: Option<Dictionary>) -> Result<()> {
     };
 
     if should_setup {
-        setup_autocmd()
-    } else {
-        Ok(())
+        setup_autocmd()?;
     }
+
+    let _ = refresh_root_for_buffer(&api::get_current_buf());
+    Ok(())
 }
 
 fn swap_root(buf: Option<Buffer>) -> Result<()> {
@@ -309,7 +471,7 @@ fn swap_root(buf: Option<Buffer>) -> Result<()> {
     Ok(())
 }
 
-fn project_root() -> Result<Option<String>> {
+fn project_root_value() -> Result<Option<String>> {
     get_project_root()
 }
 
@@ -332,7 +494,7 @@ fn show_project_root() -> Result<()> {
 }
 
 #[nvim_oxi::plugin]
-fn project_root_plugin() -> Result<Dictionary> {
+fn project_root() -> Result<Dictionary> {
     let mut api = Dictionary::new();
     api.insert("setup", Function::<Option<Dictionary>, ()>::from_fn(setup));
     api.insert(
@@ -341,7 +503,7 @@ fn project_root_plugin() -> Result<Dictionary> {
     );
     api.insert(
         "project_root",
-        Function::<(), Option<String>>::from_fn(|()| project_root()),
+        Function::<(), Option<String>>::from_fn(|()| project_root_value()),
     );
     api.insert(
         "show_project_root",
