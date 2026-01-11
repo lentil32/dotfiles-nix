@@ -1,22 +1,12 @@
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, path::Path};
 
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{OptionOpts, OptionScope};
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString};
+use nvim_utils::path::{path_is_dir, strip_known_prefixes};
 
 type OptMap = HashMap<String, Object>;
-
-fn normalize_path(path: &str) -> &str {
-    let mut path = path;
-    if let Some(stripped) = path.strip_prefix("oil://") {
-        path = stripped;
-    }
-    if let Some(stripped) = path.strip_prefix("file://") {
-        path = stripped;
-    }
-    path
-}
 
 fn buffer_from_handle(handle: Option<i64>) -> Option<Buffer> {
     let handle = handle?;
@@ -64,22 +54,18 @@ fn get_option_value(opt: &str, opt_opts: &OptionOpts, default: Object) -> Object
 }
 
 fn non_nil(value: Object) -> Option<Object> {
-    if value.is_nil() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_nil() { None } else { Some(value) }
 }
 
 fn is_dir(path: Option<String>) -> bool {
     let Some(path) = path else {
         return false;
     };
-    let path = normalize_path(path.as_str());
+    let path = strip_known_prefixes(path.as_str());
     if path.is_empty() {
         return false;
     }
-    fs::metadata(path).map(|meta| meta.is_dir()).unwrap_or(false)
+    path_is_dir(Path::new(path))
 }
 
 fn set_buf_opts((buf, opts): (Option<i64>, OptMap)) -> Result<()> {
@@ -142,8 +128,7 @@ fn edit_path(path: Option<String>) -> Result<()> {
     if path.is_empty() {
         return Ok(());
     }
-    let escaped: NvimString =
-        api::call_function("fnameescape", Array::from_iter([path.as_str()]))?;
+    let escaped: NvimString = api::call_function("fnameescape", Array::from_iter([path.as_str()]))?;
     let cmd = format!("edit {}", escaped.to_string_lossy());
     api::command(&cmd)?;
     Ok(())

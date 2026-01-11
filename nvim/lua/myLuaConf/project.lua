@@ -14,10 +14,7 @@ local function try_load()
   load_error = mod
   if vim.g.project_root_debug and not notified then
     notified = true
-    vim.notify(
-      "project_root require failed: " .. tostring(load_error),
-      vim.log.levels.ERROR
-    )
+    vim.notify("project_root require failed: " .. tostring(load_error), vim.log.levels.ERROR)
   end
   return false
 end

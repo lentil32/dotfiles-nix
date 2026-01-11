@@ -9,6 +9,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
 
 [[package]]
+name = "my_util"
+version = "0.1.0"
+dependencies = [
+ "nvim-oxi",
+ "nvim-utils",
+]
+
+[[package]]
 name = "nvim-oxi"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -68,6 +76,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvim-utils"
+version = "0.1.0"
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -87,6 +99,7 @@ name = "project_root"
 version = "0.1.0"
 dependencies = [
  "nvim-oxi",
+ "nvim-utils",
  "once_cell",
 ]
 

@@ -144,15 +144,19 @@ in
         ...
       }@packageDef:
       let
-        projectRootSrc = ../nvim/rust/project_root;
+        rustWorkspace = ../nvim/rust;
         projectRootPlugin = pkgs.rustPlatform.buildRustPackage {
           pname = "project-root-nvim";
           version = "0.1.0";
-          src = projectRootSrc;
+          src = rustWorkspace;
           cargoLock = {
-            lockFile = projectRootSrc + "/Cargo.lock";
+            lockFile = rustWorkspace + "/Cargo.lock";
           };
-          cargoBuildFlags = [ "--locked" ];
+          cargoBuildFlags = [
+            "--locked"
+            "--package"
+            "project_root"
+          ];
           doCheck = false;
           installPhase = ''
             runHook preInstall
@@ -182,15 +186,18 @@ in
             runHook postInstall
           '';
         };
-        utilSrc = ../nvim/rust/util;
         utilPlugin = pkgs.rustPlatform.buildRustPackage {
           pname = "my-util-nvim";
           version = "0.1.0";
-          src = utilSrc;
+          src = rustWorkspace;
           cargoLock = {
-            lockFile = utilSrc + "/Cargo.lock";
+            lockFile = rustWorkspace + "/Cargo.lock";
           };
-          cargoBuildFlags = [ "--locked" ];
+          cargoBuildFlags = [
+            "--locked"
+            "--package"
+            "my_util"
+          ];
           doCheck = false;
           installPhase = ''
             runHook preInstall

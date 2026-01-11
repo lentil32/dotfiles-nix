@@ -8,3 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nvim-oxi = { version = "0.6", features = ["neovim-0-10"] }
+nvim-utils = { path = "../nvim_utils" }

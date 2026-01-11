@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Mutex,
 };
 
@@ -11,6 +10,7 @@ use nvim_oxi::api::types::{AutocmdCallbackArgs, LogLevel};
 use nvim_oxi::api::{self, Buffer};
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Dictionary, Function, Result, String as NvimString};
+use nvim_utils::path::{has_uri_scheme, normalize_path, path_is_dir, strip_known_prefixes};
 
 const ROOT_VAR: &str = "project_root";
 const ROOT_FOR_VAR: &str = "project_root_for";
@@ -75,53 +75,6 @@ where
     let _ = api::notify(&message, LogLevel::Info, &Dictionary::new());
 }
 
-fn normalize_path(path: &str) -> Option<PathBuf> {
-    let path = path.strip_prefix("file://").unwrap_or(path);
-    if path.is_empty() {
-        return None;
-    }
-    let normalized = Path::new(path)
-        .components()
-        .fold(PathBuf::new(), |mut acc, component| {
-            match component {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    acc.pop();
-                }
-                Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
-                    acc.push(component.as_os_str());
-                }
-            }
-            acc
-        });
-    Some(normalized)
-}
-
-fn path_is_dir(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|meta| meta.is_dir())
-        .unwrap_or(false)
-}
-
-fn has_uri_scheme(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() {
-        return false;
-    }
-    for ch in chars {
-        if ch == ':' {
-            return value.contains("://");
-        }
-        if !(ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '.') {
-            return false;
-        }
-    }
-    false
-}
-
 fn get_buf_var(buf: &Buffer, var: &str) -> Option<String> {
     if !buf.is_valid() {
         return None;
@@ -164,29 +117,24 @@ fn get_path_from_buffer(buf: &Buffer) -> Result<Option<PathBuf>> {
     }
     let name = buf.get_name()?;
     if name.as_os_str().is_empty() {
-        debug_log(|| {
-            format!(
-                "get_path_from_buffer: buf={} empty name",
-                buf.handle()
-            )
-        });
+        debug_log(|| format!("get_path_from_buffer: buf={} empty name", buf.handle()));
         return Ok(None);
     }
-    let mut path = name.to_string_lossy().into_owned();
+    let raw_path = name.to_string_lossy().into_owned();
     debug_log(|| {
         format!(
             "get_path_from_buffer: buf={} name='{}'",
             buf.handle(),
-            path
+            raw_path
         )
     });
-    if let Some(stripped) = path.strip_prefix("oil://") {
-        path = stripped.to_string();
+    let stripped = strip_known_prefixes(&raw_path);
+    if stripped != raw_path {
         debug_log(|| {
             format!(
-                "get_path_from_buffer: buf={} oil path='{}'",
+                "get_path_from_buffer: buf={} stripped path='{}'",
                 buf.handle(),
-                path
+                stripped
             )
         });
     }
@@ -209,18 +157,21 @@ fn get_path_from_buffer(buf: &Buffer) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
 
-    if has_uri_scheme(&path) && !path.starts_with("file://") {
+    if has_uri_scheme(&raw_path)
+        && !raw_path.starts_with("file://")
+        && !raw_path.starts_with("oil://")
+    {
         debug_log(|| {
             format!(
                 "get_path_from_buffer: buf={} uri scheme in '{}' -> skip",
                 buf.handle(),
-                path
+                raw_path
             )
         });
         return Ok(None);
     }
 
-    let normalized = normalize_path(&path);
+    let normalized = normalize_path(stripped);
     debug_log(|| {
         let value = normalized
             .as_ref()
@@ -295,12 +246,7 @@ fn refresh_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
     let path = match get_path_from_buffer(buf)? {
         Some(path) => path,
         None => {
-            debug_log(|| {
-                format!(
-                    "refresh_root_for_buffer: buf={} no path",
-                    buf.handle()
-                )
-            });
+            debug_log(|| format!("refresh_root_for_buffer: buf={} no path", buf.handle()));
             set_buf_root(buf, None, None)?;
             return Ok(None);
         }
@@ -331,12 +277,7 @@ fn get_cached_root(buf: &Buffer, path: &str) -> Option<String> {
 
 fn cached_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
     let Some(path) = get_path_from_buffer(buf)? else {
-        debug_log(|| {
-            format!(
-                "cached_root_for_buffer: buf={} no path",
-                buf.handle()
-            )
-        });
+        debug_log(|| format!("cached_root_for_buffer: buf={} no path", buf.handle()));
         return Ok(None);
     };
     let path_string = path.to_string_lossy().into_owned();
@@ -354,12 +295,7 @@ fn cached_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
 
 fn get_project_root() -> Result<Option<String>> {
     let buf = api::get_current_buf();
-    debug_log(|| {
-        format!(
-            "get_project_root: current buf={}",
-            buf.handle()
-        )
-    });
+    debug_log(|| format!("get_project_root: current buf={}", buf.handle()));
     if let Some(root) = cached_or_refresh_root(&buf)? {
         debug_log(|| {
             format!(
