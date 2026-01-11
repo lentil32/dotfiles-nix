@@ -182,6 +182,44 @@ in
             runHook postInstall
           '';
         };
+        utilSrc = ../nvim/rust/util;
+        utilPlugin = pkgs.rustPlatform.buildRustPackage {
+          pname = "my-util-nvim";
+          version = "0.1.0";
+          src = utilSrc;
+          cargoLock = {
+            lockFile = utilSrc + "/Cargo.lock";
+          };
+          cargoBuildFlags = [ "--locked" ];
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lua
+            lib=""
+            if [ -f target/release/libmy_util.dylib ]; then
+              lib=target/release/libmy_util.dylib
+            elif [ -f target/release/libmy_util.so ]; then
+              lib=target/release/libmy_util.so
+            elif [ -f target/release/my_util.dll ]; then
+              lib=target/release/my_util.dll
+            else
+              lib=$(find target -type f \( -name "libmy_util.dylib" -o -name "libmy_util.so" -o -name "my_util.dll" \) | head -n 1)
+            fi
+            if [ -z "$lib" ]; then
+              echo "my_util library not found" >&2
+              exit 1
+            fi
+            case "$lib" in
+              *.dll) cp "$lib" "$out/lua/my_util.dll" ;;
+              *.dylib|*.so) cp "$lib" "$out/lua/my_util.so" ;;
+              *)
+                echo "my_util library not found: $lib" >&2
+                exit 1
+                ;;
+            esac
+            runHook postInstall
+          '';
+        };
       in
       {
         # Plugins that load at startup
@@ -194,6 +232,7 @@ in
             snacks-nvim
             grug-far-nvim # search/replace
             oil-nvim
+            utilPlugin
             projectRootPlugin
           ];
 
