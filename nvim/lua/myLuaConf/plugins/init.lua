@@ -33,6 +33,92 @@ require("lze").load({
     "sidekick.nvim",
     for_cat = "general",
     event = "BufReadPre",
+    keys = {
+      {
+        "<tab>",
+        function()
+          if not require("sidekick").nes_jump_or_apply() then
+            return "<Tab>"
+          end
+          return ""
+        end,
+        mode = "n",
+        expr = true,
+        desc = "Goto/Apply Next Edit Suggestion",
+      },
+      {
+        "<c-.>",
+        function()
+          require("sidekick.cli").toggle()
+        end,
+        mode = { "n", "t", "i", "x" },
+        desc = "Sidekick toggle",
+      },
+      {
+        "<leader>aa",
+        function()
+          require("sidekick.cli").toggle()
+        end,
+        mode = "n",
+        desc = "Sidekick toggle CLI",
+      },
+      {
+        "<leader>as",
+        function()
+          require("sidekick.cli").select()
+        end,
+        mode = "n",
+        desc = "Sidekick select CLI",
+      },
+      {
+        "<leader>ad",
+        function()
+          require("sidekick.cli").close()
+        end,
+        mode = "n",
+        desc = "Sidekick detach CLI session",
+      },
+      {
+        "<leader>at",
+        function()
+          require("sidekick.cli").send({ msg = "{this}" })
+        end,
+        mode = { "n", "x" },
+        desc = "Sidekick send this",
+      },
+      {
+        "<leader>af",
+        function()
+          require("sidekick.cli").send({ msg = "{file}" })
+        end,
+        mode = "n",
+        desc = "Sidekick send file",
+      },
+      {
+        "<leader>av",
+        function()
+          require("sidekick.cli").send({ msg = "{selection}" })
+        end,
+        mode = "x",
+        desc = "Sidekick send selection",
+      },
+      {
+        "<leader>ap",
+        function()
+          require("sidekick.cli").prompt()
+        end,
+        mode = { "n", "x" },
+        desc = "Sidekick prompt",
+      },
+      {
+        "<leader>ac",
+        function()
+          require("sidekick.cli").toggle({ name = "codex", focus = true })
+        end,
+        mode = "n",
+        desc = "Sidekick Toggle Claude",
+      },
+    },
     after = function()
       require("sidekick").setup({
         cli = {
@@ -44,56 +130,6 @@ require("lze").load({
         },
       })
 
-      local Snacks = _G.Snacks or require("snacks")
-      local function call_cli(method, opts)
-        local cli = require("sidekick.cli")
-        if cli[method] then
-          cli[method](opts)
-        end
-      end
-
-      Snacks.keymap.set("n", "<tab>", function()
-        if not require("sidekick").nes_jump_or_apply() then
-          return "<Tab>"
-        end
-        return ""
-      end, { expr = true, desc = "Goto/Apply Next Edit Suggestion" })
-
-      Snacks.keymap.set({ "n", "t", "i", "x" }, "<c-.>", function()
-        call_cli("toggle")
-      end, { desc = "Sidekick toggle" })
-
-      Snacks.keymap.set("n", "<leader>aa", function()
-        call_cli("toggle")
-      end, { desc = "Sidekick toggle CLI" })
-
-      Snacks.keymap.set("n", "<leader>as", function()
-        call_cli("select")
-      end, { desc = "Sidekick select CLI" })
-
-      Snacks.keymap.set("n", "<leader>ad", function()
-        call_cli("close")
-      end, { desc = "Sidekick detach CLI session" })
-
-      Snacks.keymap.set({ "n", "x" }, "<leader>at", function()
-        call_cli("send", { msg = "{this}" })
-      end, { desc = "Sidekick send this" })
-
-      Snacks.keymap.set("n", "<leader>af", function()
-        call_cli("send", { msg = "{file}" })
-      end, { desc = "Sidekick send file" })
-
-      Snacks.keymap.set("x", "<leader>av", function()
-        call_cli("send", { msg = "{selection}" })
-      end, { desc = "Sidekick send selection" })
-
-      Snacks.keymap.set({ "n", "x" }, "<leader>ap", function()
-        call_cli("prompt")
-      end, { desc = "Sidekick prompt" })
-
-      Snacks.keymap.set("n", "<leader>ac", function()
-        require("sidekick.cli").toggle({ name = "codex", focus = true })
-      end, { desc = "Sidekick Toggle Claude" })
     end,
   },
   {

@@ -61,8 +61,8 @@
       url = "github:pear-devs/homebrew-pear";
       flake = false;
     };
-    homebrew-sst = {
-      url = "github:sst/homebrew-tap";
+    homebrew-anomalyco = {
+      url = "github:anomalyco/homebrew-tap";
       flake = false;
     };
     homebrew-supabase = {
@@ -88,7 +88,7 @@
       homebrew-cask,
       homebrew-services,
       homebrew-pear,
-      homebrew-sst,
+      homebrew-anomalyco,
       homebrew-supabase,
       nixCats,
       ...
@@ -207,7 +207,7 @@
                   "homebrew/homebrew-cask" = homebrew-cask;
                   "homebrew/homebrew-services" = homebrew-services;
                   "pear-devs/homebrew-pear" = homebrew-pear;
-                  "sst/homebrew-tap" = homebrew-sst;
+                  "anomalyco/homebrew-tap" = homebrew-anomalyco;
                   "supabase/homebrew-tap" = homebrew-supabase;
                 };
               };

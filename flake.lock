@@ -153,6 +153,22 @@
         "type": "github"
       }
     },
+    "homebrew-anomalyco": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1768055111,
+        "narHash": "sha256-vW/wWTbgx61kgL2JsUpXl201vS639UPHYb0BjnBaZFE=",
+        "owner": "anomalyco",
+        "repo": "homebrew-tap",
+        "rev": "976616ce5fca0ac01113d8095b7eaa60b33bf7f2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "anomalyco",
+        "repo": "homebrew-tap",
+        "type": "github"
+      }
+    },
     "homebrew-cask": {
       "flake": false,
       "locked": {
@@ -214,22 +230,6 @@
       "original": {
         "owner": "homebrew",
         "repo": "homebrew-services",
-        "type": "github"
-      }
-    },
-    "homebrew-sst": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1768055111,
-        "narHash": "sha256-vW/wWTbgx61kgL2JsUpXl201vS639UPHYb0BjnBaZFE=",
-        "owner": "sst",
-        "repo": "homebrew-tap",
-        "rev": "976616ce5fca0ac01113d8095b7eaa60b33bf7f2",
-        "type": "github"
-      },
-      "original": {
-        "owner": "sst",
-        "repo": "homebrew-tap",
         "type": "github"
       }
     },
@@ -406,11 +406,11 @@
         "flake-utils": "flake-utils",
         "ghostty": "ghostty",
         "home-manager": "home-manager_2",
+        "homebrew-anomalyco": "homebrew-anomalyco",
         "homebrew-cask": "homebrew-cask",
         "homebrew-core": "homebrew-core",
         "homebrew-pear": "homebrew-pear",
         "homebrew-services": "homebrew-services",
-        "homebrew-sst": "homebrew-sst",
         "homebrew-supabase": "homebrew-supabase",
         "nix-darwin": "nix-darwin",
         "nix-darwin-emacs": "nix-darwin-emacs",
