@@ -146,7 +146,9 @@ fn get_path_from_buffer(buf: &Buffer) -> Result<Option<PathBuf>> {
             .buffer(buf.clone())
             .build(),
     )?;
-    if !bt.is_empty() {
+    let allow_nonfile_buftype =
+        raw_path.starts_with("file://") || raw_path.starts_with("oil://");
+    if !bt.is_empty() && !allow_nonfile_buftype {
         debug_log(|| {
             format!(
                 "get_path_from_buffer: buf={} buftype='{}' -> skip",
