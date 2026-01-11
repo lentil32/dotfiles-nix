@@ -3,6 +3,10 @@ return {
     "neogit",
     for_cat = "git",
     cmd = "Neogit",
+    load = function(name)
+      vim.cmd.packadd(name)
+      vim.cmd.packadd("diffview.nvim")
+    end,
     after = function()
       require("neogit").setup({
         integrations = { diffview = true, snacks = true },

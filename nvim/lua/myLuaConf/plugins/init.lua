@@ -25,6 +25,11 @@ require("lze").load({
     "orgmode",
     for_cat = "org",
     ft = "org",
+    on_require = { "orgmode" },
+    keys = {
+      { "<leader>aoa", require("myLuaConf.org").action("agenda.prompt"), desc = "Agenda" },
+      { "<leader>aoc", require("myLuaConf.org").action("capture.prompt"), desc = "Capture" },
+    },
     after = function()
       require("myLuaConf.org").setup()
     end,
@@ -124,7 +129,6 @@ require("lze").load({
           },
         },
       })
-
     end,
   },
   {

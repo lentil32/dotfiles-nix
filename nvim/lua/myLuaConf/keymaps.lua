@@ -1,6 +1,5 @@
 local buffers = require("myLuaConf.buffer")
 local oil = require("myLuaConf.oil")
-local org = require("myLuaConf.org")
 local project = require("myLuaConf.project")
 local readline = require("myLuaConf.readline")
 local util = require("myLuaConf.util")
@@ -19,7 +18,6 @@ local function git_init()
     vim.notify(out, vim.log.levels.ERROR)
   end
 end
-
 
 function M.setup()
   local Snacks = snacks()
@@ -115,17 +113,47 @@ function M.list()
 
   add({
     -- Top-level
-    { "<leader>/", function() picker.grep() end, desc = "Search project" },
-    { "<leader>*", function() picker.grep({ search = vim.fn.expand("<cword>") }) end, desc = "Search project (word)" },
+    {
+      "<leader>/",
+      function()
+        picker.grep()
+      end,
+      desc = "Search project",
+    },
+    {
+      "<leader>*",
+      function()
+        picker.grep({ search = vim.fn.expand("<cword>") })
+      end,
+      desc = "Search project (word)",
+    },
     { "<leader><Tab>", "<cmd>b#<cr>", desc = "Last buffer" },
-    { "<leader>'", function() Snacks.terminal.toggle() end, desc = "Terminal" },
-    { "&", function() run_shell(vim.fn.getcwd()) end, desc = "Shell command" },
+    {
+      "<leader>'",
+      function()
+        Snacks.terminal.toggle()
+      end,
+      desc = "Terminal",
+    },
+    {
+      "&",
+      function()
+        run_shell(vim.fn.getcwd())
+      end,
+      desc = "Shell command",
+    },
   })
 
   add({
     -- File
     { "<leader>f", group = "file" },
-    { "<leader>ff", function() picker.files() end, desc = "Find file" },
+    {
+      "<leader>ff",
+      function()
+        picker.files()
+      end,
+      desc = "Find file",
+    },
     {
       "<leader>fF",
       function()
@@ -152,19 +180,55 @@ function M.list()
       end,
       desc = "Jump to directory (Oil)",
     },
-    { "<leader>fr", function() picker.recent() end, desc = "Recent files" },
+    {
+      "<leader>fr",
+      function()
+        picker.recent()
+      end,
+      desc = "Recent files",
+    },
     { "<leader>fs", "<cmd>w<cr>", desc = "Save" },
     { "<leader>fy", group = "yank" },
-    { "<leader>fyy", function() vim.fn.setreg("+", vim.fn.expand("%:t")) end, desc = "Filename" },
-    { "<leader>fyY", function() vim.fn.setreg("+", vim.fn.expand("%:p")) end, desc = "Full path" },
-    { "<leader>fyd", function() vim.fn.setreg("+", vim.fn.expand("%:p:h")) end, desc = "Directory" },
-    { "<leader>fyr", function() vim.fn.setreg("+", vim.fn.expand("%")) end, desc = "Relative path" },
+    {
+      "<leader>fyy",
+      function()
+        vim.fn.setreg("+", vim.fn.expand("%:t"))
+      end,
+      desc = "Filename",
+    },
+    {
+      "<leader>fyY",
+      function()
+        vim.fn.setreg("+", vim.fn.expand("%:p"))
+      end,
+      desc = "Full path",
+    },
+    {
+      "<leader>fyd",
+      function()
+        vim.fn.setreg("+", vim.fn.expand("%:p:h"))
+      end,
+      desc = "Directory",
+    },
+    {
+      "<leader>fyr",
+      function()
+        vim.fn.setreg("+", vim.fn.expand("%"))
+      end,
+      desc = "Relative path",
+    },
   })
 
   add({
     -- Project
     { "<leader>p", group = "project" },
-    { "<leader>pp", function() picker.projects() end, desc = "Switch project" },
+    {
+      "<leader>pp",
+      function()
+        picker.projects()
+      end,
+      desc = "Switch project",
+    },
     {
       "<leader>pf",
       function()
@@ -249,7 +313,13 @@ function M.list()
       end,
       desc = "Replace in project",
     },
-    { "<leader>p'", function() Snacks.terminal.toggle() end, desc = "Terminal" },
+    {
+      "<leader>p'",
+      function()
+        Snacks.terminal.toggle()
+      end,
+      desc = "Terminal",
+    },
     {
       "<leader>pk",
       function()
@@ -275,33 +345,105 @@ function M.list()
   add({
     -- Buffer
     { "<leader>b", group = "buffer" },
-    { "<leader>bb", function() picker.buffers() end, desc = "Buffers" },
+    {
+      "<leader>bb",
+      function()
+        picker.buffers()
+      end,
+      desc = "Buffers",
+    },
     { "<leader>bj", project.show_project_root, desc = "Project root" },
     { "<leader>bd", buffers.delete_current_buffer, desc = "Delete" },
     { "<leader>bn", "<cmd>bnext<cr>", desc = "Next" },
     { "<leader>bp", "<cmd>bprev<cr>", desc = "Prev" },
     { "<leader>bs", "<cmd>edit ~/.local/share/nvim/scratch.md<cr>", desc = "Scratch buffer" },
-    { "<leader>bt", function() Snacks.terminal.toggle() end, desc = "Terminal" },
+    {
+      "<leader>bt",
+      function()
+        Snacks.terminal.toggle()
+      end,
+      desc = "Terminal",
+    },
   })
 
   add({
     -- Search
     { "<leader>s", group = "search" },
-    { "<leader>sp", function() picker.grep() end, desc = "Project" },
-    { "<leader>ss", function() picker.lines() end, desc = "Buffer" },
+    {
+      "<leader>sp",
+      function()
+        picker.grep()
+      end,
+      desc = "Project",
+    },
+    {
+      "<leader>ss",
+      function()
+        picker.lines()
+      end,
+      desc = "Buffer",
+    },
   })
 
   add({
     -- Errors/Diagnostics
     { "<leader>e", group = "errors" },
-    { "<leader>el", function() picker.diagnostics_buffer() end, desc = "List (buffer)" },
-    { "<leader>eL", function() picker.diagnostics() end, desc = "List (project)" },
-    { "<leader>en", function() vim.diagnostic.goto_next() end, desc = "Next" },
-    { "<leader>ep", function() vim.diagnostic.goto_prev() end, desc = "Previous" },
-    { "<leader>ex", function() vim.diagnostic.open_float() end, desc = "Explain" },
-    { "<leader>ec", function() vim.diagnostic.reset(0) end, desc = "Clear" },
-    { "<leader>ed", function() vim.diagnostic.enable(false, { bufnr = 0 }) end, desc = "Disable" },
-    { "<leader>ee", function() vim.diagnostic.enable(true, { bufnr = 0 }) end, desc = "Enable" },
+    {
+      "<leader>el",
+      function()
+        picker.diagnostics_buffer()
+      end,
+      desc = "List (buffer)",
+    },
+    {
+      "<leader>eL",
+      function()
+        picker.diagnostics()
+      end,
+      desc = "List (project)",
+    },
+    {
+      "<leader>en",
+      function()
+        vim.diagnostic.goto_next()
+      end,
+      desc = "Next",
+    },
+    {
+      "<leader>ep",
+      function()
+        vim.diagnostic.goto_prev()
+      end,
+      desc = "Previous",
+    },
+    {
+      "<leader>ex",
+      function()
+        vim.diagnostic.open_float()
+      end,
+      desc = "Explain",
+    },
+    {
+      "<leader>ec",
+      function()
+        vim.diagnostic.reset(0)
+      end,
+      desc = "Clear",
+    },
+    {
+      "<leader>ed",
+      function()
+        vim.diagnostic.enable(false, { bufnr = 0 })
+      end,
+      desc = "Disable",
+    },
+    {
+      "<leader>ee",
+      function()
+        vim.diagnostic.enable(true, { bufnr = 0 })
+      end,
+      desc = "Enable",
+    },
     {
       "<leader>ey",
       function()
@@ -347,15 +489,11 @@ function M.list()
     -- Applications
     { "<leader>a", group = "applications" },
     { "<leader>ao", group = "org" },
-    { "<leader>aoa", org.action("agenda.prompt"), desc = "Agenda" },
-    { "<leader>aoc", org.action("capture.prompt"), desc = "Capture" },
   })
 
   add({
     -- Org
     { "<leader>o", group = "org" },
-    { "<leader>oa", org.action("agenda.prompt"), desc = "Agenda" },
-    { "<leader>oc", org.action("capture.prompt"), desc = "Capture" },
   })
 
   add({
@@ -373,10 +511,28 @@ function M.list()
     { "<leader>g", group = "git" },
     { "<leader>gs", "<cmd>Neogit<cr>", desc = "Status" },
     { "<leader>gb", "<cmd>GitBlameToggle<cr>", desc = "Blame line" },
-    { "<leader>gt", function() picker.git_log_file() end, desc = "Log file" },
+    {
+      "<leader>gt",
+      function()
+        picker.git_log_file()
+      end,
+      desc = "Log file",
+    },
     { "<leader>gi", git_init, desc = "Init repo" },
-    { "<leader>gI", function() picker.gh_issue() end, desc = "GitHub issues" },
-    { "<leader>gp", function() picker.gh_pr() end, desc = "GitHub PRs" },
+    {
+      "<leader>gI",
+      function()
+        picker.gh_issue()
+      end,
+      desc = "GitHub issues",
+    },
+    {
+      "<leader>gp",
+      function()
+        picker.gh_pr()
+      end,
+      desc = "GitHub PRs",
+    },
   })
 
   return keymaps

@@ -105,10 +105,7 @@ function M.patch_parse_url()
     end
     local adapter = config.get_adapter_by_scheme(scheme)
     if not adapter and not silent then
-      vim.notify_once(
-        string.format("[oil] could not find adapter for buffer '%s://'", bufname),
-        vim.log.levels.ERROR
-      )
+      vim.notify_once(string.format("[oil] could not find adapter for buffer '%s://'", bufname), vim.log.levels.ERROR)
     end
     return adapter
   end

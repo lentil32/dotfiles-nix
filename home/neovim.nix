@@ -210,16 +210,16 @@ in
         };
 
         # External packages (LSPs, formatters, etc.)
-          lspsAndRuntimeDeps = {
-            general = with pkgs; [
-              ripgrep
-              fd
-              bat
-              imagemagick
-              mermaid-cli
-              typst
-              tectonic
-            ];
+        lspsAndRuntimeDeps = {
+          general = with pkgs; [
+            ripgrep
+            fd
+            bat
+            imagemagick
+            mermaid-cli
+            typst
+            tectonic
+          ];
 
           format = with pkgs; [
             stylua

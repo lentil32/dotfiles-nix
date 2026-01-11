@@ -111,7 +111,12 @@ return function(_, bufnr)
   vim.keymap.set("n", "<localleader>h", vim.lsp.buf.hover, { buffer = bufnr, desc = "Hover" })
   vim.keymap.set("n", "<localleader>i", ts_cmd("TSToolsOrganizeImports"), { buffer = bufnr, desc = "Organize imports" })
   vim.keymap.set("n", "<localleader>u", ts_cmd("TSToolsRemoveUnused"), { buffer = bufnr, desc = "Remove unused" })
-  vim.keymap.set("n", "<localleader>m", ts_cmd("TSToolsAddMissingImports"), { buffer = bufnr, desc = "Add missing imports" })
+  vim.keymap.set(
+    "n",
+    "<localleader>m",
+    ts_cmd("TSToolsAddMissingImports"),
+    { buffer = bufnr, desc = "Add missing imports" }
+  )
 
   vim.api.nvim_buf_create_user_command(bufnr, "Format", function()
     vim.lsp.buf.format()

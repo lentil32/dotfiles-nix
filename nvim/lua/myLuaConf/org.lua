@@ -15,7 +15,6 @@ end
 
 function M.action(action)
   return function()
-    vim.cmd.packadd("orgmode")
     M.setup()
     require("orgmode").action(action)
   end
