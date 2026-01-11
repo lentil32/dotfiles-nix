@@ -96,6 +96,27 @@ require("lze").load({
     },
   },
   {
+    "jsonls",
+    enabled = nixCats("lsp") or false,
+    lsp = {
+      filetypes = { "json", "jsonc" },
+    },
+  },
+  {
+    "taplo",
+    enabled = nixCats("lsp") or false,
+    lsp = {
+      filetypes = { "toml" },
+    },
+  },
+  {
+    "yamlls",
+    enabled = nixCats("lsp") or false,
+    lsp = {
+      filetypes = { "yaml" },
+    },
+  },
+  {
     "vtsls",
     enabled = nixCats("lsp") or false,
     lsp = {

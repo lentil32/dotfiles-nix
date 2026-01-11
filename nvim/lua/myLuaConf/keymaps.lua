@@ -100,6 +100,14 @@ function M.list()
       })
     end)
   end
+  local function project_root_or_warn()
+    local root = project.project_root()
+    if not root or root == "" then
+      vim.notify("No project root found", vim.log.levels.WARN)
+      return nil
+    end
+    return root
+  end
   local keymaps = {}
   local function add(list)
     vim.list_extend(keymaps, list)
@@ -157,8 +165,28 @@ function M.list()
     -- Project
     { "<leader>p", group = "project" },
     { "<leader>pp", function() picker.projects() end, desc = "Switch project" },
-    { "<leader>pf", function() picker.files({ cwd = project.project_root() }) end, desc = "Find file" },
-    { "<leader>p&", function() run_shell(project.project_root()) end, desc = "Shell command (project)" },
+    {
+      "<leader>pf",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.files({ cwd = root })
+      end,
+      desc = "Find file",
+    },
+    {
+      "<leader>p&",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        run_shell(root)
+      end,
+      desc = "Shell command (project)",
+    },
     {
       "<leader>pd",
       function()
@@ -166,17 +194,69 @@ function M.list()
       end,
       desc = "Find directory",
     },
-    { "<leader>pD", function() oil.open_oil(project.project_root()) end, desc = "Dired (Oil)" },
-    { "<leader>pr", function() picker.recent({ filter = { cwd = project.project_root() } }) end, desc = "Recent files" },
-    { "<leader>pb", function() picker.buffers({ filter = { cwd = project.project_root() } }) end, desc = "Project buffers" },
-    { "<leader>ps", function() picker.grep({ cwd = project.project_root() }) end, desc = "Search in project" },
-    { "<leader>pR", function() require("grug-far").open({ prefills = { paths = project.project_root() } }) end,
-      desc = "Replace in project" },
+    {
+      "<leader>pD",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        oil.open_oil(root)
+      end,
+      desc = "Dired (Oil)",
+    },
+    {
+      "<leader>pr",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.recent({ filter = { cwd = root } })
+      end,
+      desc = "Recent files",
+    },
+    {
+      "<leader>pb",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.buffers({ filter = { cwd = root } })
+      end,
+      desc = "Project buffers",
+    },
+    {
+      "<leader>ps",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.grep({ cwd = root })
+      end,
+      desc = "Search in project",
+    },
+    {
+      "<leader>pR",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        require("grug-far").open({ prefills = { paths = root } })
+      end,
+      desc = "Replace in project",
+    },
     { "<leader>p'", function() Snacks.terminal.toggle() end, desc = "Terminal" },
     {
       "<leader>pk",
       function()
-        local cwd = project.project_root()
+        local cwd = project_root_or_warn()
+        if not cwd then
+          return
+        end
         bufdelete.delete({
           filter = function(buf)
             if not vim.api.nvim_buf_is_loaded(buf) then
@@ -188,14 +268,6 @@ function M.list()
         })
       end,
       desc = "Kill project buffers",
-    },
-    {
-      "<leader>pI",
-      function()
-        require("project.api").set_pwd(project.project_root(), "manual")
-        vim.notify("Project cache invalidated", vim.log.levels.INFO)
-      end,
-      desc = "Invalidate cache",
     },
     { "<leader>pv", "<cmd>Neogit<cr>", desc = "Version control" },
   })

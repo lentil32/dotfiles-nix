@@ -8,9 +8,44 @@ local function snacks()
   return require("snacks")
 end
 
+local function project_confirm_winlocal(picker, item)
+  picker:close()
+  if not item then
+    return
+  end
+  local dir = item.file
+  if not dir or dir == "" then
+    return
+  end
+  vim.cmd("lcd " .. vim.fn.fnameescape(dir))
+  local session = Snacks.dashboard.sections.session()
+  if session then
+    local session_loaded = false
+    vim.api.nvim_create_autocmd("SessionLoadPost", {
+      once = true,
+      callback = function()
+        session_loaded = true
+      end,
+    })
+    vim.defer_fn(function()
+      if not session_loaded then
+        Snacks.picker.files({ cwd = dir })
+      end
+    end, 100)
+    vim.cmd(session.action:sub(2))
+  else
+    Snacks.picker.files({ cwd = dir })
+  end
+end
+
 ---@return snacks.Config
 local function opts()
   return {
+    animate = {
+      duration = 20,
+      easing = "outQuad",
+      fps = 120,
+    },
     styles = {
       dashboard = {
         -- Avoid double BufDelete/BufWipeout callbacks in snacks.nvim.
@@ -107,6 +142,7 @@ local function opts()
         recent = { preview = preview.picker_preview },
         projects = {
           patterns = { ".git", "package.json", "Cargo.toml", "flake.nix", "Makefile" },
+          confirm = project_confirm_winlocal,
         },
       },
     },

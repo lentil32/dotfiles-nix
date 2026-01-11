@@ -3,6 +3,51 @@ local util = require("myLuaConf.util")
 local M = {}
 
 function M.setup()
+  local function is_dir(path)
+    if not path or path == "" then
+      return false
+    end
+    local snacks_util = util.try_require("snacks.util")
+    if snacks_util and snacks_util.path_type then
+      return snacks_util.path_type(path) == "directory"
+    end
+    return vim.fn.isdirectory(path) == 1
+  end
+
+  local function set_win_cwd(win, dir)
+    if not dir or dir == "" or not is_dir(dir) then
+      return
+    end
+    if win == -1 or not vim.api.nvim_win_is_valid(win) then
+      return
+    end
+    vim.api.nvim_win_call(win, function()
+      vim.cmd("lcd " .. vim.fn.fnameescape(dir))
+    end)
+  end
+
+  local function file_dir_for_buf(bufnr)
+    if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+      return nil
+    end
+    local bt = vim.api.nvim_get_option_value("buftype", { buf = bufnr })
+    if bt ~= "" then
+      return nil
+    end
+    local name = vim.api.nvim_buf_get_name(bufnr)
+    if name == "" then
+      return nil
+    end
+    if name:match("^[%a][%w+.-]*://") then
+      return nil
+    end
+    local dir = vim.fn.fnamemodify(name, ":p:h")
+    if dir == "" then
+      return nil
+    end
+    return dir
+  end
+
   -- Show dashboard when closing to empty buffer (Spacemacs-style).
   local group = vim.api.nvim_create_augroup("UserDashboard", { clear = true })
   vim.api.nvim_create_autocmd("BufDelete", {
@@ -21,6 +66,23 @@ function M.setup()
           require("snacks").dashboard()
         end
       end)
+    end,
+  })
+
+  -- Keep window-local cwd in sync with file buffers (Spacemacs-style).
+  local file_cwd_group = vim.api.nvim_create_augroup("UserFileCwd", { clear = true })
+  vim.api.nvim_create_autocmd("BufEnter", {
+    group = file_cwd_group,
+    callback = function(args)
+      local dir = file_dir_for_buf(args.buf)
+      if not dir then
+        return
+      end
+      local win = vim.fn.bufwinid(args.buf)
+      if win == -1 then
+        return
+      end
+      set_win_cwd(win, dir)
     end,
   })
 
@@ -43,16 +105,14 @@ function M.setup()
       if win == -1 then
         return
       end
-      vim.api.nvim_win_call(win, function()
-        local map = util.get_var(nil, "oil_last_buf", {})
-        if type(map) ~= "table" then
-          map = {}
-        end
-        ---@cast map table<number, number>
-        map[win] = bufnr
-        vim.g.oil_last_buf = map
-        vim.cmd("lcd " .. vim.fn.fnameescape(dir))
-      end)
+      local map = util.get_var(nil, "oil_last_buf", {})
+      if type(map) ~= "table" then
+        map = {}
+      end
+      ---@cast map table<number, number>
+      map[win] = bufnr
+      vim.g.oil_last_buf = map
+      set_win_cwd(win, dir)
     end,
   })
 
