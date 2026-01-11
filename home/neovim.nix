@@ -143,6 +143,33 @@ in
         mkPlugin,
         ...
       }@packageDef:
+      let
+        projectRootSrc = ../nvim/rust/project_root;
+        projectRootPlugin = pkgs.rustPlatform.buildRustPackage {
+          pname = "project-root-nvim";
+          version = "0.1.0";
+          src = projectRootSrc;
+          cargoLock = {
+            lockFile = projectRootSrc + "/Cargo.lock";
+          };
+          cargoBuildFlags = [ "--locked" ];
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lua
+            lib=$(find target -type f \( -name "libproject_root.*" -o -name "project_root.dll" \) | head -n 1)
+            if [ -z "$lib" ]; then
+              echo "project_root library not found" >&2
+              exit 1
+            fi
+            case "$lib" in
+              *.dll) cp "$lib" "$out/lua/project_root.dll" ;;
+              *) cp "$lib" "$out/lua/project_root.so" ;;
+            esac
+            runHook postInstall
+          '';
+        };
+      in
       {
         # Plugins that load at startup
         startupPlugins = {
@@ -154,6 +181,7 @@ in
             snacks-nvim
             grug-far-nvim # search/replace
             oil-nvim
+            projectRootPlugin
           ];
 
           completion = with pkgs.vimPlugins; [

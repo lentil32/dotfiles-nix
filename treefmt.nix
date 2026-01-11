@@ -1,6 +1,7 @@
 {
   projectRootFile = "flake.nix";
   programs.nixfmt.enable = true;
+  programs.rustfmt.enable = true;
   programs.stylua.enable = true;
   programs.stylua.settings = {
     indent_type = "Spaces";
