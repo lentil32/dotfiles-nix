@@ -221,6 +221,14 @@ in
               tectonic
             ];
 
+          format = with pkgs; [
+            stylua
+          ];
+
+          lint = with pkgs; [
+            selene
+          ];
+
           lsp = with pkgs; [
             nil
             rust-analyzer

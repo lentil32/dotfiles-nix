@@ -11,6 +11,7 @@ require("lze").load({
         javascriptreact = js_ts,
         typescript = js_ts,
         typescriptreact = js_ts,
+        lua = { "selene" },
       }
 
       local group = vim.api.nvim_create_augroup("UserLint", { clear = true })

@@ -8,7 +8,7 @@ local util = require("myLuaConf.util")
 local M = {}
 
 local function snacks()
-  return _G.Snacks or require("snacks")
+  return require("snacks")
 end
 
 local function git_init()
@@ -81,6 +81,25 @@ function M.list()
   local Snacks = snacks()
   local picker = Snacks.picker
   local bufdelete = Snacks.bufdelete
+  local function run_shell(cwd)
+    local dir = cwd or vim.fn.getcwd()
+    Snacks.input.input({ prompt = "Shell command" }, function(value)
+      local cmd = vim.trim(value or "")
+      if cmd == "" then
+        return
+      end
+      Snacks.terminal.open(cmd, {
+        cwd = dir,
+        win = {
+          position = "bottom",
+          keys = {
+            term_normal = { "<esc>", "close", mode = "t", desc = "Close terminal" },
+          },
+        },
+        interactive = false,
+      })
+    end)
+  end
   local keymaps = {}
   local function add(list)
     vim.list_extend(keymaps, list)
@@ -92,6 +111,7 @@ function M.list()
     { "<leader>*", function() picker.grep({ search = vim.fn.expand("<cword>") }) end, desc = "Search project (word)" },
     { "<leader><Tab>", "<cmd>b#<cr>", desc = "Last buffer" },
     { "<leader>'", function() Snacks.terminal.toggle() end, desc = "Terminal" },
+    { "&", function() run_shell(vim.fn.getcwd()) end, desc = "Shell command" },
   })
 
   add({
@@ -137,7 +157,8 @@ function M.list()
     -- Project
     { "<leader>p", group = "project" },
     { "<leader>pp", function() picker.projects() end, desc = "Switch project" },
-    { "<leader>pf", function() picker.files() end, desc = "Find file" },
+    { "<leader>pf", function() picker.files({ cwd = project.project_root() }) end, desc = "Find file" },
+    { "<leader>p&", function() run_shell(project.project_root()) end, desc = "Shell command (project)" },
     {
       "<leader>pd",
       function()
@@ -146,16 +167,16 @@ function M.list()
       desc = "Find directory",
     },
     { "<leader>pD", function() oil.open_oil(project.project_root()) end, desc = "Dired (Oil)" },
-    { "<leader>pr", function() picker.recent({ filter = { cwd = true } }) end, desc = "Recent files" },
-    { "<leader>pb", function() picker.buffers({ filter = { cwd = true } }) end, desc = "Project buffers" },
-    { "<leader>ps", function() picker.grep() end, desc = "Search in project" },
-    { "<leader>pR", function() require("grug-far").open({ prefills = { paths = vim.fn.getcwd() } }) end,
+    { "<leader>pr", function() picker.recent({ filter = { cwd = project.project_root() } }) end, desc = "Recent files" },
+    { "<leader>pb", function() picker.buffers({ filter = { cwd = project.project_root() } }) end, desc = "Project buffers" },
+    { "<leader>ps", function() picker.grep({ cwd = project.project_root() }) end, desc = "Search in project" },
+    { "<leader>pR", function() require("grug-far").open({ prefills = { paths = project.project_root() } }) end,
       desc = "Replace in project" },
     { "<leader>p'", function() Snacks.terminal.toggle() end, desc = "Terminal" },
     {
       "<leader>pk",
       function()
-        local cwd = vim.fn.getcwd()
+        local cwd = project.project_root()
         bufdelete.delete({
           filter = function(buf)
             if not vim.api.nvim_buf_is_loaded(buf) then
@@ -171,7 +192,7 @@ function M.list()
     {
       "<leader>pI",
       function()
-        require("project.api").set_pwd(vim.fn.getcwd(), "manual")
+        require("project.api").set_pwd(project.project_root(), "manual")
         vim.notify("Project cache invalidated", vim.log.levels.INFO)
       end,
       desc = "Invalidate cache",

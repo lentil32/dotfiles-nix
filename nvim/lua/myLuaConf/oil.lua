@@ -152,8 +152,8 @@ function M.oil_select_other_window()
 end
 
 function M.dashboard_recent_files_with_oil(opts)
-  return function()
-    local items = Snacks.dashboard.sections.recent_files(opts or {})()
+  return function(self)
+    local items = Snacks.dashboard.sections.recent_files(opts or {})(self)
     for _, item in ipairs(items) do
       local path = item.file
       item.action = function()

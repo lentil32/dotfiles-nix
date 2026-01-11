@@ -3,12 +3,9 @@ local M = {}
 ---@type boolean
 M.isNixCats = vim.g["nixCats-special-rtp-entry-nixCats"] ~= nil
 
----@class nixCatsSetupOpts
----@field non_nix_value boolean|nil
-
 ---Setup a mock nixCats module when not loaded via nix.
 ---If loaded via nix, this does nothing.
----@param v nixCatsSetupOpts
+---@param v { non_nix_value?: boolean }|nil
 function M.setup(v)
   if M.isNixCats then
     return

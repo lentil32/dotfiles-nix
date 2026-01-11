@@ -36,12 +36,7 @@ require("lze").load({
     keys = {
       {
         "<tab>",
-        function()
-          if not require("sidekick").nes_jump_or_apply() then
-            return "<Tab>"
-          end
-          return ""
-        end,
+        "v:lua.require('sidekick').nes_jump_or_apply() and '' or '<Tab>'",
         mode = "n",
         expr = true,
         desc = "Goto/Apply Next Edit Suggestion",

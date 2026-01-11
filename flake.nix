@@ -101,8 +101,6 @@
 
       # ---------------- Per-host declarations ----------------
       macBookProHost = "lentil32-MacBookPro";
-      macMiniM1Host = "lentil32-MacMiniM1";
-
       machines = {
         ${macBookProHost} = {
           system = "aarch64-darwin";
@@ -121,7 +119,7 @@
       defaultMachine = machines.${macBookProHost};
 
       nixpkgsConfig = {
-        overlays = with inputs; [
+        overlays = [
           nix-darwin-emacs.overlays.emacs
           rust-overlay.overlays.default
           ghostty.overlays.default
@@ -142,7 +140,6 @@
 
       treefmtEval = system: treefmt-nix.lib.evalModule nixpkgs.legacyPackages.${system} ./treefmt.nix;
 
-      pkgs = nixpkgs.legacyPackages.${defaultMachine.system};
       pkgs-unstable = nixpkgs-unstable.legacyPackages.${defaultMachine.system};
 
       baseSpecialArgs = inputs // {

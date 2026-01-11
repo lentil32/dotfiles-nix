@@ -153,7 +153,7 @@ local function attach_doc_preview(buf, path, ctx)
 end
 
 function M.picker_preview(ctx)
-  local Snacks = _G.Snacks or require("snacks")
+  local Snacks = require("snacks")
   local ret = Snacks.picker.preview.file(ctx)
   local path = Snacks.picker.util.path(ctx.item)
   if not path or util.is_dir(path) then

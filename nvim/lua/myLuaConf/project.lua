@@ -2,9 +2,9 @@ local util = require("myLuaConf.util")
 
 local M = {}
 
----@type Project.API|nil
+---@type { valid_bt: fun(bufnr?: integer): boolean, get_project_root: fun(bufnr?: integer): string|nil, set_pwd: fun(dir?: string, method?: string): boolean|nil }|nil
 local project_api = util.try_require("project.api")
----@type Project.Config|nil
+---@type { options: Project.Config.Options }|nil
 local project_config = util.try_require("project.config")
 
 function M.setup()

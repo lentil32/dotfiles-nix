@@ -3,7 +3,7 @@ local util = require("myLuaConf.util")
 local M = {}
 
 local function snacks()
-  return _G.Snacks or require("snacks")
+  return require("snacks")
 end
 
 function M.delete_current_buffer()
