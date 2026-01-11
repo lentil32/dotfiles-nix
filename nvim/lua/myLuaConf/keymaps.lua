@@ -116,14 +116,22 @@ function M.list()
     {
       "<leader>/",
       function()
-        picker.grep()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.grep({ cwd = root })
       end,
       desc = "Search project",
     },
     {
       "<leader>*",
       function()
-        picker.grep({ search = vim.fn.expand("<cword>") })
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.grep({ cwd = root, search = vim.fn.expand("<cword>") })
       end,
       desc = "Search project (word)",
     },
@@ -254,7 +262,11 @@ function M.list()
     {
       "<leader>pd",
       function()
-        picker.files({ cmd = "fd", args = { "--type", "d" } })
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.files({ cwd = root, cmd = "fd", args = { "--type", "d" } })
       end,
       desc = "Find directory",
     },
@@ -316,7 +328,11 @@ function M.list()
     {
       "<leader>p'",
       function()
-        Snacks.terminal.toggle()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        Snacks.terminal.toggle(nil, { cwd = root })
       end,
       desc = "Terminal",
     },
@@ -339,7 +355,17 @@ function M.list()
       end,
       desc = "Kill project buffers",
     },
-    { "<leader>pv", "<cmd>Neogit<cr>", desc = "Version control" },
+    {
+      "<leader>pv",
+      function()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        vim.cmd("Neogit cwd=" .. vim.fn.fnameescape(root))
+      end,
+      desc = "Version control",
+    },
   })
 
   add({
@@ -372,7 +398,11 @@ function M.list()
     {
       "<leader>sp",
       function()
-        picker.grep()
+        local root = project_root_or_warn()
+        if not root then
+          return
+        end
+        picker.grep({ cwd = root })
       end,
       desc = "Project",
     },

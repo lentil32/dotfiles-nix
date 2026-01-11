@@ -1,21 +1,7 @@
-local function ensure_other_window()
-  local wins = vim.api.nvim_tabpage_list_wins(0)
-  local cur = vim.api.nvim_get_current_win()
-  if #wins > 1 then
-    for i, win in ipairs(wins) do
-      if win == cur then
-        return wins[(i % #wins) + 1], false
-      end
-    end
-  end
-  vim.cmd("vsplit")
-  local new_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_set_current_win(cur)
-  return new_win, true
-end
+local util = require("myLuaConf.util")
 
 local function goto_definition_other_window()
-  local target, created = ensure_other_window()
+  local target, created = util.get_or_create_other_window()
   local cur = vim.api.nvim_get_current_win()
   vim.lsp.buf.definition({
     on_list = function(opts)

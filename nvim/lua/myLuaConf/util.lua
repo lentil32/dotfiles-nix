@@ -114,4 +114,44 @@ function M.edit_path(path)
   vim.cmd("edit " .. vim.fn.fnameescape(path))
 end
 
+---@param wins integer[]
+---@param cur integer
+---@return integer|nil
+local function next_window(wins, cur)
+  local count = #wins
+  if count <= 1 then
+    return nil
+  end
+  for i = 1, count do
+    if wins[i] == cur then
+      return wins[(i % count) + 1]
+    end
+  end
+  return wins[1]
+end
+
+---@return integer|nil
+function M.other_window()
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local cur = vim.api.nvim_get_current_win()
+  return next_window(wins, cur)
+end
+
+---@return integer win
+---@return boolean created
+function M.get_or_create_other_window()
+  local wins = vim.api.nvim_tabpage_list_wins(0)
+  local cur = vim.api.nvim_get_current_win()
+  local win = next_window(wins, cur)
+  if win and vim.api.nvim_win_is_valid(win) then
+    return win, false
+  end
+  vim.cmd("vsplit")
+  local new_win = vim.api.nvim_get_current_win()
+  if vim.api.nvim_win_is_valid(cur) then
+    vim.api.nvim_set_current_win(cur)
+  end
+  return new_win, true
+end
+
 return M

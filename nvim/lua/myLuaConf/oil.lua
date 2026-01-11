@@ -3,24 +3,8 @@ local Snacks = require("snacks")
 
 local M = {}
 
-local function ensure_other_window()
-  local wins = vim.api.nvim_tabpage_list_wins(0)
-  local cur = vim.api.nvim_get_current_win()
-  if #wins > 1 then
-    for i, win in ipairs(wins) do
-      if win == cur then
-        return wins[(i % #wins) + 1], false
-      end
-    end
-  end
-  vim.cmd("vsplit")
-  local new_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_set_current_win(cur)
-  return new_win, true
-end
-
 local function focus_other_window()
-  local target = ensure_other_window()
+  local target = util.get_or_create_other_window()
   if target and vim.api.nvim_win_is_valid(target) then
     vim.api.nvim_set_current_win(target)
   end

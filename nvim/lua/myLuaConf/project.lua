@@ -8,6 +8,18 @@ local autocmd = vim.api.nvim_create_autocmd
 ---@class ProjectRoot.Config
 ---@field root_indicators? string[]
 
+---@param path string|nil
+---@return string|nil
+local function normalize_path(path)
+  if not path or path == "" then
+    return nil
+  end
+  if vim.fs and vim.fs.normalize then
+    return vim.fs.normalize(path)
+  end
+  return path
+end
+
 ---@type string[]
 local default_root_indicators = { ".git", "package.json", "Cargo.toml", "flake.nix", "Makefile" }
 
@@ -17,6 +29,8 @@ local root_indicators = default_root_indicators
 local did_setup = false
 ---@type string
 local root_var = "project_root"
+---@type string
+local root_for_var = "project_root_for"
 
 ---@param buf integer
 ---@return string|nil
@@ -24,16 +38,35 @@ local function get_buf_root(buf)
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
     return nil
   end
-  return util.get_var(buf, root_var)
+  local root = util.get_var(buf, root_var)
+  if type(root) ~= "string" then
+    return nil
+  end
+  return root
+end
+
+---@param buf integer
+---@return string|nil
+local function get_buf_root_for(buf)
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    return nil
+  end
+  local path = util.get_var(buf, root_for_var)
+  if type(path) ~= "string" then
+    return nil
+  end
+  return path
 end
 
 ---@param buf integer
 ---@param root string|nil
-local function set_buf_root(buf, root)
+---@param path string|nil
+local function set_buf_root(buf, root, path)
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
     return
   end
-  vim.b[buf][root_var] = root
+  vim.b[buf][root_var] = root or false
+  vim.b[buf][root_for_var] = path or false
 end
 
 ---@param buf integer
@@ -42,12 +75,19 @@ local function get_path_from_buffer(buf)
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
     return nil
   end
-  local bt = vim.api.nvim_get_option_value("buftype", { buf = buf })
-  if bt ~= "" then
-    return nil
-  end
   local name = vim.api.nvim_buf_get_name(buf)
   if name == "" then
+    return nil
+  end
+  if name:match("^oil://") then
+    local ok, oil = pcall(require, "oil")
+    if ok and oil.get_current_dir then
+      return normalize_path(oil.get_current_dir())
+    end
+    return normalize_path((name:gsub("^oil://", "")))
+  end
+  local bt = vim.api.nvim_get_option_value("buftype", { buf = buf })
+  if bt ~= "" then
     return nil
   end
   if vim.uri_from_bufnr then
@@ -58,14 +98,7 @@ local function get_path_from_buffer(buf)
   elseif name:match("^[%a][%w+.-]*://") then
     return nil
   end
-  if name:match("^oil://") then
-    local ok, oil = pcall(require, "oil")
-    if ok and oil.get_current_dir then
-      return oil.get_current_dir()
-    end
-    return (name:gsub("^oil://", ""))
-  end
-  return name
+  return normalize_path(name)
 end
 
 ---@param path string
@@ -91,32 +124,43 @@ end
 
 ---@param buf integer
 ---@return string|nil
-local function set_root_for_buffer(buf)
-  local existing = get_buf_root(buf)
-  if existing and existing ~= "" then
-    return existing
-  end
+local function refresh_root_for_buffer(buf)
   local path = get_path_from_buffer(buf)
   if not path then
+    set_buf_root(buf, nil, nil)
     return nil
   end
   local root = root_from_path(path)
-  if root and root ~= "" then
-    set_buf_root(buf, root)
-  end
+  set_buf_root(buf, root, path)
   return root
 end
 
+---@param buf integer
+---@param path string|nil
 ---@return string|nil
-local function resolve_project_root()
+local function get_cached_root(buf, path)
+  if not path then
+    return nil
+  end
+  local cached_for = get_buf_root_for(buf)
+  if cached_for ~= path then
+    return nil
+  end
+  return get_buf_root(buf)
+end
+
+---@return string|nil
+local function get_project_root()
   local buf = vim.api.nvim_get_current_buf()
-  local root = set_root_for_buffer(buf)
+  local path = get_path_from_buffer(buf)
+  local root = get_cached_root(buf, path)
   if root and root ~= "" then
     return root
   end
   local alt = vim.fn.bufnr("#")
   if alt and alt ~= -1 then
-    local alt_root = set_root_for_buffer(alt)
+    local alt_path = get_path_from_buffer(alt)
+    local alt_root = get_cached_root(alt, alt_path)
     if alt_root and alt_root ~= "" then
       return alt_root
     end
@@ -126,7 +170,7 @@ end
 
 ---@param buf? integer
 function M.swap_root(buf)
-  set_root_for_buffer(buf or vim.api.nvim_get_current_buf())
+  refresh_root_for_buffer(buf or vim.api.nvim_get_current_buf())
 end
 
 local function setup_autocmd()
@@ -156,12 +200,12 @@ end
 
 ---@return string|nil
 function M.project_root()
-  return resolve_project_root()
+  return get_project_root()
 end
 
 ---@return nil
 function M.show_project_root()
-  local root = resolve_project_root()
+  local root = get_project_root()
   if not root or root == "" then
     vim.notify("No project root found", vim.log.levels.WARN, { title = "Project root" })
     return
