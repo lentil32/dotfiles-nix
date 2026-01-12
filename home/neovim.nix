@@ -227,6 +227,47 @@ in
             runHook postInstall
           '';
         };
+        autocmdsPlugin = pkgs.rustPlatform.buildRustPackage {
+          pname = "my-autocmds-nvim";
+          version = "0.1.0";
+          src = rustWorkspace;
+          cargoLock = {
+            lockFile = rustWorkspace + "/Cargo.lock";
+          };
+          cargoBuildFlags = [
+            "--locked"
+            "--package"
+            "my_autocmds"
+          ];
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lua
+            lib=""
+            if [ -f target/release/libmy_autocmds.dylib ]; then
+              lib=target/release/libmy_autocmds.dylib
+            elif [ -f target/release/libmy_autocmds.so ]; then
+              lib=target/release/libmy_autocmds.so
+            elif [ -f target/release/my_autocmds.dll ]; then
+              lib=target/release/my_autocmds.dll
+            else
+              lib=$(find target -type f \( -name "libmy_autocmds.dylib" -o -name "libmy_autocmds.so" -o -name "my_autocmds.dll" \) | head -n 1)
+            fi
+            if [ -z "$lib" ]; then
+              echo "my_autocmds library not found" >&2
+              exit 1
+            fi
+            case "$lib" in
+              *.dll) cp "$lib" "$out/lua/my_autocmds.dll" ;;
+              *.dylib|*.so) cp "$lib" "$out/lua/my_autocmds.so" ;;
+              *)
+                echo "my_autocmds library not found: $lib" >&2
+                exit 1
+                ;;
+            esac
+            runHook postInstall
+          '';
+        };
       in
       {
         # Plugins that load at startup
@@ -239,6 +280,7 @@ in
             snacks-nvim
             grug-far-nvim # search/replace
             oil-nvim
+            autocmdsPlugin
             utilPlugin
             projectRootPlugin
           ];
@@ -257,6 +299,7 @@ in
             nvim-surround
             smear-cursor-nvim
             sidekick-nvim
+            lualine-nvim
           ];
 
           git = with pkgs.vimPlugins; [

@@ -441,6 +441,14 @@ fn project_root_value() -> Result<Option<String>> {
     get_project_root()
 }
 
+fn project_root_or_warn_value() -> Result<Option<String>> {
+    let root = get_project_root()?;
+    if root.is_none() {
+        api::notify("No project root found", LogLevel::Warn, &Dictionary::new())?;
+    }
+    Ok(root)
+}
+
 fn show_project_root() -> Result<()> {
     let Some(root) = get_project_root()? else {
         api::notify("No project root found", LogLevel::Warn, &Dictionary::new())?;
@@ -470,6 +478,10 @@ fn project_root() -> Result<Dictionary> {
     api.insert(
         "project_root",
         Function::<(), Option<String>>::from_fn(|()| project_root_value()),
+    );
+    api.insert(
+        "project_root_or_warn",
+        Function::<(), Option<String>>::from_fn(|()| project_root_or_warn_value()),
     );
     api.insert(
         "show_project_root",

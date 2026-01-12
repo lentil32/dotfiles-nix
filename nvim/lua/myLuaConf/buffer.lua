@@ -15,7 +15,7 @@ function M.delete_current_buffer()
     map = {}
   end
   ---@cast map table<number, number>
-  local oil_buf = map[win]
+  local oil_buf = map[win] or map[tostring(win)]
   if oil_buf and oil_buf ~= buf and vim.api.nvim_buf_is_valid(oil_buf) then
     local oil_util = util.try_require("oil.util")
     if oil_util and oil_util.is_oil_bufnr(oil_buf) then

@@ -98,14 +98,6 @@ function M.list()
       })
     end)
   end
-  local function project_root_or_warn()
-    local root = project.project_root()
-    if not root or root == "" then
-      vim.notify("No project root found", vim.log.levels.WARN)
-      return nil
-    end
-    return root
-  end
   local keymaps = {}
   local function add(list)
     vim.list_extend(keymaps, list)
@@ -116,7 +108,7 @@ function M.list()
     {
       "<leader>/",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -127,11 +119,11 @@ function M.list()
     {
       "<leader>*",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
-        picker.grep({ cwd = root, search = vim.fn.expand("<cword>") })
+        picker.grep_word({ cwd = root })
       end,
       desc = "Search project (word)",
     },
@@ -180,6 +172,12 @@ function M.list()
     {
       "<leader>fj",
       function()
+        local oil_util = util.try_require("oil.util")
+        if oil_util and oil_util.is_oil_bufnr(vim.api.nvim_get_current_buf()) then
+          local keys = vim.api.nvim_replace_termcodes("<BS>", true, false, true)
+          vim.api.nvim_feedkeys(keys, "m", false)
+          return
+        end
         local path = vim.fn.expand("%:p:h")
         if path == "" then
           path = vim.fn.getcwd()
@@ -240,7 +238,7 @@ function M.list()
     {
       "<leader>pf",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -251,7 +249,7 @@ function M.list()
     {
       "<leader>p&",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -262,7 +260,7 @@ function M.list()
     {
       "<leader>pd",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -273,7 +271,7 @@ function M.list()
     {
       "<leader>pD",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -284,7 +282,7 @@ function M.list()
     {
       "<leader>pr",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -295,7 +293,7 @@ function M.list()
     {
       "<leader>pb",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -306,7 +304,7 @@ function M.list()
     {
       "<leader>ps",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -317,7 +315,7 @@ function M.list()
     {
       "<leader>pR",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -328,7 +326,7 @@ function M.list()
     {
       "<leader>p'",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -339,7 +337,7 @@ function M.list()
     {
       "<leader>pk",
       function()
-        local cwd = project_root_or_warn()
+        local cwd = project.project_root_or_warn()
         if not cwd then
           return
         end
@@ -358,7 +356,7 @@ function M.list()
     {
       "<leader>pv",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end
@@ -398,7 +396,7 @@ function M.list()
     {
       "<leader>sp",
       function()
-        local root = project_root_or_warn()
+        local root = project.project_root_or_warn()
         if not root then
           return
         end

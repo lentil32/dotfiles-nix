@@ -1,14 +1,25 @@
 local colorscheme = require("myLuaConf.colorscheme")
 local keymaps = require("myLuaConf.keymaps")
+local project = require("myLuaConf.project")
 local snacks = require("myLuaConf.snacks")
 local util = require("myLuaConf.util")
 
 colorscheme.apply()
 snacks.setup()
-require("myLuaConf.project").setup()
+project.setup()
 require("myLuaConf.oil").setup()
 require("myLuaConf.autocmds").setup()
 keymaps.setup()
+
+local function sidekick_in_project_root(fn)
+  return function(...)
+    local root = project.project_root_or_warn()
+    if root then
+      vim.cmd("lcd " .. vim.fn.fnameescape(root))
+    end
+    return fn(...)
+  end
+end
 
 require("lze").load({
   {
@@ -48,25 +59,25 @@ require("lze").load({
       },
       {
         "<c-.>",
-        function()
+        sidekick_in_project_root(function()
           require("sidekick.cli").toggle()
-        end,
+        end),
         mode = { "n", "t", "i", "x" },
         desc = "Sidekick toggle",
       },
       {
         "<leader>aa",
-        function()
+        sidekick_in_project_root(function()
           require("sidekick.cli").toggle()
-        end,
+        end),
         mode = "n",
         desc = "Sidekick toggle CLI",
       },
       {
         "<leader>as",
-        function()
+        sidekick_in_project_root(function()
           require("sidekick.cli").select()
-        end,
+        end),
         mode = "n",
         desc = "Sidekick select CLI",
       },
@@ -112,9 +123,9 @@ require("lze").load({
       },
       {
         "<leader>ac",
-        function()
+        sidekick_in_project_root(function()
           require("sidekick.cli").toggle({ name = "codex", focus = true })
-        end,
+        end),
         mode = "n",
         desc = "Sidekick Toggle Claude",
       },
@@ -142,6 +153,7 @@ require("lze").load({
       require("smear_cursor").setup({})
     end,
   },
+  { import = "myLuaConf.plugins.statusline" },
   { import = "myLuaConf.plugins.completion" },
   { import = "myLuaConf.plugins.motion" },
   { import = "myLuaConf.plugins.grug_far" },
