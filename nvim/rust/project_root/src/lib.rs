@@ -9,7 +9,7 @@ use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts, Opti
 use nvim_oxi::api::types::{AutocmdCallbackArgs, LogLevel};
 use nvim_oxi::api::{self, Buffer};
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{Dictionary, Function, Result, String as NvimString};
+use nvim_oxi::{Array, Dictionary, Function, Result, String as NvimString};
 use nvim_utils::path::{has_uri_scheme, normalize_path, path_is_dir, strip_known_prefixes};
 
 const ROOT_VAR: &str = "project_root";
@@ -146,8 +146,7 @@ fn get_path_from_buffer(buf: &Buffer) -> Result<Option<PathBuf>> {
             .buffer(buf.clone())
             .build(),
     )?;
-    let allow_nonfile_buftype =
-        raw_path.starts_with("file://") || raw_path.starts_with("oil://");
+    let allow_nonfile_buftype = raw_path.starts_with("file://") || raw_path.starts_with("oil://");
     if !bt.is_empty() && !allow_nonfile_buftype {
         debug_log(|| {
             format!(
@@ -309,31 +308,60 @@ fn get_project_root() -> Result<Option<String>> {
         return Ok(Some(root));
     }
 
-    let alt: i64 = api::call_function("bufnr", nvim_oxi::Array::from_iter(["#"]))?;
-    if alt <= 0 {
+    let alt: i64 = api::call_function("bufnr", Array::from_iter(["#"]))?;
+    let alt_root = if alt <= 0 {
         debug_log(|| "get_project_root: no alternate buffer".to_string());
-        return Ok(None);
-    }
-    let Ok(handle) = i32::try_from(alt) else {
+        None
+    } else if let Ok(handle) = i32::try_from(alt) {
+        let alt_buf = Buffer::from(handle);
+        let root = cached_or_refresh_root(&alt_buf)?;
+        debug_log(|| {
+            format!(
+                "get_project_root: alternate buf={} root='{}'",
+                handle,
+                root.as_deref().unwrap_or("<none>")
+            )
+        });
+        root
+    } else {
         debug_log(|| {
             format!(
                 "get_project_root: alternate buffer handle overflow (value={})",
                 alt
             )
         });
-        return Ok(None);
+        None
     };
-    let alt_buf = Buffer::from(handle);
 
-    let alt_root = cached_or_refresh_root(&alt_buf)?;
+    if alt_root.is_some() {
+        return Ok(alt_root);
+    }
+
+    let cwd: NvimString = api::call_function("getcwd", Array::new())?;
+    let cwd = cwd.to_string_lossy().into_owned();
+    if cwd.is_empty() {
+        debug_log(|| "get_project_root: empty cwd".to_string());
+        return Ok(None);
+    }
+    let normalized = normalize_path(&cwd);
+    debug_log(|| {
+        let value = normalized
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<none>".to_string());
+        format!("get_project_root: cwd='{}' normalized='{}'", cwd, value)
+    });
+    let root = normalized
+        .as_ref()
+        .and_then(|path| root_from_path(path))
+        .map(|path| path.to_string_lossy().into_owned());
     debug_log(|| {
         format!(
-            "get_project_root: alternate buf={} root='{}'",
-            handle,
-            alt_root.as_deref().unwrap_or("<none>")
+            "get_project_root: cwd root='{}'",
+            root.as_deref().unwrap_or("<none>")
         )
     });
-    Ok(alt_root)
+    Ok(root)
 }
 
 fn setup_autocmd() -> Result<()> {
