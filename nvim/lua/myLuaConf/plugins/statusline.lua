@@ -79,7 +79,6 @@ return {
           lualine_y = {},
           lualine_z = {},
         },
-        extensions = { "oil" },
       }
 
       table.insert(opts.sections.lualine_c, 1, {
