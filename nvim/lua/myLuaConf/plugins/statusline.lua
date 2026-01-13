@@ -13,10 +13,6 @@ local function copilot_icon()
   return vim.fn.nr2char(0xF4B8) .. " "
 end
 
-local function cli_icon()
-  return vim.fn.nr2char(0xEE0D) .. " "
-end
-
 local function project_icon()
   return vim.fn.nr2char(0xEA62) .. " "
 end
@@ -71,7 +67,7 @@ return {
           lualine_a = { "mode" },
           lualine_b = { "branch", "diff", "diagnostics" },
           lualine_c = { "filename" },
-          lualine_x = { "overseer", "encoding", "fileformat", "filetype" },
+          lualine_x = { "overseer", "fileformat", "filetype" },
           lualine_y = { "progress" },
           lualine_z = { "location" },
         },
@@ -83,6 +79,7 @@ return {
           lualine_y = {},
           lualine_z = {},
         },
+        extensions = { "oil" },
       }
 
       table.insert(opts.sections.lualine_c, 1, {
@@ -126,21 +123,6 @@ return {
         cond = function()
           local status = sidekick_status()
           return status and status.get() ~= nil
-        end,
-      })
-
-      table.insert(opts.sections.lualine_x, 2, {
-        function()
-          local status = sidekick_status()
-          local sessions = status and status.cli() or {}
-          return cli_icon() .. (#sessions > 1 and #sessions or "")
-        end,
-        cond = function()
-          local status = sidekick_status()
-          return status and #status.cli() > 0
-        end,
-        color = function()
-          return "Special"
         end,
       })
 

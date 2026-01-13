@@ -164,6 +164,22 @@ require("lze").load({
       })
     end,
   },
+  {
+    "overseer.nvim",
+    for_cat = "general",
+    event = "DeferredUIEnter",
+    cmd = {
+      "OverseerOpen",
+      "OverseerClose",
+      "OverseerToggle",
+      "OverseerRun",
+      "OverseerShell",
+      "OverseerTaskAction",
+    },
+    after = function()
+      require("overseer").setup({})
+    end,
+  },
   { import = "myLuaConf.plugins.statusline" },
   { import = "myLuaConf.plugins.completion" },
   { import = "myLuaConf.plugins.motion" },
