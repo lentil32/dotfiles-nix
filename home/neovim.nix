@@ -190,6 +190,7 @@ in
             which-key-nvim
             flash-nvim
             hop-nvim
+            nvim-autopairs
             nvim-surround
             smear-cursor-nvim
             sidekick-nvim

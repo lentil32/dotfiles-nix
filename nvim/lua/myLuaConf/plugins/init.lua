@@ -154,6 +154,16 @@ require("lze").load({
       require("smear_cursor").setup({})
     end,
   },
+  {
+    "nvim-autopairs",
+    for_cat = "general",
+    event = "InsertEnter",
+    after = function()
+      require("nvim-autopairs").setup({
+        check_ts = true,
+      })
+    end,
+  },
   { import = "myLuaConf.plugins.statusline" },
   { import = "myLuaConf.plugins.completion" },
   { import = "myLuaConf.plugins.motion" },
