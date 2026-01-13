@@ -1,5 +1,5 @@
-local util = require("myLuaConf.util")
 local Snacks = require("snacks")
+local util = require("myLuaConf.util")
 
 local M = {}
 
