@@ -11,6 +11,7 @@ require("lze").load({
           javascriptreact = { "biome" },
           typescriptreact = { "biome" },
           json = { "biome" },
+          jsonc = { "biome" },
           lua = { "stylua" },
           rust = { "rustfmt" },
         },
