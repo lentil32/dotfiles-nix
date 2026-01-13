@@ -6,7 +6,7 @@ return {
     after = function()
       require("flash").setup({
         search = {
-          mode = "fuzzy",
+          mode = "search",
         },
         jump = {
           autojump = true,
