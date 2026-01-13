@@ -12,6 +12,7 @@ require("lze").load({
           typescriptreact = { "biome" },
           json = { "biome" },
           lua = { "stylua" },
+          rust = { "rustfmt" },
         },
         format_on_save = {
           timeout_ms = 500,

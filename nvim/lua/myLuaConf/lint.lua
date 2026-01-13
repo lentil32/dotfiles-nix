@@ -12,6 +12,7 @@ require("lze").load({
         typescript = js_ts,
         typescriptreact = js_ts,
         lua = { "selene" },
+        rust = { "clippy" },
       }
 
       local group = vim.api.nvim_create_augroup("UserLint", { clear = true })

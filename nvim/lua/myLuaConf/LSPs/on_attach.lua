@@ -43,8 +43,6 @@ return function(_, bufnr)
     local ok, conform = pcall(require, "conform")
     if ok and conform.format then
       conform.format()
-    else
-      vim.lsp.buf.format()
     end
   end
 
