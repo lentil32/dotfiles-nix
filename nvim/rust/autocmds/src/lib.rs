@@ -6,7 +6,7 @@ use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{schedule, Array, Dictionary, Function, Object, Result, String as NvimString};
+use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
 
 use nvim_utils::path::{has_uri_scheme, path_is_dir, strip_known_prefixes};
 
@@ -14,8 +14,7 @@ type OilMap = HashMap<String, i64>;
 
 type ShouldDeleteAutocmd = bool;
 
-const SNACKS_DASHBOARD_LUA: &str =
-    "(function() local ok, snacks = pcall(require, 'snacks'); if ok and snacks.dashboard then snacks.dashboard() end end)()";
+const SNACKS_DASHBOARD_LUA: &str = "(function() local ok, snacks = pcall(require, 'snacks'); if ok and snacks.dashboard then snacks.dashboard() end end)()";
 const OIL_DIR_LUA: &str = "(function(buf) local ok, oil = pcall(require, 'oil'); if not ok then return nil end; return oil.get_current_dir(buf) end)(_A)";
 const SNACKS_RENAME_LUA: &str = "(function(args) local ok, snacks = pcall(require, 'snacks'); if not ok then return end; local rename = snacks.rename and snacks.rename.on_rename_file; if rename then rename(args.src_url, args.dest_url) end end)(_A)";
 
@@ -79,10 +78,8 @@ fn file_dir_for_buf(buf: &Buffer) -> Result<Option<String>> {
     if has_uri_scheme(name_str.as_ref()) {
         return Ok(None);
     }
-    let dir: NvimString = api::call_function(
-        "fnamemodify",
-        Array::from_iter([name_str.as_ref(), ":p:h"]),
-    )?;
+    let dir: NvimString =
+        api::call_function("fnamemodify", Array::from_iter([name_str.as_ref(), ":p:h"]))?;
     let dir = dir.to_string_lossy().into_owned();
     if dir.is_empty() {
         return Ok(None);
@@ -107,10 +104,8 @@ fn win_for_buf(buf: &Buffer) -> Result<Option<Window>> {
 
 fn maybe_show_dashboard() -> Result<()> {
     let current = api::get_current_buf();
-    let bt: NvimString = api::get_option_value(
-        "buftype",
-        &OptionOpts::builder().buffer(current).build(),
-    )?;
+    let bt: NvimString =
+        api::get_option_value("buftype", &OptionOpts::builder().buffer(current).build())?;
     if !bt.is_empty() {
         return Ok(());
     }
@@ -387,10 +382,12 @@ fn setup_oil_last_buf_autocmds() -> Result<()> {
 
     let resized_opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|_args: AutocmdCallbackArgs| -> Result<ShouldDeleteAutocmd> {
-            clean_oil_last_buf()?;
-            Ok(false)
-        })
+        .callback(
+            |_args: AutocmdCallbackArgs| -> Result<ShouldDeleteAutocmd> {
+                clean_oil_last_buf()?;
+                Ok(false)
+            },
+        )
         .build();
     api::create_autocmd(["VimResized"], &resized_opts)?;
 

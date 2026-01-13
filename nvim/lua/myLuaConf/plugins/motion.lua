@@ -4,11 +4,18 @@ return {
     for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
-      require("flash").setup({})
+      require("flash").setup({
+        search = {
+          mode = "fuzzy",
+        },
+        jump = {
+          autojump = true,
+        },
+      })
     end,
     keys = {
       {
-        "s",
+        "gs",
         function()
           require("flash").jump()
         end,
@@ -58,7 +65,7 @@ return {
     end,
     keys = {
       {
-        "gs",
+        "gS",
         function()
           require("hop").hint_words()
         end,
@@ -72,7 +79,16 @@ return {
     for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
-      require("nvim-surround").setup({})
+      require("nvim-surround").setup({
+        keymaps = {
+          normal = "s",
+          normal_cur = "ss",
+          normal_line = "sS",
+          normal_cur_line = "sSS",
+          visual = "s",
+          visual_line = false,
+        },
+      })
     end,
   },
 }

@@ -136,6 +136,7 @@ require("lze").load({
           win = {
             keys = {
               close_wx = { "<leader>wx", "close", mode = "n", desc = "Close Sidekick" },
+              prompt = false,
             },
           },
         },
