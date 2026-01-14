@@ -1,4 +1,4 @@
-vim.opt.number = true
+vim.opt.number = false
 vim.opt.relativenumber = false
 vim.opt.expandtab = true
 vim.opt.shiftwidth = 2
