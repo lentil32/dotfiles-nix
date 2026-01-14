@@ -192,7 +192,6 @@ in
             hop-nvim
             nvim-autopairs
             nvim-surround
-            smear-cursor-nvim
             sidekick-nvim
             overseer-nvim
             lualine-nvim

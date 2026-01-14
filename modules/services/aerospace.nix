@@ -112,7 +112,7 @@ in
           run = "move-node-to-workspace 10"; # mnemonics S - Social Network
         }
         {
-          "if".app-id = "com.github.wez.wezterm";
+          "if".app-id = "com.mitchellh.ghostty";
           run = "layout tiling";
         }
         {
@@ -141,7 +141,7 @@ in
 
         # All possible commands: https://nikitabobko.github.io/AeroSpace/commands
 
-        "${meh}-enter" = "exec-and-forget open -a WezTerm";
+        "${meh}-enter" = "exec-and-forget open -a Ghostty";
 
         "${meh}-h" = "focus left";
         "${meh}-j" = "focus down";

@@ -144,17 +144,6 @@ require("lze").load({
     end,
   },
   {
-    "smear-cursor.nvim",
-    for_cat = "general",
-    event = "DeferredUIEnter",
-    after = function()
-      if util.get_var(nil, "neovide") then
-        return
-      end
-      require("smear_cursor").setup({})
-    end,
-  },
-  {
     "nvim-autopairs",
     for_cat = "general",
     event = "InsertEnter",
