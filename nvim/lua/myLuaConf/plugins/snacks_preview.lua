@@ -13,6 +13,7 @@ local doc_preview_filetypes = {
 }
 
 local doc_preview_state = {}
+local doc_preview_tokens = {}
 
 local function get_win_id(ctx)
   local win = ctx and ctx.win
@@ -29,7 +30,7 @@ local function state_ok(buf, token)
 end
 
 local function close_doc_preview(buf)
-  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+  if not buf then
     return
   end
   local state = doc_preview_state[buf]
@@ -50,6 +51,11 @@ local function close_doc_preview(buf)
     end)
   end
   doc_preview_state[buf] = nil
+end
+
+local function next_doc_preview_token(buf)
+  doc_preview_tokens[buf] = (doc_preview_tokens[buf] or 0) + 1
+  return doc_preview_tokens[buf]
 end
 
 local function attach_doc_preview(buf, path, ctx)
@@ -100,7 +106,7 @@ local function attach_doc_preview(buf, path, ctx)
     end,
   })
 
-  local token = ((doc_preview_state[buf] and doc_preview_state[buf].token) or 0) + 1
+  local token = next_doc_preview_token(buf)
   doc_preview_state[buf] = { token = token, group = group }
   snacks.image.doc.find(buf, function(imgs)
     if not state_ok(buf, token) then

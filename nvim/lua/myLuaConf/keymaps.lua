@@ -411,6 +411,20 @@ function M.list()
       end,
       desc = "Buffer",
     },
+    {
+      "<leader>so",
+      function()
+        Snacks.toggle.words():toggle()
+      end,
+      desc = "Symbol overlay",
+    },
+    {
+      "<leader>sb",
+      function()
+        picker.grep_buffers()
+      end,
+      desc = "Grep buffers",
+    },
   })
 
   add({

@@ -87,14 +87,11 @@ function M.patch_parse_url()
     if not scheme then
       return nil
     end
+    if not oil_util.is_oil_bufnr(bufnr) then
+      return nil
+    end
     if config.adapter_aliases and config.adapter_aliases[scheme] then
       scheme = config.adapter_aliases[scheme]
-    end
-    if not (config.adapters and config.adapters[scheme]) then
-      if vim.bo[bufnr].filetype == "oil" and not silent then
-        vim.notify_once(string.format("[oil] could not find adapter for buffer '%s'", bufname), vim.log.levels.ERROR)
-      end
-      return nil
     end
     local adapter = config.get_adapter_by_scheme(scheme)
     if not adapter and not silent then
