@@ -414,6 +414,32 @@ function M.list()
   })
 
   add({
+    -- Profiler
+    { "<leader>t", group = "profiler" },
+    {
+      "<leader>tp",
+      function()
+        Snacks.profiler.toggle()
+      end,
+      desc = "Toggle profiler",
+    },
+    {
+      "<leader>th",
+      function()
+        Snacks.profiler.highlight()
+      end,
+      desc = "Profiler highlights",
+    },
+    {
+      "<leader>ts",
+      function()
+        Snacks.profiler.scratch()
+      end,
+      desc = "Profiler scratch",
+    },
+  })
+
+  add({
     -- Errors/Diagnostics
     { "<leader>e", group = "errors" },
     {

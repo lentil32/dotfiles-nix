@@ -58,6 +58,7 @@ return {
     for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
+      local Snacks = require("snacks")
       local opts = {
         options = {
           theme = "auto",
@@ -81,6 +82,8 @@ return {
         },
         extensions = { "oil" },
       }
+
+      table.insert(opts.sections.lualine_x, Snacks.profiler.status())
 
       table.insert(opts.sections.lualine_c, 1, {
         function()

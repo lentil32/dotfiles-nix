@@ -146,6 +146,7 @@ local function opts()
         },
       },
     },
+    profiler = {},
     gh = { enabled = true },
   }
 end
