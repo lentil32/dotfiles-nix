@@ -1,5 +1,13 @@
 local M = {}
 
+local rust = nil
+do
+  local ok, mod = pcall(require, "my_readline")
+  if ok then
+    rust = mod
+  end
+end
+
 local function feedkeys(keys)
   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "n", false)
 end
@@ -37,36 +45,60 @@ local function transpose_chars()
 end
 
 function M.beginning_of_line()
+  if rust and rust.beginning_of_line then
+    rust.beginning_of_line()
+    return
+  end
   if is_insert_mode() then
     feedkeys("<C-o>0")
   end
 end
 
 function M.end_of_line()
+  if rust and rust.end_of_line then
+    rust.end_of_line()
+    return
+  end
   if is_insert_mode() then
     feedkeys("<C-o>$")
   end
 end
 
 function M.forward_word()
+  if rust and rust.forward_word then
+    rust.forward_word()
+    return
+  end
   if is_insert_mode() then
     feedkeys("<C-o>w")
   end
 end
 
 function M.backward_word()
+  if rust and rust.backward_word then
+    rust.backward_word()
+    return
+  end
   if is_insert_mode() then
     feedkeys("<C-o>b")
   end
 end
 
 function M.kill_word()
+  if rust and rust.kill_word then
+    rust.kill_word()
+    return
+  end
   if is_insert_mode() then
     feedkeys("<C-o>dw")
   end
 end
 
 function M.transpose_chars()
+  if rust and rust.transpose_chars then
+    rust.transpose_chars()
+    return
+  end
   if is_insert_mode() then
     transpose_chars()
   end

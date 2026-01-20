@@ -194,6 +194,7 @@ function M.list()
       desc = "Recent files",
     },
     { "<leader>fs", "<cmd>w<cr>", desc = "Save" },
+    { "<leader>feR", util.reload_nixcats, desc = "Reload nixCats runtime" },
     { "<leader>fy", group = "yank" },
     {
       "<leader>fyy",
@@ -557,6 +558,11 @@ function M.list()
     -- Applications
     { "<leader>a", group = "applications" },
     { "<leader>ao", group = "org" },
+  })
+
+  add({
+    -- Sidekick
+    { "<leader>c", group = "sidekick" },
   })
 
   add({

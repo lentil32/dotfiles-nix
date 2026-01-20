@@ -121,6 +121,47 @@ in
             runHook postInstall
           '';
         };
+        readlinePlugin = pkgs.rustPlatform.buildRustPackage {
+          pname = "my-readline-nvim";
+          version = "0.1.0";
+          src = rustWorkspace;
+          cargoLock = {
+            lockFile = rustWorkspace + "/Cargo.lock";
+          };
+          cargoBuildFlags = [
+            "--locked"
+            "--package"
+            "my_readline"
+          ];
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lua
+            lib=""
+            if [ -f target/release/libmy_readline.dylib ]; then
+              lib=target/release/libmy_readline.dylib
+            elif [ -f target/release/libmy_readline.so ]; then
+              lib=target/release/libmy_readline.so
+            elif [ -f target/release/my_readline.dll ]; then
+              lib=target/release/my_readline.dll
+            else
+              lib=$(find target -type f \( -name "libmy_readline.dylib" -o -name "libmy_readline.so" -o -name "my_readline.dll" \) | head -n 1)
+            fi
+            if [ -z "$lib" ]; then
+              echo "my_readline library not found" >&2
+              exit 1
+            fi
+            case "$lib" in
+              *.dll) cp "$lib" "$out/lua/my_readline.dll" ;;
+              *.dylib|*.so) cp "$lib" "$out/lua/my_readline.so" ;;
+              *)
+                echo "my_readline library not found: $lib" >&2
+                exit 1
+                ;;
+            esac
+            runHook postInstall
+          '';
+        };
         autocmdsPlugin = pkgs.rustPlatform.buildRustPackage {
           pname = "my-autocmds-nvim";
           version = "0.1.0";
@@ -176,6 +217,7 @@ in
             oil-nvim
             autocmdsPlugin
             utilPlugin
+            readlinePlugin
             projectRootPlugin
           ];
 

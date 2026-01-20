@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "my_readline"
+version = "0.1.0"
+dependencies = [
+ "nvim-oxi",
+]
+
+[[package]]
 name = "my_util"
 version = "0.1.0"
 dependencies = [

@@ -60,13 +60,13 @@ require("lze").load({
       {
         "<c-.>",
         sidekick_in_project_root(function()
-          require("sidekick.cli").toggle()
+          require("sidekick.cli").toggle({ name = "codex", focus = true })
         end),
         mode = { "n", "t", "i", "x" },
-        desc = "Sidekick toggle",
+        desc = "Sidekick toggle Codex",
       },
       {
-        "<leader>aa",
+        "<leader>ca",
         sidekick_in_project_root(function()
           require("sidekick.cli").toggle()
         end),
@@ -74,7 +74,7 @@ require("lze").load({
         desc = "Sidekick toggle CLI",
       },
       {
-        "<leader>as",
+        "<leader>cs",
         sidekick_in_project_root(function()
           require("sidekick.cli").select()
         end),
@@ -82,7 +82,7 @@ require("lze").load({
         desc = "Sidekick select CLI",
       },
       {
-        "<leader>ad",
+        "<leader>cd",
         function()
           require("sidekick.cli").close()
         end,
@@ -90,7 +90,7 @@ require("lze").load({
         desc = "Sidekick detach CLI session",
       },
       {
-        "<leader>at",
+        "<leader>ct",
         function()
           require("sidekick.cli").send({ msg = "{this}" })
         end,
@@ -98,7 +98,7 @@ require("lze").load({
         desc = "Sidekick send this",
       },
       {
-        "<leader>af",
+        "<leader>cf",
         function()
           require("sidekick.cli").send({ msg = "{file}" })
         end,
@@ -106,7 +106,7 @@ require("lze").load({
         desc = "Sidekick send file",
       },
       {
-        "<leader>av",
+        "<leader>cv",
         function()
           require("sidekick.cli").send({ msg = "{selection}" })
         end,
@@ -114,7 +114,7 @@ require("lze").load({
         desc = "Sidekick send selection",
       },
       {
-        "<leader>ap",
+        "<leader>cp",
         function()
           require("sidekick.cli").prompt()
         end,
@@ -122,12 +122,12 @@ require("lze").load({
         desc = "Sidekick prompt",
       },
       {
-        "<leader>ac",
+        "<leader>cc",
         sidekick_in_project_root(function()
           require("sidekick.cli").toggle({ name = "codex", focus = true })
         end),
         mode = "n",
-        desc = "Sidekick Toggle Claude",
+        desc = "Sidekick toggle Codex",
       },
     },
     after = function()

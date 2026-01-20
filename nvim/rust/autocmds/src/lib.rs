@@ -129,16 +129,6 @@ fn maybe_show_dashboard() -> Result<()> {
     Ok(())
 }
 
-fn data_buf(data: &Object, fallback: i64) -> i64 {
-    let Ok(dict) = Dictionary::try_from(data.clone()) else {
-        return fallback;
-    };
-    let key = NvimString::from("buf");
-    dict.get(&key)
-        .and_then(|obj| i64::from_object(obj.clone()).ok())
-        .unwrap_or(fallback)
-}
-
 fn oil_current_dir(buf: i64) -> Result<Option<String>> {
     let obj: Object = lua_eval(OIL_DIR_LUA, Some(Object::from(buf)))?;
     if obj.is_nil() {
@@ -149,21 +139,6 @@ fn oil_current_dir(buf: i64) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(dir))
-}
-
-fn win_for_buf_handle(buf: i64) -> Result<Option<Window>> {
-    let win_id: i64 = api::call_function("bufwinid", Array::from_iter([buf]))?;
-    if win_id == -1 {
-        return Ok(None);
-    }
-    let Ok(handle) = i32::try_from(win_id) else {
-        return Ok(None);
-    };
-    let win = Window::from(handle);
-    if !win.is_valid() {
-        return Ok(None);
-    }
-    Ok(Some(win))
 }
 
 fn win_key(win: i64) -> String {
@@ -239,12 +214,12 @@ fn on_file_cwd(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
     Ok(false)
 }
 
-fn on_oil_enter(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
-    let buf_handle = data_buf(&args.data, args.buffer.handle() as i64);
+fn on_oil_buf(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
+    let buf_handle = args.buffer.handle() as i64;
     let Some(dir) = oil_current_dir(buf_handle)? else {
         return Ok(false);
     };
-    let Some(win) = win_for_buf_handle(buf_handle)? else {
+    let Some(win) = win_for_buf(&args.buffer)? else {
         return Ok(false);
     };
     let win_id = win.handle() as i64;
@@ -355,10 +330,10 @@ fn setup_oil_cwd_autocmd() -> Result<()> {
     )?;
     let opts = CreateAutocmdOpts::builder()
         .group(group)
-        .patterns(["OilEnter"])
-        .callback(|args: AutocmdCallbackArgs| on_oil_enter(args))
+        .patterns(["oil://*"])
+        .callback(|args: AutocmdCallbackArgs| on_oil_buf(args))
         .build();
-    api::create_autocmd(["User"], &opts)?;
+    api::create_autocmd(["BufEnter", "BufReadCmd"], &opts)?;
     Ok(())
 }
 
