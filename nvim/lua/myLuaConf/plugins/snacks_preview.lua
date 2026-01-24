@@ -15,6 +15,18 @@ local doc_preview_filetypes = {
 local doc_preview_state = {}
 local doc_preview_tokens = {}
 
+local function restore_doc_preview_name(buf, state)
+  if not state or not state.restore_name then
+    return
+  end
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    return
+  end
+  if vim.api.nvim_buf_get_name(buf) == state.path then
+    pcall(vim.api.nvim_buf_set_name, buf, state.name)
+  end
+end
+
 local function get_win_id(ctx)
   local win = ctx and ctx.win
   if type(win) == "number" then
@@ -37,6 +49,7 @@ local function close_doc_preview(buf)
   if not state then
     return
   end
+  restore_doc_preview_name(buf, state)
   if state.group then
     pcall(vim.api.nvim_del_augroup_by_id, state.group)
   end
@@ -67,20 +80,11 @@ local function attach_doc_preview(buf, path, ctx)
     close_doc_preview(buf)
     return
   end
-  if vim.api.nvim_buf_get_name(buf) == "" then
-    pcall(vim.api.nvim_buf_set_name, buf, path)
-  end
   if util.get_buf_opt(buf, "filetype", "") ~= ft then
     util.set_buf_opts(buf, { filetype = ft })
   end
   local snacks = util.try_require("snacks")
   if not (snacks and snacks.image and snacks.image.doc and snacks.image.terminal) then
-    return
-  end
-  local env = snacks.image.terminal.env()
-  if env.placeholders then
-    close_doc_preview(buf)
-    snacks.image.doc.attach(buf)
     return
   end
 
@@ -107,11 +111,24 @@ local function attach_doc_preview(buf, path, ctx)
   })
 
   local token = next_doc_preview_token(buf)
-  doc_preview_state[buf] = { token = token, group = group }
+  local original_name = vim.api.nvim_buf_get_name(buf)
+  local preview_name = path .. ".snacks-preview"
+  local restore_name = original_name ~= preview_name
+  if restore_name then
+    pcall(vim.api.nvim_buf_set_name, buf, preview_name)
+  end
+  doc_preview_state[buf] = {
+    token = token,
+    group = group,
+    name = original_name,
+    path = preview_name,
+    restore_name = restore_name,
+  }
   snacks.image.doc.find(buf, function(imgs)
     if not state_ok(buf, token) then
       return
     end
+    restore_doc_preview_name(buf, doc_preview_state[buf])
     if not imgs or vim.tbl_isempty(imgs) then
       return
     end
