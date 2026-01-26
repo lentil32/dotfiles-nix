@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use once_cell::sync::Lazy;
 
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts, OptionScope};
-use nvim_oxi::api::types::{AutocmdCallbackArgs, LogLevel};
+use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::{self, Buffer};
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString};
@@ -90,9 +90,7 @@ where
         return;
     }
     let message = build();
-    if let Err(err) = api::notify(&message, LogLevel::Info, &Dictionary::new()) {
-        eprintln!("project_root debug notify failed: {err}");
-    }
+    notify::info("", &message);
 }
 
 fn get_buf_var(buf: &Buffer, var: &str) -> Option<String> {
@@ -140,7 +138,7 @@ fn get_path_from_buffer(buf: &Buffer) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let name = buf.get_name()?;
-    if name.as_os_str().is_empty() {
+    if name.is_empty() {
         debug_log(|| format!("get_path_from_buffer: buf={} empty name", buf.handle()));
         return Ok(None);
     }
@@ -167,7 +165,7 @@ fn get_path_from_buffer(buf: &Buffer) -> Result<Option<PathBuf>> {
         "buftype",
         &OptionOpts::builder()
             .scope(OptionScope::Local)
-            .buffer(buf.clone())
+            .buf(buf.clone())
             .build(),
     )?;
     let allow_nonfile_buftype = raw_path.starts_with("file://") || raw_path.starts_with("oil://");
@@ -498,14 +496,14 @@ fn project_root_value() -> Result<Option<String>> {
 fn project_root_or_warn_value() -> Result<Option<String>> {
     let root = get_project_root()?;
     if root.is_none() {
-        api::notify("No project root found", LogLevel::Warn, &Dictionary::new())?;
+        notify::warn("", "No project root found");
     }
     Ok(root)
 }
 
 fn show_project_root() -> Result<()> {
     let Some(root) = get_project_root()? else {
-        api::notify("No project root found", LogLevel::Warn, &Dictionary::new())?;
+        notify::warn("", "No project root found");
         return Ok(());
     };
 
@@ -517,7 +515,7 @@ fn show_project_root() -> Result<()> {
     .map(|value| value.to_string_lossy().into_owned())
     .unwrap_or(root);
 
-    api::notify(&display, LogLevel::Info, &Dictionary::new())?;
+    notify::info("", &display);
     Ok(())
 }
 

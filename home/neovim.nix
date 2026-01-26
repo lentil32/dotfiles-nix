@@ -38,321 +38,201 @@ in
         ...
       }@packageDef:
       let
+        lib = pkgs.lib;
+        vim = pkgs.vimPlugins;
+        p = pkgs;
         rustWorkspace = ../nvim/rust;
-        projectRootPlugin = pkgs.rustPlatform.buildRustPackage {
-          pname = "project-root-nvim";
-          version = "0.1.0";
-          src = rustWorkspace;
-          cargoLock = {
-            lockFile = rustWorkspace + "/Cargo.lock";
-          };
-          cargoBuildFlags = [
-            "--locked"
-            "--package"
-            "project_root"
-          ];
-          doCheck = false;
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/lua
-            lib=""
-            if [ -f target/release/libproject_root.dylib ]; then
-              lib=target/release/libproject_root.dylib
-            elif [ -f target/release/libproject_root.so ]; then
-              lib=target/release/libproject_root.so
-            elif [ -f target/release/project_root.dll ]; then
-              lib=target/release/project_root.dll
-            else
-              lib=$(find target -type f \( -name "libproject_root.dylib" -o -name "libproject_root.so" -o -name "project_root.dll" \) | head -n 1)
-            fi
-            if [ -z "$lib" ]; then
-              echo "project_root library not found" >&2
-              exit 1
-            fi
-            case "$lib" in
-              *.dll) cp "$lib" "$out/lua/project_root.dll" ;;
-              *.dylib|*.so) cp "$lib" "$out/lua/project_root.so" ;;
-              *)
-                echo "project_root library not found: $lib" >&2
-                exit 1
-                ;;
-            esac
-            runHook postInstall
-          '';
+        rustLockHashes = import ../nvim/rust/lock-hashes.nix;
+        rustCargoLock = {
+          lockFile = rustWorkspace + "/Cargo.lock";
+          outputHashes = rustLockHashes.byCrate;
         };
-        utilPlugin = pkgs.rustPlatform.buildRustPackage {
-          pname = "my-util-nvim";
-          version = "0.1.0";
-          src = rustWorkspace;
-          cargoLock = {
-            lockFile = rustWorkspace + "/Cargo.lock";
-          };
-          cargoBuildFlags = [
-            "--locked"
-            "--package"
-            "my_util"
-          ];
-          doCheck = false;
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/lua
-            lib=""
-            if [ -f target/release/libmy_util.dylib ]; then
-              lib=target/release/libmy_util.dylib
-            elif [ -f target/release/libmy_util.so ]; then
-              lib=target/release/libmy_util.so
-            elif [ -f target/release/my_util.dll ]; then
-              lib=target/release/my_util.dll
-            else
-              lib=$(find target -type f \( -name "libmy_util.dylib" -o -name "libmy_util.so" -o -name "my_util.dll" \) | head -n 1)
-            fi
-            if [ -z "$lib" ]; then
-              echo "my_util library not found" >&2
+        toKebab = lib.strings.replaceStrings [ "_" ] [ "-" ];
+        mkPname = crate: "${toKebab crate}-nvim";
+        mkInstallPhase = libBase: outBase: ''
+          runHook preInstall
+          mkdir -p $out/lua
+          lib=""
+          if [ -f target/release/lib${libBase}.dylib ]; then
+            lib=target/release/lib${libBase}.dylib
+          elif [ -f target/release/lib${libBase}.so ]; then
+            lib=target/release/lib${libBase}.so
+          elif [ -f target/release/${libBase}.dll ]; then
+            lib=target/release/${libBase}.dll
+          else
+            lib=$(find target -type f \( -name "lib${libBase}.dylib" -o -name "lib${libBase}.so" -o -name "${libBase}.dll" \) | head -n 1)
+          fi
+          if [ -z "$lib" ]; then
+            echo "${libBase} library not found" >&2
+            exit 1
+          fi
+          case "$lib" in
+            *.dll) cp "$lib" "$out/lua/${outBase}.dll" ;;
+            *.dylib|*.so) cp "$lib" "$out/lua/${outBase}.so" ;;
+            *)
+              echo "${libBase} library not found: $lib" >&2
               exit 1
-            fi
-            case "$lib" in
-              *.dll) cp "$lib" "$out/lua/my_util.dll" ;;
-              *.dylib|*.so) cp "$lib" "$out/lua/my_util.so" ;;
-              *)
-                echo "my_util library not found: $lib" >&2
-                exit 1
-                ;;
-            esac
-            runHook postInstall
-          '';
-        };
-        readlinePlugin = pkgs.rustPlatform.buildRustPackage {
-          pname = "my-readline-nvim";
-          version = "0.1.0";
-          src = rustWorkspace;
-          cargoLock = {
-            lockFile = rustWorkspace + "/Cargo.lock";
+              ;;
+          esac
+          runHook postInstall
+        '';
+        mkRustPlugin =
+          {
+            crate,
+            pname ? mkPname crate,
+            libBase ? crate,
+            outBase ? libBase,
+            cargoBuildFlags ? [
+              "--locked"
+              "--package"
+              crate
+            ],
+          }:
+          pkgs.rustPlatform.buildRustPackage {
+            inherit pname;
+            version = "0.1.0";
+            src = rustWorkspace;
+            cargoLock = rustCargoLock;
+            cargoBuildFlags = cargoBuildFlags;
+            doCheck = false;
+            installPhase = mkInstallPhase libBase outBase;
           };
-          cargoBuildFlags = [
-            "--locked"
-            "--package"
-            "my_readline"
-          ];
-          doCheck = false;
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/lua
-            lib=""
-            if [ -f target/release/libmy_readline.dylib ]; then
-              lib=target/release/libmy_readline.dylib
-            elif [ -f target/release/libmy_readline.so ]; then
-              lib=target/release/libmy_readline.so
-            elif [ -f target/release/my_readline.dll ]; then
-              lib=target/release/my_readline.dll
-            else
-              lib=$(find target -type f \( -name "libmy_readline.dylib" -o -name "libmy_readline.so" -o -name "my_readline.dll" \) | head -n 1)
-            fi
-            if [ -z "$lib" ]; then
-              echo "my_readline library not found" >&2
-              exit 1
-            fi
-            case "$lib" in
-              *.dll) cp "$lib" "$out/lua/my_readline.dll" ;;
-              *.dylib|*.so) cp "$lib" "$out/lua/my_readline.so" ;;
-              *)
-                echo "my_readline library not found: $lib" >&2
-                exit 1
-                ;;
-            esac
-            runHook postInstall
-          '';
+        rustPluginOrder = [
+          "project_root"
+          "my_util"
+          "my_readline"
+          "snacks_preview"
+          "my_autocmds"
+        ];
+        rustPluginSpecs = {
+          project_root = { };
+          my_util = { };
+          my_readline = { };
+          snacks_preview = { };
+          my_autocmds = { };
         };
-        snacksPreviewPlugin = pkgs.rustPlatform.buildRustPackage {
-          pname = "snacks-preview-nvim";
-          version = "0.1.0";
-          src = rustWorkspace;
-          cargoLock = {
-            lockFile = rustWorkspace + "/Cargo.lock";
+        rustPluginList = map (
+          crate: mkRustPlugin ((rustPluginSpecs.${crate} or { }) // { inherit crate; })
+        ) rustPluginOrder;
+        categoriesConfig = {
+          general = {
+            startupPlugins = [
+              vim.modus-themes-nvim
+              vim.plenary-nvim
+              vim.lze
+              vim.lzextras
+              vim.snacks-nvim
+              vim.grug-far-nvim # search/replace
+              vim.oil-nvim
+            ]
+            ++ rustPluginList;
+            optionalPlugins = [
+              vim.which-key-nvim
+              vim.flash-nvim
+              vim.hop-nvim
+              vim.nvim-autopairs
+              vim.nvim-surround
+              vim.sidekick-nvim
+              vim.overseer-nvim
+              vim.lualine-nvim
+            ];
+            runtimeDeps = [
+              p.ripgrep
+              p.fd
+              p.bat
+              p.imagemagick
+              p.mermaid-cli
+              p.typst
+              p.tectonic
+            ];
           };
-          cargoBuildFlags = [
-            "--locked"
-            "--package"
-            "snacks_preview"
-          ];
-          doCheck = false;
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/lua
-            lib=""
-            if [ -f target/release/libsnacks_preview.dylib ]; then
-              lib=target/release/libsnacks_preview.dylib
-            elif [ -f target/release/libsnacks_preview.so ]; then
-              lib=target/release/libsnacks_preview.so
-            elif [ -f target/release/snacks_preview.dll ]; then
-              lib=target/release/snacks_preview.dll
-            else
-              lib=$(find target -type f \( -name "libsnacks_preview.dylib" -o -name "libsnacks_preview.so" -o -name "snacks_preview.dll" \) | head -n 1)
-            fi
-            if [ -z "$lib" ]; then
-              echo "snacks_preview library not found" >&2
-              exit 1
-            fi
-            case "$lib" in
-              *.dll) cp "$lib" "$out/lua/snacks_preview.dll" ;;
-              *.dylib|*.so) cp "$lib" "$out/lua/snacks_preview.so" ;;
-              *)
-                echo "snacks_preview library not found: $lib" >&2
-                exit 1
-                ;;
-            esac
-            runHook postInstall
-          '';
-        };
-        autocmdsPlugin = pkgs.rustPlatform.buildRustPackage {
-          pname = "my-autocmds-nvim";
-          version = "0.1.0";
-          src = rustWorkspace;
-          cargoLock = {
-            lockFile = rustWorkspace + "/Cargo.lock";
+
+          completion = {
+            startupPlugins = [
+              vim.blink-cmp
+            ];
           };
-          cargoBuildFlags = [
-            "--locked"
-            "--package"
-            "my_autocmds"
-          ];
-          doCheck = false;
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/lua
-            lib=""
-            if [ -f target/release/libmy_autocmds.dylib ]; then
-              lib=target/release/libmy_autocmds.dylib
-            elif [ -f target/release/libmy_autocmds.so ]; then
-              lib=target/release/libmy_autocmds.so
-            elif [ -f target/release/my_autocmds.dll ]; then
-              lib=target/release/my_autocmds.dll
-            else
-              lib=$(find target -type f \( -name "libmy_autocmds.dylib" -o -name "libmy_autocmds.so" -o -name "my_autocmds.dll" \) | head -n 1)
-            fi
-            if [ -z "$lib" ]; then
-              echo "my_autocmds library not found" >&2
-              exit 1
-            fi
-            case "$lib" in
-              *.dll) cp "$lib" "$out/lua/my_autocmds.dll" ;;
-              *.dylib|*.so) cp "$lib" "$out/lua/my_autocmds.so" ;;
-              *)
-                echo "my_autocmds library not found: $lib" >&2
-                exit 1
-                ;;
-            esac
-            runHook postInstall
-          '';
+
+          git = {
+            optionalPlugins = [
+              vim.neogit
+              vim.diffview-nvim
+              vim.gitsigns-nvim
+              vim.git-blame-nvim
+              vim.vim-flog
+            ];
+          };
+
+          treesitter = {
+            optionalPlugins = [
+              vim.nvim-treesitter.withAllGrammars
+            ];
+          };
+
+          lsp = {
+            optionalPlugins = [
+              vim.nvim-lspconfig
+              vim.mason-nvim
+              vim.mason-lspconfig-nvim
+              vim.lazydev-nvim
+            ];
+            runtimeDeps = [
+              p.nil
+              p.rust-analyzer
+              p.lua-language-server
+              p.ruff
+              p.yaml-language-server
+            ];
+          };
+
+          format = {
+            optionalPlugins = [
+              vim.conform-nvim
+            ];
+            runtimeDeps = [
+              p.stylua
+              p.taplo
+              p.yamlfmt
+            ];
+          };
+
+          lint = {
+            optionalPlugins = [
+              vim.nvim-lint
+            ];
+            runtimeDeps = [
+              p.selene
+              p.yamllint
+            ];
+          };
+
+          typescript = {
+            optionalPlugins = [
+              vim.nvim-vtsls
+            ];
+            runtimeDeps = [
+              p.biome
+              p.vtsls
+            ];
+          };
+
+          org = {
+            optionalPlugins = [
+              vim.orgmode
+            ];
+          };
         };
+        collect =
+          field:
+          lib.filterAttrs (_: value: value != [ ]) (
+            lib.mapAttrs (_: cfg: cfg.${field} or [ ]) categoriesConfig
+          );
+        startupPlugins = collect "startupPlugins";
+        optionalPlugins = collect "optionalPlugins";
+        lspsAndRuntimeDeps = collect "runtimeDeps";
       in
       {
-        # Plugins that load at startup
-        startupPlugins = {
-          general = with pkgs.vimPlugins; [
-            modus-themes-nvim
-            plenary-nvim
-            lze
-            lzextras
-            snacks-nvim
-            grug-far-nvim # search/replace
-            oil-nvim
-            autocmdsPlugin
-            utilPlugin
-            readlinePlugin
-            snacksPreviewPlugin
-            projectRootPlugin
-          ];
-
-          completion = with pkgs.vimPlugins; [
-            blink-cmp
-          ];
-        };
-
-        # Plugins loaded via lze (packadd)
-        optionalPlugins = {
-          general = with pkgs.vimPlugins; [
-            which-key-nvim
-            flash-nvim
-            hop-nvim
-            nvim-autopairs
-            nvim-surround
-            sidekick-nvim
-            overseer-nvim
-            lualine-nvim
-          ];
-
-          git = with pkgs.vimPlugins; [
-            neogit
-            diffview-nvim
-            gitsigns-nvim
-            git-blame-nvim
-            vim-flog
-          ];
-
-          treesitter = with pkgs.vimPlugins; [
-            nvim-treesitter.withAllGrammars
-          ];
-
-          lsp = with pkgs.vimPlugins; [
-            nvim-lspconfig
-            mason-nvim
-            mason-lspconfig-nvim
-            lazydev-nvim
-          ];
-
-          format = with pkgs.vimPlugins; [
-            conform-nvim
-          ];
-
-          lint = with pkgs.vimPlugins; [
-            nvim-lint
-          ];
-
-          typescript = with pkgs.vimPlugins; [
-            nvim-vtsls
-          ];
-
-          org = with pkgs.vimPlugins; [
-            orgmode
-          ];
-        };
-
-        # External packages (LSPs, formatters, etc.)
-        lspsAndRuntimeDeps = {
-          general = with pkgs; [
-            ripgrep
-            fd
-            bat
-            imagemagick
-            mermaid-cli
-            typst
-            tectonic
-          ];
-
-          format = with pkgs; [
-            stylua
-            taplo
-            yamlfmt
-          ];
-
-          lint = with pkgs; [
-            selene
-            yamllint
-          ];
-
-          lsp = with pkgs; [
-            nil
-            rust-analyzer
-            lua-language-server
-            ruff
-            yaml-language-server
-          ];
-
-          typescript = with pkgs; [
-            biome
-            vtsls
-          ];
-        };
+        inherit startupPlugins optionalPlugins lspsAndRuntimeDeps;
       };
 
     packageDefinitions.replace = {

@@ -6,7 +6,7 @@ use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
+use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, mlua, schedule};
 use nvim_oxi_utils::{
     dict, guard,
     handles::{BufHandle, WinHandle},
@@ -28,9 +28,6 @@ impl AutocmdAction {
     }
 }
 
-const SNACKS_DASHBOARD_LUA: &str = "(function() local ok, snacks = pcall(require, 'snacks'); if ok and snacks.dashboard then snacks.dashboard() end end)()";
-const OIL_DIR_LUA: &str = "(function(buf) local ok, oil = pcall(require, 'oil'); if not ok then return nil end; return oil.get_current_dir(buf) end)(_A)";
-const SNACKS_RENAME_LUA: &str = "(function(args) local ok, snacks = pcall(require, 'snacks'); if not ok then return end; local rename = snacks.rename and snacks.rename.on_rename_file; if rename then rename(args.src_url, args.dest_url) end end)(_A)";
 const LOG_CONTEXT: &str = "autocmds";
 
 fn report_panic(label: &str, info: guard::PanicInfo) {
@@ -66,6 +63,53 @@ where
     );
 }
 
+fn snacks_table(lua: &mlua::Lua) -> Option<mlua::Table> {
+    lua::try_require_table(lua, "snacks")
+}
+
+fn oil_table(lua: &mlua::Lua) -> Option<mlua::Table> {
+    lua::try_require_table(lua, "oil")
+}
+
+fn snacks_dashboard() -> Result<()> {
+    let lua = lua::state();
+    let Some(snacks) = snacks_table(&lua) else {
+        return Ok(());
+    };
+    let Ok(dashboard) = snacks.get::<mlua::Function>("dashboard") else {
+        return Ok(());
+    };
+    dashboard.call::<()>(()).map_err(Into::into)
+}
+
+fn oil_current_dir_lua(buf: BufHandle) -> Result<Option<String>> {
+    let lua = lua::state();
+    let Some(oil) = oil_table(&lua) else {
+        return Ok(None);
+    };
+    let Ok(get_current_dir) = oil.get::<mlua::Function>("get_current_dir") else {
+        return Ok(None);
+    };
+    let dir: Option<String> = get_current_dir
+        .call::<Option<String>>(buf.raw())
+        .map_err(nvim_oxi::Error::from)?;
+    Ok(dir.filter(|val| !val.is_empty()))
+}
+
+fn snacks_rename_file(src: &str, dest: &str) -> Result<()> {
+    let lua = lua::state();
+    let Some(snacks) = snacks_table(&lua) else {
+        return Ok(());
+    };
+    let Ok(rename) = snacks.get::<mlua::Table>("rename") else {
+        return Ok(());
+    };
+    let Ok(on_rename_file) = rename.get::<mlua::Function>("on_rename_file") else {
+        return Ok(());
+    };
+    on_rename_file.call::<()>((src, dest)).map_err(Into::into)
+}
+
 fn is_dir(path: &str) -> bool {
     if path.is_empty() {
         return false;
@@ -99,15 +143,13 @@ fn file_dir_for_buf(buf: &Buffer) -> Result<Option<String>> {
     if !buf.is_valid() {
         return Ok(None);
     }
-    let bt: NvimString = api::get_option_value(
-        "buftype",
-        &OptionOpts::builder().buffer(buf.clone()).build(),
-    )?;
+    let bt: NvimString =
+        api::get_option_value("buftype", &OptionOpts::builder().buf(buf.clone()).build())?;
     if !bt.is_empty() {
         return Ok(None);
     }
     let name = buf.get_name()?;
-    if name.as_os_str().is_empty() {
+    if name.is_empty() {
         return Ok(None);
     }
     let name_str = name.to_string_lossy();
@@ -141,7 +183,7 @@ fn win_for_buf(buf: &Buffer) -> Result<Option<Window>> {
 fn maybe_show_dashboard() -> Result<()> {
     let current = api::get_current_buf();
     let bt: NvimString =
-        api::get_option_value("buftype", &OptionOpts::builder().buffer(current).build())?;
+        api::get_option_value("buftype", &OptionOpts::builder().buf(current).build())?;
     if !bt.is_empty() {
         return Ok(());
     }
@@ -150,7 +192,7 @@ fn maybe_show_dashboard() -> Result<()> {
         if !buf.is_valid() {
             continue;
         }
-        let opt_opts = OptionOpts::builder().buffer(buf.clone()).build();
+        let opt_opts = OptionOpts::builder().buf(buf.clone()).build();
         let listed = match api::get_option_value::<bool>("buflisted", &opt_opts) {
             Ok(value) => value,
             Err(err) => {
@@ -162,27 +204,19 @@ fn maybe_show_dashboard() -> Result<()> {
             continue;
         }
         let name = buf.get_name()?;
-        if !name.as_os_str().is_empty() {
+        if !name.is_empty() {
             return Ok(());
         }
     }
 
-    if let Err(err) = lua::eval::<Object>(SNACKS_DASHBOARD_LUA, None) {
+    if let Err(err) = snacks_dashboard() {
         notify::warn(LOG_CONTEXT, &format!("snacks dashboard failed: {err}"));
     }
     Ok(())
 }
 
 fn oil_current_dir(buf: BufHandle) -> Result<Option<String>> {
-    let obj: Object = lua::eval(OIL_DIR_LUA, Some(Object::from(buf.raw())))?;
-    if obj.is_nil() {
-        return Ok(None);
-    }
-    let dir = NvimString::from_object(obj)?.to_string_lossy().into_owned();
-    if dir.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(dir))
+    oil_current_dir_lua(buf)
 }
 
 fn win_handle_from_key(key: &str) -> Option<WinHandle> {
@@ -332,10 +366,7 @@ fn on_oil_actions_post(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
         return Ok(AutocmdAction::Keep);
     };
 
-    let mut args = Dictionary::new();
-    args.insert("src_url", src);
-    args.insert("dest_url", dest);
-    let _ = lua::eval::<Object>(SNACKS_RENAME_LUA, Some(Object::from(args)))?;
+    snacks_rename_file(&src, &dest)?;
     Ok(AutocmdAction::Keep)
 }
 

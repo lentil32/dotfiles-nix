@@ -126,28 +126,41 @@ pub mod state {
 }
 
 pub mod lua {
-    use nvim_oxi::api;
-    use nvim_oxi::conversion::FromObject;
-    use nvim_oxi::{Array, Object, Result};
+    use nvim_oxi::Result;
+    use nvim_oxi::mlua;
 
-    /// Evaluate a Lua expression via `luaeval`, passing `arg` as `_A`.
-    pub fn eval<T>(expr: &str, arg: Option<Object>) -> Result<T>
+    /// Return the Neovim Lua state handle.
+    pub fn state() -> mlua::Lua {
+        nvim_oxi::mlua::lua()
+    }
+
+    /// Require a Lua module, returning it as a table.
+    pub fn require_table(lua: &mlua::Lua, name: &str) -> Result<mlua::Table> {
+        let require: mlua::Function = lua.globals().get("require")?;
+        require.call(name).map_err(Into::into)
+    }
+
+    /// Try to require a Lua module, returning None on failure.
+    pub fn try_require_table(lua: &mlua::Lua, name: &str) -> Option<mlua::Table> {
+        let require: mlua::Function = lua.globals().get("require").ok()?;
+        require.call(name).ok()
+    }
+
+    /// Call a function from a Lua table.
+    pub fn call_table_function<A, R>(table: &mlua::Table, name: &str, args: A) -> Result<R>
     where
-        T: FromObject,
+        A: mlua::IntoLuaMulti,
+        R: mlua::FromLuaMulti,
     {
-        let mut args = Array::new();
-        args.push(expr);
-        if let Some(arg) = arg {
-            args.push(arg);
-        }
-        api::call_function("luaeval", args).map_err(Into::into)
+        let fun: mlua::Function = table.get(name)?;
+        fun.call(args).map_err(Into::into)
     }
 }
 
 pub mod notify {
-    use nvim_oxi::Dictionary;
-    use nvim_oxi::api::types::LogLevel;
-    use nvim_oxi::api::{self, Error};
+    use nvim_oxi::Error;
+    use nvim_oxi::api;
+    use nvim_oxi::api::opts::EchoOpts;
 
     fn format_message(context: &str, message: &str) -> String {
         if context.is_empty() {
@@ -157,23 +170,42 @@ pub mod notify {
         }
     }
 
-    fn report_notify_error(context: &str, err: Error) {
-        eprintln!("nvim-oxi notify failed ({}): {}", context, err);
+    fn report_echo_error(context: &str, err: Error) {
+        eprintln!("nvim-oxi echo failed ({}): {}", context, err);
+    }
+
+    fn echo_message(
+        context: &str,
+        message: &str,
+        hl_group: Option<&str>,
+        err: bool,
+    ) -> nvim_oxi::Result<()> {
+        let text = format_message(context, message);
+        let mut opts = EchoOpts::builder();
+        if err {
+            opts.err(true);
+        }
+        api::echo([(text.as_str(), hl_group)], true, &opts.build()).map_err(Into::into)
+    }
+
+    /// Notify an info message in Neovim, falling back to stderr on failure.
+    pub fn info(context: &str, message: &str) {
+        if let Err(err) = echo_message(context, message, None, false) {
+            report_echo_error(context, err);
+        }
     }
 
     /// Notify a warning in Neovim, falling back to stderr on failure.
     pub fn warn(context: &str, message: &str) {
-        let text = format_message(context, message);
-        if let Err(err) = api::notify(&text, LogLevel::Warn, &Dictionary::new()) {
-            report_notify_error(context, err);
+        if let Err(err) = echo_message(context, message, Some("WarningMsg"), false) {
+            report_echo_error(context, err);
         }
     }
 
     /// Notify an error in Neovim, falling back to stderr on failure.
     pub fn error(context: &str, message: &str) {
-        let text = format_message(context, message);
-        if let Err(err) = api::notify(&text, LogLevel::Error, &Dictionary::new()) {
-            report_notify_error(context, err);
+        if let Err(err) = echo_message(context, message, Some("ErrorMsg"), true) {
+            report_echo_error(context, err);
         }
     }
 }

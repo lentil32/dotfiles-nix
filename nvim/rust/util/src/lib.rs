@@ -61,7 +61,7 @@ fn set_buf_opts((buf, opts): (Option<i64>, OptMap)) -> Result<()> {
     let Some(buf) = valid_buffer(buf) else {
         return Ok(());
     };
-    let opt_opts = OptionOpts::builder().buffer(buf).build();
+    let opt_opts = OptionOpts::builder().buf(buf).build();
     set_option_values(opts, &opt_opts)
 }
 
@@ -80,7 +80,7 @@ fn get_buf_opt((buf, opt, default): (Option<i64>, String, Object)) -> Result<Obj
     let Some(buf) = valid_buffer(buf) else {
         return Ok(default);
     };
-    let opt_opts = OptionOpts::builder().buffer(buf).build();
+    let opt_opts = OptionOpts::builder().buf(buf).build();
     Ok(get_option_value(&opt, &opt_opts, default))
 }
 

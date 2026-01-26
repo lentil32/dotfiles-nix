@@ -11,6 +11,9 @@ members = [
   "nvim_utils",
 ]
 
+[patch.crates-io]
+nvim-oxi = { git = "https://github.com/noib3/nvim-oxi", rev = "fef0f72702f6928815eeec358d7aa834b7290ded" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = "deny"

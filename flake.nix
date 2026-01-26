@@ -33,6 +33,7 @@
 
     rust-overlay.url = "github:oxalica/rust-overlay";
     treefmt-nix.url = "github:numtide/treefmt-nix";
+    crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
 
     ghostty = {
@@ -81,6 +82,7 @@
       nix-darwin-emacs,
       rust-overlay,
       treefmt-nix,
+      crane,
       flake-utils,
       ghostty,
       nix-homebrew,
@@ -140,7 +142,21 @@
 
       treefmtEval = system: treefmt-nix.lib.evalModule nixpkgs.legacyPackages.${system} ./treefmt.nix;
 
+      pkgs = nixpkgs.legacyPackages.${defaultMachine.system};
       pkgs-unstable = nixpkgs-unstable.legacyPackages.${defaultMachine.system};
+      craneLib = crane.mkLib pkgs;
+      rustSrc = craneLib.cleanCargoSource ./nvim/rust;
+      rustLockHashes = import ./nvim/rust/lock-hashes.nix;
+      nvimOxiSourceHashes = rustLockHashes.bySource;
+      commonArgs = {
+        src = rustSrc;
+        cargoLock = ./nvim/rust/Cargo.lock;
+        outputHashes = nvimOxiSourceHashes;
+        cargoExtraArgs = "--locked --workspace";
+        pname = "nvim-rust-workspace-check";
+        version = "0.0.0";
+      };
+      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
       baseSpecialArgs = inputs // {
         inherit
@@ -224,6 +240,14 @@
 
       checks.${defaultMachine.system} = {
         formatting = (treefmtEval defaultMachine.system).config.build.check self;
+        nvim-rust-check = craneLib.mkCargoDerivation (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            buildPhaseCargoCommand = "cargo check ${commonArgs.cargoExtraArgs}";
+            doCheck = false;
+          }
+        );
       };
     };
 }

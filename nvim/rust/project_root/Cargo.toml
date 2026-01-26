@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 workspace = true
 
 [dependencies]
-nvim-oxi = { version = "0.6", features = ["neovim-0-10"] }
+nvim-oxi = { version = "0.6", features = ["neovim-0-11"] }
 once_cell = "1.19"
 nvim-utils = { path = "../nvim_utils" }
 nvim-oxi-utils = { path = "../nvim_oxi_utils" }

@@ -40,7 +40,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-nvim-oxi = { version = "0.6", features = ["neovim-0-10"] }
+nvim-oxi = { version = "0.6", features = ["neovim-0-11"] }
 once_cell = "1.19"
 ```
 

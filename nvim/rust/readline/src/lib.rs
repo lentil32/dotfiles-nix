@@ -2,7 +2,7 @@ use nvim_oxi::api;
 use nvim_oxi::{Dictionary, Function, Result, String as NvimString};
 
 fn is_insert_mode() -> Result<bool> {
-    let mode = api::get_mode()?;
+    let mode = api::get_mode();
     Ok(matches!(mode.mode.as_bytes().first(), Some(b'i')))
 }
 

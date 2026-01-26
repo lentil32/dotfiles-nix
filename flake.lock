@@ -17,6 +17,21 @@
         "type": "github"
       }
     },
+    "crane": {
+      "locked": {
+        "lastModified": 1769287525,
+        "narHash": "sha256-gABuYA6BzoRMLuPaeO5p7SLrpd4qExgkwEmYaYQY4bM=",
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "0314e365877a85c9e5758f9ea77a9972afbb4c21",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ipetkov",
+        "repo": "crane",
+        "type": "github"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -171,11 +186,11 @@
     "homebrew-cask": {
       "flake": false,
       "locked": {
-        "lastModified": 1769393183,
-        "narHash": "sha256-ZRZNnKr1GjMzR232+Dl0EYxp/8MUyFsbomOOBw2iBgM=",
+        "lastModified": 1769415425,
+        "narHash": "sha256-6T4l1q3fnDIWljc92Jf7WwlcrKp+gcMs7mmecXwQuac=",
         "owner": "homebrew",
         "repo": "homebrew-cask",
-        "rev": "c1657efcb1c87f33985af94e77bb6602fbec18bf",
+        "rev": "3595591c15513851b8cc2e4b3bf38b108c008cda",
         "type": "github"
       },
       "original": {
@@ -187,11 +202,11 @@
     "homebrew-core": {
       "flake": false,
       "locked": {
-        "lastModified": 1769393269,
-        "narHash": "sha256-kA3pcQyyTWfHwUjx0XW4EsCDwAF5zfaJ2eLrlaB9FFk=",
+        "lastModified": 1769412817,
+        "narHash": "sha256-ckah2lO529eqPmYcc8A4yyGvvp+6q7ocsc0j4ZoqvLw=",
         "owner": "homebrew",
         "repo": "homebrew-core",
-        "rev": "c3d2a1b7fb0aa53d5b8f4bf4a11c8033432aa305",
+        "rev": "1370f2e9139442bf2ef69df2a80ead62cc39e33f",
         "type": "github"
       },
       "original": {
@@ -402,6 +417,7 @@
     },
     "root": {
       "inputs": {
+        "crane": "crane",
         "flake-utils": "flake-utils",
         "ghostty": "ghostty",
         "home-manager": "home-manager_2",

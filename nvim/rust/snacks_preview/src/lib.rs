@@ -7,7 +7,7 @@ use nvim_oxi::api::Buffer;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
+use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, mlua, schedule};
 use nvim_oxi_utils::{
     dict, guard,
     handles::{BufHandle, WinHandle},
@@ -15,95 +15,14 @@ use nvim_oxi_utils::{
     state::StateCell,
 };
 
-const FILETYPE_MATCH_LUA: &str = r#"(function(path)
-  return vim.filetype.match({ filename = path })
-end)(_A)"#;
-
-const SNACKS_HAS_DOC_LUA: &str = r#"(function()
-  local ok, snacks = pcall(require, "snacks")
-  if not ok then
-    return false
-  end
-  return snacks and snacks.image and snacks.image.doc and snacks.image.terminal and true or false
-end)()"#;
-
-const SNACKS_DOC_FIND_LUA: &str = r#"(function(args)
-  local ok, snacks = pcall(require, "snacks")
-  if not ok then
-    return
-  end
-  if not (snacks.image and snacks.image.doc) then
-    return
-  end
-  snacks.image.doc.find_visible(args.buf, function(imgs)
-    require("snacks_preview").on_doc_find({
-      buf = args.buf,
-      token = args.token,
-      win = args.win,
-      imgs = imgs,
-    })
-  end)
-end)(_A)"#;
-
-const SNACKS_OPEN_PREVIEW_LUA: &str = r#"(function(args)
-  local ok, snacks = pcall(require, "snacks")
-  if not ok then
-    return nil
-  end
-  local win_id = args.win
-  local src = args.src
-  if not (win_id and src) then
-    return nil
-  end
-  if not (snacks.image and snacks.image.placement and snacks.image.config and snacks.win) then
-    return nil
-  end
-  local max_width = snacks.image.config.doc.max_width or 80
-  local max_height = snacks.image.config.doc.max_height or 40
-  local base_width = vim.api.nvim_win_get_width(win_id)
-  local base_height = vim.api.nvim_win_get_height(win_id)
-  local win = snacks.win(snacks.win.resolve(snacks.image.config.doc, "snacks_image", {
-    relative = "win",
-    win = win_id,
-    row = 1,
-    col = 1,
-    width = math.min(max_width, base_width),
-    height = math.min(max_height, base_height),
-    show = true,
-    enter = false,
-  }))
-  win:open_buf()
-  local updated = false
-  local opts = snacks.config.merge({}, snacks.image.config.doc, {
-    inline = false,
-    auto_resize = true,
-    on_update_pre = function(p)
-      if not updated then
-        updated = true
-        local loc = p:state().loc
-        win.opts.width = loc.width
-        win.opts.height = loc.height
-        win:show()
-      end
-    end,
-  })
-  local placement = snacks.image.placement.new(win.buf, src, opts)
-  return function()
-    pcall(function()
-      placement:close()
-    end)
-    pcall(function()
-      win:close()
-    end)
-  end
-end)(_A)"#;
+const BRIDGE_MODULE: &str = "myLuaConf.snacks_preview_bridge";
 const LOG_CONTEXT: &str = "snacks_preview";
 
 #[derive(Clone)]
 struct DocPreviewState {
     token: i64,
     group: Option<u32>,
-    cleanup: Option<Function<(), ()>>,
+    cleanup: Option<i64>,
     name: String,
     preview_name: String,
     restore_name: bool,
@@ -129,22 +48,23 @@ fn report_panic(label: &str, info: guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
 }
 
+fn bridge_table(lua: &mlua::Lua) -> Result<mlua::Table> {
+    lua::require_table(lua, BRIDGE_MODULE)
+}
+
+fn call_bridge<A, R>(lua: &mlua::Lua, name: &str, args: A) -> Result<R>
+where
+    A: mlua::IntoLuaMulti,
+    R: mlua::FromLuaMulti,
+{
+    let bridge = bridge_table(lua)?;
+    lua::call_table_function(&bridge, name, args)
+}
+
 fn filetype_for_path(path: &str) -> Result<String> {
-    let obj: Object = lua::eval(FILETYPE_MATCH_LUA, Some(Object::from(path)))?;
-    if obj.is_nil() {
-        return Ok(String::new());
-    }
-    let ft = match NvimString::from_object(obj) {
-        Ok(val) => val.to_string_lossy().into_owned(),
-        Err(err) => {
-            notify::warn(
-                LOG_CONTEXT,
-                &format!("filetype match failed to decode string: {err}"),
-            );
-            String::new()
-        }
-    };
-    Ok(ft)
+    let lua = lua::state();
+    let ft: Option<String> = call_bridge(&lua, "filetype_match", (path,))?;
+    Ok(ft.unwrap_or_default())
 }
 
 fn is_doc_preview_filetype(ft: &str) -> bool {
@@ -193,7 +113,8 @@ fn require_win_handle(args: &Dictionary, key: &str) -> Option<WinHandle> {
 }
 
 fn snacks_has_doc_preview() -> bool {
-    match lua::eval::<bool>(SNACKS_HAS_DOC_LUA, None) {
+    let lua = lua::state();
+    match call_bridge::<_, bool>(&lua, "snacks_has_doc", ()) {
         Ok(value) => value,
         Err(err) => {
             notify::warn(
@@ -205,8 +126,30 @@ fn snacks_has_doc_preview() -> bool {
     }
 }
 
+fn snacks_doc_find(buf_handle: BufHandle, token: i64, win_handle: WinHandle) -> Result<()> {
+    let lua = lua::state();
+    let args = lua.create_table()?;
+    args.set("buf", buf_handle.raw())?;
+    args.set("token", token)?;
+    args.set("win", win_handle.raw())?;
+    call_bridge(&lua, "snacks_doc_find", args)
+}
+
+fn snacks_open_preview(win_handle: WinHandle, src: &str) -> Result<Option<i64>> {
+    let lua = lua::state();
+    let args = lua.create_table()?;
+    args.set("win", win_handle.raw())?;
+    args.set("src", src)?;
+    call_bridge(&lua, "snacks_open_preview", args)
+}
+
+fn snacks_close_preview(cleanup_id: i64) -> Result<()> {
+    let lua = lua::state();
+    call_bridge(&lua, "snacks_close_preview", cleanup_id)
+}
+
 fn get_buf_filetype(buf: &Buffer) -> String {
-    let opt_opts = OptionOpts::builder().buffer(buf.clone()).build();
+    let opt_opts = OptionOpts::builder().buf(buf.clone()).build();
     match api::get_option_value::<NvimString>("filetype", &opt_opts) {
         Ok(value) => value.to_string_lossy().into_owned(),
         Err(err) => {
@@ -217,7 +160,7 @@ fn get_buf_filetype(buf: &Buffer) -> String {
 }
 
 fn set_buf_filetype(buf: &Buffer, ft: &str) -> Result<()> {
-    let opt_opts = OptionOpts::builder().buffer(buf.clone()).build();
+    let opt_opts = OptionOpts::builder().buf(buf.clone()).build();
     api::set_option_value("filetype", ft, &opt_opts)?;
     Ok(())
 }
@@ -279,11 +222,10 @@ fn close_doc_preview(buf_handle: BufHandle) {
         }
     }
 
-    if let Some(cleanup) = state.cleanup.take() {
-        if let Err(err) = cleanup.call(()) {
+    if let Some(cleanup_id) = state.cleanup.take() {
+        if let Err(err) = snacks_close_preview(cleanup_id) {
             notify::warn(LOG_CONTEXT, &format!("preview cleanup failed: {err}"));
         }
-        cleanup.remove_from_lua_registry();
     }
 }
 
@@ -381,12 +323,7 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
         );
     }
 
-    let args = Dictionary::from_iter([
-        ("buf", buf_handle.raw()),
-        ("token", token),
-        ("win", win_handle.raw()),
-    ]);
-    if let Err(err) = lua::eval::<Object>(SNACKS_DOC_FIND_LUA, Some(Object::from(args))) {
+    if let Err(err) = snacks_doc_find(buf_handle, token, win_handle) {
         notify::warn(LOG_CONTEXT, &format!("snacks doc find failed: {err}"));
     }
 
@@ -405,25 +342,14 @@ fn first_img_src(imgs_obj: &Object) -> Option<String> {
     if src.is_empty() { None } else { Some(src) }
 }
 
-fn cleanup_from_object(obj: Object) -> Option<Function<(), ()>> {
-    if obj.is_nil() {
-        return None;
-    }
-    Function::<(), ()>::from_object(obj).ok()
-}
-
-fn create_preview_cleanup(win_handle: WinHandle, src: &str) -> Option<Function<(), ()>> {
-    let mut args = Dictionary::new();
-    args.insert("win", win_handle.raw());
-    args.insert("src", src);
-    let obj: Object = match lua::eval(SNACKS_OPEN_PREVIEW_LUA, Some(Object::from(args))) {
+fn create_preview_cleanup(win_handle: WinHandle, src: &str) -> Option<i64> {
+    match snacks_open_preview(win_handle, src) {
         Ok(value) => value,
         Err(err) => {
             notify::warn(LOG_CONTEXT, &format!("snacks open preview failed: {err}"));
-            return None;
+            None
         }
-    };
-    cleanup_from_object(obj)
+    }
 }
 
 fn on_doc_find_inner(args: Dictionary) -> Result<()> {
@@ -466,21 +392,20 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
                 if win_handle.valid_window().is_none() {
                     return;
                 }
-                let Some(cleanup) = create_preview_cleanup(win_handle, &src) else {
+                let Some(cleanup_id) = create_preview_cleanup(win_handle, &src) else {
                     return;
                 };
-                let mut cleanup_to_run = Some(cleanup);
+                let mut cleanup_to_run = Some(cleanup_id);
                 {
                     let mut state = state_lock();
                     if let Some(entry) = state.previews.get_mut(&buf_handle) {
                         entry.cleanup = cleanup_to_run.take();
                     }
                 }
-                if let Some(cleanup) = cleanup_to_run {
-                    if let Err(err) = cleanup.call(()) {
+                if let Some(cleanup_id) = cleanup_to_run {
+                    if let Err(err) = snacks_close_preview(cleanup_id) {
                         notify::warn(LOG_CONTEXT, &format!("preview cleanup failed: {err}"));
                     }
-                    cleanup.remove_from_lua_registry();
                 }
             },
             |info| report_panic("doc_preview_schedule", info),
