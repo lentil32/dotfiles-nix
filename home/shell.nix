@@ -29,6 +29,10 @@
     };
     sessionVariables = {
     };
+    envExtra = ''
+      setopt aliases
+      alias python=python3
+    '';
     initContent = ''
       # Yazi wrapper - cd to directory on exit
       function y() {
@@ -81,8 +85,6 @@
 
       urldecode = "python3 -c 'import sys, urllib.parse as ul; print(ul.unquote_plus(sys.stdin.read()))'";
       urlencode = "python3 -c 'import sys, urllib.parse as ul; print(ul.quote_plus(sys.stdin.read()))'";
-
-      python = "python3";
 
       # Git auto-commit with Claude
       gcauto = ''git commit -m "$(claude -p "Look at the staged git changes and create a summarizing git commit title. Only respond with the title and no affirmation.")"'';
