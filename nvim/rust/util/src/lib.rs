@@ -4,9 +4,11 @@ use nvim_oxi::api;
 use nvim_oxi::api::opts::{OptionOpts, OptionScope};
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString};
+use nvim_oxi_utils::notify;
 use nvim_utils::path::{path_is_dir, strip_known_prefixes};
 
 type OptMap = HashMap<String, Object>;
+const LOG_CONTEXT: &str = "util";
 
 fn buffer_from_handle(handle: Option<i64>) -> Option<Buffer> {
     let handle = handle?;
@@ -50,7 +52,16 @@ fn set_option_values(opts: OptMap, opt_opts: &OptionOpts) -> Result<()> {
 }
 
 fn get_option_value(opt: &str, opt_opts: &OptionOpts, default: Object) -> Object {
-    api::get_option_value::<Object>(opt, opt_opts).unwrap_or(default)
+    match api::get_option_value::<Object>(opt, opt_opts) {
+        Ok(value) => value,
+        Err(err) => {
+            notify::warn(
+                LOG_CONTEXT,
+                &format!("get_option_value failed for {opt}: {err}"),
+            );
+            default
+        }
+    }
 }
 
 fn non_nil(value: Object) -> Option<Object> {

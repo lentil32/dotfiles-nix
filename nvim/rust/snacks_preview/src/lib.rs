@@ -1,8 +1,6 @@
 use std::{
     collections::HashMap,
-    panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
-    sync::Mutex,
 };
 
 use once_cell::sync::Lazy;
@@ -15,6 +13,7 @@ use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{
     schedule, Array, Dictionary, Function, Object, Result, String as NvimString,
 };
+use nvim_oxi_utils::{guard, lua, notify, state::StateCell};
 
 const FILETYPE_MATCH_LUA: &str = r#"(function(path)
   return vim.filetype.match({ filename = path })
@@ -98,6 +97,7 @@ const SNACKS_OPEN_PREVIEW_LUA: &str = r#"(function(args)
     end)
   end
 end)(_A)"#;
+const LOG_CONTEXT: &str = "snacks_preview";
 
 #[derive(Clone)]
 struct DocPreviewState {
@@ -115,35 +115,18 @@ struct State {
     previews: HashMap<i64, DocPreviewState>,
 }
 
-static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State::default()));
+static STATE: Lazy<StateCell<State>> = Lazy::new(|| StateCell::new(State::default()));
 
-fn state_lock() -> std::sync::MutexGuard<'static, State> {
-    match STATE.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+fn state_lock() -> nvim_oxi_utils::state::StateGuard<'static, State> {
+    let guard = STATE.lock();
+    if guard.poisoned() {
+        notify::warn(LOG_CONTEXT, "state mutex poisoned; continuing");
     }
+    guard
 }
 
-fn with_unwind_guard<F, R>(fallback: R, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(_) => fallback,
-    }
-}
-
-fn lua_eval<T>(expr: &str, arg: Option<Object>) -> Result<T>
-where
-    T: FromObject,
-{
-    let mut args = Array::new();
-    args.push(expr);
-    if let Some(arg) = arg {
-        args.push(arg);
-    }
-    Ok(api::call_function("luaeval", args)?)
+fn report_panic(label: &str, info: guard::PanicInfo) {
+    notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
 }
 
 fn valid_buffer(handle: i64) -> Option<Buffer> {
@@ -159,13 +142,20 @@ fn valid_window(handle: i64) -> Option<Window> {
 }
 
 fn filetype_for_path(path: &str) -> Result<String> {
-    let obj: Object = lua_eval(FILETYPE_MATCH_LUA, Some(Object::from(path)))?;
+    let obj: Object = lua::eval(FILETYPE_MATCH_LUA, Some(Object::from(path)))?;
     if obj.is_nil() {
         return Ok(String::new());
     }
-    let ft = NvimString::from_object(obj)
-        .map(|val| val.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let ft = match NvimString::from_object(obj) {
+        Ok(val) => val.to_string_lossy().into_owned(),
+        Err(err) => {
+            notify::warn(
+                LOG_CONTEXT,
+                &format!("filetype match failed to decode string: {err}"),
+            );
+            String::new()
+        }
+    };
     Ok(ft)
 }
 
@@ -177,14 +167,27 @@ fn is_doc_preview_filetype(ft: &str) -> bool {
 }
 
 fn snacks_has_doc_preview() -> bool {
-    lua_eval::<bool>(SNACKS_HAS_DOC_LUA, None).unwrap_or(false)
+    match lua::eval::<bool>(SNACKS_HAS_DOC_LUA, None) {
+        Ok(value) => value,
+        Err(err) => {
+            notify::warn(
+                LOG_CONTEXT,
+                &format!("snacks doc preview check failed: {err}"),
+            );
+            false
+        }
+    }
 }
 
 fn get_buf_filetype(buf: &Buffer) -> String {
     let opt_opts = OptionOpts::builder().buffer(buf.clone()).build();
-    api::get_option_value::<NvimString>("filetype", &opt_opts)
-        .map(|val| val.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    match api::get_option_value::<NvimString>("filetype", &opt_opts) {
+        Ok(value) => value.to_string_lossy().into_owned(),
+        Err(err) => {
+            notify::warn(LOG_CONTEXT, &format!("get filetype failed: {err}"));
+            String::new()
+        }
+    }
 }
 
 fn set_buf_filetype(buf: &Buffer, ft: &str) -> Result<()> {
@@ -217,11 +220,14 @@ fn restore_doc_preview_name(buf_handle: i64, state: &DocPreviewState) {
         return;
     };
     let Ok(name) = buf.get_name() else {
+        notify::warn(LOG_CONTEXT, "restore preview name failed to read buffer name");
         return;
     };
     if name.to_string_lossy() == state.preview_name {
         let mut buf = buf.clone();
-        let _ = buf.set_name(Path::new(&state.name));
+        if let Err(err) = buf.set_name(Path::new(&state.name)) {
+            notify::warn(LOG_CONTEXT, &format!("restore preview name failed: {err}"));
+        }
     }
 }
 
@@ -238,11 +244,15 @@ fn close_doc_preview(buf_handle: i64) {
     restore_doc_preview_name(buf_handle, &state);
 
     if let Some(group) = state.group {
-        let _ = api::del_augroup_by_id(group);
+        if let Err(err) = api::del_augroup_by_id(group) {
+            notify::warn(LOG_CONTEXT, &format!("delete augroup failed: {err}"));
+        }
     }
 
     if let Some(cleanup) = state.cleanup.take() {
-        let _ = cleanup.call(());
+        if let Err(err) = cleanup.call(()) {
+            notify::warn(LOG_CONTEXT, &format!("preview cleanup failed: {err}"));
+        }
         cleanup.remove_from_lua_registry();
     }
 }
@@ -259,7 +269,9 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
     }
 
     if get_buf_filetype(&buf) != ft {
-        let _ = set_buf_filetype(&buf, &ft);
+        if let Err(err) = set_buf_filetype(&buf, &ft) {
+            notify::warn(LOG_CONTEXT, &format!("set filetype failed: {err}"));
+        }
     }
 
     if !snacks_has_doc_preview() {
@@ -283,10 +295,10 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         .group(group)
         .buffer(buf.clone())
         .callback(move |_args: AutocmdCallbackArgs| {
-            with_unwind_guard(false, || {
+            guard::with_panic(false, || {
                 close_doc_preview(buf_handle_for_event);
                 false
-            })
+            }, |info| report_panic("doc_preview_buf_close", info))
         })
         .build();
     api::create_autocmd(["BufWipeout", "BufHidden"], &opts)?;
@@ -297,10 +309,10 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         .group(group)
         .patterns([win_id_str.as_str()])
         .callback(move |_args: AutocmdCallbackArgs| {
-            with_unwind_guard(false, || {
+            guard::with_panic(false, || {
                 close_doc_preview(buf_handle_for_win);
                 false
-            })
+            }, |info| report_panic("doc_preview_win_close", info))
         })
         .build();
     api::create_autocmd(["WinClosed"], &win_opts)?;
@@ -310,7 +322,9 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
     let restore_name = original_name != preview_name;
     if restore_name {
         let mut buf = buf.clone();
-        let _ = buf.set_name(Path::new(&preview_name));
+        if let Err(err) = buf.set_name(Path::new(&preview_name)) {
+            notify::warn(LOG_CONTEXT, &format!("set preview name failed: {err}"));
+        }
     }
 
     let token = next_doc_preview_token(buf_handle);
@@ -334,7 +348,9 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         ("token", token),
         ("win", win_id),
     ]);
-    let _ = lua_eval::<Object>(SNACKS_DOC_FIND_LUA, Some(Object::from(args)));
+    if let Err(err) = lua::eval::<Object>(SNACKS_DOC_FIND_LUA, Some(Object::from(args))) {
+        notify::warn(LOG_CONTEXT, &format!("snacks doc find failed: {err}"));
+    }
 
     Ok(())
 }
@@ -389,7 +405,13 @@ fn create_preview_cleanup(win_id: i64, src: &str) -> Option<Function<(), ()>> {
     let mut args = Dictionary::new();
     args.insert("win", win_id);
     args.insert("src", src);
-    let obj: Object = lua_eval(SNACKS_OPEN_PREVIEW_LUA, Some(Object::from(args))).ok()?;
+    let obj: Object = match lua::eval(SNACKS_OPEN_PREVIEW_LUA, Some(Object::from(args))) {
+        Ok(value) => value,
+        Err(err) => {
+            notify::warn(LOG_CONTEXT, &format!("snacks open preview failed: {err}"));
+            return None;
+        }
+    };
     cleanup_from_object(obj)
 }
 
@@ -424,7 +446,7 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
     }
 
     schedule(move |()| {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
+        guard::with_panic((), || {
             if !state_ok(buf_handle, token) {
                 return;
             }
@@ -442,20 +464,24 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
                 }
             }
             if let Some(cleanup) = cleanup_to_run {
-                let _ = cleanup.call(());
+                if let Err(err) = cleanup.call(()) {
+                    notify::warn(LOG_CONTEXT, &format!("preview cleanup failed: {err}"));
+                }
                 cleanup.remove_from_lua_registry();
             }
-        }));
+        }, |info| report_panic("doc_preview_schedule", info));
     });
 
     Ok(())
 }
 
 fn on_doc_find(args: Dictionary) -> Result<()> {
-    let result = catch_unwind(AssertUnwindSafe(|| on_doc_find_inner(args)));
-    match result {
+    match guard::catch_unwind_result(|| on_doc_find_inner(args)) {
         Ok(result) => result,
-        Err(_) => Ok(()),
+        Err(info) => {
+            report_panic("on_doc_find", info);
+            Ok(())
+        }
     }
 }
 
@@ -471,7 +497,9 @@ fn attach_doc_preview_lua(args: Dictionary) -> Result<()> {
     let Some(path) = dict_get_string(&args, "path") else {
         return Ok(());
     };
-    let _ = attach_doc_preview(buf_handle, &path, win_id);
+    if let Err(err) = attach_doc_preview(buf_handle, &path, win_id) {
+        notify::warn(LOG_CONTEXT, &format!("attach doc preview failed: {err}"));
+    }
     Ok(())
 }
 

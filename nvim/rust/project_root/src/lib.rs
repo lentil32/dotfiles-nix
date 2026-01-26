@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::path::{Path, PathBuf};
 
 use once_cell::sync::Lazy;
 
@@ -10,6 +7,7 @@ use nvim_oxi::api::types::{AutocmdCallbackArgs, LogLevel};
 use nvim_oxi::api::{self, Buffer};
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Array, Dictionary, Function, Result, String as NvimString};
+use nvim_oxi_utils::{guard, notify, state::StateCell};
 use nvim_utils::path::{has_uri_scheme, normalize_path, path_is_dir, strip_known_prefixes};
 
 const ROOT_VAR: &str = "project_root";
@@ -22,6 +20,7 @@ const DEFAULT_ROOT_INDICATORS: &[&str] = &[
     "Makefile",
 ];
 const PROJECT_ROOT_GROUP: &str = "ProjectRoot";
+const LOG_CONTEXT: &str = "project_root";
 
 fn default_root_indicators() -> Vec<String> {
     DEFAULT_ROOT_INDICATORS
@@ -45,7 +44,19 @@ impl Default for State {
     }
 }
 
-static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State::default()));
+static STATE: Lazy<StateCell<State>> = Lazy::new(|| StateCell::new(State::default()));
+
+fn state_lock() -> nvim_oxi_utils::state::StateGuard<'static, State> {
+    let guard = STATE.lock();
+    if guard.poisoned() {
+        notify::warn(LOG_CONTEXT, "state mutex poisoned; continuing");
+    }
+    guard
+}
+
+fn report_panic(label: &str, info: guard::PanicInfo) {
+    notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
+}
 
 fn debug_enabled() -> bool {
     if let Ok(value) = api::get_var::<bool>("project_root_debug") {
@@ -72,7 +83,9 @@ where
         return;
     }
     let message = build();
-    let _ = api::notify(&message, LogLevel::Info, &Dictionary::new());
+    if let Err(err) = api::notify(&message, LogLevel::Info, &Dictionary::new()) {
+        eprintln!("project_root debug notify failed: {err}");
+    }
 }
 
 fn get_buf_var(buf: &Buffer, var: &str) -> Option<String> {
@@ -197,7 +210,7 @@ fn cached_or_refresh_root(buf: &Buffer) -> Result<Option<String>> {
 
 fn root_from_path(path: &Path) -> Option<PathBuf> {
     let indicators = {
-        let state = STATE.lock().expect("project_root state poisoned");
+        let state = state_lock();
         state.root_indicators.clone()
     };
     if indicators.is_empty() {
@@ -373,8 +386,15 @@ fn setup_autocmd() -> Result<()> {
     let opts = CreateAutocmdOpts::builder()
         .group(group)
         .callback(|args: AutocmdCallbackArgs| {
-            let _ = refresh_root_for_buffer(&args.buffer);
-            false
+            guard::with_panic(false, || {
+                if let Err(err) = refresh_root_for_buffer(&args.buffer) {
+                    notify::warn(
+                        LOG_CONTEXT,
+                        &format!("refresh_root_for_buffer failed: {err}"),
+                    );
+                }
+                false
+            }, |info| report_panic("refresh_root_for_buffer", info))
         })
         .build();
 
@@ -383,7 +403,7 @@ fn setup_autocmd() -> Result<()> {
 }
 
 fn update_root_indicators(config: Option<Dictionary>) {
-    let mut state = STATE.lock().expect("project_root state poisoned");
+    let mut state = state_lock();
     let default_indicators = default_root_indicators();
 
     let Some(config) = config else {
@@ -414,7 +434,7 @@ fn setup(config: Option<Dictionary>) -> Result<()> {
     update_root_indicators(config);
 
     let should_setup = {
-        let mut state = STATE.lock().expect("project_root state poisoned");
+        let mut state = state_lock();
         if state.did_setup {
             false
         } else {

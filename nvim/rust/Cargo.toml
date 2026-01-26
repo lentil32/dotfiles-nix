@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "autocmds",
+  "nvim_oxi_utils",
   "project_root",
   "readline",
   "snacks_preview",

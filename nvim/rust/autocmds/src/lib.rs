@@ -6,7 +6,8 @@ use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
+use nvim_oxi::{schedule, Array, Dictionary, Function, Object, Result, String as NvimString};
+use nvim_oxi_utils::{guard, lua, notify};
 
 use nvim_utils::path::{has_uri_scheme, path_is_dir, strip_known_prefixes};
 
@@ -17,17 +18,36 @@ type ShouldDeleteAutocmd = bool;
 const SNACKS_DASHBOARD_LUA: &str = "(function() local ok, snacks = pcall(require, 'snacks'); if ok and snacks.dashboard then snacks.dashboard() end end)()";
 const OIL_DIR_LUA: &str = "(function(buf) local ok, oil = pcall(require, 'oil'); if not ok then return nil end; return oil.get_current_dir(buf) end)(_A)";
 const SNACKS_RENAME_LUA: &str = "(function(args) local ok, snacks = pcall(require, 'snacks'); if not ok then return end; local rename = snacks.rename and snacks.rename.on_rename_file; if rename then rename(args.src_url, args.dest_url) end end)(_A)";
+const LOG_CONTEXT: &str = "autocmds";
 
-fn lua_eval<T>(expr: &str, arg: Option<Object>) -> Result<T>
+fn report_panic(label: &str, info: guard::PanicInfo) {
+    notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
+}
+
+fn run_autocmd<F>(label: &str, f: F) -> Result<ShouldDeleteAutocmd>
 where
-    T: FromObject,
+    F: FnOnce() -> Result<ShouldDeleteAutocmd>,
 {
-    let mut args = Array::new();
-    args.push(expr);
-    if let Some(arg) = arg {
-        args.push(arg);
+    let result =
+        guard::with_panic(Ok(false), f, |info| report_panic(label, info));
+    match result {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            notify::warn(LOG_CONTEXT, &format!("{label} failed: {err}"));
+            Ok(false)
+        }
     }
-    Ok(api::call_function("luaeval", args)?)
+}
+
+fn run_scheduled<F>(label: &str, f: F)
+where
+    F: FnOnce() -> Result<()>,
+{
+    guard::with_panic((), || {
+        if let Err(err) = f() {
+            notify::warn(LOG_CONTEXT, &format!("{label} failed: {err}"));
+        }
+    }, |info| report_panic(label, info));
 }
 
 fn is_dir(path: &str) -> bool {
@@ -115,7 +135,13 @@ fn maybe_show_dashboard() -> Result<()> {
             continue;
         }
         let opt_opts = OptionOpts::builder().buffer(buf.clone()).build();
-        let listed = api::get_option_value::<bool>("buflisted", &opt_opts).unwrap_or(false);
+        let listed = match api::get_option_value::<bool>("buflisted", &opt_opts) {
+            Ok(value) => value,
+            Err(err) => {
+                notify::warn(LOG_CONTEXT, &format!("buflisted failed: {err}"));
+                false
+            }
+        };
         if !listed {
             continue;
         }
@@ -125,12 +151,14 @@ fn maybe_show_dashboard() -> Result<()> {
         }
     }
 
-    let _ = lua_eval::<Object>(SNACKS_DASHBOARD_LUA, None)?;
+    if let Err(err) = lua::eval::<Object>(SNACKS_DASHBOARD_LUA, None) {
+        notify::warn(LOG_CONTEXT, &format!("snacks dashboard failed: {err}"));
+    }
     Ok(())
 }
 
 fn oil_current_dir(buf: i64) -> Result<Option<String>> {
-    let obj: Object = lua_eval(OIL_DIR_LUA, Some(Object::from(buf)))?;
+    let obj: Object = lua::eval(OIL_DIR_LUA, Some(Object::from(buf)))?;
     if obj.is_nil() {
         return Ok(None);
     }
@@ -146,6 +174,7 @@ fn win_key(win: i64) -> String {
 }
 
 fn oil_last_buf_map() -> OilMap {
+    // Missing var is expected; treat as an empty map.
     let Ok(obj) = api::get_var::<Object>("oil_last_buf") else {
         return HashMap::new();
     };
@@ -199,7 +228,7 @@ fn clean_oil_last_buf() -> Result<()> {
 }
 
 fn on_dashboard_delete() -> Result<ShouldDeleteAutocmd> {
-    schedule(|()| maybe_show_dashboard());
+    schedule(|()| run_scheduled("dashboard", maybe_show_dashboard));
     Ok(false)
 }
 
@@ -293,7 +322,7 @@ fn on_oil_actions_post(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd>
     let mut args = Dictionary::new();
     args.insert("src_url", src);
     args.insert("dest_url", dest);
-    let _ = lua_eval::<Object>(SNACKS_RENAME_LUA, Some(Object::from(args)))?;
+    let _ = lua::eval::<Object>(SNACKS_RENAME_LUA, Some(Object::from(args)))?;
     Ok(false)
 }
 
@@ -304,7 +333,7 @@ fn setup_dashboard_autocmd() -> Result<()> {
     )?;
     let opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|_args: AutocmdCallbackArgs| on_dashboard_delete())
+        .callback(|_args: AutocmdCallbackArgs| run_autocmd("on_dashboard_delete", on_dashboard_delete))
         .build();
     api::create_autocmd(["BufDelete"], &opts)?;
     Ok(())
@@ -317,7 +346,7 @@ fn setup_file_cwd_autocmd() -> Result<()> {
     )?;
     let opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|args: AutocmdCallbackArgs| on_file_cwd(args))
+        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_file_cwd", || on_file_cwd(args)))
         .build();
     api::create_autocmd(["BufEnter"], &opts)?;
     Ok(())
@@ -331,7 +360,7 @@ fn setup_oil_cwd_autocmd() -> Result<()> {
     let opts = CreateAutocmdOpts::builder()
         .group(group)
         .patterns(["oil://*"])
-        .callback(|args: AutocmdCallbackArgs| on_oil_buf(args))
+        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_oil_buf", || on_oil_buf(args)))
         .build();
     api::create_autocmd(["BufEnter", "BufReadCmd"], &opts)?;
     Ok(())
@@ -345,24 +374,24 @@ fn setup_oil_last_buf_autocmds() -> Result<()> {
 
     let win_closed_opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|args: AutocmdCallbackArgs| on_win_closed(args))
+        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_win_closed", || on_win_closed(args)))
         .build();
     api::create_autocmd(["WinClosed"], &win_closed_opts)?;
 
     let wipeout_opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|args: AutocmdCallbackArgs| on_buf_wipeout(args))
+        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_buf_wipeout", || on_buf_wipeout(args)))
         .build();
     api::create_autocmd(["BufWipeout"], &wipeout_opts)?;
 
     let resized_opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(
-            |_args: AutocmdCallbackArgs| -> Result<ShouldDeleteAutocmd> {
+        .callback(|_args: AutocmdCallbackArgs| {
+            run_autocmd("clean_oil_last_buf", || {
                 clean_oil_last_buf()?;
                 Ok(false)
-            },
-        )
+            })
+        })
         .build();
     api::create_autocmd(["VimResized"], &resized_opts)?;
 
@@ -377,7 +406,9 @@ fn setup_oil_rename_autocmd() -> Result<()> {
     let opts = CreateAutocmdOpts::builder()
         .group(group)
         .patterns(["OilActionsPost"])
-        .callback(|args: AutocmdCallbackArgs| on_oil_actions_post(args))
+        .callback(|args: AutocmdCallbackArgs| {
+            run_autocmd("on_oil_actions_post", || on_oil_actions_post(args))
+        })
         .build();
     api::create_autocmd(["User"], &opts)?;
     Ok(())

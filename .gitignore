@@ -3,4 +3,5 @@
 .claude/
 
 target/
+/.tmp/
 
