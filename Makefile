@@ -1,6 +1,7 @@
-.PHONY: darwin darwin-debug update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc gc-all fmt check clean help
+.PHONY: darwin darwin-debug nvim update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc gc-all fmt check clean help
 
 hostname := $(shell hostname)
+user := $(shell whoami)
 
 ############################################################################
 #
@@ -26,6 +27,12 @@ darwin-debug:
 #  nix related commands
 #
 ############################################################################
+
+nvim:
+	nix build .#darwinConfigurations.${hostname}.config.home-manager.users.${user}.home.activationPackage \
+	  --extra-experimental-features 'nix-command flakes'
+
+	./result/activate
 
 update-emacs:
 	gh repo sync lentil32/nix-darwin-emacs --source nix-giant/nix-darwin-emacs
@@ -64,6 +71,7 @@ clean:
 help:
 	@echo "darwin       - Build and apply system configuration"
 	@echo "darwin-debug - Build with verbose output"
+	@echo "nvim         - Build and apply home-manager activation (Neovim config)"
 	@echo "update-flake - Update flake.lock"
 	@echo "deploy-flake - Update flake.lock and rebuild"
 	@echo "gc           - Remove generations older than 7 days"
