@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::Path, sync::Mutex};
+use std::{
+    collections::HashMap,
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::Path,
+    sync::Mutex,
+};
 
 use once_cell::sync::Lazy;
 
@@ -10,42 +15,6 @@ use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{
     schedule, Array, Dictionary, Function, Object, Result, String as NvimString,
 };
-
-use nvim_utils::path::{path_is_dir, strip_known_prefixes};
-
-const SNACKS_PREVIEW_FILE_LUA: &str = r#"(function(ctx)
-  local ok, snacks = pcall(require, "snacks")
-  if not ok then
-    return nil
-  end
-  return snacks.picker.preview.file(ctx)
-end)(_A)"#;
-
-const SNACKS_PICKER_PATH_LUA: &str = r#"(function(ctx)
-  local ok, snacks = pcall(require, "snacks")
-  if not ok then
-    return nil
-  end
-  if not ctx or not ctx.item then
-    return nil
-  end
-  return snacks.picker.util.path(ctx.item)
-end)(_A)"#;
-
-const CTX_BUF_LUA: &str = r#"(function(ctx)
-  return ctx and ctx.buf or nil
-end)(_A)"#;
-
-const CTX_WIN_LUA: &str = r#"(function(ctx)
-  local win = ctx and ctx.win
-  if type(win) == "number" then
-    return win
-  end
-  if type(win) == "table" then
-    return win.win
-  end
-  return nil
-end)(_A)"#;
 
 const FILETYPE_MATCH_LUA: &str = r#"(function(path)
   return vim.filetype.match({ filename = path })
@@ -148,6 +117,23 @@ struct State {
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State::default()));
 
+fn state_lock() -> std::sync::MutexGuard<'static, State> {
+    match STATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn with_unwind_guard<F, R>(fallback: R, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(_) => fallback,
+    }
+}
+
 fn lua_eval<T>(expr: &str, arg: Option<Object>) -> Result<T>
 where
     T: FromObject,
@@ -158,14 +144,6 @@ where
         args.push(arg);
     }
     Ok(api::call_function("luaeval", args)?)
-}
-
-fn is_dir(path: &str) -> bool {
-    let path = strip_known_prefixes(path);
-    if path.is_empty() {
-        return false;
-    }
-    path_is_dir(Path::new(path))
 }
 
 fn valid_buffer(handle: i64) -> Option<Buffer> {
@@ -202,43 +180,6 @@ fn snacks_has_doc_preview() -> bool {
     lua_eval::<bool>(SNACKS_HAS_DOC_LUA, None).unwrap_or(false)
 }
 
-fn snacks_picker_preview(ctx: &Object) -> Object {
-    lua_eval::<Object>(SNACKS_PREVIEW_FILE_LUA, Some(ctx.clone()))
-        .unwrap_or_else(|_| Object::nil())
-}
-
-fn snacks_picker_path(ctx: &Object) -> Option<String> {
-    let obj: Object = lua_eval(SNACKS_PICKER_PATH_LUA, Some(ctx.clone())).ok()?;
-    if obj.is_nil() {
-        return None;
-    }
-    let path = NvimString::from_object(obj)
-        .ok()?
-        .to_string_lossy()
-        .into_owned();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
-}
-
-fn ctx_buf_handle(ctx: &Object) -> Option<i64> {
-    let obj: Object = lua_eval(CTX_BUF_LUA, Some(ctx.clone())).ok()?;
-    if obj.is_nil() {
-        return None;
-    }
-    i64::from_object(obj).ok()
-}
-
-fn ctx_win_handle(ctx: &Object) -> Option<i64> {
-    let obj: Object = lua_eval(CTX_WIN_LUA, Some(ctx.clone())).ok()?;
-    if obj.is_nil() {
-        return None;
-    }
-    i64::from_object(obj).ok()
-}
-
 fn get_buf_filetype(buf: &Buffer) -> String {
     let opt_opts = OptionOpts::builder().buffer(buf.clone()).build();
     api::get_option_value::<NvimString>("filetype", &opt_opts)
@@ -253,14 +194,14 @@ fn set_buf_filetype(buf: &Buffer, ft: &str) -> Result<()> {
 }
 
 fn next_doc_preview_token(buf_handle: i64) -> i64 {
-    let mut state = STATE.lock().expect("snacks_preview state poisoned");
+    let mut state = state_lock();
     let entry = state.tokens.entry(buf_handle).or_insert(0);
     *entry += 1;
     *entry
 }
 
 fn state_ok(buf_handle: i64, token: i64) -> bool {
-    let state = STATE.lock().expect("snacks_preview state poisoned");
+    let state = state_lock();
     state
         .previews
         .get(&buf_handle)
@@ -286,7 +227,7 @@ fn restore_doc_preview_name(buf_handle: i64, state: &DocPreviewState) {
 
 fn close_doc_preview(buf_handle: i64) {
     let state = {
-        let mut state = STATE.lock().expect("snacks_preview state poisoned");
+        let mut state = state_lock();
         state.previews.remove(&buf_handle)
     };
 
@@ -342,8 +283,10 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         .group(group)
         .buffer(buf.clone())
         .callback(move |_args: AutocmdCallbackArgs| {
-            close_doc_preview(buf_handle_for_event);
-            false
+            with_unwind_guard(false, || {
+                close_doc_preview(buf_handle_for_event);
+                false
+            })
         })
         .build();
     api::create_autocmd(["BufWipeout", "BufHidden"], &opts)?;
@@ -354,8 +297,10 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         .group(group)
         .patterns([win_id_str.as_str()])
         .callback(move |_args: AutocmdCallbackArgs| {
-            close_doc_preview(buf_handle_for_win);
-            false
+            with_unwind_guard(false, || {
+                close_doc_preview(buf_handle_for_win);
+                false
+            })
         })
         .build();
     api::create_autocmd(["WinClosed"], &win_opts)?;
@@ -370,7 +315,7 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
 
     let token = next_doc_preview_token(buf_handle);
     {
-        let mut state = STATE.lock().expect("snacks_preview state poisoned");
+        let mut state = state_lock();
         state.previews.insert(
             buf_handle,
             DocPreviewState {
@@ -398,6 +343,18 @@ fn dict_get_i64(dict: &Dictionary, key: &str) -> Option<i64> {
     let key = NvimString::from(key);
     let obj = dict.get(&key)?.clone();
     i64::from_object(obj).ok()
+}
+
+fn dict_get_string(dict: &Dictionary, key: &str) -> Option<String> {
+    let key = NvimString::from(key);
+    let obj = dict.get(&key)?.clone();
+    if obj.is_nil() {
+        return None;
+    }
+    NvimString::from_object(obj)
+        .ok()
+        .map(|val| val.to_string_lossy().into_owned())
+        .filter(|val| !val.is_empty())
 }
 
 fn dict_get_object(dict: &Dictionary, key: &str) -> Option<Object> {
@@ -436,7 +393,7 @@ fn create_preview_cleanup(win_id: i64, src: &str) -> Option<Function<(), ()>> {
     cleanup_from_object(obj)
 }
 
-fn on_doc_find(args: Dictionary) -> Result<()> {
+fn on_doc_find_inner(args: Dictionary) -> Result<()> {
     let buf_handle = dict_get_i64(&args, "buf").unwrap_or_default();
     if buf_handle == 0 {
         return Ok(());
@@ -447,7 +404,7 @@ fn on_doc_find(args: Dictionary) -> Result<()> {
     }
 
     if let Some(state) = {
-        let state = STATE.lock().expect("snacks_preview state poisoned");
+        let state = state_lock();
         state.previews.get(&buf_handle).cloned()
     } {
         restore_doc_preview_name(buf_handle, &state);
@@ -467,63 +424,78 @@ fn on_doc_find(args: Dictionary) -> Result<()> {
     }
 
     schedule(move |()| {
-        if !state_ok(buf_handle, token) {
-            return;
-        }
-        if valid_window(win_id).is_none() {
-            return;
-        }
-        let Some(cleanup) = create_preview_cleanup(win_id, &src) else {
-            return;
-        };
-        let mut state = STATE.lock().expect("snacks_preview state poisoned");
-        if let Some(entry) = state.previews.get_mut(&buf_handle) {
-            entry.cleanup = Some(cleanup);
-        } else {
-            let _ = cleanup.call(());
-            cleanup.remove_from_lua_registry();
-        }
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if !state_ok(buf_handle, token) {
+                return;
+            }
+            if valid_window(win_id).is_none() {
+                return;
+            }
+            let Some(cleanup) = create_preview_cleanup(win_id, &src) else {
+                return;
+            };
+            let mut cleanup_to_run = Some(cleanup);
+            {
+                let mut state = state_lock();
+                if let Some(entry) = state.previews.get_mut(&buf_handle) {
+                    entry.cleanup = cleanup_to_run.take();
+                }
+            }
+            if let Some(cleanup) = cleanup_to_run {
+                let _ = cleanup.call(());
+                cleanup.remove_from_lua_registry();
+            }
+        }));
     });
 
     Ok(())
 }
 
-fn picker_preview(ctx: Object) -> Result<Object> {
-    let ret = snacks_picker_preview(&ctx);
-    let buf_handle = ctx_buf_handle(&ctx);
-    let path = snacks_picker_path(&ctx);
-
-    if path
-        .as_deref()
-        .map(|value| is_dir(value))
-        .unwrap_or(true)
-    {
-        if let Some(buf_handle) = buf_handle {
-            close_doc_preview(buf_handle);
-        }
-        return Ok(ret);
+fn on_doc_find(args: Dictionary) -> Result<()> {
+    let result = catch_unwind(AssertUnwindSafe(|| on_doc_find_inner(args)));
+    match result {
+        Ok(result) => result,
+        Err(_) => Ok(()),
     }
+}
 
-    let (Some(buf_handle), Some(win_id), Some(path)) =
-        (buf_handle, ctx_win_handle(&ctx), path)
-    else {
-        return Ok(ret);
+fn attach_doc_preview_lua(args: Dictionary) -> Result<()> {
+    let buf_handle = dict_get_i64(&args, "buf").unwrap_or_default();
+    if buf_handle == 0 {
+        return Ok(());
+    }
+    let win_id = dict_get_i64(&args, "win").unwrap_or_default();
+    if win_id == 0 {
+        return Ok(());
+    }
+    let Some(path) = dict_get_string(&args, "path") else {
+        return Ok(());
     };
-
     let _ = attach_doc_preview(buf_handle, &path, win_id);
-    Ok(ret)
+    Ok(())
+}
+
+fn close_doc_preview_lua(buf_handle: i64) -> Result<()> {
+    if buf_handle != 0 {
+        close_doc_preview(buf_handle);
+    }
+    Ok(())
 }
 
 #[nvim_oxi::plugin]
 fn snacks_preview() -> Result<Dictionary> {
     let mut api = Dictionary::new();
     api.insert(
-        "picker_preview",
-        Function::<Object, Object>::from_fn(picker_preview),
-    );
-    api.insert(
         "on_doc_find",
         Function::<Dictionary, ()>::from_fn(on_doc_find),
+    );
+    api.insert(
+        "attach_doc_preview",
+        Function::<Dictionary, ()>::from_fn(attach_doc_preview_lua),
+    );
+    api.insert(
+        "close_doc_preview",
+        Function::<i64, ()>::from_fn(close_doc_preview_lua),
     );
     Ok(api)
 }
