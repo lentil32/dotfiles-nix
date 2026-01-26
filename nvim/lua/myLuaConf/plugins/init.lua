@@ -51,13 +51,6 @@ require("lze").load({
     event = "BufReadPre",
     keys = {
       {
-        "<tab>",
-        "v:lua.require('sidekick').nes_jump_or_apply() and '' or '<Tab>'",
-        mode = "n",
-        expr = true,
-        desc = "Goto/Apply Next Edit Suggestion",
-      },
-      {
         "<c-.>",
         sidekick_in_project_root(function()
           require("sidekick.cli").toggle({ name = "codex", focus = true })
@@ -140,6 +133,19 @@ require("lze").load({
             },
           },
         },
+      })
+
+      local Snacks = require("snacks")
+      Snacks.keymap.set("n", "<Tab>", function()
+        local ok, sidekick = pcall(require, "sidekick")
+        if not ok or not sidekick.nes_jump_or_apply then
+          return "<Tab>"
+        end
+        return sidekick.nes_jump_or_apply() and "" or "<Tab>"
+      end, {
+        ft = "sidekick_terminal",
+        expr = true,
+        desc = "Goto/Apply Next Edit Suggestion",
       })
     end,
   },
