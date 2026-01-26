@@ -7,63 +7,15 @@ use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
-use nvim_oxi_utils::{dict, guard, lua, notify};
+use nvim_oxi_utils::{
+    dict, guard,
+    handles::{BufHandle, WinHandle},
+    lua, notify,
+};
 
 use nvim_utils::path::{has_uri_scheme, path_is_dir, strip_known_prefixes};
 
 type OilMap = HashMap<WinHandle, BufHandle>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct WinHandle(i64);
-
-impl WinHandle {
-    fn from_window(win: &Window) -> Self {
-        Self(win.handle() as i64)
-    }
-
-    fn try_from_i64(handle: i64) -> Option<Self> {
-        if handle <= 0 {
-            return None;
-        }
-        i32::try_from(handle).ok().map(|_| Self(handle))
-    }
-
-    fn to_window(self) -> Option<Window> {
-        i32::try_from(self.0).ok().map(Window::from)
-    }
-
-    fn valid_window(self) -> Option<Window> {
-        self.to_window().filter(|win| win.is_valid())
-    }
-
-    fn to_key(self) -> String {
-        self.0.to_string()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct BufHandle(i64);
-
-impl BufHandle {
-    fn from_buffer(buf: &Buffer) -> Self {
-        Self(buf.handle() as i64)
-    }
-
-    fn try_from_i64(handle: i64) -> Option<Self> {
-        if handle <= 0 {
-            return None;
-        }
-        i32::try_from(handle).ok().map(|_| Self(handle))
-    }
-
-    fn to_buffer(self) -> Option<Buffer> {
-        i32::try_from(self.0).ok().map(Buffer::from)
-    }
-
-    fn valid_buffer(self) -> Option<Buffer> {
-        self.to_buffer().filter(|buf| buf.is_valid())
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutocmdAction {
@@ -222,7 +174,7 @@ fn maybe_show_dashboard() -> Result<()> {
 }
 
 fn oil_current_dir(buf: BufHandle) -> Result<Option<String>> {
-    let obj: Object = lua::eval(OIL_DIR_LUA, Some(Object::from(buf.0)))?;
+    let obj: Object = lua::eval(OIL_DIR_LUA, Some(Object::from(buf.raw())))?;
     if obj.is_nil() {
         return Ok(None);
     }
@@ -264,7 +216,7 @@ fn oil_last_buf_map() -> OilMap {
 fn map_to_dict(map: &OilMap) -> Dictionary {
     let mut dict = Dictionary::new();
     for (win, buf) in map {
-        dict.insert(win.to_key(), buf.0);
+        dict.insert(win.raw().to_string(), buf.raw());
     }
     dict
 }

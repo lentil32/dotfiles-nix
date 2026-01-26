@@ -180,16 +180,68 @@ pub mod handles {
     use nvim_oxi::api;
     use nvim_oxi::api::{Buffer, Window};
 
-    fn to_i32(handle: i64) -> Option<i32> {
-        i32::try_from(handle).ok()
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct BufHandle(i64);
+
+    impl BufHandle {
+        pub fn from_buffer(buf: &Buffer) -> Self {
+            Self(buf.handle() as i64)
+        }
+
+        pub fn try_from_i64(handle: i64) -> Option<Self> {
+            if handle <= 0 {
+                return None;
+            }
+            i32::try_from(handle).ok().map(|_| Self(handle))
+        }
+
+        pub fn raw(self) -> i64 {
+            self.0
+        }
+
+        pub fn to_buffer(self) -> Option<Buffer> {
+            i32::try_from(self.0).ok().map(Buffer::from)
+        }
+
+        pub fn valid_buffer(self) -> Option<Buffer> {
+            self.to_buffer().filter(|buf| buf.is_valid())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct WinHandle(i64);
+
+    impl WinHandle {
+        pub fn from_window(win: &Window) -> Self {
+            Self(win.handle() as i64)
+        }
+
+        pub fn try_from_i64(handle: i64) -> Option<Self> {
+            if handle <= 0 {
+                return None;
+            }
+            i32::try_from(handle).ok().map(|_| Self(handle))
+        }
+
+        pub fn raw(self) -> i64 {
+            self.0
+        }
+
+        pub fn to_window(self) -> Option<Window> {
+            i32::try_from(self.0).ok().map(Window::from)
+        }
+
+        pub fn valid_window(self) -> Option<Window> {
+            self.to_window().filter(|win| win.is_valid())
+        }
     }
 
     pub fn buffer_from_i64(handle: i64) -> Option<Buffer> {
-        to_i32(handle).map(Buffer::from)
+        BufHandle::try_from_i64(handle).and_then(BufHandle::to_buffer)
     }
 
     pub fn window_from_i64(handle: i64) -> Option<Window> {
-        to_i32(handle).map(Window::from)
+        WinHandle::try_from_i64(handle).and_then(WinHandle::to_window)
     }
 
     pub fn buffer_from_optional(handle: Option<i64>) -> Option<Buffer> {
@@ -215,11 +267,11 @@ pub mod handles {
     }
 
     pub fn valid_buffer(handle: i64) -> Option<Buffer> {
-        buffer_from_i64(handle).filter(|buf| buf.is_valid())
+        BufHandle::try_from_i64(handle).and_then(BufHandle::valid_buffer)
     }
 
     pub fn valid_window(handle: i64) -> Option<Window> {
-        window_from_i64(handle).filter(|win| win.is_valid())
+        WinHandle::try_from_i64(handle).and_then(WinHandle::valid_window)
     }
 
     pub fn valid_buffer_optional(handle: Option<i64>) -> Option<Buffer> {
