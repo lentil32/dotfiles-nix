@@ -40,6 +40,7 @@ make clean         # Remove the ./result symlink
 - See `.tmp/` if library references needed. There are cloned libraries we are using in this repository. Treat these directories as readonly.
 
 List:
+- lualine.nvim
 - lze
 - lzextras
 - nixCats-nvim

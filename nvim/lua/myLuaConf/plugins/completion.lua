@@ -7,21 +7,17 @@ return {
       require("blink.cmp").setup({
         keymap = {
           preset = "default",
-          ["<C-space>"] = { "show", "show_documentation", "hide_documentation" },
+          ["<Tab>"] = { "show", "show_documentation", "hide_documentation", "accept", "fallback" },
           ["<CR>"] = { "accept", "fallback" },
-          ["<Tab>"] = {
-            "accept",
+          ["<C-n>"] = {
+            "select_next",
             "snippet_forward",
-            function()
-              local ok, sidekick = pcall(require, "sidekick")
-              if ok and sidekick.nes_jump_or_apply then
-                return sidekick.nes_jump_or_apply()
-              end
-              return false
+            function() -- sidekick next edit suggestion
+              return require("sidekick").nes_jump_or_apply()
             end,
             "fallback",
           },
-          ["<S-Tab>"] = { "select_prev", "snippet_backward", "fallback" },
+          ["<C-p>"] = { "select_prev", "snippet_backward", "fallback" },
           ["<C-b>"] = { "scroll_documentation_up", "fallback" },
           ["<C-f>"] = { "scroll_documentation_down", "fallback" },
         },

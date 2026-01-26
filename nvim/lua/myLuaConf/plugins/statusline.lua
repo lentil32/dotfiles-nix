@@ -7,7 +7,6 @@ local function sidekick_status()
 end
 
 local project = require("myLuaConf.project")
-local util = require("myLuaConf.util")
 
 local function copilot_icon()
   return vim.fn.nr2char(0xF4B8) .. " "
@@ -17,31 +16,8 @@ local function project_icon()
   return vim.fn.nr2char(0xEA62) .. " "
 end
 
-local function statusline_winid()
-  local winid = tonumber(util.get_var(nil, "statusline_winid"))
-  if not winid or winid == 0 then
-    return nil
-  end
-  if not vim.api.nvim_win_is_valid(winid) then
-    return nil
-  end
-  return winid
-end
-
-local function project_root()
-  local winid = statusline_winid()
-  if not winid then
-    return project.project_root()
-  end
-  local ok, root = pcall(vim.api.nvim_win_call, winid, project.project_root)
-  if ok then
-    return root
-  end
-  return nil
-end
-
 local function project_label()
-  local root = project_root()
+  local root = project.project_root()
   if not root or root == "" then
     return nil
   end
@@ -52,84 +28,146 @@ local function project_label()
   return project_icon() .. name
 end
 
+local function overseer_status()
+  local ok_constants, constants = pcall(require, "overseer.constants")
+  local ok_tasks, task_list = pcall(require, "overseer.task_list")
+  local ok_util, util = pcall(require, "overseer.util")
+  if not (ok_constants and ok_tasks and ok_util) then
+    return ""
+  end
+
+  local symbols = {
+    [constants.STATUS.FAILURE] = "󰅚 ",
+    [constants.STATUS.CANCELED] = " ",
+    [constants.STATUS.SUCCESS] = "󰄴 ",
+    [constants.STATUS.RUNNING] = "󰑮 ",
+  }
+
+  local tasks = task_list.list_tasks({ include_ephemeral = true })
+  if type(tasks) ~= "table" then
+    return ""
+  end
+  local tasks_by_status = util.tbl_group_by(tasks, "status")
+  local pieces = {}
+  for _, status in ipairs(constants.STATUS.values) do
+    local status_tasks = tasks_by_status[status]
+    if symbols[status] and status_tasks then
+      table.insert(pieces, string.format("%s%s", symbols[status], #status_tasks))
+    end
+  end
+  if #pieces > 0 then
+    return table.concat(pieces, " ")
+  end
+  return ""
+end
+
 return {
   {
-    "lualine.nvim",
+    "witch-line",
     for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
-      local Snacks = require("snacks")
-      local opts = {
-        options = {
-          theme = "auto",
-          globalstatus = false,
+      vim.o.laststatus = 2
+
+      require("witch-line").setup({
+        cache = { enabled = false },
+        statusline = {
+          global = {
+            "mode",
+            "git.branch",
+            "git.diff.added",
+            "git.diff.modified",
+            "git.diff.removed",
+            "diagnostic.error",
+            "diagnostic.warn",
+            "diagnostic.info",
+            "diagnostic.hint",
+            {
+              id = "project.label",
+              events = { "BufEnter", "DirChanged" },
+              update = function()
+                return project_label() or ""
+              end,
+              style = "Directory",
+            },
+            "file.name",
+            {
+              id = "sidekick.status",
+              timing = true,
+              update = function()
+                return copilot_icon()
+              end,
+              style = function()
+                local status = sidekick_status()
+                if not status then
+                  return nil
+                end
+                local info = status.get()
+                if info then
+                  if info.kind == "Error" then
+                    return "DiagnosticError"
+                  end
+                  if info.busy then
+                    return "DiagnosticWarn"
+                  end
+                  return "Special"
+                end
+                return nil
+              end,
+              hidden = function()
+                local status = sidekick_status()
+                return not status or status.get() == nil
+              end,
+            },
+            "%=",
+            {
+              id = "overseer.status",
+              timing = true,
+              update = function()
+                return overseer_status()
+              end,
+            },
+            {
+              id = "file.format",
+              events = { "BufEnter", "BufWritePost" },
+              update = function()
+                local format = vim.bo.fileformat
+                return format or ""
+              end,
+            },
+            {
+              id = "file.type",
+              events = { "BufEnter", "FileType" },
+              update = function()
+                local filetype = vim.bo.filetype
+                return filetype or ""
+              end,
+            },
+            {
+              id = "snacks.profiler",
+              timing = true,
+              update = function()
+                local ok, Snacks = pcall(require, "snacks")
+                if not ok or not Snacks.profiler or not Snacks.profiler.core then
+                  return ""
+                end
+                if not Snacks.profiler.core.running then
+                  return ""
+                end
+                local icon = "󰈸 "
+                if Snacks.profiler.config and Snacks.profiler.config.icons then
+                  icon = Snacks.profiler.config.icons.status or icon
+                end
+                local count = Snacks.profiler.core.events and #Snacks.profiler.core.events or 0
+                return string.format("%s %d events", icon, count)
+              end,
+              style = "DiagnosticError",
+            },
+            "cursor.progress",
+            "cursor.pos",
+          },
         },
-        sections = {
-          lualine_a = { "mode" },
-          lualine_b = { "branch", "diff", "diagnostics" },
-          lualine_c = { "filename" },
-          lualine_x = { "overseer", "fileformat", "filetype" },
-          lualine_y = { "progress" },
-          lualine_z = { "location" },
-        },
-        inactive_sections = {
-          lualine_a = {},
-          lualine_b = {},
-          lualine_c = { "filename" },
-          lualine_x = { "location" },
-          lualine_y = {},
-          lualine_z = {},
-        },
-        extensions = { "oil" },
-      }
-
-      table.insert(opts.sections.lualine_x, Snacks.profiler.status())
-
-      table.insert(opts.sections.lualine_c, 1, {
-        function()
-          return project_label()
-        end,
-        cond = function()
-          return project_root() ~= nil
-        end,
-        color = function()
-          return "Directory"
-        end,
       })
-
-      table.insert(opts.inactive_sections.lualine_c, 1, {
-        function()
-          return project_label()
-        end,
-        cond = function()
-          return project_root() ~= nil
-        end,
-        color = function()
-          return "Directory"
-        end,
-      })
-
-      table.insert(opts.sections.lualine_c, {
-        function()
-          return copilot_icon()
-        end,
-        color = function()
-          local status = sidekick_status()
-          if not status then
-            return nil
-          end
-          local info = status.get()
-          if info then
-            return info.kind == "Error" and "DiagnosticError" or info.busy and "DiagnosticWarn" or "Special"
-          end
-        end,
-        cond = function()
-          local status = sidekick_status()
-          return status and status.get() ~= nil
-        end,
-      })
-
-      require("lualine").setup(opts)
     end,
   },
 }

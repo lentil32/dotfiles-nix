@@ -134,19 +134,6 @@ require("lze").load({
           },
         },
       })
-
-      local Snacks = require("snacks")
-      Snacks.keymap.set("n", "<Tab>", function()
-        local ok, sidekick = pcall(require, "sidekick")
-        if not ok or not sidekick.nes_jump_or_apply then
-          return "<Tab>"
-        end
-        return sidekick.nes_jump_or_apply() and "" or "<Tab>"
-      end, {
-        ft = "sidekick_terminal",
-        expr = true,
-        desc = "Goto/Apply Next Edit Suggestion",
-      })
     end,
   },
   {

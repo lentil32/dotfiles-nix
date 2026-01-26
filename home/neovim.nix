@@ -134,7 +134,14 @@ in
               vim.nvim-surround
               vim.sidekick-nvim
               vim.overseer-nvim
-              vim.lualine-nvim
+              (mkPlugin "witch-line" (
+                pkgs.fetchFromGitHub {
+                  owner = "sontungexpt";
+                  repo = "witch-line";
+                  rev = "929a5e9f7ff05bf412507a79c285955ad9e54c3f";
+                  hash = "sha256-QK4rIm/DiBFGlZo2/hRgMhDi8W5MU9DYqq0AAJqGMiI=";
+                }
+              ))
             ];
             runtimeDeps = [
               p.ripgrep
