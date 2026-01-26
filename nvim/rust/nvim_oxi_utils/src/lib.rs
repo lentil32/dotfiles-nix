@@ -309,3 +309,36 @@ pub mod dict {
         dict.get(&key).cloned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::handles::{BufHandle, WinHandle};
+
+    #[test]
+    fn buf_handle_rejects_non_positive() {
+        assert!(BufHandle::try_from_i64(0).is_none());
+        assert!(BufHandle::try_from_i64(-1).is_none());
+        assert!(BufHandle::try_from_i64(i64::MIN).is_none());
+    }
+
+    #[test]
+    fn win_handle_rejects_non_positive() {
+        assert!(WinHandle::try_from_i64(0).is_none());
+        assert!(WinHandle::try_from_i64(-1).is_none());
+        assert!(WinHandle::try_from_i64(i64::MIN).is_none());
+    }
+
+    #[test]
+    fn buf_handle_roundtrip_i32_max() {
+        let value = i32::MAX as i64;
+        let handle = BufHandle::try_from_i64(value).expect("i32 max should fit");
+        assert_eq!(handle.raw(), value);
+    }
+
+    #[test]
+    fn win_handle_roundtrip_i32_max() {
+        let value = i32::MAX as i64;
+        let handle = WinHandle::try_from_i64(value).expect("i32 max should fit");
+        assert_eq!(handle.raw(), value);
+    }
+}

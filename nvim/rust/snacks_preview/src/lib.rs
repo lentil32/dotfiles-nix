@@ -8,7 +8,12 @@ use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
-use nvim_oxi_utils::{dict, guard, handles, lua, notify, state::StateCell};
+use nvim_oxi_utils::{
+    dict, guard,
+    handles::{BufHandle, WinHandle},
+    lua, notify,
+    state::StateCell,
+};
 
 const FILETYPE_MATCH_LUA: &str = r#"(function(path)
   return vim.filetype.match({ filename = path })
@@ -106,8 +111,8 @@ struct DocPreviewState {
 
 #[derive(Default)]
 struct State {
-    tokens: HashMap<i64, i64>,
-    previews: HashMap<i64, DocPreviewState>,
+    tokens: HashMap<BufHandle, i64>,
+    previews: HashMap<BufHandle, DocPreviewState>,
 }
 
 static STATE: Lazy<StateCell<State>> = Lazy::new(|| StateCell::new(State::default()));
@@ -179,14 +184,14 @@ fn set_buf_filetype(buf: &Buffer, ft: &str) -> Result<()> {
     Ok(())
 }
 
-fn next_doc_preview_token(buf_handle: i64) -> i64 {
+fn next_doc_preview_token(buf_handle: BufHandle) -> i64 {
     let mut state = state_lock();
     let entry = state.tokens.entry(buf_handle).or_insert(0);
     *entry += 1;
     *entry
 }
 
-fn state_ok(buf_handle: i64, token: i64) -> bool {
+fn state_ok(buf_handle: BufHandle, token: i64) -> bool {
     let state = state_lock();
     state
         .previews
@@ -195,11 +200,11 @@ fn state_ok(buf_handle: i64, token: i64) -> bool {
         .unwrap_or(false)
 }
 
-fn restore_doc_preview_name(buf_handle: i64, state: &DocPreviewState) {
+fn restore_doc_preview_name(buf_handle: BufHandle, state: &DocPreviewState) {
     if !state.restore_name {
         return;
     }
-    let Some(buf) = handles::valid_buffer(buf_handle) else {
+    let Some(buf) = buf_handle.valid_buffer() else {
         return;
     };
     let Ok(name) = buf.get_name() else {
@@ -217,7 +222,7 @@ fn restore_doc_preview_name(buf_handle: i64, state: &DocPreviewState) {
     }
 }
 
-fn close_doc_preview(buf_handle: i64) {
+fn close_doc_preview(buf_handle: BufHandle) {
     let state = {
         let mut state = state_lock();
         state.tokens.remove(&buf_handle);
@@ -244,8 +249,8 @@ fn close_doc_preview(buf_handle: i64) {
     }
 }
 
-fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
-    let Some(buf) = handles::valid_buffer(buf_handle) else {
+fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) -> Result<()> {
+    let Some(buf) = buf_handle.valid_buffer() else {
         return Ok(());
     };
 
@@ -267,11 +272,11 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         return Ok(());
     }
 
-    if handles::valid_window(win_id).is_none() {
+    if win_handle.valid_window().is_none() {
         return Ok(());
     }
 
-    let group_name = format!("snacks.doc_preview.{buf_handle}");
+    let group_name = format!("snacks.doc_preview.{}", buf_handle.raw());
     let group = api::create_augroup(
         &group_name,
         &CreateAugroupOpts::builder().clear(true).build(),
@@ -295,7 +300,7 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
     api::create_autocmd(["BufWipeout", "BufHidden"], &opts)?;
 
     let buf_handle_for_win = buf_handle;
-    let win_id_str = win_id.to_string();
+    let win_id_str = win_handle.raw().to_string();
     let win_opts = CreateAutocmdOpts::builder()
         .group(group)
         .patterns([win_id_str.as_str()])
@@ -338,7 +343,11 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         );
     }
 
-    let args = Dictionary::from_iter([("buf", buf_handle), ("token", token), ("win", win_id)]);
+    let args = Dictionary::from_iter([
+        ("buf", buf_handle.raw()),
+        ("token", token),
+        ("win", win_handle.raw()),
+    ]);
     if let Err(err) = lua::eval::<Object>(SNACKS_DOC_FIND_LUA, Some(Object::from(args))) {
         notify::warn(LOG_CONTEXT, &format!("snacks doc find failed: {err}"));
     }
@@ -365,9 +374,9 @@ fn cleanup_from_object(obj: Object) -> Option<Function<(), ()>> {
     Function::<(), ()>::from_object(obj).ok()
 }
 
-fn create_preview_cleanup(win_id: i64, src: &str) -> Option<Function<(), ()>> {
+fn create_preview_cleanup(win_handle: WinHandle, src: &str) -> Option<Function<(), ()>> {
     let mut args = Dictionary::new();
-    args.insert("win", win_id);
+    args.insert("win", win_handle.raw());
     args.insert("src", src);
     let obj: Object = match lua::eval(SNACKS_OPEN_PREVIEW_LUA, Some(Object::from(args))) {
         Ok(value) => value,
@@ -380,10 +389,9 @@ fn create_preview_cleanup(win_id: i64, src: &str) -> Option<Function<(), ()>> {
 }
 
 fn on_doc_find_inner(args: Dictionary) -> Result<()> {
-    let buf_handle = dict::get_i64(&args, "buf").unwrap_or_default();
-    if buf_handle == 0 {
+    let Some(buf_handle) = dict::get_i64(&args, "buf").and_then(BufHandle::try_from_i64) else {
         return Ok(());
-    }
+    };
     let token = dict::get_i64(&args, "token").unwrap_or_default();
     if !state_ok(buf_handle, token) {
         return Ok(());
@@ -404,10 +412,9 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
         return Ok(());
     };
 
-    let win_id = dict::get_i64(&args, "win").unwrap_or_default();
-    if win_id == 0 {
+    let Some(win_handle) = dict::get_i64(&args, "win").and_then(WinHandle::try_from_i64) else {
         return Ok(());
-    }
+    };
 
     schedule(move |()| {
         guard::with_panic(
@@ -416,10 +423,10 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
                 if !state_ok(buf_handle, token) {
                     return;
                 }
-                if handles::valid_window(win_id).is_none() {
+                if win_handle.valid_window().is_none() {
                     return;
                 }
-                let Some(cleanup) = create_preview_cleanup(win_id, &src) else {
+                let Some(cleanup) = create_preview_cleanup(win_handle, &src) else {
                     return;
                 };
                 let mut cleanup_to_run = Some(cleanup);
@@ -454,27 +461,26 @@ fn on_doc_find(args: Dictionary) -> Result<()> {
 }
 
 fn attach_doc_preview_lua(args: Dictionary) -> Result<()> {
-    let buf_handle = dict::get_i64(&args, "buf").unwrap_or_default();
-    if buf_handle == 0 {
+    let Some(buf_handle) = dict::get_i64(&args, "buf").and_then(BufHandle::try_from_i64) else {
         return Ok(());
-    }
-    let win_id = dict::get_i64(&args, "win").unwrap_or_default();
-    if win_id == 0 {
+    };
+    let Some(win_handle) = dict::get_i64(&args, "win").and_then(WinHandle::try_from_i64) else {
         return Ok(());
-    }
+    };
     let Some(path) = dict::get_string_nonempty(&args, "path") else {
         return Ok(());
     };
-    if let Err(err) = attach_doc_preview(buf_handle, &path, win_id) {
+    if let Err(err) = attach_doc_preview(buf_handle, &path, win_handle) {
         notify::warn(LOG_CONTEXT, &format!("attach doc preview failed: {err}"));
     }
     Ok(())
 }
 
 fn close_doc_preview_lua(buf_handle: i64) -> Result<()> {
-    if buf_handle != 0 {
-        close_doc_preview(buf_handle);
-    }
+    let Some(buf_handle) = BufHandle::try_from_i64(buf_handle) else {
+        return Ok(());
+    };
+    close_doc_preview(buf_handle);
     Ok(())
 }
 

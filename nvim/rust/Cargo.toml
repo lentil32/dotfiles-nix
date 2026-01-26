@@ -9,3 +9,6 @@ members = [
   "util",
   "nvim_utils",
 ]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

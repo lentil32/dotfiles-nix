@@ -3,5 +3,8 @@ name = "nvim-oxi-utils"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 nvim-oxi = { version = "0.6", features = ["neovim-0-10"] }
