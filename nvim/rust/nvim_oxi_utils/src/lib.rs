@@ -1,5 +1,7 @@
 //! Shared nvim-oxi helpers for plugin crates.
 
+pub use nvim_errors::{Error, Result};
+
 pub mod guard {
     use std::any::Any;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -284,6 +286,7 @@ pub mod handles {
 }
 
 pub mod dict {
+    use nvim_errors::{Error, Result};
     use nvim_oxi::conversion::FromObject;
     use nvim_oxi::{Dictionary, Object, String as NvimString};
 
@@ -293,11 +296,25 @@ pub mod dict {
         i64::from_object(obj).ok()
     }
 
+    pub fn require_i64(dict: &Dictionary, key: &str) -> Result<i64> {
+        let key_str = NvimString::from(key);
+        let obj = dict.get(&key_str).ok_or_else(|| Error::missing_key(key))?;
+        i64::from_object(obj.clone()).map_err(|_| Error::invalid_value(key, "i64"))
+    }
+
     pub fn get_string(dict: &Dictionary, key: &str) -> Option<String> {
         let key = NvimString::from(key);
         dict.get(&key)
             .and_then(|obj| NvimString::from_object(obj.clone()).ok())
             .map(|val| val.to_string_lossy().into_owned())
+    }
+
+    pub fn require_string(dict: &Dictionary, key: &str) -> Result<String> {
+        let key_str = NvimString::from(key);
+        let obj = dict.get(&key_str).ok_or_else(|| Error::missing_key(key))?;
+        NvimString::from_object(obj.clone())
+            .map(|val| val.to_string_lossy().into_owned())
+            .map_err(|_| Error::invalid_value(key, "string"))
     }
 
     pub fn get_string_nonempty(dict: &Dictionary, key: &str) -> Option<String> {

@@ -154,6 +154,44 @@ fn is_doc_preview_filetype(ft: &str) -> bool {
     )
 }
 
+fn require_i64(args: &Dictionary, key: &str) -> Option<i64> {
+    match dict::require_i64(args, key) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            notify::warn(LOG_CONTEXT, &format!("missing/invalid {key}: {err}"));
+            None
+        }
+    }
+}
+
+fn require_buf_handle(args: &Dictionary, key: &str) -> Option<BufHandle> {
+    let value = require_i64(args, key)?;
+    match BufHandle::try_from_i64(value) {
+        Some(handle) => Some(handle),
+        None => {
+            notify::warn(
+                LOG_CONTEXT,
+                &format!("{key} invalid buffer handle: {value}"),
+            );
+            None
+        }
+    }
+}
+
+fn require_win_handle(args: &Dictionary, key: &str) -> Option<WinHandle> {
+    let value = require_i64(args, key)?;
+    match WinHandle::try_from_i64(value) {
+        Some(handle) => Some(handle),
+        None => {
+            notify::warn(
+                LOG_CONTEXT,
+                &format!("{key} invalid window handle: {value}"),
+            );
+            None
+        }
+    }
+}
+
 fn snacks_has_doc_preview() -> bool {
     match lua::eval::<bool>(SNACKS_HAS_DOC_LUA, None) {
         Ok(value) => value,
@@ -389,10 +427,12 @@ fn create_preview_cleanup(win_handle: WinHandle, src: &str) -> Option<Function<(
 }
 
 fn on_doc_find_inner(args: Dictionary) -> Result<()> {
-    let Some(buf_handle) = dict::get_i64(&args, "buf").and_then(BufHandle::try_from_i64) else {
+    let Some(buf_handle) = require_buf_handle(&args, "buf") else {
         return Ok(());
     };
-    let token = dict::get_i64(&args, "token").unwrap_or_default();
+    let Some(token) = require_i64(&args, "token") else {
+        return Ok(());
+    };
     if !state_ok(buf_handle, token) {
         return Ok(());
     }
@@ -412,7 +452,7 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
         return Ok(());
     };
 
-    let Some(win_handle) = dict::get_i64(&args, "win").and_then(WinHandle::try_from_i64) else {
+    let Some(win_handle) = require_win_handle(&args, "win") else {
         return Ok(());
     };
 
@@ -461,10 +501,10 @@ fn on_doc_find(args: Dictionary) -> Result<()> {
 }
 
 fn attach_doc_preview_lua(args: Dictionary) -> Result<()> {
-    let Some(buf_handle) = dict::get_i64(&args, "buf").and_then(BufHandle::try_from_i64) else {
+    let Some(buf_handle) = require_buf_handle(&args, "buf") else {
         return Ok(());
     };
-    let Some(win_handle) = dict::get_i64(&args, "win").and_then(WinHandle::try_from_i64) else {
+    let Some(win_handle) = require_win_handle(&args, "win") else {
         return Ok(());
     };
     let Some(path) = dict::get_string_nonempty(&args, "path") else {

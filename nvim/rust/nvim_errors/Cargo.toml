@@ -1,5 +1,5 @@
 [package]
-name = "nvim-oxi-utils"
+name = "nvim-errors"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,4 +8,4 @@ workspace = true
 
 [dependencies]
 nvim-oxi = { version = "0.6", features = ["neovim-0-10"] }
-nvim-errors = { path = "../nvim_errors" }
+thiserror = "2.0"

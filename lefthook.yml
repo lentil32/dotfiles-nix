@@ -1,0 +1,4 @@
+pre-push:
+  commands:
+    fmt:
+      run: make fmt && git diff --exit-code
