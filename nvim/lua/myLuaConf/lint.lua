@@ -13,6 +13,8 @@ require("lze").load({
         jsonc = { "biomejs" },
         lua = { "selene" },
         rust = { "clippy" },
+        yaml = { "yamllint" },
+        ["yaml.ansible"] = { "yamllint" },
       }
 
       vim.api.nvim_create_autocmd({ "BufWritePost" }, {

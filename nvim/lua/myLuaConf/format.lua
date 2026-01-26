@@ -14,6 +14,9 @@ require("lze").load({
           jsonc = { "biome" },
           lua = { "stylua" },
           rust = { "rustfmt" },
+          toml = { "taplo" },
+          yaml = { "yamlfmt" },
+          ["yaml.ansible"] = { "yamlfmt" },
         },
         format_on_save = {
           timeout_ms = 500,

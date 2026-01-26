@@ -86,7 +86,6 @@
     taplo
     typescript-language-server
     vscode-langservers-extracted
-    yaml-language-server
     yapf
 
     # Productivity

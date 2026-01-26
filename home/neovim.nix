@@ -331,10 +331,13 @@ in
 
           format = with pkgs; [
             stylua
+            taplo
+            yamlfmt
           ];
 
           lint = with pkgs; [
             selene
+            yamllint
           ];
 
           lsp = with pkgs; [
@@ -342,6 +345,7 @@ in
             rust-analyzer
             lua-language-server
             ruff
+            yaml-language-server
           ];
 
           typescript = with pkgs; [
