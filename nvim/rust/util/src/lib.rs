@@ -4,44 +4,22 @@ use nvim_oxi::api;
 use nvim_oxi::api::opts::{OptionOpts, OptionScope};
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString};
-use nvim_oxi_utils::notify;
+use nvim_oxi_utils::{handles, notify};
 use nvim_utils::path::{path_is_dir, strip_known_prefixes};
 
 type OptMap = HashMap<String, Object>;
 const LOG_CONTEXT: &str = "util";
 
 fn buffer_from_handle(handle: Option<i64>) -> Option<Buffer> {
-    let handle = handle?;
-    if handle == 0 {
-        return Some(api::get_current_buf());
-    }
-    if handle < 0 {
-        return None;
-    }
-    let handle = i32::try_from(handle).ok()?;
-    Some(Buffer::from(handle))
-}
-
-fn window_from_handle(handle: Option<i64>) -> Option<Window> {
-    let handle = handle?;
-    if handle == 0 {
-        return Some(api::get_current_win());
-    }
-    if handle < 0 {
-        return None;
-    }
-    let handle = i32::try_from(handle).ok()?;
-    Some(Window::from(handle))
+    handles::buffer_from_optional(handle)
 }
 
 fn valid_buffer(handle: Option<i64>) -> Option<Buffer> {
-    let buf = buffer_from_handle(handle)?;
-    buf.is_valid().then_some(buf)
+    handles::valid_buffer_optional(handle)
 }
 
 fn valid_window(handle: Option<i64>) -> Option<Window> {
-    let win = window_from_handle(handle)?;
-    win.is_valid().then_some(win)
+    handles::valid_window_optional(handle)
 }
 
 fn set_option_values(opts: OptMap, opt_opts: &OptionOpts) -> Result<()> {

@@ -7,7 +7,7 @@ use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{schedule, Array, Dictionary, Function, Object, Result, String as NvimString};
-use nvim_oxi_utils::{guard, lua, notify};
+use nvim_oxi_utils::{dict, guard, lua, notify};
 
 use nvim_utils::path::{has_uri_scheme, path_is_dir, strip_known_prefixes};
 
@@ -287,13 +287,6 @@ fn on_buf_wipeout(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
     Ok(false)
 }
 
-fn dict_string(dict: &Dictionary, key: &str) -> Option<String> {
-    let key = NvimString::from(key);
-    dict.get(&key)
-        .and_then(|obj| NvimString::from_object(obj.clone()).ok())
-        .map(|val| val.to_string_lossy().into_owned())
-}
-
 fn on_oil_actions_post(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
     let Ok(dict) = Dictionary::try_from(args.data) else {
         return Ok(false);
@@ -308,14 +301,14 @@ fn on_oil_actions_post(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd>
     let Some(first) = actions.into_iter().next() else {
         return Ok(false);
     };
-    let action_type = dict_string(&first, "type");
+    let action_type = dict::get_string(&first, "type");
     if action_type.as_deref() != Some("move") {
         return Ok(false);
     }
-    let Some(src) = dict_string(&first, "src_url") else {
+    let Some(src) = dict::get_string(&first, "src_url") else {
         return Ok(false);
     };
-    let Some(dest) = dict_string(&first, "dest_url") else {
+    let Some(dest) = dict::get_string(&first, "dest_url") else {
         return Ok(false);
     };
 

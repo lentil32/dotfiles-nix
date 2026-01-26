@@ -175,3 +175,85 @@ pub mod notify {
         }
     }
 }
+
+pub mod handles {
+    use nvim_oxi::api;
+    use nvim_oxi::api::{Buffer, Window};
+
+    fn to_i32(handle: i64) -> Option<i32> {
+        i32::try_from(handle).ok()
+    }
+
+    pub fn buffer_from_i64(handle: i64) -> Option<Buffer> {
+        to_i32(handle).map(Buffer::from)
+    }
+
+    pub fn window_from_i64(handle: i64) -> Option<Window> {
+        to_i32(handle).map(Window::from)
+    }
+
+    pub fn buffer_from_optional(handle: Option<i64>) -> Option<Buffer> {
+        let handle = handle?;
+        if handle == 0 {
+            return Some(api::get_current_buf());
+        }
+        if handle < 0 {
+            return None;
+        }
+        buffer_from_i64(handle)
+    }
+
+    pub fn window_from_optional(handle: Option<i64>) -> Option<Window> {
+        let handle = handle?;
+        if handle == 0 {
+            return Some(api::get_current_win());
+        }
+        if handle < 0 {
+            return None;
+        }
+        window_from_i64(handle)
+    }
+
+    pub fn valid_buffer(handle: i64) -> Option<Buffer> {
+        buffer_from_i64(handle).filter(|buf| buf.is_valid())
+    }
+
+    pub fn valid_window(handle: i64) -> Option<Window> {
+        window_from_i64(handle).filter(|win| win.is_valid())
+    }
+
+    pub fn valid_buffer_optional(handle: Option<i64>) -> Option<Buffer> {
+        buffer_from_optional(handle).filter(|buf| buf.is_valid())
+    }
+
+    pub fn valid_window_optional(handle: Option<i64>) -> Option<Window> {
+        window_from_optional(handle).filter(|win| win.is_valid())
+    }
+}
+
+pub mod dict {
+    use nvim_oxi::conversion::FromObject;
+    use nvim_oxi::{Dictionary, Object, String as NvimString};
+
+    pub fn get_i64(dict: &Dictionary, key: &str) -> Option<i64> {
+        let key = NvimString::from(key);
+        let obj = dict.get(&key)?.clone();
+        i64::from_object(obj).ok()
+    }
+
+    pub fn get_string(dict: &Dictionary, key: &str) -> Option<String> {
+        let key = NvimString::from(key);
+        dict.get(&key)
+            .and_then(|obj| NvimString::from_object(obj.clone()).ok())
+            .map(|val| val.to_string_lossy().into_owned())
+    }
+
+    pub fn get_string_nonempty(dict: &Dictionary, key: &str) -> Option<String> {
+        get_string(dict, key).filter(|val| !val.is_empty())
+    }
+
+    pub fn get_object(dict: &Dictionary, key: &str) -> Option<Object> {
+        let key = NvimString::from(key);
+        dict.get(&key).cloned()
+    }
+}

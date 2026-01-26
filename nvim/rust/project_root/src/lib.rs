@@ -6,7 +6,7 @@ use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts, Opti
 use nvim_oxi::api::types::{AutocmdCallbackArgs, LogLevel};
 use nvim_oxi::api::{self, Buffer};
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{Array, Dictionary, Function, Result, String as NvimString};
+use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString};
 use nvim_oxi_utils::{guard, notify, state::StateCell};
 use nvim_utils::path::{has_uri_scheme, normalize_path, path_is_dir, strip_known_prefixes};
 
@@ -58,21 +58,28 @@ fn report_panic(label: &str, info: guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
 }
 
-fn debug_enabled() -> bool {
-    if let Ok(value) = api::get_var::<bool>("project_root_debug") {
+fn truthy_object(obj: Object) -> bool {
+    if let Ok(value) = bool::from_object(obj.clone()) {
         return value;
     }
-    if let Ok(value) = api::get_var::<i64>("project_root_debug") {
+    if let Ok(value) = i64::from_object(obj.clone()) {
         return value != 0;
     }
-    if let Ok(value) = api::get_var::<f64>("project_root_debug") {
+    if let Ok(value) = f64::from_object(obj.clone()) {
         return value != 0.0;
     }
-    if let Ok(value) = api::get_var::<NvimString>("project_root_debug") {
+    if let Ok(value) = NvimString::from_object(obj) {
         let value = value.to_string_lossy().to_ascii_lowercase();
         return matches!(value.as_str(), "1" | "true" | "yes" | "on");
     }
     false
+}
+
+fn debug_enabled() -> bool {
+    let Ok(value) = api::get_var::<Object>("project_root_debug") else {
+        return false;
+    };
+    truthy_object(value)
 }
 
 fn debug_log<F>(build: F)
@@ -108,7 +115,11 @@ fn get_buf_root_for(buf: &Buffer) -> Option<String> {
 fn set_buf_var(buf: &mut Buffer, var: &str, value: Option<&str>) -> Result<()> {
     match value {
         Some(value) => buf.set_var(var, value)?,
-        None => buf.set_var(var, false)?,
+        None => {
+            if let Err(err) = buf.del_var(var) {
+                debug_log(|| format!("set_buf_var: del_var {var} failed: {err}"));
+            }
+        }
     }
     Ok(())
 }

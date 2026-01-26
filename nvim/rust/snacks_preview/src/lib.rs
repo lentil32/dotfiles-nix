@@ -8,12 +8,12 @@ use once_cell::sync::Lazy;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
-use nvim_oxi::api::{Buffer, Window};
+use nvim_oxi::api::Buffer;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{
     schedule, Array, Dictionary, Function, Object, Result, String as NvimString,
 };
-use nvim_oxi_utils::{guard, lua, notify, state::StateCell};
+use nvim_oxi_utils::{dict, guard, handles, lua, notify, state::StateCell};
 
 const FILETYPE_MATCH_LUA: &str = r#"(function(path)
   return vim.filetype.match({ filename = path })
@@ -129,18 +129,6 @@ fn report_panic(label: &str, info: guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
 }
 
-fn valid_buffer(handle: i64) -> Option<Buffer> {
-    let handle = i32::try_from(handle).ok()?;
-    let buf = Buffer::from(handle);
-    buf.is_valid().then_some(buf)
-}
-
-fn valid_window(handle: i64) -> Option<Window> {
-    let handle = i32::try_from(handle).ok()?;
-    let win = Window::from(handle);
-    win.is_valid().then_some(win)
-}
-
 fn filetype_for_path(path: &str) -> Result<String> {
     let obj: Object = lua::eval(FILETYPE_MATCH_LUA, Some(Object::from(path)))?;
     if obj.is_nil() {
@@ -216,7 +204,7 @@ fn restore_doc_preview_name(buf_handle: i64, state: &DocPreviewState) {
     if !state.restore_name {
         return;
     }
-    let Some(buf) = valid_buffer(buf_handle) else {
+    let Some(buf) = handles::valid_buffer(buf_handle) else {
         return;
     };
     let Ok(name) = buf.get_name() else {
@@ -258,7 +246,7 @@ fn close_doc_preview(buf_handle: i64) {
 }
 
 fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
-    let Some(buf) = valid_buffer(buf_handle) else {
+    let Some(buf) = handles::valid_buffer(buf_handle) else {
         return Ok(());
     };
 
@@ -280,7 +268,7 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
 
     close_doc_preview(buf_handle);
 
-    if valid_window(win_id).is_none() {
+    if handles::valid_window(win_id).is_none() {
         return Ok(());
     }
 
@@ -355,29 +343,6 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
     Ok(())
 }
 
-fn dict_get_i64(dict: &Dictionary, key: &str) -> Option<i64> {
-    let key = NvimString::from(key);
-    let obj = dict.get(&key)?.clone();
-    i64::from_object(obj).ok()
-}
-
-fn dict_get_string(dict: &Dictionary, key: &str) -> Option<String> {
-    let key = NvimString::from(key);
-    let obj = dict.get(&key)?.clone();
-    if obj.is_nil() {
-        return None;
-    }
-    NvimString::from_object(obj)
-        .ok()
-        .map(|val| val.to_string_lossy().into_owned())
-        .filter(|val| !val.is_empty())
-}
-
-fn dict_get_object(dict: &Dictionary, key: &str) -> Option<Object> {
-    let key = NvimString::from(key);
-    dict.get(&key).cloned()
-}
-
 fn first_img_src(imgs_obj: &Object) -> Option<String> {
     let imgs = Array::from_object(imgs_obj.clone()).ok()?;
     let first = imgs.iter().next()?;
@@ -416,11 +381,11 @@ fn create_preview_cleanup(win_id: i64, src: &str) -> Option<Function<(), ()>> {
 }
 
 fn on_doc_find_inner(args: Dictionary) -> Result<()> {
-    let buf_handle = dict_get_i64(&args, "buf").unwrap_or_default();
+    let buf_handle = dict::get_i64(&args, "buf").unwrap_or_default();
     if buf_handle == 0 {
         return Ok(());
     }
-    let token = dict_get_i64(&args, "token").unwrap_or_default();
+    let token = dict::get_i64(&args, "token").unwrap_or_default();
     if !state_ok(buf_handle, token) {
         return Ok(());
     }
@@ -432,7 +397,7 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
         restore_doc_preview_name(buf_handle, &state);
     }
 
-    let imgs_obj = dict_get_object(&args, "imgs");
+    let imgs_obj = dict::get_object(&args, "imgs");
     let Some(imgs_obj) = imgs_obj else {
         return Ok(());
     };
@@ -440,7 +405,7 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
         return Ok(());
     };
 
-    let win_id = dict_get_i64(&args, "win").unwrap_or_default();
+    let win_id = dict::get_i64(&args, "win").unwrap_or_default();
     if win_id == 0 {
         return Ok(());
     }
@@ -450,7 +415,7 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
             if !state_ok(buf_handle, token) {
                 return;
             }
-            if valid_window(win_id).is_none() {
+            if handles::valid_window(win_id).is_none() {
                 return;
             }
             let Some(cleanup) = create_preview_cleanup(win_id, &src) else {
@@ -486,15 +451,15 @@ fn on_doc_find(args: Dictionary) -> Result<()> {
 }
 
 fn attach_doc_preview_lua(args: Dictionary) -> Result<()> {
-    let buf_handle = dict_get_i64(&args, "buf").unwrap_or_default();
+    let buf_handle = dict::get_i64(&args, "buf").unwrap_or_default();
     if buf_handle == 0 {
         return Ok(());
     }
-    let win_id = dict_get_i64(&args, "win").unwrap_or_default();
+    let win_id = dict::get_i64(&args, "win").unwrap_or_default();
     if win_id == 0 {
         return Ok(());
     }
-    let Some(path) = dict_get_string(&args, "path") else {
+    let Some(path) = dict::get_string_nonempty(&args, "path") else {
         return Ok(());
     };
     if let Err(err) = attach_doc_preview(buf_handle, &path, win_id) {
