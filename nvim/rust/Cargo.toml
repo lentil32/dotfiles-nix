@@ -4,6 +4,7 @@ members = [
   "autocmds",
   "project_root",
   "readline",
+  "snacks_preview",
   "util",
   "nvim_utils",
 ]

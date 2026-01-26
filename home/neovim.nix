@@ -162,6 +162,47 @@ in
             runHook postInstall
           '';
         };
+        snacksPreviewPlugin = pkgs.rustPlatform.buildRustPackage {
+          pname = "snacks-preview-nvim";
+          version = "0.1.0";
+          src = rustWorkspace;
+          cargoLock = {
+            lockFile = rustWorkspace + "/Cargo.lock";
+          };
+          cargoBuildFlags = [
+            "--locked"
+            "--package"
+            "snacks_preview"
+          ];
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lua
+            lib=""
+            if [ -f target/release/libsnacks_preview.dylib ]; then
+              lib=target/release/libsnacks_preview.dylib
+            elif [ -f target/release/libsnacks_preview.so ]; then
+              lib=target/release/libsnacks_preview.so
+            elif [ -f target/release/snacks_preview.dll ]; then
+              lib=target/release/snacks_preview.dll
+            else
+              lib=$(find target -type f \( -name "libsnacks_preview.dylib" -o -name "libsnacks_preview.so" -o -name "snacks_preview.dll" \) | head -n 1)
+            fi
+            if [ -z "$lib" ]; then
+              echo "snacks_preview library not found" >&2
+              exit 1
+            fi
+            case "$lib" in
+              *.dll) cp "$lib" "$out/lua/snacks_preview.dll" ;;
+              *.dylib|*.so) cp "$lib" "$out/lua/snacks_preview.so" ;;
+              *)
+                echo "snacks_preview library not found: $lib" >&2
+                exit 1
+                ;;
+            esac
+            runHook postInstall
+          '';
+        };
         autocmdsPlugin = pkgs.rustPlatform.buildRustPackage {
           pname = "my-autocmds-nvim";
           version = "0.1.0";
@@ -218,6 +259,7 @@ in
             autocmdsPlugin
             utilPlugin
             readlinePlugin
+            snacksPreviewPlugin
             projectRootPlugin
           ];
 

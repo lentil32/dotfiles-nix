@@ -169,6 +169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "snacks_preview"
+version = "0.1.0"
+dependencies = [
+ "nvim-oxi",
+ "nvim-utils",
+ "once_cell",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.114"
 source = "registry+https://github.com/rust-lang/crates.io-index"
