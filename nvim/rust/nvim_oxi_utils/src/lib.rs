@@ -2,7 +2,7 @@
 
 pub mod guard {
     use std::any::Any;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     /// Details about a captured panic payload.
     #[derive(Debug, Clone)]
@@ -143,9 +143,9 @@ pub mod lua {
 }
 
 pub mod notify {
+    use nvim_oxi::Dictionary;
     use nvim_oxi::api::types::LogLevel;
     use nvim_oxi::api::{self, Error};
-    use nvim_oxi::Dictionary;
 
     fn format_message(context: &str, message: &str) -> String {
         if context.is_empty() {

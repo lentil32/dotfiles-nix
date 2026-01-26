@@ -219,24 +219,30 @@ fn cached_or_refresh_root(buf: &Buffer) -> Result<Option<String>> {
     refresh_root_for_buffer(buf)
 }
 
-fn root_from_path(path: &Path) -> Option<PathBuf> {
-    let indicators = {
-        let state = state_lock();
-        state.root_indicators.clone()
-    };
+fn root_from_path_with<F, G>(
+    path: &Path,
+    indicators: &[String],
+    is_dir: F,
+    exists: G,
+) -> Option<PathBuf>
+where
+    F: Fn(&Path) -> bool,
+    G: Fn(&Path) -> bool,
+{
     if indicators.is_empty() {
         debug_log(|| "root_from_path: no indicators".to_string());
         return None;
     }
 
     let mut current = path.to_path_buf();
-    if !path_is_dir(&current) {
+    if !is_dir(&current) {
         current = current.parent()?.to_path_buf();
     }
 
     loop {
-        for indicator in &indicators {
-            if current.join(indicator).exists() {
+        for indicator in indicators {
+            let candidate = current.join(indicator);
+            if exists(&candidate) {
                 debug_log(|| {
                     format!(
                         "root_from_path: path='{}' found='{}' via '{}'",
@@ -261,6 +267,19 @@ fn root_from_path(path: &Path) -> Option<PathBuf> {
         )
     });
     None
+}
+
+fn root_from_path(path: &Path) -> Option<PathBuf> {
+    let indicators = {
+        let state = state_lock();
+        state.root_indicators.clone()
+    };
+    root_from_path_with(
+        path,
+        &indicators,
+        |dir| path_is_dir(dir),
+        |candidate| candidate.exists(),
+    )
 }
 
 fn refresh_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
@@ -397,15 +416,19 @@ fn setup_autocmd() -> Result<()> {
     let opts = CreateAutocmdOpts::builder()
         .group(group)
         .callback(|args: AutocmdCallbackArgs| {
-            guard::with_panic(false, || {
-                if let Err(err) = refresh_root_for_buffer(&args.buffer) {
-                    notify::warn(
-                        LOG_CONTEXT,
-                        &format!("refresh_root_for_buffer failed: {err}"),
-                    );
-                }
-                false
-            }, |info| report_panic("refresh_root_for_buffer", info))
+            guard::with_panic(
+                false,
+                || {
+                    if let Err(err) = refresh_root_for_buffer(&args.buffer) {
+                        notify::warn(
+                            LOG_CONTEXT,
+                            &format!("refresh_root_for_buffer failed: {err}"),
+                        );
+                    }
+                    false
+                },
+                |info| report_panic("refresh_root_for_buffer", info),
+            )
         })
         .build();
 

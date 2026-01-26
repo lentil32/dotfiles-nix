@@ -1,18 +1,13 @@
-use std::{
-    collections::HashMap,
-    path::Path,
-};
+use std::{collections::HashMap, path::Path};
 
 use once_cell::sync::Lazy;
 
 use nvim_oxi::api;
+use nvim_oxi::api::Buffer;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
-use nvim_oxi::api::Buffer;
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{
-    schedule, Array, Dictionary, Function, Object, Result, String as NvimString,
-};
+use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
 use nvim_oxi_utils::{dict, guard, handles, lua, notify, state::StateCell};
 
 const FILETYPE_MATCH_LUA: &str = r#"(function(path)
@@ -35,7 +30,7 @@ const SNACKS_DOC_FIND_LUA: &str = r#"(function(args)
   if not (snacks.image and snacks.image.doc) then
     return
   end
-  snacks.image.doc.find(args.buf, function(imgs)
+  snacks.image.doc.find_visible(args.buf, function(imgs)
     require("snacks_preview").on_doc_find({
       buf = args.buf,
       token = args.token,
@@ -208,7 +203,10 @@ fn restore_doc_preview_name(buf_handle: i64, state: &DocPreviewState) {
         return;
     };
     let Ok(name) = buf.get_name() else {
-        notify::warn(LOG_CONTEXT, "restore preview name failed to read buffer name");
+        notify::warn(
+            LOG_CONTEXT,
+            "restore preview name failed to read buffer name",
+        );
         return;
     };
     if name.to_string_lossy() == state.preview_name {
@@ -222,6 +220,7 @@ fn restore_doc_preview_name(buf_handle: i64, state: &DocPreviewState) {
 fn close_doc_preview(buf_handle: i64) {
     let state = {
         let mut state = state_lock();
+        state.tokens.remove(&buf_handle);
         state.previews.remove(&buf_handle)
     };
 
@@ -262,11 +261,11 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         }
     }
 
+    close_doc_preview(buf_handle);
+
     if !snacks_has_doc_preview() {
         return Ok(());
     }
-
-    close_doc_preview(buf_handle);
 
     if handles::valid_window(win_id).is_none() {
         return Ok(());
@@ -283,10 +282,14 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         .group(group)
         .buffer(buf.clone())
         .callback(move |_args: AutocmdCallbackArgs| {
-            guard::with_panic(false, || {
-                close_doc_preview(buf_handle_for_event);
-                false
-            }, |info| report_panic("doc_preview_buf_close", info))
+            guard::with_panic(
+                false,
+                || {
+                    close_doc_preview(buf_handle_for_event);
+                    false
+                },
+                |info| report_panic("doc_preview_buf_close", info),
+            )
         })
         .build();
     api::create_autocmd(["BufWipeout", "BufHidden"], &opts)?;
@@ -297,10 +300,14 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         .group(group)
         .patterns([win_id_str.as_str()])
         .callback(move |_args: AutocmdCallbackArgs| {
-            guard::with_panic(false, || {
-                close_doc_preview(buf_handle_for_win);
-                false
-            }, |info| report_panic("doc_preview_win_close", info))
+            guard::with_panic(
+                false,
+                || {
+                    close_doc_preview(buf_handle_for_win);
+                    false
+                },
+                |info| report_panic("doc_preview_win_close", info),
+            )
         })
         .build();
     api::create_autocmd(["WinClosed"], &win_opts)?;
@@ -331,11 +338,7 @@ fn attach_doc_preview(buf_handle: i64, path: &str, win_id: i64) -> Result<()> {
         );
     }
 
-    let args = Dictionary::from_iter([
-        ("buf", buf_handle),
-        ("token", token),
-        ("win", win_id),
-    ]);
+    let args = Dictionary::from_iter([("buf", buf_handle), ("token", token), ("win", win_id)]);
     if let Err(err) = lua::eval::<Object>(SNACKS_DOC_FIND_LUA, Some(Object::from(args))) {
         notify::warn(LOG_CONTEXT, &format!("snacks doc find failed: {err}"));
     }
@@ -352,11 +355,7 @@ fn first_img_src(imgs_obj: &Object) -> Option<String> {
         .ok()?
         .to_string_lossy()
         .into_owned();
-    if src.is_empty() {
-        None
-    } else {
-        Some(src)
-    }
+    if src.is_empty() { None } else { Some(src) }
 }
 
 fn cleanup_from_object(obj: Object) -> Option<Function<(), ()>> {
@@ -411,30 +410,34 @@ fn on_doc_find_inner(args: Dictionary) -> Result<()> {
     }
 
     schedule(move |()| {
-        guard::with_panic((), || {
-            if !state_ok(buf_handle, token) {
-                return;
-            }
-            if handles::valid_window(win_id).is_none() {
-                return;
-            }
-            let Some(cleanup) = create_preview_cleanup(win_id, &src) else {
-                return;
-            };
-            let mut cleanup_to_run = Some(cleanup);
-            {
-                let mut state = state_lock();
-                if let Some(entry) = state.previews.get_mut(&buf_handle) {
-                    entry.cleanup = cleanup_to_run.take();
+        guard::with_panic(
+            (),
+            || {
+                if !state_ok(buf_handle, token) {
+                    return;
                 }
-            }
-            if let Some(cleanup) = cleanup_to_run {
-                if let Err(err) = cleanup.call(()) {
-                    notify::warn(LOG_CONTEXT, &format!("preview cleanup failed: {err}"));
+                if handles::valid_window(win_id).is_none() {
+                    return;
                 }
-                cleanup.remove_from_lua_registry();
-            }
-        }, |info| report_panic("doc_preview_schedule", info));
+                let Some(cleanup) = create_preview_cleanup(win_id, &src) else {
+                    return;
+                };
+                let mut cleanup_to_run = Some(cleanup);
+                {
+                    let mut state = state_lock();
+                    if let Some(entry) = state.previews.get_mut(&buf_handle) {
+                        entry.cleanup = cleanup_to_run.take();
+                    }
+                }
+                if let Some(cleanup) = cleanup_to_run {
+                    if let Err(err) = cleanup.call(()) {
+                        notify::warn(LOG_CONTEXT, &format!("preview cleanup failed: {err}"));
+                    }
+                    cleanup.remove_from_lua_registry();
+                }
+            },
+            |info| report_panic("doc_preview_schedule", info),
+        );
     });
 
     Ok(())

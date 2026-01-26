@@ -6,14 +6,75 @@ use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{schedule, Array, Dictionary, Function, Object, Result, String as NvimString};
+use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, schedule};
 use nvim_oxi_utils::{dict, guard, lua, notify};
 
 use nvim_utils::path::{has_uri_scheme, path_is_dir, strip_known_prefixes};
 
-type OilMap = HashMap<String, i64>;
+type OilMap = HashMap<WinHandle, BufHandle>;
 
-type ShouldDeleteAutocmd = bool;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct WinHandle(i64);
+
+impl WinHandle {
+    fn from_window(win: &Window) -> Self {
+        Self(win.handle() as i64)
+    }
+
+    fn try_from_i64(handle: i64) -> Option<Self> {
+        if handle <= 0 {
+            return None;
+        }
+        i32::try_from(handle).ok().map(|_| Self(handle))
+    }
+
+    fn to_window(self) -> Option<Window> {
+        i32::try_from(self.0).ok().map(Window::from)
+    }
+
+    fn valid_window(self) -> Option<Window> {
+        self.to_window().filter(|win| win.is_valid())
+    }
+
+    fn to_key(self) -> String {
+        self.0.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BufHandle(i64);
+
+impl BufHandle {
+    fn from_buffer(buf: &Buffer) -> Self {
+        Self(buf.handle() as i64)
+    }
+
+    fn try_from_i64(handle: i64) -> Option<Self> {
+        if handle <= 0 {
+            return None;
+        }
+        i32::try_from(handle).ok().map(|_| Self(handle))
+    }
+
+    fn to_buffer(self) -> Option<Buffer> {
+        i32::try_from(self.0).ok().map(Buffer::from)
+    }
+
+    fn valid_buffer(self) -> Option<Buffer> {
+        self.to_buffer().filter(|buf| buf.is_valid())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutocmdAction {
+    Keep,
+}
+
+impl AutocmdAction {
+    fn as_bool(self) -> bool {
+        false
+    }
+}
 
 const SNACKS_DASHBOARD_LUA: &str = "(function() local ok, snacks = pcall(require, 'snacks'); if ok and snacks.dashboard then snacks.dashboard() end end)()";
 const OIL_DIR_LUA: &str = "(function(buf) local ok, oil = pcall(require, 'oil'); if not ok then return nil end; return oil.get_current_dir(buf) end)(_A)";
@@ -24,14 +85,13 @@ fn report_panic(label: &str, info: guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
 }
 
-fn run_autocmd<F>(label: &str, f: F) -> Result<ShouldDeleteAutocmd>
+fn run_autocmd<F>(label: &str, f: F) -> Result<bool>
 where
-    F: FnOnce() -> Result<ShouldDeleteAutocmd>,
+    F: FnOnce() -> Result<AutocmdAction>,
 {
-    let result =
-        guard::with_panic(Ok(false), f, |info| report_panic(label, info));
+    let result = guard::with_panic(Ok(AutocmdAction::Keep), f, |info| report_panic(label, info));
     match result {
-        Ok(value) => Ok(value),
+        Ok(value) => Ok(value.as_bool()),
         Err(err) => {
             notify::warn(LOG_CONTEXT, &format!("{label} failed: {err}"));
             Ok(false)
@@ -43,11 +103,15 @@ fn run_scheduled<F>(label: &str, f: F)
 where
     F: FnOnce() -> Result<()>,
 {
-    guard::with_panic((), || {
-        if let Err(err) = f() {
-            notify::warn(LOG_CONTEXT, &format!("{label} failed: {err}"));
-        }
-    }, |info| report_panic(label, info));
+    guard::with_panic(
+        (),
+        || {
+            if let Err(err) = f() {
+                notify::warn(LOG_CONTEXT, &format!("{label} failed: {err}"));
+            }
+        },
+        |info| report_panic(label, info),
+    );
 }
 
 fn is_dir(path: &str) -> bool {
@@ -157,8 +221,8 @@ fn maybe_show_dashboard() -> Result<()> {
     Ok(())
 }
 
-fn oil_current_dir(buf: i64) -> Result<Option<String>> {
-    let obj: Object = lua::eval(OIL_DIR_LUA, Some(Object::from(buf)))?;
+fn oil_current_dir(buf: BufHandle) -> Result<Option<String>> {
+    let obj: Object = lua::eval(OIL_DIR_LUA, Some(Object::from(buf.0)))?;
     if obj.is_nil() {
         return Ok(None);
     }
@@ -169,8 +233,8 @@ fn oil_current_dir(buf: i64) -> Result<Option<String>> {
     Ok(Some(dir))
 }
 
-fn win_key(win: i64) -> String {
-    win.to_string()
+fn win_handle_from_key(key: &str) -> Option<WinHandle> {
+    key.parse::<i64>().ok().and_then(WinHandle::try_from_i64)
 }
 
 fn oil_last_buf_map() -> OilMap {
@@ -183,15 +247,26 @@ fn oil_last_buf_map() -> OilMap {
     };
     let mut map = HashMap::new();
     for (key, value) in dict.iter() {
-        if let Ok(buf) = i64::from_object(value.clone()) {
-            map.insert(key.to_string_lossy().into_owned(), buf);
-        }
+        let Some(win) = win_handle_from_key(&key.to_string_lossy()) else {
+            continue;
+        };
+        let Ok(buf) = i64::from_object(value.clone()) else {
+            continue;
+        };
+        let Some(buf) = BufHandle::try_from_i64(buf) else {
+            continue;
+        };
+        map.insert(win, buf);
     }
     map
 }
 
 fn map_to_dict(map: &OilMap) -> Dictionary {
-    Dictionary::from_iter(map.iter().map(|(key, value)| (key.as_str(), *value)))
+    let mut dict = Dictionary::new();
+    for (win, buf) in map {
+        dict.insert(win.to_key(), buf.0);
+    }
+    dict
 }
 
 fn write_oil_last_buf(map: &OilMap) -> Result<()> {
@@ -202,19 +277,9 @@ fn write_oil_last_buf(map: &OilMap) -> Result<()> {
 fn clean_oil_last_buf() -> Result<()> {
     let mut map = oil_last_buf_map();
     let mut changed = false;
-    map.retain(|key, buf_id| {
-        let win_ok = key
-            .parse::<i64>()
-            .ok()
-            .and_then(|id| i32::try_from(id).ok())
-            .map(Window::from)
-            .map(|win| win.is_valid())
-            .unwrap_or(false);
-        let buf_ok = i32::try_from(*buf_id)
-            .ok()
-            .map(Buffer::from)
-            .map(|buf| buf.is_valid())
-            .unwrap_or(false);
+    map.retain(|win, buf| {
+        let win_ok = win.valid_window().is_some();
+        let buf_ok = buf.valid_buffer().is_some();
         let keep = win_ok && buf_ok;
         if !keep {
             changed = true;
@@ -227,55 +292,58 @@ fn clean_oil_last_buf() -> Result<()> {
     Ok(())
 }
 
-fn on_dashboard_delete() -> Result<ShouldDeleteAutocmd> {
+fn on_dashboard_delete() -> Result<AutocmdAction> {
     schedule(|()| run_scheduled("dashboard", maybe_show_dashboard));
-    Ok(false)
+    Ok(AutocmdAction::Keep)
 }
 
-fn on_file_cwd(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
+fn on_file_cwd(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let Some(dir) = file_dir_for_buf(&args.buffer)? else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     let Some(win) = win_for_buf(&args.buffer)? else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     set_win_cwd(&win, &dir)?;
-    Ok(false)
+    Ok(AutocmdAction::Keep)
 }
 
-fn on_oil_buf(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
-    let buf_handle = args.buffer.handle() as i64;
+fn on_oil_buf(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
+    let buf_handle = BufHandle::from_buffer(&args.buffer);
     let Some(dir) = oil_current_dir(buf_handle)? else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     let Some(win) = win_for_buf(&args.buffer)? else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
-    let win_id = win.handle() as i64;
+    let win_handle = WinHandle::from_window(&win);
     let mut map = oil_last_buf_map();
-    map.insert(win_key(win_id), buf_handle);
+    map.insert(win_handle, buf_handle);
     write_oil_last_buf(&map)?;
     set_win_cwd(&win, &dir)?;
-    Ok(false)
+    Ok(AutocmdAction::Keep)
 }
 
-fn on_win_closed(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
+fn on_win_closed(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let Ok(win_id) = args.r#match.parse::<i64>() else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
+    };
+    let Some(win_handle) = WinHandle::try_from_i64(win_id) else {
+        return Ok(AutocmdAction::Keep);
     };
     let mut map = oil_last_buf_map();
-    if map.remove(&win_key(win_id)).is_some() {
+    if map.remove(&win_handle).is_some() {
         write_oil_last_buf(&map)?;
     }
-    Ok(false)
+    Ok(AutocmdAction::Keep)
 }
 
-fn on_buf_wipeout(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
-    let buf_id = args.buffer.handle() as i64;
+fn on_buf_wipeout(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
+    let buf_handle = BufHandle::from_buffer(&args.buffer);
     let mut map = oil_last_buf_map();
     let mut changed = false;
     map.retain(|_, mapped| {
-        let keep = *mapped != buf_id;
+        let keep = *mapped != buf_handle;
         if !keep {
             changed = true;
         }
@@ -284,39 +352,39 @@ fn on_buf_wipeout(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
     if changed {
         write_oil_last_buf(&map)?;
     }
-    Ok(false)
+    Ok(AutocmdAction::Keep)
 }
 
-fn on_oil_actions_post(args: AutocmdCallbackArgs) -> Result<ShouldDeleteAutocmd> {
+fn on_oil_actions_post(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let Ok(dict) = Dictionary::try_from(args.data) else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     let actions_key = NvimString::from("actions");
     let Some(actions_obj) = dict.get(&actions_key) else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     let Ok(actions) = Vec::<Dictionary>::from_object(actions_obj.clone()) else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     let Some(first) = actions.into_iter().next() else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     let action_type = dict::get_string(&first, "type");
     if action_type.as_deref() != Some("move") {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     }
     let Some(src) = dict::get_string(&first, "src_url") else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
     let Some(dest) = dict::get_string(&first, "dest_url") else {
-        return Ok(false);
+        return Ok(AutocmdAction::Keep);
     };
 
     let mut args = Dictionary::new();
     args.insert("src_url", src);
     args.insert("dest_url", dest);
     let _ = lua::eval::<Object>(SNACKS_RENAME_LUA, Some(Object::from(args)))?;
-    Ok(false)
+    Ok(AutocmdAction::Keep)
 }
 
 fn setup_dashboard_autocmd() -> Result<()> {
@@ -326,7 +394,9 @@ fn setup_dashboard_autocmd() -> Result<()> {
     )?;
     let opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|_args: AutocmdCallbackArgs| run_autocmd("on_dashboard_delete", on_dashboard_delete))
+        .callback(|_args: AutocmdCallbackArgs| {
+            run_autocmd("on_dashboard_delete", on_dashboard_delete)
+        })
         .build();
     api::create_autocmd(["BufDelete"], &opts)?;
     Ok(())
@@ -373,7 +443,9 @@ fn setup_oil_last_buf_autocmds() -> Result<()> {
 
     let wipeout_opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_buf_wipeout", || on_buf_wipeout(args)))
+        .callback(|args: AutocmdCallbackArgs| {
+            run_autocmd("on_buf_wipeout", || on_buf_wipeout(args))
+        })
         .build();
     api::create_autocmd(["BufWipeout"], &wipeout_opts)?;
 
@@ -382,7 +454,7 @@ fn setup_oil_last_buf_autocmds() -> Result<()> {
         .callback(|_args: AutocmdCallbackArgs| {
             run_autocmd("clean_oil_last_buf", || {
                 clean_oil_last_buf()?;
-                Ok(false)
+                Ok(AutocmdAction::Keep)
             })
         })
         .build();

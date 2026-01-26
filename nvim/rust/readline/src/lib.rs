@@ -71,21 +71,17 @@ fn transpose_chars() -> Result<()> {
         return Ok(());
     }
 
-    let mut byte_count = 0usize;
-    let mut char_index = 0usize;
-    for ch in &chars {
-        if byte_count >= col {
+    let mut char_index = None;
+    for (idx, (byte_idx, _)) in line.char_indices().enumerate() {
+        if byte_idx > col {
             break;
         }
-        let ch_len = ch.len_utf8();
-        byte_count += ch_len;
-        if byte_count <= col {
-            char_index += 1;
-        } else {
-            break;
-        }
+        char_index = Some(idx);
     }
 
+    let Some(char_index) = char_index else {
+        return Ok(());
+    };
     if char_index == 0 || char_index >= chars.len() {
         return Ok(());
     }

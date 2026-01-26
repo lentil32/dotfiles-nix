@@ -37,7 +37,7 @@ make clean         # Remove the ./result symlink
 
 ## Agent Notes
 - See `CLAUDE.md` for additional architecture details and common commands.
-- See `.tmp/` if library references needed. There are cloned libraries we are using in this repository. Treat this directory as readonly.
+- See `.tmp/` if library references needed. There are cloned libraries we are using in this repository. Treat these directories as readonly.
 
 List:
 - lze
