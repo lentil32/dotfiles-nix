@@ -1,7 +1,6 @@
 {
   pkgs,
   pkgs-unstable,
-  system,
   ...
 }:
 {
@@ -34,10 +33,10 @@
     pngpaste
     jq
     imagemagick
-    yq-go # yaml processer https://github.com/mikefarah/yq
     wabt
     websocat
     wireguard-tools
+    yq-go # yaml processer https://github.com/mikefarah/yq
 
     aria2 # A lightweight multi-protocol & multi-source command-line download utility
     ripgrep-all # rga - search in PDFs, Office docs, archives, etc.
@@ -135,6 +134,7 @@
     direnv = {
       enable = true;
       enableZshIntegration = true;
+      enableBashIntegration = true;
       mise.enable = true;
       nix-direnv.enable = true;
     };

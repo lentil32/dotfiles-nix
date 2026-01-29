@@ -112,6 +112,7 @@ let
 
     # Utility
     { cask = "jordanbaird-ice"; }
+    { cask = "tailscale-app"; }
   ];
 
   isFormulae = item: item ? formulae;
