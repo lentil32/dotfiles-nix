@@ -79,6 +79,15 @@ require("lze").load({
     enabled = nixCats("lsp") or false,
     lsp = {
       filetypes = { "rust" },
+      settings = {
+        ["rust-analyzer"] = {
+          procMacro = {
+            ignored = {
+              leptos_macro = { "server" },
+            },
+          },
+        },
+      },
     },
   },
   {

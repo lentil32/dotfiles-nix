@@ -36,7 +36,6 @@ make clean         # Remove the ./result symlink
 - Commit messages are short and action-oriented; conventional prefixes appear often (e.g., `feat:`, `refactor:`, `migrate:`) but are not strictly enforced.
 
 ## Agent Notes
-- See `CLAUDE.md` for additional architecture details and common commands.
 - See `.tmp/` if library references needed. There are cloned libraries we are using in this repository. Treat these directories as readonly.
 
 List:
@@ -47,5 +46,4 @@ List:
 - nvim-oxi
 - oil.nvim
 - snacks.nvim
-
 
