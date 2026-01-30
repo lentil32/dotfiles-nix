@@ -42,7 +42,6 @@ let
       desc = "GPT";
       cask = "codex";
     }
-    { formulae = "gemini-cli"; }
     { formulae = "anomalyco/tap/opencode"; }
 
     # IM & audio & video

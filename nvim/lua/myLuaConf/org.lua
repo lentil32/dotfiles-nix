@@ -7,9 +7,10 @@ function M.setup()
     return
   end
   configured = true
+  local home = vim.loop.os_homedir() or vim.fn.expand("~")
   require("orgmode").setup({
-    org_agenda_files = { "~/org/**/*" },
-    org_default_notes_file = "~/org/refile.org",
+    org_agenda_files = { home .. "/org/**/*" },
+    org_default_notes_file = home .. "/org/refile.org",
   })
 end
 

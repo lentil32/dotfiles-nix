@@ -381,7 +381,14 @@ function M.list()
     { "<leader>bd", buffers.delete_current_buffer, desc = "Delete" },
     { "<leader>bn", "<cmd>bnext<cr>", desc = "Next" },
     { "<leader>bp", "<cmd>bprev<cr>", desc = "Prev" },
-    { "<leader>bs", "<cmd>edit ~/.local/share/nvim/scratch.md<cr>", desc = "Scratch buffer" },
+    {
+      "<leader>bs",
+      function()
+        local scratch = vim.fn.stdpath("data") .. "/scratch.md"
+        vim.cmd("edit " .. vim.fn.fnameescape(scratch))
+      end,
+      desc = "Scratch buffer",
+    },
     {
       "<leader>bt",
       function()

@@ -5,6 +5,9 @@
   config,
   ...
 }:
+let
+  homeDir = config.home.homeDirectory;
+in
 {
   # import sub modules
   imports = [
@@ -29,6 +32,8 @@
     ./scripts
   ];
 
+  xdg.enable = true;
+
   # Home Manager needs a bit of information about you and the
   # paths it should manage.
   home = {
@@ -52,9 +57,9 @@
 
       SAM_CLI_TELEMETRY = "0";
 
-      BUNBIN = "$HOME/.bun/bin";
-      PNPM_HOME = "$HOME/Library/pnpm";
-      NODE_PATH = "$HOME/.bun/install/global/node_modules";
+      BUNBIN = "${homeDir}/.bun/bin";
+      PNPM_HOME = "${homeDir}/Library/pnpm";
+      NODE_PATH = "${homeDir}/.bun/install/global/node_modules";
     }
     // lib.optionalAttrs pkgs.stdenv.targetPlatform.isDarwin {
       PUPPETEER_EXECUTABLE_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -62,9 +67,10 @@
 
     sessionPath = [
       "$BUNBIN"
+      "${config.xdg.dataHome}/mise/shims"
       "${config.home.sessionVariables.PNPM_HOME}"
-      "$HOME/.local/bin"
-      "$HOME/.cargo/bin"
+      "${homeDir}/.local/bin"
+      "${homeDir}/.cargo/bin"
     ];
 
   };
