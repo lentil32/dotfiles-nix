@@ -9,6 +9,7 @@ return {
     end,
     after = function()
       require("neogit").setup({
+        kind = "auto",
         integrations = { diffview = true, snacks = true },
         graph_style = "unicode",
         disable_insert_on_commit = true,

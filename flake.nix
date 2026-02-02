@@ -31,6 +31,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     rust-overlay.url = "github:oxalica/rust-overlay";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     crane.url = "github:ipetkov/crane";
@@ -80,6 +85,7 @@
       nix-darwin,
       home-manager,
       nix-darwin-emacs,
+      sops-nix,
       rust-overlay,
       treefmt-nix,
       crane,
@@ -189,6 +195,8 @@
             ./modules/nix-core.nix
             ./modules/system.nix
             ./modules/ulimits.nix
+            sops-nix.darwinModules.sops
+            ./modules/secrets.nix
             ./modules/services/aerospace.nix
           ]
           ++ (

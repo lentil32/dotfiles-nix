@@ -12,6 +12,7 @@
     p7zip
 
     # utils
+    age
     awscli2
     bottom
     convmv
@@ -20,7 +21,6 @@
     ffmpeg
     fzf
     glow # markdown previewer in terminal
-    gh
     keycastr # keystroke visualizer
     killport
     lefthook
@@ -101,6 +101,7 @@
     which
     tree
     gnupg
+    sops
     gnused
     gnutar
     gawk
@@ -142,6 +143,9 @@
       enable = true;
       git = true;
       enableZshIntegration = true;
+    };
+    gh = {
+      enable = true;
     };
     java.enable = true;
     mise = {
