@@ -1,4 +1,32 @@
+pre-commit:
+  commands:
+    sops:
+      glob: "secrets/*.{yml,yaml}"
+      run: |
+        if command -v rg >/dev/null 2>&1; then
+          check() { rg -Fq "$1"; }
+        else
+          check() { grep -Fq "$1"; }
+        fi
+        bad=""
+        for f in {staged_files}; do
+          content="$(git show ":$f" 2>/dev/null || true)"
+          if [ -z "$content" ]; then
+            continue
+          fi
+          if ! printf '%s' "$content" | check 'sops:' || ! printf '%s' "$content" | check 'ENC['; then
+            bad="${bad}\n${f}"
+          fi
+        done
+        if [ -n "$bad" ]; then
+          printf 'Unencrypted sops secret(s) detected:%b\n' "$bad" >&2
+          printf 'Run: sops -e -i <file>\n' >&2
+          exit 1
+        fi
 pre-push:
   commands:
     fmt:
-      run: make fmt && git diff --exit-code
+      glob: "*"
+      run: |
+        nix fmt -- {staged_files}
+        git diff --exit-code

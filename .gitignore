@@ -5,3 +5,9 @@
 target/
 /.tmp/
 
+# SOPS plaintext artifacts (encrypted secrets are safe to commit)
+/secrets/*_unencrypted*
+/secrets/*.dec
+/secrets/*.decrypted
+/secrets/*.clear
+/secrets/*.plain
