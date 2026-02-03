@@ -8,6 +8,25 @@ local function try_require(mod)
   return nil
 end
 
+local function doc_inline_enabled(snacks)
+  if not snacks or not snacks.image or not snacks.image.config then
+    return false
+  end
+  local doc = snacks.image.config.doc
+  if not doc or doc.inline ~= true then
+    return false
+  end
+  local terminal = snacks.image.terminal
+  if not terminal or type(terminal.env) ~= "function" then
+    return false
+  end
+  local ok, env = pcall(terminal.env)
+  if not ok or not env then
+    return false
+  end
+  return env.placeholders == true
+end
+
 local cleanup_id = 0
 local cleanups = {}
 
@@ -24,6 +43,9 @@ end
 function M.snacks_has_doc()
   local snacks = try_require("snacks")
   if not snacks or not snacks.image or not snacks.image.doc or not snacks.image.terminal then
+    return false
+  end
+  if doc_inline_enabled(snacks) then
     return false
   end
   return true
