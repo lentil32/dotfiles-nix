@@ -146,6 +146,12 @@
     };
     gh = {
       enable = true;
+      settings = {
+        aliases = { };
+        editor = "";
+        git_protocol = "ssh";
+        version = "1";
+      };
     };
     java.enable = true;
     mise = {
