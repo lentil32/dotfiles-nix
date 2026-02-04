@@ -114,6 +114,9 @@ in
         prune = true;
         pruneTags = true;
         all = true;
+        negotiationAlgorithm = "skipping";
+        parallel = 8;
+        writeCommitGraph = true;
       };
 
       # why the hell not?
