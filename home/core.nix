@@ -1,4 +1,5 @@
 {
+  lib,
   pkgs,
   pkgs-unstable,
   ...
@@ -186,4 +187,7 @@
     };
     zoxide.enable = true;
   };
+
+  # Silence bat cache activation; bat still works without prebuilt cache.
+  home.activation.batCache = lib.mkForce (lib.hm.dag.entryAfter [ "linkGeneration" ] "true");
 }
