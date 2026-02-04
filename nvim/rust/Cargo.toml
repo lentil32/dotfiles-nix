@@ -7,6 +7,7 @@ members = [
   "project_root",
   "readline",
   "snacks_preview",
+  "text",
   "util",
   "nvim_utils",
 ]

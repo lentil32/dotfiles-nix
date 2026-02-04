@@ -2,6 +2,7 @@ local buffers = require("myLuaConf.buffer")
 local oil = require("myLuaConf.oil")
 local project = require("myLuaConf.project")
 local readline = require("myLuaConf.readline")
+local text = require("myLuaConf.text")
 local util = require("myLuaConf.util")
 
 local M = {}
@@ -432,6 +433,60 @@ function M.list()
         picker.grep_buffers()
       end,
       desc = "Grep buffers",
+    },
+  })
+
+  add({
+    -- Text/Lines
+    { "<leader>x", group = "text" },
+    { "<leader>xl", group = "lines" },
+    {
+      "<leader>xlc",
+      text.sort_lines_by_column,
+      desc = "Sort lines by column",
+      mode = { "n", "x" },
+    },
+    {
+      "<leader>xld",
+      text.duplicate_line_or_region,
+      desc = "Duplicate line or region",
+      mode = { "n", "x" },
+    },
+    {
+      "<leader>xlk",
+      text.kill_back_to_indentation,
+      desc = "Kill back to indentation",
+      mode = { "n", "x" },
+    },
+    {
+      "<leader>xlr",
+      text.randomize_lines,
+      desc = "Randomize lines",
+      mode = { "n", "x" },
+    },
+    {
+      "<leader>xls",
+      text.sort_lines,
+      desc = "Sort lines",
+      mode = { "n", "x" },
+    },
+    {
+      "<leader>xlu",
+      text.uniquify_lines,
+      desc = "Uniquify lines",
+      mode = { "n", "x" },
+    },
+    {
+      "<leader>xlC",
+      text.sort_lines_by_column_reverse,
+      desc = "Sort lines by column (reverse)",
+      mode = { "n", "x" },
+    },
+    {
+      "<leader>xlS",
+      text.sort_lines_reverse,
+      desc = "Sort lines (reverse)",
+      mode = { "n", "x" },
     },
   })
 

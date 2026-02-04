@@ -39,8 +39,12 @@ let
     }
     { cask = "claude-code"; }
     {
-      desc = "GPT";
+      desc = "OpenAI Codex CLI";
       cask = "codex";
+    }
+    {
+      desc = "OpenAI Codex Desktop";
+      cask = "codex-app";
     }
     { formulae = "anomalyco/tap/opencode"; }
 

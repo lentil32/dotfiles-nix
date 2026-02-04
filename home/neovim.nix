@@ -101,6 +101,7 @@ in
           "project_root"
           "my_util"
           "my_readline"
+          "my_text"
           "snacks_preview"
           "my_autocmds"
         ];
@@ -108,6 +109,7 @@ in
           project_root = { };
           my_util = { };
           my_readline = { };
+          my_text = { };
           snacks_preview = { };
           my_autocmds = { };
         };
