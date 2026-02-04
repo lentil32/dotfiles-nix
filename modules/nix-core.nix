@@ -1,4 +1,18 @@
 { pkgs, lib, ... }:
+let
+  binaryCaches = [
+    "https://cache.nixos.org"
+    "https://nix-community.cachix.org"
+    "https://ghostty.cachix.org"
+    "https://neovim-nightly.cachix.org"
+  ];
+  trustedPublicKeys = [
+    "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+    "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+    "ghostty.cachix.org-1:QB389yTa6gTyneehvqG58y0WnHjQOqgnA+wBnpWWxns="
+    "neovim-nightly.cachix.org-1:feIoInHRevVEplgdZvQDjhp11kYASYCE2NGY9hNrwxY="
+  ];
+in
 {
   # enable flakes globally
   nix.settings.experimental-features = [
@@ -7,14 +21,8 @@
   ];
 
   # Enable trusted binary caches globally (not just per-flake).
-  nix.settings.substituters = [
-    "https://cache.nixos.org"
-    "https://nix-community.cachix.org"
-  ];
-  nix.settings.trusted-public-keys = [
-    "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
-    "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
-  ];
+  nix.settings.substituters = binaryCaches;
+  nix.settings.trusted-public-keys = trustedPublicKeys;
 
   # Allow unfree packages
   nixpkgs.config.allowUnfree = true;
