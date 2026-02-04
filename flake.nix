@@ -39,6 +39,11 @@
     # Homebrew management
     nix-homebrew.url = "github:zhaofengli/nix-homebrew";
 
+    nur = {
+      url = "github:nix-community/NUR";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     # Homebrew taps (declarative)
     homebrew-core = {
       url = "github:homebrew/homebrew-core";
@@ -81,6 +86,7 @@
       flake-utils,
       ghostty,
       nix-homebrew,
+      nur,
       homebrew-core,
       homebrew-cask,
       homebrew-services,
@@ -120,6 +126,7 @@
           nix-darwin-emacs.overlays.emacs
           rust-overlay.overlays.default
           ghostty.overlays.default
+          nur.overlays.default
           (final: prev: {
             pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
           })

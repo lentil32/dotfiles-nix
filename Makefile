@@ -1,4 +1,4 @@
-.PHONY: darwin darwin-debug nvim update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc gc-all fmt check clean help
+.PHONY: darwin darwin-debug nvim update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc fmt check clean help
 
 hostname := $(shell hostname)
 user := $(shell whoami)
@@ -50,13 +50,6 @@ history:
 	nix profile history --profile /nix/var/nix/profiles/system
 
 gc:
-# remove all generations older than 7 days
-	sudo nix profile wipe-history --profile /nix/var/nix/profiles/system  --older-than 7d
-
-# garbage collect all unused nix store entries
-	sudo nix store gc --debug
-
-gc-all:
 	sudo nix-collect-garbage -d
 
 fmt:
@@ -74,8 +67,7 @@ help:
 	@echo "nvim         - Build and apply home-manager activation (Neovim config)"
 	@echo "update-flake - Update flake.lock"
 	@echo "deploy-flake - Update flake.lock and rebuild"
-	@echo "gc           - Remove generations older than 7 days"
-	@echo "gc-all       - Full garbage collection"
+	@echo "gc           - Full garbage collection"
 	@echo "fmt          - Format Nix files"
 	@echo "check        - Run flake checks"
 	@echo "clean        - Remove result symlink"
