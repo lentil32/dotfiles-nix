@@ -1,6 +1,9 @@
 { lib, config, ... }:
 let
   homeDir = config.home.homeDirectory;
+  maintenanceSecretFile = ../secrets/git-maintenance.yaml;
+  hasMaintenanceSecret = builtins.pathExists maintenanceSecretFile;
+  maintenanceInclude = { path = "${homeDir}/.config/git/maintenance.inc"; };
 in
 {
   # `programs.git` will generate the config file: ~/.config/git/config
@@ -23,13 +26,15 @@ in
     enable = true;
     lfs.enable = true;
 
-    includes = [
-      {
-        # use diffrent email & name for work
-        path = "${homeDir}/work/.gitconfig";
-        condition = "gitdir:${homeDir}/work/";
-      }
-    ];
+    includes =
+      [
+        {
+          # use diffrent email & name for work
+          path = "${homeDir}/work/.gitconfig";
+          condition = "gitdir:${homeDir}/work/";
+        }
+      ]
+      ++ lib.optional hasMaintenanceSecret maintenanceInclude;
 
     signing = {
       key = "C69D0D84EE437EDA60F39326ED44A29A1A3B09B1";
@@ -139,6 +144,7 @@ in
       };
       merge.conflictstyle = "zdiff3";
       pull.rebase = true;
+      pack.threads = 0;
     };
   };
 }

@@ -20,6 +20,7 @@ in
     ./git.nix
     ./neovim.nix
     ./python.nix
+    ./ssh.nix
     ./starship.nix
     ./tmux.nix
     ./wezterm.nix
