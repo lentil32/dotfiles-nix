@@ -32,8 +32,13 @@ in
   # do garbage collection weekly to keep disk usage low
   nix.gc = {
     automatic = lib.mkDefault true;
-    options = lib.mkDefault "--delete-older-than 7d";
+    options = lib.mkDefault "--delete-older-than 30d";
   };
 
   nix.optimise.automatic = true;
+
+  # Performance tuning: keep more paths, build in parallel, and download more substitutes.
+  nix.settings.max-jobs = lib.mkDefault "auto";
+  nix.settings.cores = lib.mkDefault 0;
+  nix.settings.http-connections = lib.mkDefault 50;
 }
