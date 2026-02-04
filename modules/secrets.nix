@@ -10,9 +10,11 @@ let
   secretsFile = ../secrets/nix-access-tokens.yaml;
   ghHostsFile = ../secrets/gh-hosts.yaml;
   maintenanceFile = ../secrets/git-maintenance.yaml;
+  sshConfigFile = ../secrets/ssh-config.yaml;
   hasSecretsFile = builtins.pathExists secretsFile;
   hasGhHostsFile = builtins.pathExists ghHostsFile;
   hasMaintenanceFile = builtins.pathExists maintenanceFile;
+  hasSshConfigFile = builtins.pathExists sshConfigFile;
 in
 {
   sops = lib.mkMerge [
@@ -43,6 +45,15 @@ in
       secrets."git-maintenance" = {
         sopsFile = maintenanceFile;
         path = "${userHome}/.config/git/maintenance.inc";
+        owner = username;
+        group = userGroup;
+        mode = "0600";
+      };
+    })
+    (lib.mkIf hasSshConfigFile {
+      secrets."ssh-config" = {
+        sopsFile = sshConfigFile;
+        path = "${userHome}/.ssh/config.private";
         owner = username;
         group = userGroup;
         mode = "0600";

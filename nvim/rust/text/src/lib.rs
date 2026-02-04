@@ -125,10 +125,7 @@ mod core {
 
     impl RngCore for SmallRng {
         fn next_u64(&mut self) -> u64 {
-            self.state = self
-                .state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1);
+            self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
             self.state
         }
     }
@@ -206,38 +203,22 @@ mod core {
 
         #[test]
         fn sort_lines_asc_and_desc() {
-            let lines = vec![
-                "beta".to_string(),
-                "alpha".to_string(),
-                "gamma".to_string(),
-            ];
+            let lines = vec!["beta".to_string(), "alpha".to_string(), "gamma".to_string()];
             let asc = sort_lines(&lines, SortDirection::Asc);
             let desc = sort_lines(&lines, SortDirection::Desc);
             assert_eq!(
                 asc,
-                vec![
-                    "alpha".to_string(),
-                    "beta".to_string(),
-                    "gamma".to_string()
-                ]
+                vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
             );
             assert_eq!(
                 desc,
-                vec![
-                    "gamma".to_string(),
-                    "beta".to_string(),
-                    "alpha".to_string()
-                ]
+                vec!["gamma".to_string(), "beta".to_string(), "alpha".to_string()]
             );
         }
 
         #[test]
         fn sort_lines_by_column_uses_substring() {
-            let lines = vec![
-                "x:2".to_string(),
-                "x:10".to_string(),
-                "x:1".to_string(),
-            ];
+            let lines = vec!["x:2".to_string(), "x:10".to_string(), "x:1".to_string()];
             let sorted = sort_lines_by_column(&lines, Column(2), SortDirection::Asc);
             assert_eq!(
                 sorted,
@@ -255,7 +236,10 @@ mod core {
                 "b".to_string(),
             ];
             let uniq = uniquify_lines(&lines);
-            assert_eq!(uniq, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+            assert_eq!(
+                uniq,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()]
+            );
         }
 
         #[test]
@@ -303,7 +287,12 @@ mod core {
             shuffle_with_rng(&mut lines, &mut rng);
             assert_eq!(
                 lines,
-                vec!["b".to_string(), "c".to_string(), "d".to_string(), "a".to_string()]
+                vec![
+                    "b".to_string(),
+                    "c".to_string(),
+                    "d".to_string(),
+                    "a".to_string()
+                ]
             );
         }
     }
@@ -320,7 +309,11 @@ impl LineRange {
         if start == 0 || end == 0 {
             return Err(TextError::InvalidLineIndex { value: 0 }.into());
         }
-        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         Ok(Self { start, end })
     }
 
@@ -346,7 +339,9 @@ impl LineRange {
 
 #[derive(Debug)]
 enum TextError {
-    InvalidLineIndex { value: i64 },
+    InvalidLineIndex {
+        value: i64,
+    },
     RangeOutOfBounds {
         start: usize,
         end: usize,
