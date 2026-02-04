@@ -16,6 +16,8 @@ in
   sops = lib.mkMerge [
     {
       age.keyFile = "${userHome}/.config/sops/age/keys.txt";
+      age.sshKeyPaths = [ ];
+      gnupg.sshKeyPaths = [ ];
     }
     (lib.mkIf hasSecretsFile {
       defaultSopsFile = secretsFile;
