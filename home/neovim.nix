@@ -254,6 +254,7 @@ in
               "vim"
               "vi"
             ];
+            suffix-path = false;
             wrapRc = true;
           };
 

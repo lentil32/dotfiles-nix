@@ -64,6 +64,7 @@ require("lze").load({
         "<c-.>",
         sidekick_in_project_root(function()
           require("sidekick.cli").toggle({ name = "codex", focus = true })
+          vim.cmd.stopinsert()
         end),
         mode = { "n", "t", "i", "x" },
         desc = "Sidekick toggle Codex",
