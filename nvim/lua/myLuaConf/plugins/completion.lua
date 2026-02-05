@@ -7,7 +7,8 @@ return {
       require("blink.cmp").setup({
         keymap = {
           preset = "default",
-          ["<Tab>"] = { "show", "show_documentation", "hide_documentation", "accept", "fallback" },
+          ["<Tab>"] = { "show_documentation", "hide_documentation", "fallback" },
+          ["<C-Space>"] = { "show", "fallback" },
           ["<CR>"] = { "accept", "fallback" },
           ["<C-n>"] = {
             "select_next",
