@@ -1,5 +1,9 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::env;
+use std::io::ErrorKind;
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use std::process::Command;
+use std::thread;
 
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
@@ -11,6 +15,7 @@ use nvim_oxi_utils::{
     dict, guard,
     handles::{BufHandle, WinHandle},
     lua, notify,
+    state::StateCell,
 };
 
 use nvim_utils::path::{has_uri_scheme, path_is_dir, strip_known_prefixes};
@@ -29,6 +34,146 @@ impl AutocmdAction {
 }
 
 const LOG_CONTEXT: &str = "autocmds";
+const WEZTERM_LOG_CONTEXT: &str = "wezterm_tab";
+const PROJECT_ROOT_VAR: &str = "project_root";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NonEmptyString(String);
+
+impl NonEmptyString {
+    fn try_new(value: String) -> Option<Self> {
+        if value.is_empty() {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectRoot(PathBuf);
+
+impl ProjectRoot {
+    fn try_new(value: String) -> Option<Self> {
+        let value = NonEmptyString::try_new(value)?;
+        Some(Self(PathBuf::from(value.into_string())))
+    }
+
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabTitle(NonEmptyString);
+
+impl TabTitle {
+    fn try_new(value: String) -> Option<Self> {
+        NonEmptyString::try_new(value).map(Self)
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<NonEmptyString> for TabTitle {
+    fn from(value: NonEmptyString) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WarnOnce(bool);
+
+impl WarnOnce {
+    const fn new() -> Self {
+        Self(false)
+    }
+
+    fn warn(&mut self, context: &str, message: &str) {
+        if self.0 {
+            return;
+        }
+        self.0 = true;
+        notify::warn(context, message);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliAvailability {
+    Enabled,
+    Disabled,
+}
+
+impl CliAvailability {
+    const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Debug)]
+struct WeztermTabState {
+    last_title: Option<TabTitle>,
+    cli_availability: CliAvailability,
+    warned_cli_unavailable: WarnOnce,
+    warned_cli_failed: WarnOnce,
+}
+
+impl WeztermTabState {
+    const fn new() -> Self {
+        Self {
+            last_title: None,
+            cli_availability: CliAvailability::Enabled,
+            warned_cli_unavailable: WarnOnce::new(),
+            warned_cli_failed: WarnOnce::new(),
+        }
+    }
+
+    fn should_update(&self, title: &TabTitle) -> bool {
+        self.last_title.as_ref() != Some(title)
+    }
+
+    fn record_title(&mut self, title: TabTitle) {
+        self.last_title = Some(title);
+    }
+
+    fn cli_enabled(&self) -> bool {
+        self.cli_availability.is_enabled()
+    }
+
+    fn disable_cli(&mut self) {
+        self.cli_availability = CliAvailability::Disabled;
+    }
+
+    fn warn_cli_unavailable(&mut self, err: &std::io::Error) {
+        let message = format!("wezterm cli unavailable: {err}");
+        self.warned_cli_unavailable
+            .warn(WEZTERM_LOG_CONTEXT, &message);
+    }
+
+    fn warn_cli_failed(&mut self, message: &str) {
+        self.warned_cli_failed.warn(WEZTERM_LOG_CONTEXT, message);
+    }
+}
+
+static WEZTERM_TAB_STATE: StateCell<WeztermTabState> = StateCell::new(WeztermTabState::new());
+
+fn wezterm_state_lock() -> nvim_oxi_utils::state::StateGuard<'static, WeztermTabState> {
+    let guard = WEZTERM_TAB_STATE.lock();
+    if guard.poisoned() {
+        notify::warn(WEZTERM_LOG_CONTEXT, "state mutex poisoned; continuing");
+    }
+    guard
+}
 
 fn report_panic(label: &str, info: guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
@@ -63,6 +208,142 @@ where
     );
 }
 
+#[derive(Debug, Clone)]
+struct WeztermContext {
+    home: Option<PathBuf>,
+}
+
+impl WeztermContext {
+    fn detect() -> Option<Self> {
+        let in_wezterm = env::var_os("WEZTERM_PANE").map_or(false, |value| !value.is_empty());
+        if !in_wezterm {
+            return None;
+        }
+        let home = env::var_os("HOME").map(PathBuf::from);
+        Some(Self { home })
+    }
+}
+
+fn current_buf_project_root() -> Result<Option<ProjectRoot>> {
+    let buf = api::get_current_buf();
+    if !buf.is_valid() {
+        return Ok(None);
+    }
+    let args = Array::from_iter([
+        Object::from(buf.handle()),
+        Object::from(PROJECT_ROOT_VAR),
+        Object::from(""),
+    ]);
+    let root: NvimString = api::call_function("getbufvar", args)?;
+    Ok(ProjectRoot::try_new(root.to_string_lossy().into_owned()))
+}
+
+fn path_basename(path: &Path) -> Option<NonEmptyString> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    NonEmptyString::try_new(name)
+}
+
+fn tilde_path(path: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home {
+        if path == home {
+            return "~".to_string();
+        }
+        if let Ok(stripped) = path.strip_prefix(home) {
+            let tail = stripped.to_string_lossy();
+            if tail.is_empty() {
+                return "~".to_string();
+            }
+            return format!("~{}{}", MAIN_SEPARATOR, tail);
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
+fn tab_title_for_root(root: &ProjectRoot, home: Option<&Path>) -> Option<TabTitle> {
+    let path = root.as_path();
+    path_basename(path)
+        .map(TabTitle::from)
+        .or_else(|| TabTitle::try_new(tilde_path(path, home)))
+}
+
+fn derive_tab_title(root: Option<ProjectRoot>, home: Option<&Path>) -> Option<TabTitle> {
+    root.and_then(|root| tab_title_for_root(&root, home))
+}
+
+fn spawn_wezterm_cli(title: &TabTitle) -> std::io::Result<std::process::Child> {
+    Command::new("wezterm")
+        .args(["cli", "set-tab-title", title.as_str()])
+        .spawn()
+}
+
+fn format_cli_failure(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("wezterm cli failed with exit code {code}"),
+        None => "wezterm cli failed with signal".to_string(),
+    }
+}
+
+fn schedule_cli_failed_warning(message: String) {
+    schedule(move |()| {
+        let mut state = wezterm_state_lock();
+        state.warn_cli_failed(&message);
+    });
+}
+
+fn monitor_wezterm_cli(child: std::process::Child) {
+    thread::spawn(move || {
+        let mut child = child;
+        let result = child.wait();
+        let message = match result {
+            Ok(status) if status.success() => return,
+            Ok(status) => format_cli_failure(status),
+            Err(err) => format!("wezterm cli wait failed: {err}"),
+        };
+        schedule_cli_failed_warning(message);
+    });
+}
+
+fn set_wezterm_tab_title(state: &mut WeztermTabState, title: &TabTitle) -> Result<bool> {
+    if !state.cli_enabled() {
+        return Ok(false);
+    }
+    match spawn_wezterm_cli(title) {
+        Ok(child) => {
+            monitor_wezterm_cli(child);
+            Ok(true)
+        }
+        Err(err) => {
+            state.warn_cli_unavailable(&err);
+            if err.kind() == ErrorKind::NotFound {
+                state.disable_cli();
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn update_wezterm_tab_title() -> Result<AutocmdAction> {
+    let Some(context) = WeztermContext::detect() else {
+        return Ok(AutocmdAction::Keep);
+    };
+
+    let root = current_buf_project_root()?;
+    let Some(title) = derive_tab_title(root, context.home.as_deref()) else {
+        return Ok(AutocmdAction::Keep);
+    };
+
+    let mut state = wezterm_state_lock();
+
+    if !state.should_update(&title) {
+        return Ok(AutocmdAction::Keep);
+    }
+
+    if set_wezterm_tab_title(&mut state, &title)? {
+        state.record_title(title);
+    }
+    Ok(AutocmdAction::Keep)
+}
+
 fn snacks_table(lua: &mlua::Lua) -> Option<mlua::Table> {
     lua::try_require_table(lua, "snacks")
 }
@@ -82,7 +363,7 @@ fn snacks_dashboard() -> Result<()> {
     dashboard.call::<()>(()).map_err(Into::into)
 }
 
-fn oil_current_dir_lua(buf: BufHandle) -> Result<Option<String>> {
+fn oil_current_dir(buf: BufHandle) -> Result<Option<String>> {
     let lua = lua::state();
     let Some(oil) = oil_table(&lua) else {
         return Ok(None);
@@ -213,10 +494,6 @@ fn maybe_show_dashboard() -> Result<()> {
         notify::warn(LOG_CONTEXT, &format!("snacks dashboard failed: {err}"));
     }
     Ok(())
-}
-
-fn oil_current_dir(buf: BufHandle) -> Result<Option<String>> {
-    oil_current_dir_lua(buf)
 }
 
 fn win_handle_from_key(key: &str) -> Option<WinHandle> {
@@ -462,12 +739,28 @@ fn setup_oil_rename_autocmd() -> Result<()> {
     Ok(())
 }
 
+fn setup_wezterm_tab_autocmd() -> Result<()> {
+    let group = api::create_augroup(
+        "WeztermProjectTab",
+        &CreateAugroupOpts::builder().clear(true).build(),
+    )?;
+    let opts = CreateAutocmdOpts::builder()
+        .group(group)
+        .callback(|_args: AutocmdCallbackArgs| {
+            run_autocmd("wezterm_tab_title", update_wezterm_tab_title)
+        })
+        .build();
+    api::create_autocmd(["VimEnter", "BufEnter", "DirChanged"], &opts)?;
+    Ok(())
+}
+
 fn setup() -> Result<()> {
     setup_dashboard_autocmd()?;
     setup_file_cwd_autocmd()?;
     setup_oil_cwd_autocmd()?;
     setup_oil_last_buf_autocmds()?;
     setup_oil_rename_autocmd()?;
+    setup_wezterm_tab_autocmd()?;
     Ok(())
 }
 
