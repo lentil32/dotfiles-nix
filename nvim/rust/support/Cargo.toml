@@ -1,0 +1,10 @@
+[package]
+name = "support"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+derive_more = { workspace = true }

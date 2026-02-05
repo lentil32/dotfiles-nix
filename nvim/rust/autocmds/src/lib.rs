@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::env;
 use std::io::ErrorKind;
-use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 
+use autocmds_core::{WeztermTabState, derive_tab_title, format_cli_failure};
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
@@ -17,10 +18,57 @@ use nvim_oxi_utils::{
     lua, notify,
     state::StateCell,
 };
+use support::{NonEmptyString, ProjectRoot, TabTitle};
 
 use nvim_utils::path::{has_uri_scheme, path_is_dir, strip_known_prefixes};
 
 type OilMap = HashMap<WinHandle, BufHandle>;
+
+#[derive(Debug)]
+struct OilMoveAction {
+    src_url: NonEmptyString,
+    dest_url: NonEmptyString,
+}
+
+#[derive(Debug)]
+enum OilAction {
+    Move(OilMoveAction),
+    Other,
+}
+
+#[derive(Debug)]
+struct OilActionsPostArgs {
+    action: OilAction,
+}
+
+impl OilActionsPostArgs {
+    fn parse(data: Object) -> Option<Self> {
+        let dict = Dictionary::try_from(data).ok()?;
+        let actions_key = NvimString::from("actions");
+        let actions_obj = dict.get(&actions_key)?;
+        let actions = Vec::<Dictionary>::from_object(actions_obj.clone()).ok()?;
+        let first = actions.into_iter().next()?;
+        let action = OilAction::parse(&first)?;
+        Some(Self { action })
+    }
+}
+
+impl OilAction {
+    fn parse(action: &Dictionary) -> Option<Self> {
+        let action_type = dict::get_string_nonempty(action, "type")?;
+        if action_type != "move" {
+            return Some(Self::Other);
+        }
+        let src = dict::get_string_nonempty(action, "src_url")?;
+        let dest = dict::get_string_nonempty(action, "dest_url")?;
+        let src = NonEmptyString::try_new(src).ok()?;
+        let dest = NonEmptyString::try_new(dest).ok()?;
+        Some(Self::Move(OilMoveAction {
+            src_url: src,
+            dest_url: dest,
+        }))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutocmdAction {
@@ -28,142 +76,16 @@ enum AutocmdAction {
 }
 
 impl AutocmdAction {
-    fn as_bool(self) -> bool {
-        false
+    const fn as_bool(self) -> bool {
+        match self {
+            Self::Keep => false,
+        }
     }
 }
 
 const LOG_CONTEXT: &str = "autocmds";
 const WEZTERM_LOG_CONTEXT: &str = "wezterm_tab";
 const PROJECT_ROOT_VAR: &str = "project_root";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NonEmptyString(String);
-
-impl NonEmptyString {
-    fn try_new(value: String) -> Option<Self> {
-        if value.is_empty() {
-            None
-        } else {
-            Some(Self(value))
-        }
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn into_string(self) -> String {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectRoot(PathBuf);
-
-impl ProjectRoot {
-    fn try_new(value: String) -> Option<Self> {
-        let value = NonEmptyString::try_new(value)?;
-        Some(Self(PathBuf::from(value.into_string())))
-    }
-
-    fn as_path(&self) -> &Path {
-        &self.0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TabTitle(NonEmptyString);
-
-impl TabTitle {
-    fn try_new(value: String) -> Option<Self> {
-        NonEmptyString::try_new(value).map(Self)
-    }
-
-    fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl From<NonEmptyString> for TabTitle {
-    fn from(value: NonEmptyString) -> Self {
-        Self(value)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WarnOnce(bool);
-
-impl WarnOnce {
-    const fn new() -> Self {
-        Self(false)
-    }
-
-    fn warn(&mut self, context: &str, message: &str) {
-        if self.0 {
-            return;
-        }
-        self.0 = true;
-        notify::warn(context, message);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CliAvailability {
-    Enabled,
-    Disabled,
-}
-
-impl CliAvailability {
-    const fn is_enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-}
-
-#[derive(Debug)]
-struct WeztermTabState {
-    last_title: Option<TabTitle>,
-    cli_availability: CliAvailability,
-    warned_cli_unavailable: WarnOnce,
-    warned_cli_failed: WarnOnce,
-}
-
-impl WeztermTabState {
-    const fn new() -> Self {
-        Self {
-            last_title: None,
-            cli_availability: CliAvailability::Enabled,
-            warned_cli_unavailable: WarnOnce::new(),
-            warned_cli_failed: WarnOnce::new(),
-        }
-    }
-
-    fn should_update(&self, title: &TabTitle) -> bool {
-        self.last_title.as_ref() != Some(title)
-    }
-
-    fn record_title(&mut self, title: TabTitle) {
-        self.last_title = Some(title);
-    }
-
-    fn cli_enabled(&self) -> bool {
-        self.cli_availability.is_enabled()
-    }
-
-    fn disable_cli(&mut self) {
-        self.cli_availability = CliAvailability::Disabled;
-    }
-
-    fn warn_cli_unavailable(&mut self, err: &std::io::Error) {
-        let message = format!("wezterm cli unavailable: {err}");
-        self.warned_cli_unavailable
-            .warn(WEZTERM_LOG_CONTEXT, &message);
-    }
-
-    fn warn_cli_failed(&mut self, message: &str) {
-        self.warned_cli_failed.warn(WEZTERM_LOG_CONTEXT, message);
-    }
-}
 
 static WEZTERM_TAB_STATE: StateCell<WeztermTabState> = StateCell::new(WeztermTabState::new());
 
@@ -175,20 +97,36 @@ fn wezterm_state_lock() -> nvim_oxi_utils::state::StateGuard<'static, WeztermTab
     guard
 }
 
-fn report_panic(label: &str, info: guard::PanicInfo) {
+fn warn_cli_unavailable(state: &mut WeztermTabState, err: &std::io::Error) {
+    if !state.take_warn_cli_unavailable() {
+        return;
+    }
+    let message = format!("wezterm cli unavailable: {err}");
+    notify::warn(WEZTERM_LOG_CONTEXT, &message);
+}
+
+fn warn_cli_failed(state: &mut WeztermTabState, message: &str) {
+    if state.take_warn_cli_failed() {
+        notify::warn(WEZTERM_LOG_CONTEXT, message);
+    }
+}
+
+fn report_panic(label: &str, info: &guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
 }
 
-fn run_autocmd<F>(label: &str, f: F) -> Result<bool>
+fn run_autocmd<F>(label: &str, f: F) -> bool
 where
     F: FnOnce() -> Result<AutocmdAction>,
 {
-    let result = guard::with_panic(Ok(AutocmdAction::Keep), f, |info| report_panic(label, info));
+    let result = guard::with_panic(Ok(AutocmdAction::Keep), f, |info| {
+        report_panic(label, &info)
+    });
     match result {
-        Ok(value) => Ok(value.as_bool()),
+        Ok(value) => value.as_bool(),
         Err(err) => {
             notify::warn(LOG_CONTEXT, &format!("{label} failed: {err}"));
-            Ok(false)
+            false
         }
     }
 }
@@ -204,7 +142,7 @@ where
                 notify::warn(LOG_CONTEXT, &format!("{label} failed: {err}"));
             }
         },
-        |info| report_panic(label, info),
+        |info| report_panic(label, &info),
     );
 }
 
@@ -215,7 +153,7 @@ struct WeztermContext {
 
 impl WeztermContext {
     fn detect() -> Option<Self> {
-        let in_wezterm = env::var_os("WEZTERM_PANE").map_or(false, |value| !value.is_empty());
+        let in_wezterm = env::var_os("WEZTERM_PANE").is_some_and(|value| !value.is_empty());
         if !in_wezterm {
             return None;
         }
@@ -235,39 +173,7 @@ fn current_buf_project_root() -> Result<Option<ProjectRoot>> {
         Object::from(""),
     ]);
     let root: NvimString = api::call_function("getbufvar", args)?;
-    Ok(ProjectRoot::try_new(root.to_string_lossy().into_owned()))
-}
-
-fn path_basename(path: &Path) -> Option<NonEmptyString> {
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    NonEmptyString::try_new(name)
-}
-
-fn tilde_path(path: &Path, home: Option<&Path>) -> String {
-    if let Some(home) = home {
-        if path == home {
-            return "~".to_string();
-        }
-        if let Ok(stripped) = path.strip_prefix(home) {
-            let tail = stripped.to_string_lossy();
-            if tail.is_empty() {
-                return "~".to_string();
-            }
-            return format!("~{}{}", MAIN_SEPARATOR, tail);
-        }
-    }
-    path.to_string_lossy().into_owned()
-}
-
-fn tab_title_for_root(root: &ProjectRoot, home: Option<&Path>) -> Option<TabTitle> {
-    let path = root.as_path();
-    path_basename(path)
-        .map(TabTitle::from)
-        .or_else(|| TabTitle::try_new(tilde_path(path, home)))
-}
-
-fn derive_tab_title(root: Option<ProjectRoot>, home: Option<&Path>) -> Option<TabTitle> {
-    root.and_then(|root| tab_title_for_root(&root, home))
+    Ok(ProjectRoot::try_new(root.to_string_lossy().into_owned()).ok())
 }
 
 fn spawn_wezterm_cli(title: &TabTitle) -> std::io::Result<std::process::Child> {
@@ -276,17 +182,10 @@ fn spawn_wezterm_cli(title: &TabTitle) -> std::io::Result<std::process::Child> {
         .spawn()
 }
 
-fn format_cli_failure(status: std::process::ExitStatus) -> String {
-    match status.code() {
-        Some(code) => format!("wezterm cli failed with exit code {code}"),
-        None => "wezterm cli failed with signal".to_string(),
-    }
-}
-
 fn schedule_cli_failed_warning(message: String) {
     schedule(move |()| {
         let mut state = wezterm_state_lock();
-        state.warn_cli_failed(&message);
+        warn_cli_failed(&mut state, &message);
     });
 }
 
@@ -303,21 +202,21 @@ fn monitor_wezterm_cli(child: std::process::Child) {
     });
 }
 
-fn set_wezterm_tab_title(state: &mut WeztermTabState, title: &TabTitle) -> Result<bool> {
+fn set_wezterm_tab_title(state: &mut WeztermTabState, title: &TabTitle) -> bool {
     if !state.cli_enabled() {
-        return Ok(false);
+        return false;
     }
     match spawn_wezterm_cli(title) {
         Ok(child) => {
             monitor_wezterm_cli(child);
-            Ok(true)
+            true
         }
         Err(err) => {
-            state.warn_cli_unavailable(&err);
+            warn_cli_unavailable(state, &err);
             if err.kind() == ErrorKind::NotFound {
                 state.disable_cli();
             }
-            Ok(false)
+            false
         }
     }
 }
@@ -338,9 +237,10 @@ fn update_wezterm_tab_title() -> Result<AutocmdAction> {
         return Ok(AutocmdAction::Keep);
     }
 
-    if set_wezterm_tab_title(&mut state, &title)? {
+    if set_wezterm_tab_title(&mut state, &title) {
         state.record_title(title);
     }
+    drop(state);
     Ok(AutocmdAction::Keep)
 }
 
@@ -410,7 +310,7 @@ fn set_win_cwd(win: &Window, dir: &str) -> Result<()> {
         return Ok(());
     }
     let dir = dir.to_string();
-    let _: () = win.call(move |_| -> Result<()> {
+    let _: () = win.call(move |()| -> Result<()> {
         let escaped: NvimString =
             api::call_function("fnameescape", Array::from_iter([dir.as_str()]))?;
         let cmd = format!("lcd {}", escaped.to_string_lossy());
@@ -555,12 +455,12 @@ fn clean_oil_last_buf() -> Result<()> {
     Ok(())
 }
 
-fn on_dashboard_delete() -> Result<AutocmdAction> {
+fn on_dashboard_delete() -> AutocmdAction {
     schedule(|()| run_scheduled("dashboard", maybe_show_dashboard));
-    Ok(AutocmdAction::Keep)
+    AutocmdAction::Keep
 }
 
-fn on_file_cwd(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
+fn on_file_cwd(args: &AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let Some(dir) = file_dir_for_buf(&args.buffer)? else {
         return Ok(AutocmdAction::Keep);
     };
@@ -571,7 +471,7 @@ fn on_file_cwd(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
     Ok(AutocmdAction::Keep)
 }
 
-fn on_oil_buf(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
+fn on_oil_buf(args: &AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let buf_handle = BufHandle::from_buffer(&args.buffer);
     let Some(dir) = oil_current_dir(buf_handle)? else {
         return Ok(AutocmdAction::Keep);
@@ -587,7 +487,7 @@ fn on_oil_buf(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
     Ok(AutocmdAction::Keep)
 }
 
-fn on_win_closed(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
+fn on_win_closed(args: &AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let Ok(win_id) = args.r#match.parse::<i64>() else {
         return Ok(AutocmdAction::Keep);
     };
@@ -601,7 +501,7 @@ fn on_win_closed(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
     Ok(AutocmdAction::Keep)
 }
 
-fn on_buf_wipeout(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
+fn on_buf_wipeout(args: &AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let buf_handle = BufHandle::from_buffer(&args.buffer);
     let mut map = oil_last_buf_map();
     let mut changed = false;
@@ -619,31 +519,12 @@ fn on_buf_wipeout(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
 }
 
 fn on_oil_actions_post(args: AutocmdCallbackArgs) -> Result<AutocmdAction> {
-    let Ok(dict) = Dictionary::try_from(args.data) else {
+    let Some(parsed) = OilActionsPostArgs::parse(args.data) else {
         return Ok(AutocmdAction::Keep);
     };
-    let actions_key = NvimString::from("actions");
-    let Some(actions_obj) = dict.get(&actions_key) else {
-        return Ok(AutocmdAction::Keep);
-    };
-    let Ok(actions) = Vec::<Dictionary>::from_object(actions_obj.clone()) else {
-        return Ok(AutocmdAction::Keep);
-    };
-    let Some(first) = actions.into_iter().next() else {
-        return Ok(AutocmdAction::Keep);
-    };
-    let action_type = dict::get_string(&first, "type");
-    if action_type.as_deref() != Some("move") {
-        return Ok(AutocmdAction::Keep);
+    if let OilAction::Move(action) = parsed.action {
+        snacks_rename_file(action.src_url.as_str(), action.dest_url.as_str())?;
     }
-    let Some(src) = dict::get_string(&first, "src_url") else {
-        return Ok(AutocmdAction::Keep);
-    };
-    let Some(dest) = dict::get_string(&first, "dest_url") else {
-        return Ok(AutocmdAction::Keep);
-    };
-
-    snacks_rename_file(&src, &dest)?;
     Ok(AutocmdAction::Keep)
 }
 
@@ -655,7 +536,7 @@ fn setup_dashboard_autocmd() -> Result<()> {
     let opts = CreateAutocmdOpts::builder()
         .group(group)
         .callback(|_args: AutocmdCallbackArgs| {
-            run_autocmd("on_dashboard_delete", on_dashboard_delete)
+            run_autocmd("on_dashboard_delete", || Ok(on_dashboard_delete()))
         })
         .build();
     api::create_autocmd(["BufDelete"], &opts)?;
@@ -669,7 +550,7 @@ fn setup_file_cwd_autocmd() -> Result<()> {
     )?;
     let opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_file_cwd", || on_file_cwd(args)))
+        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_file_cwd", || on_file_cwd(&args)))
         .build();
     api::create_autocmd(["BufEnter"], &opts)?;
     Ok(())
@@ -683,7 +564,7 @@ fn setup_oil_cwd_autocmd() -> Result<()> {
     let opts = CreateAutocmdOpts::builder()
         .group(group)
         .patterns(["oil://*"])
-        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_oil_buf", || on_oil_buf(args)))
+        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_oil_buf", || on_oil_buf(&args)))
         .build();
     api::create_autocmd(["BufEnter", "BufReadCmd"], &opts)?;
     Ok(())
@@ -697,14 +578,14 @@ fn setup_oil_last_buf_autocmds() -> Result<()> {
 
     let win_closed_opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_win_closed", || on_win_closed(args)))
+        .callback(|args: AutocmdCallbackArgs| run_autocmd("on_win_closed", || on_win_closed(&args)))
         .build();
     api::create_autocmd(["WinClosed"], &win_closed_opts)?;
 
     let wipeout_opts = CreateAutocmdOpts::builder()
         .group(group)
         .callback(|args: AutocmdCallbackArgs| {
-            run_autocmd("on_buf_wipeout", || on_buf_wipeout(args))
+            run_autocmd("on_buf_wipeout", || on_buf_wipeout(&args))
         })
         .build();
     api::create_autocmd(["BufWipeout"], &wipeout_opts)?;
@@ -765,8 +646,8 @@ fn setup() -> Result<()> {
 }
 
 #[nvim_oxi::plugin]
-fn my_autocmds() -> Result<Dictionary> {
+fn my_autocmds() -> Dictionary {
     let mut api = Dictionary::new();
     api.insert("setup", Function::<(), ()>::from_fn(|()| setup()));
-    Ok(api)
+    api
 }

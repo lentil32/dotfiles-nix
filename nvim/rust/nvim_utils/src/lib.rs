@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub mod path {
-    use super::*;
+    use super::{Component, Path, PathBuf, fs};
 
     const KNOWN_PREFIXES: [&str; 2] = ["oil://", "file://"];
 
@@ -38,9 +38,7 @@ pub mod path {
     }
 
     pub fn path_is_dir(path: &Path) -> bool {
-        fs::metadata(path)
-            .map(|meta| meta.is_dir())
-            .unwrap_or(false)
+        fs::metadata(path).is_ok_and(|meta| meta.is_dir())
     }
 
     pub fn has_uri_scheme(value: &str) -> bool {

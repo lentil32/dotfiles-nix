@@ -6,6 +6,7 @@ use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString};
 use nvim_oxi_utils::{handles, notify};
 use nvim_utils::path::{path_is_dir, strip_known_prefixes};
+use util_core::next_index;
 
 type OptMap = HashMap<String, Object>;
 const LOG_CONTEXT: &str = "util";
@@ -76,38 +77,38 @@ fn set_win_opts((win, opts): (Option<i64>, OptMap)) -> Result<()> {
     set_option_values(opts, &opt_opts)
 }
 
-fn get_buf_opt((buf, opt, default): (Option<i64>, String, Object)) -> Result<Object> {
+fn get_buf_opt((buf, opt, default): (Option<i64>, String, Object)) -> Object {
     let Some(buf) = valid_buffer(buf) else {
-        return Ok(default);
+        return default;
     };
     let opt_opts = OptionOpts::builder().buf(buf).build();
-    Ok(get_option_value(&opt, &opt_opts, default))
+    get_option_value(&opt, &opt_opts, default)
 }
 
-fn get_win_opt((win, opt, default): (Option<i64>, String, Object)) -> Result<Object> {
+fn get_win_opt((win, opt, default): (Option<i64>, String, Object)) -> Object {
     let Some(win) = valid_window(win) else {
-        return Ok(default);
+        return default;
     };
     let opt_opts = OptionOpts::builder().win(win).build();
-    Ok(get_option_value(&opt, &opt_opts, default))
+    get_option_value(&opt, &opt_opts, default)
 }
 
-fn get_var((buf, name, default): (Option<i64>, String, Object)) -> Result<Object> {
+fn get_var((buf, name, default): (Option<i64>, String, Object)) -> Object {
     let buf = match buf {
         Some(_) => buffer_from_handle(buf),
         None => Some(api::get_current_buf()),
     };
     if let Some(value) = buf
-        .filter(|buf| buf.is_valid())
+        .filter(Buffer::is_valid)
         .and_then(|buf| buf.get_var::<Object>(&name).ok())
         .and_then(non_nil)
     {
-        return Ok(value);
+        return value;
     }
     if let Some(value) = api::get_var::<Object>(&name).ok().and_then(non_nil) {
-        return Ok(value);
+        return value;
     }
-    Ok(default)
+    default
 }
 
 fn edit_path(path: Option<String>) -> Result<()> {
@@ -124,16 +125,10 @@ fn edit_path(path: Option<String>) -> Result<()> {
 }
 
 fn next_window(wins: &[Window], cur: &Window) -> Option<Window> {
-    let count = wins.len();
-    if count <= 1 {
+    if wins.len() <= 1 {
         return None;
     }
-    for (idx, win) in wins.iter().enumerate() {
-        if win == cur {
-            return Some(wins[(idx + 1) % count].clone());
-        }
-    }
-    wins.first().cloned()
+    next_index(wins, cur).map_or_else(|| wins.first().cloned(), |idx| wins.get(idx).cloned())
 }
 
 fn other_window() -> Result<Option<Window>> {
@@ -147,10 +142,10 @@ fn get_or_create_other_window() -> Result<(Window, bool)> {
     let tab = api::get_current_tabpage();
     let wins: Vec<Window> = tab.list_wins()?.collect();
     let cur = api::get_current_win();
-    if let Some(win) = next_window(&wins, &cur) {
-        if win.is_valid() {
-            return Ok((win, false));
-        }
+    if let Some(win) = next_window(&wins, &cur)
+        && win.is_valid()
+    {
+        return Ok((win, false));
     }
     api::command("vsplit")?;
     let new_win = api::get_current_win();
@@ -161,7 +156,7 @@ fn get_or_create_other_window() -> Result<(Window, bool)> {
 }
 
 #[nvim_oxi::plugin]
-fn my_util() -> Result<Dictionary> {
+fn my_util() -> Dictionary {
     let mut api = Dictionary::new();
     api.insert("is_dir", Function::<_, bool>::from_fn(is_dir));
     api.insert("set_buf_opts", Function::<_, ()>::from_fn(set_buf_opts));
@@ -178,5 +173,5 @@ fn my_util() -> Result<Dictionary> {
         "get_or_create_other_window",
         Function::<(), (Window, bool)>::from_fn(|()| get_or_create_other_window()),
     );
-    Ok(api)
+    api
 }

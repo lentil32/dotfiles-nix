@@ -12,5 +12,6 @@ workspace = true
 [dependencies]
 nvim-oxi = { version = "0.6", features = ["neovim-0-11", "mlua"] }
 nvim-utils = { path = "../nvim_utils" }
-once_cell = "1.19"
 nvim-oxi-utils = { path = "../nvim_oxi_utils" }
+snacks-preview-core = { path = "../snacks_preview_core" }
+support = { path = "../support" }

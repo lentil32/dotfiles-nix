@@ -25,7 +25,7 @@ pub mod guard {
         }
     }
 
-    fn from_payload(payload: Box<dyn Any + Send>) -> PanicInfo {
+    fn from_payload(payload: &(dyn Any + Send)) -> PanicInfo {
         if let Some(msg) = payload.downcast_ref::<&str>() {
             return PanicInfo::Message((*msg).to_string());
         }
@@ -42,7 +42,7 @@ pub mod guard {
     {
         match catch_unwind(AssertUnwindSafe(f)) {
             Ok(value) => Ok(value),
-            Err(payload) => Err(from_payload(payload)),
+            Err(payload) => Err(from_payload(payload.as_ref())),
         }
     }
 
@@ -103,14 +103,14 @@ pub mod state {
         poisoned: bool,
     }
 
-    impl<'a, T> StateGuard<'a, T> {
+    impl<T> StateGuard<'_, T> {
         /// True when the mutex was poisoned before acquisition.
-        pub fn poisoned(&self) -> bool {
+        pub const fn poisoned(&self) -> bool {
             self.poisoned
         }
     }
 
-    impl<'a, T> Deref for StateGuard<'a, T> {
+    impl<T> Deref for StateGuard<'_, T> {
         type Target = T;
 
         fn deref(&self) -> &Self::Target {
@@ -118,7 +118,7 @@ pub mod state {
         }
     }
 
-    impl<'a, T> DerefMut for StateGuard<'a, T> {
+    impl<T> DerefMut for StateGuard<'_, T> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.guard
         }
@@ -170,8 +170,8 @@ pub mod notify {
         }
     }
 
-    fn report_echo_error(context: &str, err: Error) {
-        eprintln!("nvim-oxi echo failed ({}): {}", context, err);
+    fn report_echo_error(context: &str, err: &Error) {
+        eprintln!("nvim-oxi echo failed ({context}): {err}");
     }
 
     fn echo_message(
@@ -191,21 +191,21 @@ pub mod notify {
     /// Notify an info message in Neovim, falling back to stderr on failure.
     pub fn info(context: &str, message: &str) {
         if let Err(err) = echo_message(context, message, None, false) {
-            report_echo_error(context, err);
+            report_echo_error(context, &err);
         }
     }
 
     /// Notify a warning in Neovim, falling back to stderr on failure.
     pub fn warn(context: &str, message: &str) {
         if let Err(err) = echo_message(context, message, Some("WarningMsg"), false) {
-            report_echo_error(context, err);
+            report_echo_error(context, &err);
         }
     }
 
     /// Notify an error in Neovim, falling back to stderr on failure.
     pub fn error(context: &str, message: &str) {
         if let Err(err) = echo_message(context, message, Some("ErrorMsg"), true) {
-            report_echo_error(context, err);
+            report_echo_error(context, &err);
         }
     }
 }
@@ -219,7 +219,7 @@ pub mod handles {
 
     impl BufHandle {
         pub fn from_buffer(buf: &Buffer) -> Self {
-            Self(buf.handle() as i64)
+            Self(i64::from(buf.handle()))
         }
 
         pub fn try_from_i64(handle: i64) -> Option<Self> {
@@ -229,7 +229,7 @@ pub mod handles {
             i32::try_from(handle).ok().map(|_| Self(handle))
         }
 
-        pub fn raw(self) -> i64 {
+        pub const fn raw(self) -> i64 {
             self.0
         }
 
@@ -238,7 +238,7 @@ pub mod handles {
         }
 
         pub fn valid_buffer(self) -> Option<Buffer> {
-            self.to_buffer().filter(|buf| buf.is_valid())
+            self.to_buffer().filter(Buffer::is_valid)
         }
     }
 
@@ -247,7 +247,7 @@ pub mod handles {
 
     impl WinHandle {
         pub fn from_window(win: &Window) -> Self {
-            Self(win.handle() as i64)
+            Self(i64::from(win.handle()))
         }
 
         pub fn try_from_i64(handle: i64) -> Option<Self> {
@@ -257,7 +257,7 @@ pub mod handles {
             i32::try_from(handle).ok().map(|_| Self(handle))
         }
 
-        pub fn raw(self) -> i64 {
+        pub const fn raw(self) -> i64 {
             self.0
         }
 
@@ -266,7 +266,7 @@ pub mod handles {
         }
 
         pub fn valid_window(self) -> Option<Window> {
-            self.to_window().filter(|win| win.is_valid())
+            self.to_window().filter(Window::is_valid)
         }
     }
 
@@ -309,11 +309,11 @@ pub mod handles {
     }
 
     pub fn valid_buffer_optional(handle: Option<i64>) -> Option<Buffer> {
-        buffer_from_optional(handle).filter(|buf| buf.is_valid())
+        buffer_from_optional(handle).filter(Buffer::is_valid)
     }
 
     pub fn valid_window_optional(handle: Option<i64>) -> Option<Window> {
-        window_from_optional(handle).filter(|win| win.is_valid())
+        window_from_optional(handle).filter(Window::is_valid)
     }
 }
 
@@ -379,15 +379,21 @@ mod tests {
 
     #[test]
     fn buf_handle_roundtrip_i32_max() {
-        let value = i32::MAX as i64;
-        let handle = BufHandle::try_from_i64(value).expect("i32 max should fit");
-        assert_eq!(handle.raw(), value);
+        let value = i64::from(i32::MAX);
+        let handle = BufHandle::try_from_i64(value);
+        assert!(handle.is_some(), "expected valid buf handle");
+        if let Some(handle) = handle {
+            assert_eq!(handle.raw(), value);
+        }
     }
 
     #[test]
     fn win_handle_roundtrip_i32_max() {
-        let value = i32::MAX as i64;
-        let handle = WinHandle::try_from_i64(value).expect("i32 max should fit");
-        assert_eq!(handle.raw(), value);
+        let value = i64::from(i32::MAX);
+        let handle = WinHandle::try_from_i64(value);
+        assert!(handle.is_some(), "expected valid win handle");
+        if let Some(handle) = handle {
+            assert_eq!(handle.raw(), value);
+        }
     }
 }
