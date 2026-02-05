@@ -136,6 +136,11 @@ require("lze").load({
     after = function()
       require("sidekick").setup({
         cli = {
+          tools = {
+            codex = {
+              cmd = { "mise", "exec", "--", "codex" },
+            },
+          },
           win = {
             keys = {
               close_wx = { "<leader>wx", "close", mode = "n", desc = "Close Sidekick" },

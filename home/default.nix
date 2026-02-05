@@ -68,7 +68,6 @@ in
 
     sessionPath = [
       "$BUNBIN"
-      "${config.xdg.dataHome}/mise/shims"
       "${config.home.sessionVariables.PNPM_HOME}"
       "${homeDir}/.local/bin"
       "${homeDir}/.cargo/bin"
