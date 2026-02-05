@@ -134,6 +134,7 @@ in
               vim.hop-nvim
               vim.nvim-autopairs
               vim.nvim-surround
+              vim.smear-cursor-nvim
               vim.sidekick-nvim
               vim.overseer-nvim
               (mkPlugin "witch-line" (

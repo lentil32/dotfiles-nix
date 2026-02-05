@@ -3,13 +3,23 @@ local keymaps = require("myLuaConf.keymaps")
 local project = require("myLuaConf.project")
 local snacks = require("myLuaConf.snacks")
 local util = require("myLuaConf.util")
-
 colorscheme.apply()
 snacks.setup()
 project.setup()
 require("myLuaConf.oil").setup()
 require("myLuaConf.autocmds").setup()
 keymaps.setup()
+
+local function should_enable_smear_cursor()
+  if util.get_var(nil, "neovide") then
+    return false
+  end
+  local term_program = vim.env.TERM_PROGRAM
+  if term_program and term_program == "ghostty" then
+    return false
+  end
+  return true
+end
 
 local function sidekick_in_project_root(fn)
   return function(...)
@@ -134,6 +144,17 @@ require("lze").load({
           },
         },
       })
+    end,
+  },
+  {
+    "smear-cursor.nvim",
+    for_cat = "general",
+    event = "DeferredUIEnter",
+    after = function()
+      if not should_enable_smear_cursor() then
+        return
+      end
+      require("smear_cursor").setup({})
     end,
   },
   {
