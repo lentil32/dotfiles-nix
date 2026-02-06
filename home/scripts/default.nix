@@ -1,7 +1,13 @@
 { pkgs, ... }:
+let
+  nvimProfileScript = builtins.readFile ./nvim-profile.sh;
+in
 {
   home.packages = with pkgs; [
-    # Comma-prefixed commands
+    hyperfine
+    jq
+
+    # Custom helper commands
     (writeShellScriptBin ",sld" ''
       #!/usr/bin/env zsh
 
@@ -50,5 +56,7 @@
       pmset "$sleepCommand"
       kill "$caffeinate_pid" 2>/dev/null
     '')
+    (writeShellScriptBin ",nvp" nvimProfileScript)
+    (writeShellScriptBin "nvim-profile" nvimProfileScript)
   ];
 }

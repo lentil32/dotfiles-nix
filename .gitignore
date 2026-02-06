@@ -4,6 +4,7 @@
 
 target/
 /.tmp/
+/nvim/artifacts/
 
 # SOPS plaintext artifacts (encrypted secrets are safe to commit)
 /secrets/*_unencrypted*

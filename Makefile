@@ -1,4 +1,4 @@
-.PHONY: darwin darwin-debug nvim update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc fmt check clean help
+.PHONY: darwin darwin-debug nvim nvim-profile update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc fmt check clean help
 
 hostname := $(shell hostname)
 user := $(shell whoami)
@@ -34,6 +34,9 @@ nvim:
 
 	./result/activate
 
+nvim-profile:
+	bash ./home/scripts/nvim-profile.sh $(ARGS)
+
 update-emacs:
 	gh repo sync lentil32/nix-darwin-emacs --source nix-giant/nix-darwin-emacs
 
@@ -65,6 +68,7 @@ help:
 	@echo "darwin       - Build and apply system configuration"
 	@echo "darwin-debug - Build with verbose output"
 	@echo "nvim         - Build and apply home-manager activation (Neovim config)"
+	@echo "nvim-profile - Profile Neovim startup (pass args via ARGS='...')"
 	@echo "update-flake - Update flake.lock"
 	@echo "deploy-flake - Update flake.lock and rebuild"
 	@echo "gc           - Full garbage collection"

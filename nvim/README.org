@@ -1,0 +1,34 @@
+* Neovim Configuration
+Neovim configuration lives under this directory:
+- ~init.lua~ entrypoint
+- ~lua/~ for Lua config/modules
+- ~rust/~ for Rust plugins (nvim-oxi crates)
+- ~docs/~ for deeper technical docs
+
+** Startup profiling
+Use the repo-level target to benchmark startup with ~hyperfine~ while also
+collecting Neovim startup diagnostics:
+
+#+begin_src bash
+  make nvim-profile ARGS="--runs 10 --warmup 1 --mode both ."
+#+end_src
+
+Artifacts are written under ~nvim/artifacts/nvim-profile-<timestamp>/~.
+
+** Deep startup debugging
+Capture verbose logs, builtin ~:profile~ output, and TUI transcript:
+
+#+begin_src bash
+  make nvim-profile ARGS="--runs 5 --mode tui --verbose 3 --vim-profile --capture-tui ."
+#+end_src
+
+Helpful outputs:
+- ~summary.tsv~: aggregated timing summary
+- ~*-startuptime-logs.txt~: list of per-run ~--startuptime~ logs
+- ~*-top-self.tsv~: top self-time hotspots aggregated across runs
+- ~*-verbose-logs.txt~: list of Neovim ~-V~ log files (when enabled)
+- ~*-vim-profile-logs.txt~: list of ~:profile~ outputs (when enabled)
+- ~*-tty-logs.txt~: list of terminal transcripts (when enabled)
+
+See also:
+- ~nvim/docs/porting-plugins-to-rust.md~
