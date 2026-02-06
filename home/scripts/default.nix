@@ -30,6 +30,22 @@ in
       fi
 
       event_type="$(printf '%s' "$payload_json" | jq -r '.type // empty')"
+
+      # Feed all Codex notifications into lemonaid when available.
+      # This powers terminal-pane switching for Codex sessions.
+      lemonaid_bin=""
+      if command -v lemonaid >/dev/null 2>&1; then
+        lemonaid_bin="$(command -v lemonaid)"
+      elif [[ -x "$HOME/.local/bin/lemonaid" ]]; then
+        lemonaid_bin="$HOME/.local/bin/lemonaid"
+      fi
+
+      if [[ -n "$lemonaid_bin" ]]; then
+        if ! "$lemonaid_bin" codex notify "$payload_json"; then
+          echo "codex-notify-ntfy: lemonaid codex notify failed" >&2
+        fi
+      fi
+
       case "$event_type" in
       "" | "agent-turn-complete")
         ;;
