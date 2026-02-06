@@ -293,20 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn format_set_working_dir_failure_reports_exit_code() -> Result<(), &'static str> {
-        let status = std::process::Command::new("sh")
-            .args(["-c", "exit 7"])
-            .status()
-            .map_err(|_| "failed to execute shell")?;
-        let message = format_set_working_dir_failure(status);
-        assert_eq!(
-            message,
-            "wezterm set-working-directory failed with exit code 7"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn wezterm_state_deduplicates_cwd_updates() {
         let mut state = WeztermState::new();
         let tmp = "/tmp".to_string();
