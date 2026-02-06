@@ -127,6 +127,19 @@ Patterns used in this repo:
 - Still refresh on demand if the cache is empty or invalid
 - Keep filesystem traversal minimal (short list of root indicators)
 
+## Threading boundary (important with nvim-oxi)
+- Treat Neovim/Lua access as main-thread-only.
+- Do not call `nvim_oxi::api::*`, `nvim_oxi::mlua::*`, or `nvim_oxi::schedule`
+  from worker threads created with `std::thread::spawn`.
+- `nvim-oxi-luajit` keeps Lua state in thread-local storage; worker threads
+  are not initialized with it and can panic when touching those APIs.
+- Safe pattern:
+  1) Worker thread does pure Rust work (filesystem/process/network parsing).
+  2) Worker thread sends plain data back.
+  3) Main Neovim thread applies state/UI updates via nvim-oxi APIs.
+- If the external command is cheap and synchronous, prefer running it on the
+  main thread over introducing unsafe cross-thread callbacks.
+
 ## Checklist
 - [ ] `crate-type = ["cdylib"]`
 - [ ] `nvim/rust/.cargo/config.toml` has macOS dynamic lookup flags
