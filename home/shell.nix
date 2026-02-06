@@ -22,7 +22,6 @@
         "spectrum"
         "utility"
         "completion"
-        "prompt"
         "autosuggestions"
         "fasd"
       ];
@@ -59,14 +58,11 @@
       "l." = "eza -a | grep -E '^.'";
       tree = "${ls} --tree";
       cdtemp = "cd `mktemp -d`";
-      cp = "cp -iv";
+      cp = "cp -v";
       ln = "ln -v";
       mkdir = "mkdir -vp";
-      mv = "mv -iv";
-      rm = lib.mkMerge [
-        (lib.mkIf pkgs.stdenv.targetPlatform.isDarwin "rm -v")
-        (lib.mkIf (!pkgs.stdenv.targetPlatform.isDarwin) "rm -Iv")
-      ];
+      mv = "mv -v";
+      rm = "rm -v";
       dh = "du -h";
       df = "df -h";
       su = "sudo -E su -m";

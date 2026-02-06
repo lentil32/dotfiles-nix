@@ -194,6 +194,7 @@
             sops-nix.darwinModules.sops
             ./modules/secrets.nix
             ./modules/services/aerospace.nix
+            ./modules/services/ntfy.nix
           ]
           ++ (
             if machine ? extraModulesDir then
