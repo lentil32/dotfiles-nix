@@ -526,12 +526,8 @@ fn oil_winbar() -> String {
         Ok(vim) => vim,
         Err(_) => return String::new(),
     };
-    let v: mlua::Table = match vim.get("v") {
-        Ok(v) => v,
-        Err(_) => return String::new(),
-    };
-    let winid = match v.get::<Option<i64>>("statusline_winid") {
-        Ok(Some(id)) if id > 0 => id,
+    let winid = match statusline_winid(&vim) {
+        Some(id) => id,
         _ => return String::new(),
     };
     let Some(win) = handles::valid_window(winid) else {
@@ -562,6 +558,16 @@ fn oil_winbar() -> String {
     fnamemodify
         .call::<String>((dir, ":~"))
         .unwrap_or_else(|_| String::new())
+}
+
+fn statusline_winid(vim: &mlua::Table) -> Option<i64> {
+    let from_scope = |scope: &str| {
+        vim.get::<mlua::Table>(scope)
+            .ok()
+            .and_then(|table| table.get::<Option<i64>>("statusline_winid").ok().flatten())
+            .filter(|id| *id > 0)
+    };
+    from_scope("g").or_else(|| from_scope("v"))
 }
 
 fn vim_joinpath(lua: &mlua::Lua, lhs: &str, rhs: &str) -> Option<String> {
