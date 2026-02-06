@@ -1,42 +1,4 @@
-local util = require("myLuaConf.util")
-
-local function goto_definition_other_window()
-  local target, created = util.get_or_create_other_window()
-  local cur = vim.api.nvim_get_current_win()
-  vim.lsp.buf.definition({
-    on_list = function(opts)
-      local items = opts.items or {}
-      if vim.tbl_isempty(items) then
-        if created and target and vim.api.nvim_win_is_valid(target) then
-          vim.api.nvim_win_close(target, true)
-        end
-        return
-      end
-
-      local item = items[1]
-      if target and vim.api.nvim_win_is_valid(target) then
-        vim.api.nvim_win_call(target, function()
-          if item.bufnr and vim.api.nvim_buf_is_valid(item.bufnr) then
-            vim.api.nvim_win_set_buf(0, item.bufnr)
-          elseif item.filename then
-            vim.cmd("edit " .. vim.fn.fnameescape(item.filename))
-          end
-          local lnum = item.lnum or 1
-          local col = math.max((item.col or 1) - 1, 0)
-          pcall(vim.api.nvim_win_set_cursor, 0, { lnum, col })
-        end)
-      end
-
-      if #items > 1 then
-        vim.fn.setqflist({}, " ", { title = opts.title, items = items })
-      end
-
-      if vim.api.nvim_win_is_valid(cur) then
-        vim.api.nvim_set_current_win(cur)
-      end
-    end,
-  })
-end
+local plugin_util = require("rs_plugin_util")
 
 return function(_, bufnr)
   local function format_buffer()
@@ -73,7 +35,7 @@ return function(_, bufnr)
   nmap("<leader>lu", ts_cmd("TSToolsRemoveUnused"), "[L]SP Remove [U]nused")
   nmap("<leader>lm", ts_cmd("TSToolsAddMissingImports"), "[L]SP Add [M]issing Imports")
   nmap("gd", vim.lsp.buf.definition, "[G]oto [D]efinition")
-  nmap("gD", goto_definition_other_window, "[G]oto [D]efinition (other window)")
+  nmap("gD", plugin_util.goto_definition_other_window, "[G]oto [D]efinition (other window)")
   nmap("gI", vim.lsp.buf.implementation, "[G]oto [I]mplementation")
   nmap("gr", vim.lsp.buf.references, "[G]oto [R]eferences")
   nmap("<leader>ds", vim.lsp.buf.document_symbol, "[D]ocument [S]ymbols")

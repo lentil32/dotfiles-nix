@@ -1,9 +1,9 @@
 local catUtils = require("nixCatsUtils")
-local util = require("myLuaConf.util")
+local lua_helpers = require("myLuaConf.lua_helpers")
 
 local capabilities
 do
-  local blink = util.try_require("blink.cmp")
+  local blink = lua_helpers.try_require("blink.cmp")
   if blink and blink.get_lsp_capabilities then
     capabilities = blink.get_lsp_capabilities()
   end

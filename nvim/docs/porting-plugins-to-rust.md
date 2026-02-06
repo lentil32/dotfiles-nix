@@ -9,7 +9,8 @@ Rust using nvim-oxi and Nix. It is tuned for macOS + nix-darwin + home-manager.
 - You need native integrations not exposed in Lua
 
 ## High level steps
-1) Create a Rust crate under `nvim/rust/<plugin>`
+1) Create a Rust crate under `nvim/rust/plugins/<plugin>` for Lua-facing plugins
+   and name the package `rs_<plugin>`
 2) Implement a `#[nvim_oxi::plugin]` entry point returning a Dictionary of
    functions
 3) Compile as a `cdylib` and install the compiled library under `lua/` with
@@ -18,21 +19,24 @@ Rust using nvim-oxi and Nix. It is tuned for macOS + nix-darwin + home-manager.
 5) Provide a small Lua wrapper for ergonomic API + lazy loading
 
 ## 1) Crate layout
-Example (mirrors `nvim/rust/project_root`):
+Example (mirrors `nvim/rust/plugins/project_root`):
 
 ```
-nvim/rust/<plugin>/
-  Cargo.toml
+nvim/rust/
+  Cargo.toml            # workspace
   Cargo.lock
-  src/lib.rs
   .cargo/config.toml
+  plugins/
+    <plugin>/
+      Cargo.toml
+      src/lib.rs
 ```
 
 `Cargo.toml`:
 
 ```
 [package]
-name = "<plugin>"
+name = "rs_<plugin>"
 version = "0.1.0"
 edition = "2024"
 
@@ -41,10 +45,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nvim-oxi = { version = "0.6", features = ["neovim-0-11"] }
-once_cell = "1.19"
 ```
 
-macOS needs dynamic lookup for Neovim symbols. Add `.cargo/config.toml`:
+macOS needs dynamic lookup for Neovim symbols. Configure
+`nvim/rust/.cargo/config.toml`:
 
 ```
 [target.x86_64-apple-darwin]
@@ -64,18 +68,18 @@ rustflags = [
 The plugin should expose a small API to Lua. Example pattern:
 
 ```
-use nvim_oxi::{Dictionary, Function, Result};
+use nvim_oxi::{Dictionary, Function};
 
 #[nvim_oxi::plugin]
-fn my_plugin() -> Result<Dictionary> {
+fn rs_plugin() -> Dictionary {
     let mut api = Dictionary::new();
-    api.insert("setup", Function::<(), ()>::from_fn(|()| Ok(())));
-    api.insert("do_thing", Function::<(), String>::from_fn(|()| Ok("ok".into())));
-    Ok(api)
+    api.insert("setup", Function::<(), ()>::from_fn(|()| ()));
+    api.insert("do_thing", Function::<(), String>::from_fn(|()| "ok".to_string()));
+    api
 }
 ```
 
-Each entry becomes a Lua-callable function on `require("<plugin>")`.
+Each entry becomes a Lua-callable function on `require("rs_<plugin>")`.
 
 ## 3) Package it for Neovim (Nix)
 This repo uses `buildRustPackage` to compile and install the compiled library
@@ -87,7 +91,8 @@ Key points:
 - Do not copy `.rlib` or `.a` (they will fail to load with "not valid mach-o")
 - Prefer `target/release` artifacts
 
-The current pattern lives in `home/neovim.nix` under `projectRootPlugin`.
+The current pattern lives in `home/neovim.nix` under `mkRustPlugin`
+and `rustPluginOrder`.
 
 ## 4) Ensure runtimepath contains the plugin
 The plugin must be on Neovim runtimepath, and the compiled library must be at:
@@ -104,10 +109,10 @@ Keep a small Lua module that `require`s the Rust plugin and provides stable
 API for the rest of your config. This also gives a place to handle lazy
 load errors and extra UX.
 
-Pattern used in this repo (see `nvim/lua/myLuaConf/project.lua`):
-- `pcall(require, "<plugin>")`
-- If load fails, provide no-op functions and a warning
-- Optionally retry `require` on the next call
+Patterns used in this repo:
+- Mandatory plugin: direct `require("<plugin>")` (e.g. `nvim/lua/myLuaConf/project.lua`)
+- Optional plugin: `pcall(require, "<plugin>")` with fallback
+  (e.g. `nvim/lua/myLuaConf/readline.lua`)
 
 ## Debugging tips
 - If you see "slice is not valid mach-o file", you are loading a static
@@ -124,7 +129,8 @@ Pattern used in this repo (see `nvim/lua/myLuaConf/project.lua`):
 
 ## Checklist
 - [ ] `crate-type = ["cdylib"]`
-- [ ] `.cargo/config.toml` has macOS dynamic lookup flags
+- [ ] `nvim/rust/.cargo/config.toml` has macOS dynamic lookup flags
 - [ ] Nix installPhase copies `lib<plugin>.dylib` or `.so` to `lua/<plugin>.so`
 - [ ] Plugin is in runtimepath (`startupPlugins` or `optionalPlugins`)
+- [ ] Lua-facing plugin crate/module uses `rs_` prefix consistently
 - [ ] Lua wrapper handles load errors gracefully

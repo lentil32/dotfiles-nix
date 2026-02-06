@@ -8,6 +8,16 @@ local function snacks()
   return require("snacks")
 end
 
+local function reset_preview_state()
+  local ok, preview = pcall(require, "rs_snacks_preview")
+  if not ok or not preview then
+    return
+  end
+  if preview.reset_state then
+    preview.reset_state()
+  end
+end
+
 local function project_confirm_winlocal(picker, item)
   picker:close()
   if not item then
@@ -152,6 +162,7 @@ local function opts()
 end
 
 function M.setup()
+  reset_preview_state()
   snacks().setup(opts())
 end
 

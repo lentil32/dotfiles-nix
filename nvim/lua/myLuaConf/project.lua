@@ -9,7 +9,7 @@
 ---@field show_project_root fun()
 
 ---@type ProjectRootApi
-local rust = require("project_root")
+local rust = require("rs_project_root")
 
 local M = {}
 

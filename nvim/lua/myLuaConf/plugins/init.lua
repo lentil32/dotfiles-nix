@@ -1,17 +1,17 @@
 local colorscheme = require("myLuaConf.colorscheme")
 local keymaps = require("myLuaConf.keymaps")
 local project = require("myLuaConf.project")
+local plugin_util = require("rs_plugin_util")
 local snacks = require("myLuaConf.snacks")
-local util = require("myLuaConf.util")
 colorscheme.apply()
 snacks.setup()
 project.setup()
 require("myLuaConf.oil").setup()
-require("myLuaConf.autocmds").setup()
+require("rs_autocmds").setup()
 keymaps.setup()
 
 local function should_enable_smear_cursor()
-  if util.get_var(nil, "neovide") then
+  if plugin_util.get_var(nil, "neovide") then
     return false
   end
   local term_program = vim.env.TERM_PROGRAM

@@ -1,22 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-  "autocmds",
-  "autocmds_core",
-  "nvim_errors",
-  "nvim_oxi_utils",
-  "project_root_core",
-  "project_root",
-  "readline_core",
-  "readline",
-  "snacks_preview_core",
-  "snacks_preview",
-  "support",
-  "text_core",
-  "text",
-  "util_core",
-  "util",
-  "nvim_utils",
+  "plugins/autocmds",
+  "libs/nvim-oxi-utils",
+  "plugins/project_root",
+  "plugins/readline",
+  "plugins/snacks_preview",
+  "libs/support",
+  "plugins/text",
+  "plugins/plugin_util",
+  "libs/nvim-utils",
 ]
 
 [patch.crates-io]

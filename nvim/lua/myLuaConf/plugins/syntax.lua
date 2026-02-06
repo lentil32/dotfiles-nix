@@ -2,7 +2,7 @@ return {
   {
     "nvim-treesitter",
     for_cat = "treesitter",
-    event = "BufReadPre",
+    event = "BufReadPost",
     after = function()
       local function is_mise_filename(filename)
         return filename:match(".*mise.*%.toml$") ~= nil

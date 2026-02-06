@@ -1,9 +1,9 @@
-local buffers = require("myLuaConf.buffer")
+local lua_helpers = require("myLuaConf.lua_helpers")
 local oil = require("myLuaConf.oil")
 local project = require("myLuaConf.project")
-local readline = require("myLuaConf.readline")
-local text = require("myLuaConf.text")
-local util = require("myLuaConf.util")
+local readline = require("rs_readline")
+local plugin_util = require("rs_plugin_util")
+local text = require("rs_text")
 
 local M = {}
 
@@ -20,10 +20,18 @@ local function git_init()
   end
 end
 
+local function reload_nixcats()
+  if vim.fn.exists(":NixCatsReload") == 2 then
+    vim.cmd("NixCatsReload")
+    return
+  end
+  vim.notify("NixCatsReload command unavailable", vim.log.levels.WARN)
+end
+
 function M.setup()
   local Snacks = snacks()
 
-  if util.get_var(nil, "neovide") then
+  if plugin_util.get_var(nil, "neovide") then
     Snacks.keymap.set("n", "<D-s>", "<cmd>w<CR>", { desc = "Save" })
     Snacks.keymap.set("v", "<D-c>", '"+y', { desc = "Copy" })
     Snacks.keymap.set("n", "<D-v>", '"+P', { desc = "Paste" })
@@ -31,7 +39,7 @@ function M.setup()
     Snacks.keymap.set("c", "<D-v>", "<C-R>+", { desc = "Paste" })
     Snacks.keymap.set("i", "<D-v>", '<ESC>l"+Pli', { desc = "Paste" })
     Snacks.keymap.set("t", "<D-v>", function()
-      local chan = tonumber(util.get_var(nil, "terminal_job_id"))
+      local chan = tonumber(plugin_util.get_var(nil, "terminal_job_id"))
       if chan and chan > 0 then
         vim.fn.chansend(chan, vim.fn.getreg("+"))
       end
@@ -50,9 +58,9 @@ function M.setup()
     callback = function(args)
       local win = vim.fn.bufwinid(args.buf)
       if win ~= -1 then
-        util.set_win_opts(win, { number = false, relativenumber = false })
+        plugin_util.set_win_opts(win, { number = false, relativenumber = false })
       else
-        util.set_buf_opts(args.buf, { number = false, relativenumber = false })
+        plugin_util.set_buf_opts(args.buf, { number = false, relativenumber = false })
       end
       Snacks.keymap.set("t", "<Esc>", [[<C-\><C-n>]], {
         buffer = args.buf,
@@ -173,7 +181,7 @@ function M.list()
     {
       "<leader>fj",
       function()
-        local oil_util = util.try_require("oil.util")
+        local oil_util = lua_helpers.try_require("oil.util")
         if oil_util and oil_util.is_oil_bufnr(vim.api.nvim_get_current_buf()) then
           local keys = vim.api.nvim_replace_termcodes("<BS>", true, false, true)
           vim.api.nvim_feedkeys(keys, "m", false)
@@ -195,7 +203,7 @@ function M.list()
       desc = "Recent files",
     },
     { "<leader>fs", "<cmd>w<cr>", desc = "Save" },
-    { "<leader>feR", util.reload_nixcats, desc = "Reload nixCats runtime" },
+    { "<leader>feR", reload_nixcats, desc = "Reload nixCats runtime" },
     { "<leader>fy", group = "yank" },
     {
       "<leader>fyy",
@@ -379,7 +387,7 @@ function M.list()
       desc = "Buffers",
     },
     { "<leader>bj", project.show_project_root, desc = "Project root" },
-    { "<leader>bd", buffers.delete_current_buffer, desc = "Delete" },
+    { "<leader>bd", plugin_util.delete_current_buffer, desc = "Delete" },
     { "<leader>bn", "<cmd>bnext<cr>", desc = "Next" },
     { "<leader>bp", "<cmd>bprev<cr>", desc = "Prev" },
     {
@@ -591,7 +599,7 @@ function M.list()
   add({
     -- Window
     { "<leader>w", group = "window" },
-    { "<leader>wx", buffers.kill_window_and_buffer, desc = "Close window" },
+    { "<leader>wx", plugin_util.kill_window_and_buffer, desc = "Close window" },
     { "<leader>wo", "<cmd>only<cr>", desc = "Only window" },
     { "<leader>wD", "<cmd>only<cr>", desc = "Close others" },
     { "<leader>wd", "<cmd>close<cr>", desc = "Close" },

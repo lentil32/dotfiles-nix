@@ -28,5 +28,5 @@ pre-push:
     fmt:
       glob: "*"
       run: |
-        nix fmt -- {staged_files}
+        nix fmt -- {push_files}
         git diff --exit-code

@@ -1,0 +1,16 @@
+[package]
+name = "rs_autocmds"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+nvim-oxi = { version = "0.6", features = ["neovim-0-11", "mlua"] }
+nvim-utils = { path = "../../libs/nvim-utils" }
+nvim-oxi-utils = { path = "../../libs/nvim-oxi-utils" }
+support = { path = "../../libs/support" }

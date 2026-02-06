@@ -86,7 +86,7 @@ return {
   {
     "gitsigns.nvim",
     for_cat = "git",
-    event = "BufReadPre",
+    event = "BufReadPost",
     after = function()
       require("gitsigns").setup({})
     end,

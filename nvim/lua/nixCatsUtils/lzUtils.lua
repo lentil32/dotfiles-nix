@@ -1,8 +1,8 @@
-local util = require("myLuaConf.util")
+local plugin_util = require("rs_plugin_util")
 local M = {}
 
 local function get_cat_enabled(cat, default)
-  if util.get_var(nil, "nixCats-special-rtp-entry-nixCats") ~= nil then
+  if plugin_util.get_var(nil, "nixCats-special-rtp-entry-nixCats") ~= nil then
     if type(_G.nixCats) == "function" then
       return _G.nixCats(cat) or false
     end

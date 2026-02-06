@@ -1,0 +1,13 @@
+[package]
+name = "rs_readline"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+nvim-oxi = { version = "0.6", features = ["neovim-0-11"] }

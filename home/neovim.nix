@@ -98,24 +98,14 @@ in
             installPhase = mkInstallPhase libBase outBase;
           };
         rustPluginOrder = [
-          "project_root"
-          "my_util"
-          "my_readline"
-          "my_text"
-          "snacks_preview"
-          "my_autocmds"
+          "rs_project_root"
+          "rs_plugin_util"
+          "rs_readline"
+          "rs_text"
+          "rs_snacks_preview"
+          "rs_autocmds"
         ];
-        rustPluginSpecs = {
-          project_root = { };
-          my_util = { };
-          my_readline = { };
-          my_text = { };
-          snacks_preview = { };
-          my_autocmds = { };
-        };
-        rustPluginList = map (
-          crate: mkRustPlugin ((rustPluginSpecs.${crate} or { }) // { inherit crate; })
-        ) rustPluginOrder;
+        rustPluginList = map (crate: mkRustPlugin { inherit crate; }) rustPluginOrder;
         categoriesConfig = {
           general = {
             startupPlugins = [
