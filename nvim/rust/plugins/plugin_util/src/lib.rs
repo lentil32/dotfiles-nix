@@ -1,5 +1,11 @@
-use std::{collections::HashMap, fmt, path::Path};
+mod definition_flow;
 
+use std::{collections::HashMap, path::Path};
+
+use definition_flow::{
+    DefinitionAction, DefinitionItem, parse_definition_items, parse_definition_title,
+    plan_definition_actions,
+};
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{ClearAutocmdsOpts, OptionOpts, OptionScope};
 use nvim_oxi::api::{Buffer, Window};
@@ -55,6 +61,7 @@ fn is_dir_path(path: &str) -> bool {
     path_is_dir(Path::new(path))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn is_dir(path: Option<String>) -> bool {
     path.as_deref().is_some_and(is_dir_path)
 }
@@ -284,9 +291,7 @@ fn rs_autocmds_table(lua: &mlua::Lua) -> Option<mlua::Table> {
 
 fn autocmds_oil_last_buf_for_win(win: Option<i64>) -> Option<i64> {
     let lua = lua::state();
-    let Some(autocmds) = rs_autocmds_table(&lua) else {
-        return None;
-    };
+    let autocmds = rs_autocmds_table(&lua)?;
     let Ok(oil_last_buf_for_win) = autocmds.get::<mlua::Function>("oil_last_buf_for_win") else {
         return None;
     };
@@ -383,25 +388,25 @@ fn clear_termclose_autocmd(buf: &Buffer, term: &mlua::Table) {
     }
 }
 
-fn close_matching_snacks_terminal(buf: &Buffer) -> Result<bool> {
+fn close_matching_snacks_terminal(buf: &Buffer) -> bool {
     if !buf_has_snacks_terminal(buf) {
-        return Ok(false);
+        return false;
     }
     let lua = lua::state();
     let Some(snacks) = snacks_table(&lua) else {
-        return Ok(false);
+        return false;
     };
     let Ok(terminal) = snacks.get::<mlua::Table>("terminal") else {
-        return Ok(false);
+        return false;
     };
     let Ok(list) = terminal.get::<mlua::Function>("list") else {
-        return Ok(false);
+        return false;
     };
     let terms = match list.call::<mlua::Table>(()) {
         Ok(value) => value,
         Err(err) => {
             notify::warn(LOG_CONTEXT, &format!("snacks terminal list failed: {err}"));
-            return Ok(false);
+            return false;
         }
     };
 
@@ -427,10 +432,10 @@ fn close_matching_snacks_terminal(buf: &Buffer) -> Result<bool> {
         if let Err(err) = delete_buffer_via_command(buf_handle, true, true) {
             notify::warn(LOG_CONTEXT, &format!("terminal wipeout failed: {err}"));
         }
-        return Ok(true);
+        return true;
     }
 
-    Ok(false)
+    false
 }
 
 fn buf_option_string(buf: &Buffer, name: &str) -> String {
@@ -463,7 +468,7 @@ fn kill_window_and_buffer() -> Result<()> {
     let buf = api::get_current_buf();
     let buf_handle = i64::from(buf.handle());
 
-    if close_matching_snacks_terminal(&buf)? {
+    if close_matching_snacks_terminal(&buf) {
         return Ok(());
     }
 
@@ -479,16 +484,7 @@ fn kill_window_and_buffer() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DefinitionAction, DefinitionItem, normalize_oil_target, plan_definition_actions};
-
-    fn definition_item(bufnr: i64, lnum: i64, col: i64) -> DefinitionItem {
-        DefinitionItem {
-            bufnr: Some(bufnr),
-            filename: None,
-            lnum,
-            col,
-        }
-    }
+    use super::normalize_oil_target;
 
     #[test]
     fn normalize_oil_target_rejects_empty_values() {
@@ -516,39 +512,6 @@ mod tests {
         assert_eq!(
             normalize_oil_target(Some(" ./src ".to_string())),
             Some("./src".to_string())
-        );
-    }
-
-    #[test]
-    fn plan_definition_actions_closes_when_empty() {
-        assert_eq!(
-            plan_definition_actions(Vec::new(), None),
-            vec![DefinitionAction::CloseCreatedTarget]
-        );
-    }
-
-    #[test]
-    fn plan_definition_actions_opens_primary_for_single_item() {
-        assert_eq!(
-            plan_definition_actions(vec![definition_item(1, 2, 3)], Some("defs".to_string())),
-            vec![DefinitionAction::OpenPrimary(definition_item(1, 2, 3))]
-        );
-    }
-
-    #[test]
-    fn plan_definition_actions_pushes_quickfix_for_multiple_items() {
-        assert_eq!(
-            plan_definition_actions(
-                vec![definition_item(1, 2, 3), definition_item(4, 5, 6)],
-                Some("defs".to_string())
-            ),
-            vec![
-                DefinitionAction::OpenPrimary(definition_item(1, 2, 3)),
-                DefinitionAction::PushQuickfix {
-                    title: Some("defs".to_string()),
-                    items: vec![definition_item(1, 2, 3), definition_item(4, 5, 6)],
-                }
-            ]
         );
     }
 }
@@ -680,146 +643,6 @@ fn get_or_create_other_window() -> Result<(Window, bool)> {
     Ok((new_win, true))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DefinitionItem {
-    bufnr: Option<i64>,
-    filename: Option<String>,
-    lnum: i64,
-    col: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DefinitionParseError {
-    InvalidItemType { index: usize },
-    MissingLocation { index: usize },
-    MissingField { index: usize, field: &'static str },
-    InvalidField { index: usize, field: &'static str },
-}
-
-impl fmt::Display for DefinitionParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidItemType { index } => {
-                write!(f, "definition item #{index} has invalid type")
-            }
-            Self::MissingLocation { index } => {
-                write!(f, "definition item #{index} is missing bufnr/filename")
-            }
-            Self::MissingField { index, field } => {
-                write!(f, "definition item #{index} missing field `{field}`")
-            }
-            Self::InvalidField { index, field } => {
-                write!(f, "definition item #{index} has invalid field `{field}`")
-            }
-        }
-    }
-}
-
-type DefinitionParseResult<T> = std::result::Result<T, DefinitionParseError>;
-
-fn parse_required_positive_field(
-    item: &mlua::Table,
-    index: usize,
-    field: &'static str,
-) -> DefinitionParseResult<i64> {
-    match item.get::<Option<i64>>(field) {
-        Ok(Some(value)) if value > 0 => Ok(value),
-        Ok(Some(_)) => Err(DefinitionParseError::InvalidField { index, field }),
-        Ok(None) => Err(DefinitionParseError::MissingField { index, field }),
-        Err(_) => Err(DefinitionParseError::InvalidField { index, field }),
-    }
-}
-
-fn parse_optional_bufnr(item: &mlua::Table, index: usize) -> DefinitionParseResult<Option<i64>> {
-    match item.get::<Option<i64>>("bufnr") {
-        Ok(Some(value)) if value > 0 => Ok(Some(value)),
-        Ok(Some(_)) => Ok(None),
-        Ok(None) => Ok(None),
-        Err(_) => Err(DefinitionParseError::InvalidField {
-            index,
-            field: "bufnr",
-        }),
-    }
-}
-
-fn parse_optional_filename(
-    item: &mlua::Table,
-    index: usize,
-) -> DefinitionParseResult<Option<String>> {
-    match item.get::<Option<String>>("filename") {
-        Ok(Some(value)) if !value.is_empty() => Ok(Some(value)),
-        Ok(Some(_)) => Ok(None),
-        Ok(None) => Ok(None),
-        Err(_) => Err(DefinitionParseError::InvalidField {
-            index,
-            field: "filename",
-        }),
-    }
-}
-
-fn parse_definition_item(
-    item: &mlua::Table,
-    index: usize,
-) -> DefinitionParseResult<DefinitionItem> {
-    let bufnr = parse_optional_bufnr(item, index)?;
-    let filename = parse_optional_filename(item, index)?;
-    if bufnr.is_none() && filename.is_none() {
-        return Err(DefinitionParseError::MissingLocation { index });
-    }
-    let lnum = parse_required_positive_field(item, index, "lnum")?;
-    let col = parse_required_positive_field(item, index, "col")?;
-    Ok(DefinitionItem {
-        bufnr,
-        filename,
-        lnum,
-        col,
-    })
-}
-
-fn parse_definition_items(items: &mlua::Table) -> DefinitionParseResult<Vec<DefinitionItem>> {
-    let len = items.raw_len();
-    let mut parsed = Vec::with_capacity(len);
-    for index in 1..=len {
-        let entry = items
-            .raw_get::<mlua::Table>(index)
-            .map_err(|_| DefinitionParseError::InvalidItemType { index })?;
-        parsed.push(parse_definition_item(&entry, index)?);
-    }
-    Ok(parsed)
-}
-
-fn parse_definition_title(opts: &mlua::Table) -> Option<String> {
-    opts.get::<Option<String>>("title")
-        .ok()
-        .flatten()
-        .filter(|title| !title.is_empty())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DefinitionAction {
-    CloseCreatedTarget,
-    OpenPrimary(DefinitionItem),
-    PushQuickfix {
-        title: Option<String>,
-        items: Vec<DefinitionItem>,
-    },
-}
-
-fn plan_definition_actions(
-    items: Vec<DefinitionItem>,
-    title: Option<String>,
-) -> Vec<DefinitionAction> {
-    let Some((primary, rest)) = items.split_first() else {
-        return vec![DefinitionAction::CloseCreatedTarget];
-    };
-
-    let mut actions = vec![DefinitionAction::OpenPrimary(primary.clone())];
-    if !rest.is_empty() {
-        actions.push(DefinitionAction::PushQuickfix { title, items });
-    }
-    actions
-}
-
 fn restore_current_window(cur_handle: i64) {
     if let Some(cur) = handles::valid_window(cur_handle)
         && let Err(err) = api::set_current_win(&cur)
@@ -843,20 +666,14 @@ fn close_created_target_window(target_handle: i64, created: bool) {
 }
 
 fn set_cursor_safe(target: &mut Window, lnum: i64, col: i64) {
-    let row = match usize::try_from(lnum) {
-        Ok(value) => value,
-        Err(_) => {
-            notify::warn(LOG_CONTEXT, "set cursor failed: invalid line number");
-            return;
-        }
+    let Ok(row) = usize::try_from(lnum) else {
+        notify::warn(LOG_CONTEXT, "set cursor failed: invalid line number");
+        return;
     };
     let col_zero_based = col.saturating_sub(1);
-    let col = match usize::try_from(col_zero_based) {
-        Ok(value) => value,
-        Err(_) => {
-            notify::warn(LOG_CONTEXT, "set cursor failed: invalid column");
-            return;
-        }
+    let Ok(col) = usize::try_from(col_zero_based) else {
+        notify::warn(LOG_CONTEXT, "set cursor failed: invalid column");
+        return;
     };
     if let Err(err) = target.set_cursor(row, col) {
         notify::warn(LOG_CONTEXT, &format!("set cursor failed: {err}"));
@@ -945,7 +762,7 @@ fn execute_definition_actions(
 
 fn on_lsp_definition_list(
     lua: &mlua::Lua,
-    opts: mlua::Table,
+    opts: &mlua::Table,
     target_handle: i64,
     created: bool,
     cur_handle: i64,
@@ -976,7 +793,7 @@ fn on_lsp_definition_list(
             },
             None => Vec::new(),
         };
-        let actions = plan_definition_actions(items, parse_definition_title(&opts));
+        let actions = plan_definition_actions(items, parse_definition_title(opts));
         execute_definition_actions(lua, target_handle, created, actions)?;
         Ok(())
     })();
@@ -999,7 +816,7 @@ fn goto_definition_other_window() -> Result<()> {
 
     let on_list = lua
         .create_function(move |lua, opts: mlua::Table| {
-            if let Err(err) = on_lsp_definition_list(&lua, opts, target_handle, created, cur_handle)
+            if let Err(err) = on_lsp_definition_list(lua, &opts, target_handle, created, cur_handle)
             {
                 notify::warn(
                     LOG_CONTEXT,

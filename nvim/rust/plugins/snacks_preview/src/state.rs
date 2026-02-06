@@ -17,7 +17,7 @@ pub struct State {
 }
 
 impl State {
-    fn next_cleanup_id(&mut self) -> i64 {
+    const fn next_cleanup_id(&mut self) -> i64 {
         self.next_cleanup_id = if self.next_cleanup_id == i64::MAX {
             1
         } else {
@@ -47,9 +47,12 @@ static STATE: LazyLock<StateCell<State>> = LazyLock::new(|| StateCell::new(State
 pub fn state_lock() -> StateGuard<'static, State> {
     let mut guard = STATE.lock();
     if guard.poisoned() {
+        let dropped_cleanups = guard.cleanups.len();
         notify::warn(
             LOG_CONTEXT,
-            "state mutex poisoned; resetting preview registry",
+            &format!(
+                "state mutex poisoned; resetting preview registry (dropping {dropped_cleanups} pending cleanups)"
+            ),
         );
         *guard = State::default();
         STATE.clear_poison();

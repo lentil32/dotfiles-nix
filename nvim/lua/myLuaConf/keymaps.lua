@@ -1,8 +1,8 @@
 local lua_helpers = require("myLuaConf.lua_helpers")
 local oil = require("myLuaConf.oil")
+local plugin_util = require("rs_plugin_util")
 local project = require("myLuaConf.project")
 local readline = require("rs_readline")
-local plugin_util = require("rs_plugin_util")
 local text = require("rs_text")
 
 local M = {}

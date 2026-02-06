@@ -1,7 +1,7 @@
 local colorscheme = require("myLuaConf.colorscheme")
 local keymaps = require("myLuaConf.keymaps")
-local project = require("myLuaConf.project")
 local plugin_util = require("rs_plugin_util")
+local project = require("myLuaConf.project")
 local snacks = require("myLuaConf.snacks")
 colorscheme.apply()
 snacks.setup()

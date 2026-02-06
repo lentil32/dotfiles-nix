@@ -333,7 +333,5 @@ pub fn close_doc_preview_lua(buf_handle: i64) {
 }
 
 pub fn reset_state_lua() {
-    if let Err(err) = reset_preview_state() {
-        notify::warn(LOG_CONTEXT, &format!("reset preview state failed: {err}"));
-    }
+    reset_preview_state();
 }

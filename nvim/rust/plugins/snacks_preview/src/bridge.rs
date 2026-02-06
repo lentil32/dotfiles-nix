@@ -162,7 +162,17 @@ pub fn snacks_open_preview(win_handle: WinHandle, src: &str) -> Result<Option<i6
     let args = lua.create_table()?;
     args.set("win", win_handle.raw())?;
     args.set("src", src)?;
-    let cleanup = call_bridge::<_, Option<mlua::Function>>(&lua, "snacks_open_preview", args)?;
+    let (cleanup, open_error) = call_bridge::<_, (Option<mlua::Function>, Option<String>)>(
+        &lua,
+        "snacks_open_preview",
+        args,
+    )?;
+    if let Some(message) = open_error {
+        notify::warn(
+            LOG_CONTEXT,
+            &format!("snacks_open_preview bridge rejected request: {message}"),
+        );
+    }
     let Some(cleanup) = cleanup else {
         return Ok(None);
     };
@@ -197,12 +207,11 @@ pub fn snacks_close_preview(cleanup_id: i64) -> Result<()> {
     run_cleanup_registry_key(cleanup_key)
 }
 
-pub fn reset_preview_state() -> Result<()> {
+pub fn reset_preview_state() {
     let cleanup_keys = take_all_cleanup_keys_and_reset();
     for cleanup_key in cleanup_keys {
         if let Err(err) = run_cleanup_registry_key(cleanup_key) {
             notify::warn(LOG_CONTEXT, &format!("preview cleanup reset failed: {err}"));
         }
     }
-    Ok(())
 }

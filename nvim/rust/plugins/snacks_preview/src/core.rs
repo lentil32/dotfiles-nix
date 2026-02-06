@@ -222,8 +222,27 @@ impl PreviewRegistry {
 mod tests {
     use super::*;
 
+    fn key(raw: i64) -> Result<BufKey, &'static str> {
+        BufKey::try_new(raw).ok_or("expected valid key")
+    }
+
     fn token(raw: i64) -> Result<PreviewToken, &'static str> {
         PreviewToken::try_new(raw).ok_or("expected valid token")
+    }
+
+    fn assert_registry_invariants(registry: &PreviewRegistry) {
+        assert!(registry.next_token >= 0);
+        for state in registry.previews.values() {
+            assert!(state.token.raw() > 0);
+            if let Some(cleanup_id) = state.cleanup {
+                assert!(cleanup_id > 0);
+            }
+            if let Some(plan) = &state.restore_name_plan {
+                assert!(!plan.name.is_empty());
+                assert!(!plan.preview_name.is_empty());
+                assert_ne!(plan.name, plan.preview_name);
+            }
+        }
     }
 
     #[test]
@@ -540,6 +559,124 @@ mod tests {
 
         assert_eq!(transition.effects, vec![PreviewEffect::CloseCleanup(99)]);
         assert_eq!(transition.command, None);
+        Ok(())
+    }
+
+    #[derive(Clone, Copy)]
+    enum Step {
+        Register,
+        Close,
+        DocFindCurrent,
+        DocFindStale,
+        CleanupCurrent,
+        CleanupStale,
+    }
+
+    impl Step {
+        const ALL: [Self; 6] = [
+            Self::Register,
+            Self::Close,
+            Self::DocFindCurrent,
+            Self::DocFindStale,
+            Self::CleanupCurrent,
+            Self::CleanupStale,
+        ];
+    }
+
+    fn current_token(registry: &PreviewRegistry, key: BufKey) -> Option<PreviewToken> {
+        registry.get_preview(key).map(|entry| entry.token)
+    }
+
+    fn apply_step(
+        registry: &mut PreviewRegistry,
+        key: BufKey,
+        step: Step,
+        next_cleanup_id: &mut i64,
+    ) -> Result<(), &'static str> {
+        let stale_token = token(99_999)?;
+        let transition = match step {
+            Step::Register => registry.reduce(PreviewEvent::Register {
+                key,
+                group: 7,
+                restore_name_plan: Some(RestoreNamePlan {
+                    name: "name".to_string(),
+                    preview_name: "name.preview".to_string(),
+                }),
+            }),
+            Step::Close => registry.reduce(PreviewEvent::Close { key }),
+            Step::DocFindCurrent => {
+                let Some(current) = current_token(registry, key) else {
+                    return Ok(());
+                };
+                registry.reduce(PreviewEvent::DocFindArrived {
+                    key,
+                    token: current,
+                })
+            }
+            Step::DocFindStale => registry.reduce(PreviewEvent::DocFindArrived {
+                key,
+                token: stale_token,
+            }),
+            Step::CleanupCurrent => {
+                let Some(current) = current_token(registry, key) else {
+                    return Ok(());
+                };
+                let cleanup_id = *next_cleanup_id;
+                *next_cleanup_id += 1;
+                registry.reduce(PreviewEvent::CleanupOpened {
+                    key,
+                    token: current,
+                    cleanup_id,
+                })
+            }
+            Step::CleanupStale => {
+                let cleanup_id = *next_cleanup_id;
+                *next_cleanup_id += 1;
+                registry.reduce(PreviewEvent::CleanupOpened {
+                    key,
+                    token: stale_token,
+                    cleanup_id,
+                })
+            }
+        };
+        for effect in transition.effects {
+            if let PreviewEffect::CloseCleanup(cleanup_id) = effect {
+                assert!(cleanup_id > 0);
+            }
+        }
+        if let Some(PreviewCommand::RequestDocFind(token)) = transition.command {
+            assert!(token.raw() > 0);
+        }
+        assert_registry_invariants(registry);
+        Ok(())
+    }
+
+    fn run_sequences(
+        sequence: &mut Vec<Step>,
+        remaining: usize,
+        key: BufKey,
+    ) -> Result<(), &'static str> {
+        if remaining == 0 {
+            let mut registry = PreviewRegistry::default();
+            assert_registry_invariants(&registry);
+            let mut next_cleanup_id = 1;
+            for step in sequence {
+                apply_step(&mut registry, key, *step, &mut next_cleanup_id)?;
+            }
+            return Ok(());
+        }
+        for step in Step::ALL {
+            sequence.push(step);
+            run_sequences(sequence, remaining - 1, key)?;
+            let _ = sequence.pop();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reduce_preserves_invariants_over_bounded_sequences() -> Result<(), &'static str> {
+        let key = key(13)?;
+        run_sequences(&mut Vec::new(), 4, key)?;
         Ok(())
     }
 }
