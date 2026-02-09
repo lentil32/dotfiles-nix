@@ -1,0 +1,871 @@
+use crate::animation::{
+    center, compute_stiffnesses, corners_for_cursor, corners_for_render, initial_velocity,
+    reached_target, simulate_step, zero_velocity_corners,
+};
+use crate::config::RuntimeConfig;
+use crate::draw::{GradientInfo, RenderFrame};
+use crate::state::{CursorLocation, CursorShape, RuntimeState};
+use crate::types::{BASE_TIME_INTERVAL, EPSILON, Particle, Point, StepInput};
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CursorEventContext {
+    pub(crate) row: f64,
+    pub(crate) col: f64,
+    pub(crate) now_ms: f64,
+    pub(crate) seed: u32,
+    pub(crate) cursor_location: CursorLocation,
+    pub(crate) scroll_shift: Option<ScrollShift>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScrollShift {
+    pub(crate) shift: f64,
+    pub(crate) min_row: f64,
+    pub(crate) max_row: f64,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum EventSource {
+    External,
+    AnimationTick,
+}
+
+#[derive(Debug)]
+pub(crate) enum RenderAction {
+    Draw(RenderFrame),
+    ClearAll,
+    Noop,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RenderCleanupAction {
+    None,
+    Schedule,
+    Invalidate,
+}
+
+#[derive(Debug)]
+pub(crate) struct TransitionEffects {
+    pub(crate) render_action: RenderAction,
+    pub(crate) step_interval_ms: Option<f64>,
+    pub(crate) notify_delay_disabled: bool,
+    pub(crate) render_cleanup_action: RenderCleanupAction,
+}
+
+impl TransitionEffects {
+    fn clear_all() -> Self {
+        Self {
+            render_action: RenderAction::ClearAll,
+            step_interval_ms: None,
+            notify_delay_disabled: false,
+            render_cleanup_action: RenderCleanupAction::None,
+        }
+    }
+
+    fn draw(frame: RenderFrame, step_interval_ms: Option<f64>) -> Self {
+        Self {
+            render_action: RenderAction::Draw(frame),
+            step_interval_ms,
+            notify_delay_disabled: false,
+            render_cleanup_action: RenderCleanupAction::None,
+        }
+    }
+
+    fn noop() -> Self {
+        Self {
+            render_action: RenderAction::Noop,
+            step_interval_ms: None,
+            notify_delay_disabled: false,
+            render_cleanup_action: RenderCleanupAction::None,
+        }
+    }
+
+    fn noop_with_step(step_interval_ms: f64) -> Self {
+        Self {
+            render_action: RenderAction::Noop,
+            step_interval_ms: Some(step_interval_ms),
+            notify_delay_disabled: false,
+            render_cleanup_action: RenderCleanupAction::None,
+        }
+    }
+
+    fn with_delay_notification(mut self, enabled: bool) -> Self {
+        self.notify_delay_disabled = self.notify_delay_disabled || enabled;
+        self
+    }
+
+    fn with_render_cleanup_action(mut self, action: RenderCleanupAction) -> Self {
+        self.render_cleanup_action = action;
+        self
+    }
+}
+
+fn build_step_input(
+    state: &RuntimeState,
+    mode: &str,
+    time_interval: f64,
+    vertical_bar: bool,
+    horizontal_bar: bool,
+    particles: Vec<Particle>,
+) -> StepInput {
+    StepInput {
+        mode: mode.to_string(),
+        time_interval,
+        config_time_interval: state.config.time_interval,
+        current_corners: state.current_corners,
+        target_corners: state.target_corners,
+        velocity_corners: state.velocity_corners,
+        stiffnesses: state.stiffnesses,
+        max_length: state.config.max_length,
+        max_length_insert_mode: state.config.max_length_insert_mode,
+        damping: state.config.damping,
+        damping_insert_mode: state.config.damping_insert_mode,
+        delay_disable: state.config.delay_disable,
+        particles,
+        previous_center: state.previous_center,
+        particle_damping: state.config.particle_damping,
+        particles_enabled: state.config.particles_enabled,
+        particle_gravity: state.config.particle_gravity,
+        particle_random_velocity: state.config.particle_random_velocity,
+        particle_max_num: state.config.particle_max_num,
+        particle_spread: state.config.particle_spread,
+        particles_per_second: state.config.particles_per_second,
+        particles_per_length: state.config.particles_per_length,
+        particle_max_initial_velocity: state.config.particle_max_initial_velocity,
+        particle_velocity_from_cursor: state.config.particle_velocity_from_cursor,
+        particle_max_lifetime: state.config.particle_max_lifetime,
+        particle_lifetime_distribution_exponent: state
+            .config
+            .particle_lifetime_distribution_exponent,
+        min_distance_emit_particles: state.config.min_distance_emit_particles,
+        vertical_bar,
+        horizontal_bar,
+        block_aspect_ratio: state.config.block_aspect_ratio,
+        rng_state: state.rng_state,
+    }
+}
+
+pub(crate) fn build_render_frame(
+    state: &RuntimeState,
+    mode: &str,
+    render_corners: [Point; 4],
+    target: Point,
+    vertical_bar: bool,
+    gradient_indexes: Option<(usize, usize)>,
+) -> RenderFrame {
+    let gradient = gradient_indexes.map(|(index_head, index_tail)| {
+        let origin = render_corners[index_head];
+        let direction = Point {
+            row: render_corners[index_tail].row - origin.row,
+            col: render_corners[index_tail].col - origin.col,
+        };
+        let length_squared = direction.row * direction.row + direction.col * direction.col;
+        let direction_scaled = if length_squared > 1.0 {
+            Point {
+                row: direction.row / length_squared,
+                col: direction.col / length_squared,
+            }
+        } else {
+            Point::ZERO
+        };
+
+        GradientInfo {
+            origin,
+            direction_scaled,
+        }
+    });
+
+    RenderFrame {
+        mode: mode.to_string(),
+        corners: render_corners,
+        target,
+        target_corners: state.target_corners,
+        vertical_bar,
+        particles: state.particles.clone(),
+        cursor_color: state.config.cursor_color.clone(),
+        cursor_color_insert_mode: state.config.cursor_color_insert_mode.clone(),
+        normal_bg: state.config.normal_bg.clone(),
+        transparent_bg_fallback_color: state.config.transparent_bg_fallback_color.clone(),
+        cterm_cursor_colors: state.config.cterm_cursor_colors.clone(),
+        cterm_bg: state.config.cterm_bg,
+        color_at_cursor: state.color_at_cursor.clone(),
+        hide_target_hack: state.config.hide_target_hack,
+        never_draw_over_target: state.config.never_draw_over_target,
+        legacy_computing_symbols_support: state.config.legacy_computing_symbols_support,
+        legacy_computing_symbols_support_vertical_bars: state
+            .config
+            .legacy_computing_symbols_support_vertical_bars,
+        use_diagonal_blocks: state.config.use_diagonal_blocks,
+        max_slope_horizontal: state.config.max_slope_horizontal,
+        min_slope_vertical: state.config.min_slope_vertical,
+        max_angle_difference_diagonal: state.config.max_angle_difference_diagonal,
+        max_offset_diagonal: state.config.max_offset_diagonal,
+        min_shade_no_diagonal: state.config.min_shade_no_diagonal,
+        min_shade_no_diagonal_vertical_bar: state.config.min_shade_no_diagonal_vertical_bar,
+        max_shade_no_matrix: state.config.max_shade_no_matrix,
+        particle_max_lifetime: state.config.particle_max_lifetime,
+        particle_switch_octant_braille: state.config.particle_switch_octant_braille,
+        particles_over_text: state.config.particles_over_text,
+        color_levels: state.config.color_levels,
+        gamma: state.config.gamma,
+        gradient_exponent: state.config.gradient_exponent,
+        matrix_pixel_threshold: state.config.matrix_pixel_threshold,
+        matrix_pixel_threshold_vertical_bar: state.config.matrix_pixel_threshold_vertical_bar,
+        matrix_pixel_min_factor: state.config.matrix_pixel_min_factor,
+        windows_zindex: state.config.windows_zindex,
+        gradient,
+    }
+}
+
+fn gradient_indexes_for_corners(
+    current_corners: &[Point; 4],
+    target_corners: &[Point; 4],
+) -> Option<(usize, usize)> {
+    let mut distance_head_to_target_squared = f64::INFINITY;
+    let mut distance_tail_to_target_squared = 0.0_f64;
+    let mut index_head = 0_usize;
+    let mut index_tail = 0_usize;
+
+    for index in 0..4 {
+        let distance_squared = current_corners[index].distance_squared(target_corners[index]);
+        if distance_squared < distance_head_to_target_squared {
+            distance_head_to_target_squared = distance_squared;
+            index_head = index;
+        }
+        if distance_squared > distance_tail_to_target_squared {
+            distance_tail_to_target_squared = distance_squared;
+            index_tail = index;
+        }
+    }
+
+    if distance_tail_to_target_squared <= EPSILON {
+        None
+    } else {
+        Some((index_head, index_tail))
+    }
+}
+
+fn reset_animation_timing(state: &mut RuntimeState) {
+    state.reset_animation_timing();
+}
+
+fn clamp_row_to_window(row: f64, scroll_shift: ScrollShift) -> f64 {
+    row.max(scroll_shift.min_row).min(scroll_shift.max_row)
+}
+
+fn apply_scroll_shift_to_state(
+    state: &mut RuntimeState,
+    vertical_bar: bool,
+    horizontal_bar: bool,
+    scroll_shift: ScrollShift,
+) {
+    let shifted_row = clamp_row_to_window(
+        state.current_corners[0].row - scroll_shift.shift,
+        scroll_shift,
+    );
+    let shifted_col = state.current_corners[0].col;
+    state.current_corners =
+        corners_for_cursor(shifted_row, shifted_col, vertical_bar, horizontal_bar);
+    state.previous_center = center(&state.current_corners);
+
+    for particle in &mut state.particles {
+        particle.position.row -= scroll_shift.shift;
+    }
+}
+
+fn should_jump_to_target(
+    state: &RuntimeState,
+    window_changed: bool,
+    buffer_changed: bool,
+    target_row: f64,
+    target_col: f64,
+) -> bool {
+    if window_changed || buffer_changed {
+        return !state.config.smear_between_buffers;
+    }
+
+    let current_row = state.current_corners[0].row;
+    let current_col = state.current_corners[0].col;
+    let delta_row = (target_row - current_row).abs();
+    let delta_col = (target_col - current_col).abs();
+
+    (!state.config.smear_between_neighbor_lines && delta_row <= 1.5)
+        || (delta_row < state.config.min_vertical_distance_smear
+            && delta_col < state.config.min_horizontal_distance_smear)
+        || (!state.config.smear_horizontally && delta_row <= 0.5)
+        || (!state.config.smear_vertically && delta_col <= 0.5)
+        || (!state.config.smear_diagonally && delta_row > 0.5 && delta_col > 0.5)
+}
+
+fn external_mode_ignores_cursor(config: &RuntimeConfig, mode: &str) -> bool {
+    mode == "c" && !config.smear_to_cmd
+}
+
+fn external_mode_requires_jump(config: &RuntimeConfig, mode: &str) -> bool {
+    (mode == "i" && !config.smear_insert_mode)
+        || (mode == "R" && !config.smear_replace_mode)
+        || (mode == "t" && !config.smear_terminal_mode)
+}
+
+pub(crate) fn reduce_cursor_event(
+    state: &mut RuntimeState,
+    mode: &str,
+    event: CursorEventContext,
+    source: EventSource,
+) -> TransitionEffects {
+    if !state.is_enabled() {
+        state.stop_animation();
+        reset_animation_timing(state);
+        return TransitionEffects::clear_all()
+            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+    }
+
+    if state.is_delay_disabled() {
+        if source == EventSource::External {
+            return TransitionEffects::noop()
+                .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        }
+        if !state.is_animating() {
+            reset_animation_timing(state);
+            return TransitionEffects::clear_all()
+                .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        }
+    }
+
+    let vertical_bar = state.config.cursor_is_vertical_bar(mode);
+    let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
+    let cursor_shape = CursorShape::new(vertical_bar, horizontal_bar);
+    let mut target_position = if source == EventSource::AnimationTick {
+        state.target_position
+    } else {
+        Point {
+            row: event.row,
+            col: event.col,
+        }
+    };
+    let (window_changed, buffer_changed) =
+        state.tracked_location().map_or((false, false), |tracked| {
+            (
+                tracked.window_handle != event.cursor_location.window_handle,
+                tracked.buffer_handle != event.cursor_location.buffer_handle,
+            )
+        });
+
+    if source == EventSource::External && external_mode_ignores_cursor(&state.config, mode) {
+        return TransitionEffects::noop().with_render_cleanup_action(RenderCleanupAction::Schedule);
+    }
+
+    if source == EventSource::External && external_mode_requires_jump(&state.config, mode) {
+        // Match upstream Lua behavior: jump updates position/target but does not
+        // force-stop an in-flight animation loop or clear velocity state.
+        state.jump_preserving_motion(target_position, cursor_shape, event.cursor_location);
+        return TransitionEffects::clear_all()
+            .with_render_cleanup_action(RenderCleanupAction::Schedule);
+    }
+
+    if !state.is_initialized() {
+        state.initialize_cursor(
+            target_position,
+            cursor_shape,
+            event.seed,
+            event.cursor_location,
+        );
+        let frame = build_render_frame(
+            state,
+            mode,
+            state.current_corners,
+            target_position,
+            vertical_bar,
+            None,
+        );
+        return TransitionEffects::draw(frame, None)
+            .with_render_cleanup_action(RenderCleanupAction::Schedule);
+    }
+
+    if source == EventSource::AnimationTick && !state.is_animating() {
+        return TransitionEffects::noop();
+    }
+
+    if source == EventSource::External {
+        if let Some(scroll_shift) = event.scroll_shift {
+            apply_scroll_shift_to_state(state, vertical_bar, horizontal_bar, scroll_shift);
+            target_position.row =
+                clamp_row_to_window(target_position.row - scroll_shift.shift, scroll_shift);
+        }
+
+        if should_jump_to_target(
+            state,
+            window_changed,
+            buffer_changed,
+            target_position.row,
+            target_position.col,
+        ) {
+            state.jump_and_stop_animation(target_position, cursor_shape, event.cursor_location);
+            return TransitionEffects::clear_all()
+                .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        }
+        state.set_target(target_position, cursor_shape);
+        state.stiffnesses = compute_stiffnesses(
+            &state.config,
+            mode,
+            &state.current_corners,
+            &state.target_corners,
+        );
+    }
+
+    let was_animating = state.is_animating();
+    if source == EventSource::External && !was_animating {
+        state.velocity_corners = initial_velocity(
+            &state.current_corners,
+            &state.target_corners,
+            state.config.anticipation,
+        );
+        state.start_animation();
+    }
+    let just_started = source == EventSource::External && !was_animating && state.is_animating();
+
+    if source == EventSource::External {
+        state.update_tracking(event.cursor_location);
+    }
+
+    let should_advance = match source {
+        EventSource::AnimationTick => state.is_animating(),
+        // Match upstream behavior: target updates do not advance physics while already animating.
+        // The first transition after a jump starts animation immediately.
+        EventSource::External => just_started,
+    };
+
+    if should_advance {
+        let step_interval = if just_started {
+            state.set_last_tick_ms(Some(event.now_ms));
+            BASE_TIME_INTERVAL
+        } else {
+            let interval = match state.last_tick_ms() {
+                Some(previous) => (event.now_ms - previous).max(0.0),
+                None => BASE_TIME_INTERVAL,
+            };
+            state.set_last_tick_ms(Some(event.now_ms));
+            interval
+        };
+
+        let particles = std::mem::take(&mut state.particles);
+        let step_input = build_step_input(
+            state,
+            mode,
+            step_interval,
+            vertical_bar,
+            horizontal_bar,
+            particles,
+        );
+        let step_output = simulate_step(step_input);
+
+        state.current_corners = step_output.current_corners;
+        state.velocity_corners = step_output.velocity_corners;
+        state.previous_center = step_output.previous_center;
+        state.rng_state = step_output.rng_state;
+        state.particles = step_output.particles;
+        let mut notify_delay_disabled = false;
+        if step_output.disabled_due_to_delay && !state.is_delay_disabled() {
+            state.set_delay_disabled(true);
+            notify_delay_disabled = true;
+        }
+
+        if reached_target(
+            &state.config,
+            mode,
+            &state.current_corners,
+            &state.target_corners,
+            &state.velocity_corners,
+            &state.particles,
+        ) {
+            state.current_corners = state.target_corners;
+            state.velocity_corners = zero_velocity_corners();
+            state.stop_animation();
+            reset_animation_timing(state);
+            return TransitionEffects::clear_all()
+                .with_delay_notification(notify_delay_disabled)
+                .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        }
+
+        if state.lag_ms() > EPSILON {
+            return TransitionEffects::noop_with_step(step_interval)
+                .with_delay_notification(notify_delay_disabled)
+                .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+        }
+
+        let render_corners =
+            corners_for_render(&state.config, &state.current_corners, &state.target_corners);
+        let frame = build_render_frame(
+            state,
+            mode,
+            render_corners,
+            target_position,
+            vertical_bar,
+            Some((step_output.index_head, step_output.index_tail)),
+        );
+        return TransitionEffects::draw(frame, Some(step_interval))
+            .with_delay_notification(notify_delay_disabled)
+            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+    }
+
+    if source == EventSource::External {
+        return TransitionEffects::noop()
+            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+    }
+
+    let gradient_indexes =
+        gradient_indexes_for_corners(&state.current_corners, &state.target_corners);
+    let render_corners =
+        corners_for_render(&state.config, &state.current_corners, &state.target_corners);
+    let frame = build_render_frame(
+        state,
+        mode,
+        render_corners,
+        target_position,
+        vertical_bar,
+        gradient_indexes,
+    );
+    TransitionEffects::draw(frame, None).with_render_cleanup_action(RenderCleanupAction::None)
+}
+
+pub(crate) fn as_delay_ms(value: f64) -> u64 {
+    let clamped = if value.is_finite() {
+        value.max(0.0).floor()
+    } else {
+        0.0
+    };
+    if clamped > u64::MAX as f64 {
+        u64::MAX
+    } else {
+        clamped as u64
+    }
+}
+
+pub(crate) fn next_animation_delay_ms(
+    state: &mut RuntimeState,
+    step_interval_ms: f64,
+    callback_duration_ms: f64,
+) -> u64 {
+    let lag_ms = (state.lag_ms() + step_interval_ms - state.config.time_interval).max(0.0);
+    state.set_lag_ms(lag_ms);
+
+    let mut delay_ms = (state.config.time_interval - callback_duration_ms).max(0.0);
+    if state.lag_ms() <= delay_ms {
+        delay_ms -= state.lag_ms();
+        state.set_lag_ms(0.0);
+    } else {
+        state.set_lag_ms(state.lag_ms() - delay_ms);
+        delay_ms = 0.0;
+    }
+
+    as_delay_ms(delay_ms)
+}
+
+pub(crate) fn external_settle_delay_ms(delay_event_to_smear: f64) -> u64 {
+    as_delay_ms(delay_event_to_smear)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CursorEventContext, EventSource, RenderAction, RenderCleanupAction, reduce_cursor_event,
+    };
+    use crate::state::{CursorLocation, RuntimeState};
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn event(row: f64, col: f64) -> CursorEventContext {
+        CursorEventContext {
+            row,
+            col,
+            now_ms: 100.0,
+            seed: 7,
+            cursor_location: CursorLocation::new(10, 20, 1, 1),
+            scroll_shift: None,
+        }
+    }
+
+    fn event_with_location(
+        row: f64,
+        col: f64,
+        now_ms: f64,
+        seed: u32,
+        window_handle: i64,
+        buffer_handle: i64,
+    ) -> CursorEventContext {
+        CursorEventContext {
+            row,
+            col,
+            now_ms,
+            seed,
+            cursor_location: CursorLocation::new(window_handle, buffer_handle, 1, 1),
+            scroll_shift: None,
+        }
+    }
+
+    #[test]
+    fn disabled_state_reduces_to_clear_all() {
+        let mut state = RuntimeState::default();
+        state.set_enabled(false);
+        state.start_animation();
+
+        let effects = reduce_cursor_event(&mut state, "n", event(3.0, 8.0), EventSource::External);
+        assert!(matches!(effects.render_action, RenderAction::ClearAll));
+        assert_eq!(
+            effects.render_cleanup_action,
+            RenderCleanupAction::Invalidate
+        );
+        assert!(!state.is_animating());
+    }
+
+    #[test]
+    fn first_external_event_initializes_and_draws() {
+        let mut state = RuntimeState::default();
+        let effects = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
+
+        assert!(matches!(effects.render_action, RenderAction::Draw(_)));
+        assert_eq!(effects.render_cleanup_action, RenderCleanupAction::Schedule);
+        assert!(state.is_initialized());
+        assert!(!state.is_animating());
+    }
+
+    #[test]
+    fn animation_tick_is_noop_when_not_running() {
+        let mut state = RuntimeState::default();
+        state.mark_initialized();
+        state.stop_animation();
+        let effects =
+            reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::AnimationTick);
+        assert!(matches!(effects.render_action, RenderAction::Noop));
+        assert_eq!(effects.render_cleanup_action, RenderCleanupAction::None);
+    }
+
+    #[test]
+    fn window_switch_smears_when_smear_between_buffers_enabled() {
+        let mut state = RuntimeState::default();
+        state.config.smear_between_buffers = true;
+
+        let _ = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
+        let switched_window = CursorEventContext {
+            row: 20.0,
+            col: 30.0,
+            now_ms: 120.0,
+            seed: 99,
+            cursor_location: CursorLocation::new(999, 20, 1, 1),
+            scroll_shift: None,
+        };
+
+        let effects = reduce_cursor_event(&mut state, "n", switched_window, EventSource::External);
+        assert!(matches!(effects.render_action, RenderAction::Draw(_)));
+        assert_eq!(
+            effects.render_cleanup_action,
+            RenderCleanupAction::Invalidate
+        );
+    }
+
+    #[test]
+    fn window_switch_clears_when_smear_between_buffers_disabled() {
+        let mut state = RuntimeState::default();
+        state.config.smear_between_buffers = false;
+
+        let _ = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
+        let switched_window = CursorEventContext {
+            row: 20.0,
+            col: 30.0,
+            now_ms: 120.0,
+            seed: 99,
+            cursor_location: CursorLocation::new(999, 20, 1, 1),
+            scroll_shift: None,
+        };
+
+        let effects = reduce_cursor_event(&mut state, "n", switched_window, EventSource::External);
+        assert!(matches!(effects.render_action, RenderAction::ClearAll));
+        assert_eq!(effects.render_cleanup_action, RenderCleanupAction::Schedule);
+    }
+
+    #[test]
+    fn repeated_window_switches_keep_smearing_when_enabled() {
+        let mut state = RuntimeState::default();
+        state.config.smear_between_buffers = true;
+
+        let _ = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
+
+        let mut now_ms = 120.0;
+        let mut observed_draw = false;
+        for step in 0_u32..64 {
+            let window_handle = if step % 2 == 0 { 100_i64 } else { 101_i64 };
+            let event = CursorEventContext {
+                row: 20.0 + f64::from(step) * 0.5,
+                col: 30.0 + f64::from(step) * 0.5,
+                now_ms,
+                seed: 1000 + step,
+                cursor_location: CursorLocation::new(window_handle, 20, 1, 1),
+                scroll_shift: None,
+            };
+            let effects = reduce_cursor_event(&mut state, "n", event, EventSource::External);
+            if matches!(effects.render_action, RenderAction::Draw(_)) {
+                observed_draw = true;
+            }
+            assert!(
+                !matches!(effects.render_action, RenderAction::ClearAll),
+                "unexpected clear-all for repeated window switch step {step}"
+            );
+            assert_ne!(
+                effects.render_cleanup_action,
+                RenderCleanupAction::Schedule,
+                "unexpected cleanup scheduling while repeatedly switching windows at step {step}"
+            );
+            now_ms += 16.0;
+        }
+        assert!(observed_draw, "expected repeated switches to produce draws");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn prop_window_change_clears_when_smear_between_buffers_disabled(
+            start_row in 1_u16..120,
+            start_col in 1_u16..220,
+            switched_row in 120_u16..280,
+            switched_col in 120_u16..280,
+            initial_window in any::<i64>(),
+            initial_buffer in any::<i64>(),
+            window_delta in 1_i16..32,
+            buffer_delta in 1_i16..32,
+            initial_seed in any::<u32>(),
+            switched_seed in any::<u32>(),
+        ) {
+            let mut state = RuntimeState::default();
+            state.config.smear_between_buffers = false;
+
+            let initial = event_with_location(
+                f64::from(start_row),
+                f64::from(start_col),
+                100.0,
+                initial_seed,
+                initial_window,
+                initial_buffer,
+            );
+            let _ = reduce_cursor_event(&mut state, "n", initial, EventSource::External);
+
+            let switched = event_with_location(
+                f64::from(switched_row),
+                f64::from(switched_col),
+                116.0,
+                switched_seed,
+                initial_window.wrapping_add(i64::from(window_delta)),
+                initial_buffer.wrapping_add(i64::from(buffer_delta)),
+            );
+            let effects = reduce_cursor_event(&mut state, "n", switched, EventSource::External);
+
+            prop_assert!(matches!(effects.render_action, RenderAction::ClearAll));
+            prop_assert_eq!(effects.render_cleanup_action, RenderCleanupAction::Schedule);
+        }
+
+        #[test]
+        fn prop_repeated_window_switches_do_not_clear_when_smear_between_buffers_enabled(
+            switches in vec((20_u16..260, 20_u16..260, any::<u32>()), 1..96),
+        ) {
+            let mut state = RuntimeState::default();
+            state.config.smear_between_buffers = true;
+
+            let initial = event_with_location(5.0, 6.0, 100.0, 7, 10, 20);
+            let _ = reduce_cursor_event(&mut state, "n", initial, EventSource::External);
+
+            let mut now_ms = 120.0;
+            for (index, (row, col, seed)) in switches.into_iter().enumerate() {
+                let window_handle = if index % 2 == 0 { 100_i64 } else { 101_i64 };
+                let step_event = event_with_location(
+                    f64::from(row),
+                    f64::from(col),
+                    now_ms,
+                    seed,
+                    window_handle,
+                    20,
+                );
+                let effects = reduce_cursor_event(&mut state, "n", step_event, EventSource::External);
+                prop_assert!(
+                    !matches!(effects.render_action, RenderAction::ClearAll),
+                    "unexpected clear-all at step {index}"
+                );
+                prop_assert_ne!(
+                    effects.render_cleanup_action,
+                    RenderCleanupAction::Schedule,
+                    "unexpected cleanup scheduling at step {}",
+                    index
+                );
+                now_ms += 16.0;
+            }
+        }
+
+        #[test]
+        fn prop_idle_animation_ticks_are_idempotent(
+            ticks in vec((0_u16..320, 0_u16..320, any::<u32>()), 1..96),
+        ) {
+            let mut state = RuntimeState::default();
+            state.mark_initialized();
+            state.stop_animation();
+            let tracked_before = state.tracked_location();
+            let last_tick_before = state.last_tick_ms();
+            let lag_before = state.lag_ms();
+
+            let mut now_ms = 100.0;
+            for (row, col, seed) in ticks {
+                let tick = event_with_location(
+                    f64::from(row),
+                    f64::from(col),
+                    now_ms,
+                    seed,
+                    10,
+                    20,
+                );
+                let effects = reduce_cursor_event(&mut state, "n", tick, EventSource::AnimationTick);
+                prop_assert!(matches!(effects.render_action, RenderAction::Noop));
+                prop_assert_eq!(effects.render_cleanup_action, RenderCleanupAction::None);
+                prop_assert!(state.is_initialized());
+                prop_assert!(!state.is_animating());
+                prop_assert_eq!(state.tracked_location(), tracked_before);
+                prop_assert_eq!(state.last_tick_ms(), last_tick_before);
+                prop_assert_eq!(state.lag_ms(), lag_before);
+                now_ms += 16.0;
+            }
+        }
+
+        #[test]
+        fn prop_clear_all_and_external_noop_always_emit_cleanup_intent(
+            steps in vec((any::<bool>(), 0_u16..320, 0_u16..320, any::<u32>(), any::<i64>(), any::<i64>()), 1..160),
+        ) {
+            let mut state = RuntimeState::default();
+            let mut now_ms = 100.0;
+
+            for (is_external, row, col, seed, window_handle, buffer_handle) in steps {
+                let source = if is_external {
+                    EventSource::External
+                } else {
+                    EventSource::AnimationTick
+                };
+                let step_event = event_with_location(
+                    f64::from(row),
+                    f64::from(col),
+                    now_ms,
+                    seed,
+                    window_handle,
+                    buffer_handle,
+                );
+                let effects = reduce_cursor_event(&mut state, "n", step_event, source);
+
+                if matches!(effects.render_action, RenderAction::ClearAll) {
+                    prop_assert_ne!(effects.render_cleanup_action, RenderCleanupAction::None);
+                }
+                if source == EventSource::External
+                    && matches!(effects.render_action, RenderAction::Noop)
+                {
+                    prop_assert_ne!(effects.render_cleanup_action, RenderCleanupAction::None);
+                }
+
+                now_ms += 8.0;
+            }
+        }
+    }
+}

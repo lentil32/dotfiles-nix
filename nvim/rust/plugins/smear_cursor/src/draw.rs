@@ -20,6 +20,12 @@ const OCTANT_CODE_MIN: i64 = 0x1CD00;
 const OCTANT_CODE_MAX: i64 = 0x1CDE7;
 const PARTICLE_ZINDEX_OFFSET: u32 = 1;
 const BLOCK_ASPECT_RATIO: f64 = 2.0;
+const ADAPTIVE_POOL_MIN_BUDGET: usize = 16;
+const ADAPTIVE_POOL_HARD_MAX_BUDGET: usize = 256;
+const ADAPTIVE_POOL_BUDGET_MARGIN: usize = 8;
+const ADAPTIVE_POOL_EWMA_SCALE: u64 = 1000;
+const ADAPTIVE_POOL_EWMA_PREV_WEIGHT: u64 = 7;
+const ADAPTIVE_POOL_EWMA_NEW_WEIGHT: u64 = 3;
 
 const BOTTOM_BLOCKS: [&str; 9] = ["█", "▇", "▆", "▅", "▄", "▃", "▂", "▁", " "];
 const LEFT_BLOCKS: [&str; 9] = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
@@ -72,7 +78,6 @@ pub(crate) struct RenderFrame {
     pub(crate) matrix_pixel_threshold: f64,
     pub(crate) matrix_pixel_threshold_vertical_bar: f64,
     pub(crate) matrix_pixel_min_factor: f64,
-    pub(crate) max_kept_windows: usize,
     pub(crate) windows_zindex: u32,
     pub(crate) gradient: Option<GradientInfo>,
 }
@@ -95,16 +100,120 @@ struct WindowBufferHandle {
     buffer_id: i32,
 }
 
-#[derive(Default, Debug)]
-struct TabWindows {
-    active: usize,
-    windows: Vec<WindowBufferHandle>,
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct FrameEpoch(u64);
+
+impl FrameEpoch {
+    const ZERO: Self = Self(0);
+
+    fn next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CachedWindowLifecycle {
+    Available { last_used_epoch: FrameEpoch },
+    InUse { epoch: FrameEpoch },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EpochRollover {
+    AvailableUnchanged,
+    ReleasedForReuse,
+    RecoveredStaleInUse,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CachedRenderWindow {
+    handles: WindowBufferHandle,
+    lifecycle: CachedWindowLifecycle,
+}
+
+impl CachedRenderWindow {
+    fn new_in_use(handles: WindowBufferHandle, epoch: FrameEpoch) -> Self {
+        Self {
+            handles,
+            lifecycle: CachedWindowLifecycle::InUse { epoch },
+        }
+    }
+
+    fn is_available_for_reuse(self) -> bool {
+        matches!(self.lifecycle, CachedWindowLifecycle::Available { .. })
+    }
+
+    fn mark_in_use(&mut self, epoch: FrameEpoch) -> bool {
+        match self.lifecycle {
+            CachedWindowLifecycle::Available { .. } => {
+                self.lifecycle = CachedWindowLifecycle::InUse { epoch };
+                true
+            }
+            CachedWindowLifecycle::InUse { .. } => false,
+        }
+    }
+
+    fn rollover_to_next_epoch(&mut self, previous_epoch: FrameEpoch) -> EpochRollover {
+        match self.lifecycle {
+            CachedWindowLifecycle::Available { .. } => EpochRollover::AvailableUnchanged,
+            CachedWindowLifecycle::InUse { epoch } if epoch == previous_epoch => {
+                self.lifecycle = CachedWindowLifecycle::Available {
+                    last_used_epoch: epoch,
+                };
+                EpochRollover::ReleasedForReuse
+            }
+            CachedWindowLifecycle::InUse { epoch } => {
+                self.lifecycle = CachedWindowLifecycle::Available {
+                    last_used_epoch: epoch,
+                };
+                EpochRollover::RecoveredStaleInUse
+            }
+        }
+    }
+
+    fn available_epoch(self) -> Option<FrameEpoch> {
+        match self.lifecycle {
+            CachedWindowLifecycle::Available { last_used_epoch } => Some(last_used_epoch),
+            CachedWindowLifecycle::InUse { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TabWindows {
+    current_epoch: FrameEpoch,
+    frame_demand: usize,
+    reuse_scan_index: usize,
+    windows: Vec<CachedRenderWindow>,
+    ewma_demand_milli: u64,
+    cached_budget: usize,
+}
+
+impl Default for TabWindows {
+    fn default() -> Self {
+        Self {
+            current_epoch: FrameEpoch::ZERO,
+            frame_demand: 0,
+            reuse_scan_index: 0,
+            windows: Vec::new(),
+            ewma_demand_milli: 0,
+            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct DrawState {
     tabs: HashMap<i32, TabWindows>,
     bulge_above: bool,
+}
+
+impl Default for DrawState {
+    fn default() -> Self {
+        Self {
+            tabs: HashMap::new(),
+            bulge_above: false,
+        }
+    }
 }
 
 static DRAW_STATE: LazyLock<Mutex<DrawState>> = LazyLock::new(|| Mutex::new(DrawState::default()));
@@ -398,6 +507,45 @@ fn buffer_from_handle_i32(handle: i32) -> Option<api::Buffer> {
     }
 }
 
+fn buffer_has_render_marker(buffer: &api::Buffer) -> bool {
+    let opts = OptionOpts::builder().buf(buffer.clone()).build();
+    let Ok(filetype) = api::get_option_value::<String>("filetype", &opts) else {
+        return false;
+    };
+    if filetype != "smear-cursor" {
+        return false;
+    }
+
+    let Ok(buftype) = api::get_option_value::<String>("buftype", &opts) else {
+        return false;
+    };
+    buftype == "nofile"
+}
+
+fn window_buffer(window: &api::Window) -> Option<api::Buffer> {
+    if !window.is_valid() {
+        return None;
+    }
+    let args = Array::from_iter([Object::from(window.handle())]);
+    let buffer_handle: i32 = api::call_function("nvim_win_get_buf", args).ok()?;
+    buffer_from_handle_i32(buffer_handle)
+}
+
+fn close_orphan_render_windows(namespace_id: u32) {
+    let _event_ignore = EventIgnoreGuard::set_all();
+    for window in api::list_wins() {
+        let Some(mut buffer) = window_buffer(&window) else {
+            continue;
+        };
+        if !buffer_has_render_marker(&buffer) {
+            continue;
+        }
+
+        let _ = buffer.del_extmark(namespace_id, EXTMARK_ID);
+        let _ = window.close(true);
+    }
+}
+
 pub(crate) fn clear_buffer_namespace(buffer: &mut api::Buffer, namespace_id: u32) {
     let _ = buffer.clear_namespace(namespace_id, 0..);
 }
@@ -443,31 +591,51 @@ fn initialize_window_options(window: &api::Window) -> Result<()> {
     Ok(())
 }
 
+fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {
+    if let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id) {
+        let _ = buffer.del_extmark(namespace_id, EXTMARK_ID);
+    }
+    if let Some(window) = window_from_handle_i32(handles.window_id) {
+        let _ = window.close(true);
+    }
+}
+
 fn get_or_create_window(
     draw_state: &mut DrawState,
+    namespace_id: u32,
     tab_handle: i32,
     row: i64,
     col: i64,
     zindex: u32,
 ) -> Result<(api::Window, api::Buffer)> {
     let tab_windows = draw_state.tabs.entry(tab_handle).or_default();
-    tab_windows.active = tab_windows.active.saturating_add(1);
+    while tab_windows.reuse_scan_index < tab_windows.windows.len() {
+        let index = tab_windows.reuse_scan_index;
+        tab_windows.reuse_scan_index = tab_windows.reuse_scan_index.saturating_add(1);
 
-    while tab_windows.active <= tab_windows.windows.len() {
-        let index = tab_windows.active - 1;
-        let handle = tab_windows.windows[index];
+        let cached = tab_windows.windows[index];
+        if !cached.is_available_for_reuse() {
+            continue;
+        }
 
-        if let (Some(mut window), Some(buffer)) = (
-            window_from_handle_i32(handle.window_id),
-            buffer_from_handle_i32(handle.buffer_id),
-        ) {
+        let maybe_window = window_from_handle_i32(cached.handles.window_id);
+        let maybe_buffer = buffer_from_handle_i32(cached.handles.buffer_id);
+
+        if let (Some(mut window), Some(buffer)) = (maybe_window, maybe_buffer) {
             let config = float_window_config(row, col, zindex);
             if window.set_config(&config).is_ok() {
-                return Ok((window, buffer));
+                if tab_windows.windows[index].mark_in_use(tab_windows.current_epoch) {
+                    tab_windows.frame_demand = tab_windows.frame_demand.saturating_add(1);
+                    return Ok((window, buffer));
+                }
             }
         }
 
+        close_cached_window(namespace_id, cached.handles);
         tab_windows.windows.remove(index);
+        if tab_windows.reuse_scan_index > 0 {
+            tab_windows.reuse_scan_index -= 1;
+        }
     }
 
     // Match upstream Lua behavior: avoid triggering unrelated autocmds while
@@ -479,58 +647,200 @@ fn get_or_create_window(
     initialize_buffer_options(&buffer)?;
     initialize_window_options(&window)?;
 
-    let index = tab_windows.active - 1;
     let handles = WindowBufferHandle {
         window_id: window.handle(),
         buffer_id: buffer.handle(),
     };
 
-    if index == tab_windows.windows.len() {
-        tab_windows.windows.push(handles);
-    } else {
-        tab_windows.windows[index] = handles;
-    }
+    tab_windows.windows.push(CachedRenderWindow::new_in_use(
+        handles,
+        tab_windows.current_epoch,
+    ));
+    tab_windows.frame_demand = tab_windows.frame_demand.saturating_add(1);
+    tab_windows.reuse_scan_index = tab_windows.windows.len();
 
     Ok((window, buffer))
 }
 
-fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32, max_kept_windows: usize) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AdaptiveBudgetState {
+    ewma_demand_milli: u64,
+    cached_budget: usize,
+}
+
+fn ceil_div_u64(lhs: u64, rhs: u64) -> u64 {
+    if rhs == 0 {
+        return 0;
+    }
+    let quotient = lhs / rhs;
+    if lhs % rhs == 0 {
+        quotient
+    } else {
+        quotient.saturating_add(1)
+    }
+}
+
+fn next_adaptive_budget(previous: AdaptiveBudgetState, frame_demand: usize) -> AdaptiveBudgetState {
+    let demand_milli = u64::try_from(frame_demand)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(ADAPTIVE_POOL_EWMA_SCALE);
+    let weighted_prev = previous
+        .ewma_demand_milli
+        .saturating_mul(ADAPTIVE_POOL_EWMA_PREV_WEIGHT);
+    let weighted_new = demand_milli.saturating_mul(ADAPTIVE_POOL_EWMA_NEW_WEIGHT);
+    let denominator = ADAPTIVE_POOL_EWMA_PREV_WEIGHT.saturating_add(ADAPTIVE_POOL_EWMA_NEW_WEIGHT);
+    let next_ewma = if previous.ewma_demand_milli == 0 {
+        demand_milli
+    } else {
+        weighted_prev
+            .saturating_add(weighted_new)
+            .saturating_add(denominator.saturating_sub(1))
+            / denominator.max(1)
+    };
+    let ewma_demand =
+        usize::try_from(ceil_div_u64(next_ewma, ADAPTIVE_POOL_EWMA_SCALE)).unwrap_or(usize::MAX);
+    let target_budget = ewma_demand
+        .saturating_add(ADAPTIVE_POOL_BUDGET_MARGIN)
+        .clamp(ADAPTIVE_POOL_MIN_BUDGET, ADAPTIVE_POOL_HARD_MAX_BUDGET);
+    let next_budget = if target_budget >= previous.cached_budget {
+        target_budget
+    } else {
+        previous
+            .cached_budget
+            .saturating_sub(ADAPTIVE_POOL_BUDGET_MARGIN)
+            .max(target_budget)
+            .max(ADAPTIVE_POOL_MIN_BUDGET)
+    };
+
+    AdaptiveBudgetState {
+        ewma_demand_milli: next_ewma,
+        cached_budget: next_budget,
+    }
+}
+
+fn lru_prune_indices(windows: &[CachedRenderWindow], keep_count: usize) -> Vec<usize> {
+    let mut ordered: Vec<(usize, FrameEpoch)> = windows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cached)| cached.available_epoch().map(|epoch| (index, epoch)))
+        .collect();
+    if ordered.len() <= keep_count {
+        return Vec::new();
+    }
+
+    let remove_count = ordered.len().saturating_sub(keep_count);
+    ordered.sort_by(|lhs, rhs| lhs.1.cmp(&rhs.1).then(lhs.0.cmp(&rhs.0)));
+
+    let mut remove_indices: Vec<usize> = ordered
+        .into_iter()
+        .take(remove_count)
+        .map(|(index, _)| index)
+        .collect();
+    remove_indices.sort_unstable();
+    remove_indices
+}
+
+fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
+    let hide_config = hide_window_config();
     for tab_windows in draw_state.tabs.values_mut() {
-        let hide_count = tab_windows.active.min(max_kept_windows);
-        for index in 0..hide_count {
-            let handles = tab_windows.windows[index];
+        let next_budget = next_adaptive_budget(
+            AdaptiveBudgetState {
+                ewma_demand_milli: tab_windows.ewma_demand_milli,
+                cached_budget: tab_windows.cached_budget,
+            },
+            tab_windows.frame_demand,
+        );
+        tab_windows.ewma_demand_milli = next_budget.ewma_demand_milli;
+        tab_windows.cached_budget = next_budget.cached_budget;
+        let previous_epoch = tab_windows.current_epoch;
+        tab_windows.current_epoch = tab_windows.current_epoch.next();
+        tab_windows.frame_demand = 0;
+        tab_windows.reuse_scan_index = 0;
 
-            if let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id) {
-                let _ = buffer.del_extmark(namespace_id, EXTMARK_ID);
+        let mut index = 0;
+        while index < tab_windows.windows.len() {
+            let handles = tab_windows.windows[index].handles;
+            let maybe_window = window_from_handle_i32(handles.window_id);
+            let maybe_buffer = buffer_from_handle_i32(handles.buffer_id);
+
+            if maybe_window.is_none() || maybe_buffer.is_none() {
+                close_cached_window(namespace_id, handles);
+                tab_windows.windows.remove(index);
+                continue;
             }
 
-            if let Some(mut window) = window_from_handle_i32(handles.window_id)
-                && window.set_config(&hide_window_config()).is_err()
-            {
-                let _ = window.close(true);
+            let rollover = tab_windows.windows[index].rollover_to_next_epoch(previous_epoch);
+            if matches!(
+                rollover,
+                EpochRollover::ReleasedForReuse | EpochRollover::RecoveredStaleInUse
+            ) {
+                if let Some(mut buffer) = maybe_buffer {
+                    let _ = buffer.del_extmark(namespace_id, EXTMARK_ID);
+                }
+
+                if let Some(mut window) = maybe_window
+                    && window.set_config(&hide_config).is_err()
+                {
+                    close_cached_window(namespace_id, handles);
+                    tab_windows.windows.remove(index);
+                    continue;
+                }
             }
+
+            index += 1;
         }
 
-        tab_windows.active = 0;
+        debug_assert!(
+            tab_windows
+                .windows
+                .iter()
+                .all(|cached| cached.is_available_for_reuse()),
+            "cached render windows must be available after epoch rollover"
+        );
 
-        if tab_windows.windows.len() > max_kept_windows {
+        let remove_indices = lru_prune_indices(&tab_windows.windows, tab_windows.cached_budget);
+        if !remove_indices.is_empty() {
             // Match upstream Lua behavior: close extra windows with events
             // ignored to avoid incidental side effects.
             let _event_ignore = EventIgnoreGuard::set_all();
-            for handles in tab_windows.windows.iter().skip(max_kept_windows).copied() {
-                if let Some(window) = window_from_handle_i32(handles.window_id) {
-                    let _ = window.close(true);
-                }
+            for remove_index in remove_indices.into_iter().rev() {
+                let cached = tab_windows.windows.remove(remove_index);
+                close_cached_window(namespace_id, cached.handles);
             }
-            tab_windows.windows.truncate(max_kept_windows);
         }
     }
 }
 
-pub(crate) fn clear_all_namespaces(namespace_id: u32, max_kept_windows: usize) {
+fn purge_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
+    // Closing helper windows can trigger unrelated autocommands; suppress them
+    // while tearing down all cached render state.
+    let _event_ignore = EventIgnoreGuard::set_all();
+
+    for tab_windows in draw_state.tabs.values() {
+        for cached in tab_windows.windows.iter().copied() {
+            close_cached_window(namespace_id, cached.handles);
+        }
+    }
+
+    draw_state.tabs.clear();
+    draw_state.bulge_above = false;
+    close_orphan_render_windows(namespace_id);
+}
+
+pub(crate) fn clear_active_render_windows(namespace_id: u32) {
+    let mut draw_state = draw_state_lock();
+    clear_cached_windows(&mut draw_state, namespace_id);
+}
+
+pub(crate) fn purge_render_windows(namespace_id: u32) {
+    let mut draw_state = draw_state_lock();
+    purge_cached_windows(&mut draw_state, namespace_id);
+}
+
+pub(crate) fn clear_all_namespaces(namespace_id: u32) {
     {
         let mut draw_state = draw_state_lock();
-        clear_cached_windows(&mut draw_state, namespace_id, max_kept_windows);
+        purge_cached_windows(&mut draw_state, namespace_id);
     }
 
     for mut buffer in api::list_bufs() {
@@ -1136,7 +1446,8 @@ fn draw_character(
     }
 
     let tab_handle = api::get_current_tabpage().handle();
-    let (_, mut buffer) = get_or_create_window(draw_state, tab_handle, row, col, zindex)?;
+    let (_, mut buffer) =
+        get_or_create_window(draw_state, namespace_id, tab_handle, row, col, zindex)?;
 
     let extmark_opts = SetExtmarkOpts::builder()
         .id(EXTMARK_ID)
@@ -1147,6 +1458,131 @@ fn draw_character(
 
     let _ = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ADAPTIVE_POOL_BUDGET_MARGIN, ADAPTIVE_POOL_EWMA_SCALE, ADAPTIVE_POOL_HARD_MAX_BUDGET,
+        ADAPTIVE_POOL_MIN_BUDGET, AdaptiveBudgetState, CachedRenderWindow, CachedWindowLifecycle,
+        EpochRollover, FrameEpoch, WindowBufferHandle, lru_prune_indices, next_adaptive_budget,
+    };
+
+    #[test]
+    fn adaptive_budget_has_floor_when_idle() {
+        let previous = AdaptiveBudgetState {
+            ewma_demand_milli: 0,
+            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
+        };
+
+        let next = next_adaptive_budget(previous, 0);
+        assert_eq!(next.cached_budget, ADAPTIVE_POOL_MIN_BUDGET);
+        assert_eq!(next.ewma_demand_milli, 0);
+    }
+
+    #[test]
+    fn adaptive_budget_grows_with_demand() {
+        let previous = AdaptiveBudgetState {
+            ewma_demand_milli: 0,
+            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
+        };
+
+        let next = next_adaptive_budget(previous, 120);
+        assert_eq!(next.ewma_demand_milli, 120_u64 * ADAPTIVE_POOL_EWMA_SCALE);
+        assert_eq!(next.cached_budget, 120 + ADAPTIVE_POOL_BUDGET_MARGIN);
+    }
+
+    #[test]
+    fn adaptive_budget_shrinks_gradually() {
+        let previous = AdaptiveBudgetState {
+            ewma_demand_milli: 120_u64 * ADAPTIVE_POOL_EWMA_SCALE,
+            cached_budget: 120,
+        };
+
+        let next = next_adaptive_budget(previous, 0);
+        assert_eq!(next.cached_budget, 112);
+    }
+
+    #[test]
+    fn adaptive_budget_honors_hard_max() {
+        let previous = AdaptiveBudgetState {
+            ewma_demand_milli: 0,
+            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
+        };
+
+        let next = next_adaptive_budget(previous, 10_000);
+        assert_eq!(next.cached_budget, ADAPTIVE_POOL_HARD_MAX_BUDGET);
+    }
+
+    fn cached(window_id: i32, buffer_id: i32, last_used_epoch: u64) -> CachedRenderWindow {
+        CachedRenderWindow {
+            handles: WindowBufferHandle {
+                window_id,
+                buffer_id,
+            },
+            lifecycle: CachedWindowLifecycle::Available {
+                last_used_epoch: FrameEpoch(last_used_epoch),
+            },
+        }
+    }
+
+    #[test]
+    fn rollover_releases_in_use_window_from_previous_epoch() {
+        let handles = WindowBufferHandle {
+            window_id: 10,
+            buffer_id: 11,
+        };
+        let mut cached = CachedRenderWindow::new_in_use(handles, FrameEpoch(9));
+        assert_eq!(
+            cached.rollover_to_next_epoch(FrameEpoch(9)),
+            EpochRollover::ReleasedForReuse
+        );
+        assert_eq!(cached.available_epoch(), Some(FrameEpoch(9)));
+        assert!(cached.is_available_for_reuse());
+    }
+
+    #[test]
+    fn rollover_recovers_stale_in_use_window() {
+        let handles = WindowBufferHandle {
+            window_id: 20,
+            buffer_id: 21,
+        };
+        let mut cached = CachedRenderWindow::new_in_use(handles, FrameEpoch(3));
+        assert_eq!(
+            cached.rollover_to_next_epoch(FrameEpoch(5)),
+            EpochRollover::RecoveredStaleInUse
+        );
+        assert_eq!(cached.available_epoch(), Some(FrameEpoch(3)));
+        assert!(cached.is_available_for_reuse());
+    }
+
+    #[test]
+    fn lru_prune_indices_empty_when_budget_sufficient() {
+        let windows = vec![cached(1, 10, 7), cached(2, 20, 8)];
+        assert!(lru_prune_indices(&windows, 2).is_empty());
+        assert!(lru_prune_indices(&windows, 3).is_empty());
+    }
+
+    #[test]
+    fn lru_prune_indices_removes_oldest_epochs_deterministically() {
+        let windows = vec![
+            cached(1, 10, 9),
+            CachedRenderWindow::new_in_use(
+                WindowBufferHandle {
+                    window_id: 90,
+                    buffer_id: 99,
+                },
+                FrameEpoch(9),
+            ),
+            cached(2, 20, 1),
+            cached(3, 30, 4),
+            cached(4, 40, 1),
+            cached(5, 50, 7),
+        ];
+
+        // Keep three newest reusable epochs; in-use windows are excluded from LRU pruning.
+        assert_eq!(lru_prune_indices(&windows, 3), vec![2, 4]);
+    }
 }
 
 fn draw_partial_block(
@@ -1846,13 +2282,12 @@ pub(crate) fn draw_current(namespace_id: u32, frame: &RenderFrame) -> Result<()>
 
     let corners = ensure_clockwise(&frame.corners);
     let geometry = precompute_quad_geometry(&corners, frame);
+    let (editor_max_row, editor_max_col) = editor_bounds()?;
+    let mut draw_state = draw_state_lock();
+    clear_cached_windows(&mut draw_state, namespace_id);
     if geometry.top > geometry.bottom || geometry.left > geometry.right {
         return Ok(());
     }
-
-    let (editor_max_row, editor_max_col) = editor_bounds()?;
-    let mut draw_state = draw_state_lock();
-    clear_cached_windows(&mut draw_state, namespace_id, frame.max_kept_windows);
 
     draw_state.bulge_above = !draw_state.bulge_above;
     let bulge_above = draw_state.bulge_above;

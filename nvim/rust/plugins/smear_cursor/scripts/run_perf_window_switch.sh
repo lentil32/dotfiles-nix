@@ -3,7 +3,10 @@ set -euo pipefail
 
 # Build the Neovim cdylib and run the headless window-switch perf harness.
 # Override parameters with env vars, for example:
-# SMEAR_BETWEEN_BUFFERS=true SMEAR_STRESS_ITERATIONS=50000 scripts/run_perf_window_switch.sh
+# SMEAR_BETWEEN_BUFFERS=true SMEAR_STRESS_ITERATIONS=50000 \
+# SMEAR_MAX_RECOVERY_RATIO=1.35 SMEAR_MAX_STRESS_RATIO=1.8 \
+# SMEAR_DRAIN_EVERY=16 SMEAR_KEYS_PER_SWITCH=3 \
+# SMEAR_DELAY_EVENT_TO_SMEAR=1 SMEAR_DELAY_AFTER_KEY=5 scripts/run_perf_window_switch.sh
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd)"

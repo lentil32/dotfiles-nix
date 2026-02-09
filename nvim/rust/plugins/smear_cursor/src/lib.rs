@@ -4,6 +4,8 @@ mod draw;
 mod events;
 mod lua;
 mod octant_chars;
+mod reducer;
+mod state;
 mod step;
 mod types;
 

@@ -157,8 +157,7 @@ require("lze").load({
     for_cat = "general",
     event = "DeferredUIEnter",
     -- Already available via startupPlugins; no packadd needed.
-    load = function(_)
-    end,
+    load = function(_) end,
     after = function()
       if not should_enable_smear_cursor() then
         return

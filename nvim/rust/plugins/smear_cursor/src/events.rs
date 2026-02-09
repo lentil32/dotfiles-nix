@@ -1,17 +1,18 @@
-use crate::animation::{
-    center, compute_stiffnesses, corners_for_cursor, corners_for_render, initial_velocity,
-    reached_target, simulate_step, zero_velocity_corners,
-};
 use crate::config::RuntimeConfig;
 use crate::draw::{
-    GradientInfo, RenderFrame, clear_all_namespaces, clear_highlight_cache, draw_current,
-    draw_target_hack_block,
+    RenderFrame, clear_active_render_windows, clear_all_namespaces, clear_highlight_cache,
+    draw_current, draw_target_hack_block, purge_render_windows,
 };
 use crate::lua::{
     bool_from_object, f64_from_object, i64_from_object, invalid_key, parse_indexed_objects,
     string_from_object,
 };
-use crate::types::{BASE_TIME_INTERVAL, DEFAULT_RNG_STATE, EPSILON, Particle, Point, StepInput};
+use crate::reducer::{
+    CursorEventContext, EventSource, RenderAction, RenderCleanupAction, ScrollShift, as_delay_ms,
+    build_render_frame, external_settle_delay_ms, next_animation_delay_ms, reduce_cursor_event,
+};
+use crate::state::{CursorLocation, CursorShape, CursorSnapshot, RuntimeState};
+use crate::types::{DEFAULT_RNG_STATE, EPSILON, Point};
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{
     ClearAutocmdsOpts, CreateAugroupOpts, CreateAutocmdOpts, CreateCommandOpts, OptionOpts,
@@ -22,7 +23,8 @@ use nvim_oxi::conversion::FromObject;
 use nvim_oxi::libuv::TimerHandle;
 use nvim_oxi::schedule;
 use nvim_oxi::{Array, Dictionary, Object, Result, String as NvimString};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -34,6 +36,7 @@ const LOG_LEVEL_WARN: i64 = 3;
 const LOG_LEVEL_INFO: i64 = 2;
 const LOG_LEVEL_ERROR: i64 = 4;
 const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
+const MIN_RENDER_CLEANUP_DELAY_MS: u64 = 200;
 const CURSOR_COLOR_LUAEVAL_EXPR: &str = r##"(function()
   local function get_hl_color(group, attr)
     local hl = vim.api.nvim_get_hl(0, { name = group, link = false })
@@ -71,156 +74,64 @@ const CURSOR_COLOR_LUAEVAL_EXPR: &str = r##"(function()
   return nil
 end)()"##;
 
-#[derive(Debug)]
-struct RuntimeState {
-    config: RuntimeConfig,
-    enabled: bool,
-    initialized: bool,
-    animating: bool,
-    disabled_in_buffer: bool,
-    namespace_id: Option<u32>,
-    current_corners: [Point; 4],
-    target_corners: [Point; 4],
-    target_position: Point,
-    velocity_corners: [Point; 4],
-    stiffnesses: [f64; 4],
-    particles: Vec<Particle>,
-    previous_center: Point,
-    rng_state: u32,
-    last_tick_ms: Option<f64>,
-    lag_ms: f64,
-    last_window_handle: Option<i64>,
-    last_buffer_handle: Option<i64>,
-    last_top_row: Option<i64>,
-    last_line: Option<i64>,
-    cursor_hidden: bool,
-    pending_external_event: Option<CursorSnapshot>,
-    color_at_cursor: Option<String>,
+#[derive(Debug, Clone, Copy, Default)]
+struct RenderCleanupGeneration {
+    value: u64,
 }
 
-impl Default for RuntimeState {
-    fn default() -> Self {
-        Self {
-            config: RuntimeConfig::default(),
-            enabled: true,
-            initialized: false,
-            animating: false,
-            disabled_in_buffer: false,
-            namespace_id: None,
-            current_corners: [Point::ZERO; 4],
-            target_corners: [Point::ZERO; 4],
-            target_position: Point::ZERO,
-            velocity_corners: [Point::ZERO; 4],
-            stiffnesses: [0.6; 4],
-            particles: Vec::new(),
-            previous_center: Point::ZERO,
-            rng_state: DEFAULT_RNG_STATE,
-            last_tick_ms: None,
-            lag_ms: 0.0,
-            last_window_handle: None,
-            last_buffer_handle: None,
-            last_top_row: None,
-            last_line: None,
-            cursor_hidden: false,
-            pending_external_event: None,
-            color_at_cursor: None,
-        }
+impl RenderCleanupGeneration {
+    fn bump(&mut self) -> u64 {
+        self.value = self.value.wrapping_add(1);
+        self.value
+    }
+
+    const fn current(self) -> u64 {
+        self.value
     }
 }
 
-#[derive(Debug, Clone)]
-struct CursorSnapshot {
-    mode: String,
-    row: f64,
-    col: f64,
+#[derive(Debug, Default)]
+struct EngineState {
+    runtime: RuntimeState,
+    render_cleanup_generation: RenderCleanupGeneration,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CursorEventContext {
-    row: f64,
-    col: f64,
-    now_ms: f64,
-    seed: u32,
-    current_win_handle: i64,
-    current_buf_handle: i64,
-    current_top_row: i64,
-    current_line: i64,
-    scroll_shift: Option<ScrollShift>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ScrollShift {
-    shift: f64,
-    min_row: f64,
-    max_row: f64,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum EventSource {
-    External,
-    AnimationTick,
-}
-
-#[derive(Debug)]
-enum RenderAction {
-    Draw(RenderFrame),
-    ClearAll,
-    Noop,
-}
-
-#[derive(Debug)]
-struct TransitionEffects {
-    render_action: RenderAction,
-    step_interval_ms: Option<f64>,
-    notify_delay_disabled: bool,
-}
-
-impl TransitionEffects {
-    fn clear_all() -> Self {
-        Self {
-            render_action: RenderAction::ClearAll,
-            step_interval_ms: None,
-            notify_delay_disabled: false,
-        }
+impl EngineState {
+    fn bump_render_cleanup_generation(&mut self) -> u64 {
+        self.render_cleanup_generation.bump()
     }
 
-    fn draw(frame: RenderFrame, step_interval_ms: Option<f64>) -> Self {
-        Self {
-            render_action: RenderAction::Draw(frame),
-            step_interval_ms,
-            notify_delay_disabled: false,
-        }
-    }
-
-    fn noop() -> Self {
-        Self {
-            render_action: RenderAction::Noop,
-            step_interval_ms: None,
-            notify_delay_disabled: false,
-        }
-    }
-
-    fn noop_with_step(step_interval_ms: f64) -> Self {
-        Self {
-            render_action: RenderAction::Noop,
-            step_interval_ms: Some(step_interval_ms),
-            notify_delay_disabled: false,
-        }
-    }
-
-    fn with_delay_notification(mut self, enabled: bool) -> Self {
-        self.notify_delay_disabled = self.notify_delay_disabled || enabled;
-        self
+    const fn current_render_cleanup_generation(&self) -> u64 {
+        self.render_cleanup_generation.current()
     }
 }
 
-static RUNTIME_STATE: LazyLock<Mutex<RuntimeState>> =
-    LazyLock::new(|| Mutex::new(RuntimeState::default()));
+struct RuntimeStateGuard(std::sync::MutexGuard<'static, EngineState>);
+
+impl Deref for RuntimeStateGuard {
+    type Target = RuntimeState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.runtime
+    }
+}
+
+impl DerefMut for RuntimeStateGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0.runtime
+    }
+}
+
+static ENGINE_STATE: LazyLock<Mutex<EngineState>> =
+    LazyLock::new(|| Mutex::new(EngineState::default()));
 static LOG_LEVEL: AtomicI64 = AtomicI64::new(LOG_LEVEL_INFO);
 thread_local! {
     static ANIMATION_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
     static EXTERNAL_EVENT_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
     static KEY_EVENT_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
+    static RENDER_CLEANUP_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
+    static EXTERNAL_TRIGGER_PENDING: Cell<bool> = const { Cell::new(false) };
+    static LAST_AUTOCMD_EVENT_MS: Cell<f64> = const { Cell::new(0.0) };
 }
 
 fn set_log_level(level: i64) {
@@ -313,33 +224,108 @@ fn clear_key_event_timer() {
     });
 }
 
-fn state_lock() -> std::sync::MutexGuard<'static, RuntimeState> {
+fn clear_render_cleanup_timer() {
+    RENDER_CLEANUP_TIMER.with(|timer_slot| {
+        let _ = timer_slot.borrow_mut().take();
+    });
+}
+
+fn bump_render_cleanup_generation() -> u64 {
+    let mut state = engine_lock();
+    state.bump_render_cleanup_generation()
+}
+
+fn current_render_cleanup_generation() -> u64 {
+    let state = engine_lock();
+    state.current_render_cleanup_generation()
+}
+
+fn invalidate_render_cleanup() {
+    let _ = bump_render_cleanup_generation();
+    clear_render_cleanup_timer();
+}
+
+fn clear_external_trigger_pending() {
+    EXTERNAL_TRIGGER_PENDING.with(|pending| pending.set(false));
+}
+
+fn mark_external_trigger_pending_if_idle() -> bool {
+    EXTERNAL_TRIGGER_PENDING.with(|pending| {
+        if pending.get() {
+            false
+        } else {
+            pending.set(true);
+            true
+        }
+    })
+}
+
+fn note_autocmd_event_now() {
+    LAST_AUTOCMD_EVENT_MS.with(|value| value.set(now_ms()));
+}
+
+fn clear_autocmd_event_timestamp() {
+    LAST_AUTOCMD_EVENT_MS.with(|value| value.set(0.0));
+}
+
+fn elapsed_ms_since_last_autocmd_event(now_ms: f64) -> f64 {
+    LAST_AUTOCMD_EVENT_MS.with(|value| {
+        let last = value.get();
+        if last <= 0.0 {
+            f64::INFINITY
+        } else {
+            (now_ms - last).max(0.0)
+        }
+    })
+}
+
+fn reset_transient_event_state() {
+    clear_animation_timer();
+    clear_external_event_timer();
+    clear_key_event_timer();
+    clear_external_trigger_pending();
+    clear_autocmd_event_timestamp();
+    invalidate_render_cleanup();
+}
+
+fn reset_transient_event_state_without_generation_bump() {
+    clear_animation_timer();
+    clear_external_event_timer();
+    clear_key_event_timer();
+    clear_external_trigger_pending();
+    clear_autocmd_event_timestamp();
+    clear_render_cleanup_timer();
+}
+
+fn engine_lock() -> std::sync::MutexGuard<'static, EngineState> {
     loop {
-        match RUNTIME_STATE.lock() {
+        match ENGINE_STATE.lock() {
             Ok(guard) => return guard,
             Err(poisoned) => {
                 let mut guard = poisoned.into_inner();
-                let namespace_id = guard.namespace_id;
-                *guard = RuntimeState::default();
+                let namespace_id = guard.runtime.namespace_id;
+                *guard = EngineState::default();
                 drop(guard);
 
-                RUNTIME_STATE.clear_poison();
+                ENGINE_STATE.clear_poison();
                 set_log_level(RuntimeConfig::default().logging_level);
                 warn("state mutex poisoned; resetting runtime state");
                 if let Some(namespace_id) = namespace_id {
-                    clear_all_namespaces(namespace_id, RuntimeConfig::default().max_kept_windows);
+                    clear_all_namespaces(namespace_id);
                 }
-                clear_animation_timer();
-                clear_external_event_timer();
-                clear_key_event_timer();
+                reset_transient_event_state_without_generation_bump();
             }
         }
     }
 }
 
+fn state_lock() -> RuntimeStateGuard {
+    RuntimeStateGuard(engine_lock())
+}
+
 fn is_enabled() -> bool {
     let state = state_lock();
-    state.enabled
+    state.is_enabled()
 }
 
 fn now_ms() -> f64 {
@@ -459,14 +445,25 @@ fn current_buffer_filetype(buffer: &api::Buffer) -> Result<String> {
 }
 
 fn skip_current_buffer_events(buffer: &api::Buffer) -> Result<bool> {
+    let should_check_filetype = {
+        let state = state_lock();
+        if state.is_delay_disabled() {
+            return Ok(true);
+        }
+        !state.config.filetypes_disabled.is_empty()
+    };
+
+    if !should_check_filetype {
+        return Ok(false);
+    }
+
     let filetype = current_buffer_filetype(buffer)?;
     let state = state_lock();
-    Ok(state.disabled_in_buffer
-        || state
-            .config
-            .filetypes_disabled
-            .iter()
-            .any(|entry| entry == &filetype))
+    Ok(state
+        .config
+        .filetypes_disabled
+        .iter()
+        .any(|entry| entry == &filetype))
 }
 
 fn should_track_cursor_color(config: &RuntimeConfig) -> bool {
@@ -605,35 +602,30 @@ fn maybe_scroll_shift(
     window: &api::Window,
     scroll_buffer_space: bool,
     current_corners: &[Point; 4],
-    previous_window_handle: Option<i64>,
-    previous_buffer_handle: Option<i64>,
-    current_window_handle: i64,
-    current_buffer_handle: i64,
-    previous_top_row: Option<i64>,
-    previous_line: Option<i64>,
-    current_top_row: i64,
-    current_line: i64,
+    previous_location: Option<CursorLocation>,
+    current_location: CursorLocation,
 ) -> Result<Option<ScrollShift>> {
     if !scroll_buffer_space {
         return Ok(None);
     }
-    if previous_window_handle != Some(current_window_handle)
-        || previous_buffer_handle != Some(current_buffer_handle)
+    let Some(previous_location) = previous_location else {
+        return Ok(None);
+    };
+    if previous_location.window_handle != current_location.window_handle
+        || previous_location.buffer_handle != current_location.buffer_handle
     {
         return Ok(None);
     }
     if !smear_outside_cmd_row(current_corners)? {
         return Ok(None);
     }
-
-    let (Some(previous_top_row), Some(previous_line)) = (previous_top_row, previous_line) else {
-        return Ok(None);
-    };
-    if previous_top_row == current_top_row || previous_line == current_line {
+    if previous_location.top_row == current_location.top_row
+        || previous_location.line == current_location.line
+    {
         return Ok(None);
     }
 
-    let shift = screen_distance(window, previous_top_row, current_top_row)?;
+    let shift = screen_distance(window, previous_location.top_row, current_location.top_row)?;
     let (window_row_zero, _) = window.get_position()?;
     let window_height = f64::from(window.get_height()?);
     let min_row = window_row_zero as f64 + 1.0;
@@ -667,42 +659,6 @@ fn snapshots_match(lhs: &CursorSnapshot, rhs: &CursorSnapshot) -> bool {
         && (lhs.col - rhs.col).abs() <= EPSILON
 }
 
-fn as_delay_ms(value: f64) -> u64 {
-    let clamped = if value.is_finite() {
-        value.max(0.0).floor()
-    } else {
-        0.0
-    };
-    if clamped > u64::MAX as f64 {
-        u64::MAX
-    } else {
-        clamped as u64
-    }
-}
-
-fn next_animation_delay_ms(
-    state: &mut RuntimeState,
-    step_interval_ms: f64,
-    callback_duration_ms: f64,
-) -> u64 {
-    state.lag_ms = (state.lag_ms + step_interval_ms - state.config.time_interval).max(0.0);
-
-    let mut delay_ms = (state.config.time_interval - callback_duration_ms).max(0.0);
-    if state.lag_ms <= delay_ms {
-        delay_ms -= state.lag_ms;
-        state.lag_ms = 0.0;
-    } else {
-        state.lag_ms -= delay_ms;
-        delay_ms = 0.0;
-    }
-
-    as_delay_ms(delay_ms)
-}
-
-fn external_settle_delay_ms(delay_event_to_smear: f64) -> u64 {
-    as_delay_ms(delay_event_to_smear)
-}
-
 fn on_animation_tick() -> Result<()> {
     on_cursor_event_impl(EventSource::AnimationTick)
 }
@@ -714,13 +670,13 @@ fn on_external_settle_tick() -> Result<()> {
         (
             state.config.smear_to_cmd,
             external_settle_delay_ms(state.config.delay_event_to_smear),
-            state.pending_external_event.clone(),
+            state.pending_external_event_cloned(),
         )
     };
 
     if mode == "c" && !smear_to_cmd {
         let mut state = state_lock();
-        state.pending_external_event = None;
+        state.clear_pending_external_event();
         return Ok(());
     }
 
@@ -732,7 +688,7 @@ fn on_external_settle_tick() -> Result<()> {
     let Some(current_snapshot) = current_snapshot else {
         {
             let mut state = state_lock();
-            state.pending_external_event = None;
+            state.clear_pending_external_event();
         }
         return Ok(());
     };
@@ -740,14 +696,14 @@ fn on_external_settle_tick() -> Result<()> {
     if snapshots_match(&current_snapshot, &expected_snapshot) {
         {
             let mut state = state_lock();
-            state.pending_external_event = None;
+            state.clear_pending_external_event();
         }
         return on_cursor_event_impl(EventSource::External);
     }
 
     {
         let mut state = state_lock();
-        state.pending_external_event = Some(current_snapshot);
+        state.set_pending_external_event(Some(current_snapshot));
     }
     schedule_external_event_timer(delay_ms);
     Ok(())
@@ -799,6 +755,80 @@ fn schedule_external_event_timer(delay_ms: u64) {
         Err(err) => {
             warn(&format!("failed to schedule external settle tick: {err}"));
         }
+    }
+}
+
+fn schedule_key_event_timer(delay_ms: u64) {
+    clear_key_event_timer();
+
+    if delay_ms == 0 {
+        schedule_external_event_trigger();
+        return;
+    }
+
+    let timeout = Duration::from_millis(delay_ms);
+    match TimerHandle::once(timeout, || {
+        schedule(|_| {
+            clear_key_event_timer();
+            schedule_external_event_trigger();
+        });
+    }) {
+        Ok(handle) => {
+            KEY_EVENT_TIMER.with(|timer_slot| {
+                *timer_slot.borrow_mut() = Some(handle);
+            });
+        }
+        Err(err) => {
+            warn(&format!("failed to schedule key-event tick: {err}"));
+        }
+    }
+}
+
+fn render_cleanup_delay_ms(config: &RuntimeConfig) -> u64 {
+    let baseline =
+        as_delay_ms(config.time_interval + config.delay_event_to_smear + config.delay_after_key);
+    baseline.max(MIN_RENDER_CLEANUP_DELAY_MS)
+}
+
+fn schedule_render_cleanup_timer(namespace_id: u32, delay_ms: u64) {
+    let generation = bump_render_cleanup_generation();
+    clear_render_cleanup_timer();
+
+    let timeout = Duration::from_millis(delay_ms);
+    match TimerHandle::once(timeout, move || {
+        schedule(move |_| {
+            clear_render_cleanup_timer();
+
+            if current_render_cleanup_generation() != generation {
+                return;
+            }
+            purge_render_windows(namespace_id);
+        });
+    }) {
+        Ok(handle) => {
+            RENDER_CLEANUP_TIMER.with(|timer_slot| {
+                *timer_slot.borrow_mut() = Some(handle);
+            });
+        }
+        Err(err) => {
+            warn(&format!("failed to schedule render cleanup: {err}"));
+        }
+    }
+}
+
+fn schedule_render_cleanup(namespace_id: u32) {
+    let delay_ms = {
+        let state = state_lock();
+        render_cleanup_delay_ms(&state.config)
+    };
+    schedule_render_cleanup_timer(namespace_id, delay_ms);
+}
+
+fn apply_render_cleanup_action(namespace_id: u32, action: RenderCleanupAction) {
+    match action {
+        RenderCleanupAction::None => {}
+        RenderCleanupAction::Schedule => schedule_render_cleanup(namespace_id),
+        RenderCleanupAction::Invalidate => invalidate_render_cleanup(),
     }
 }
 
@@ -872,54 +902,9 @@ fn validated_cterm_color_index(key: &str, value: Object) -> Result<u16> {
     Ok(parsed as u16)
 }
 
-fn build_step_input(
-    state: &RuntimeState,
-    mode: &str,
-    time_interval: f64,
-    vertical_bar: bool,
-    horizontal_bar: bool,
-    particles: Vec<Particle>,
-) -> StepInput {
-    StepInput {
-        mode: mode.to_string(),
-        time_interval,
-        config_time_interval: state.config.time_interval,
-        current_corners: state.current_corners,
-        target_corners: state.target_corners,
-        velocity_corners: state.velocity_corners,
-        stiffnesses: state.stiffnesses,
-        max_length: state.config.max_length,
-        max_length_insert_mode: state.config.max_length_insert_mode,
-        damping: state.config.damping,
-        damping_insert_mode: state.config.damping_insert_mode,
-        delay_disable: state.config.delay_disable,
-        particles,
-        previous_center: state.previous_center,
-        particle_damping: state.config.particle_damping,
-        particles_enabled: state.config.particles_enabled,
-        particle_gravity: state.config.particle_gravity,
-        particle_random_velocity: state.config.particle_random_velocity,
-        particle_max_num: state.config.particle_max_num,
-        particle_spread: state.config.particle_spread,
-        particles_per_second: state.config.particles_per_second,
-        particles_per_length: state.config.particles_per_length,
-        particle_max_initial_velocity: state.config.particle_max_initial_velocity,
-        particle_velocity_from_cursor: state.config.particle_velocity_from_cursor,
-        particle_max_lifetime: state.config.particle_max_lifetime,
-        particle_lifetime_distribution_exponent: state
-            .config
-            .particle_lifetime_distribution_exponent,
-        min_distance_emit_particles: state.config.min_distance_emit_particles,
-        vertical_bar,
-        horizontal_bar,
-        block_aspect_ratio: state.config.block_aspect_ratio,
-        rng_state: state.rng_state,
-    }
-}
-
 fn apply_runtime_options(state: &mut RuntimeState, opts: &Dictionary) -> Result<()> {
     if let Some(value) = opts.get(&NvimString::from("enabled")).cloned() {
-        state.enabled = bool_from_object("enabled", value)?;
+        state.set_enabled(bool_from_object("enabled", value)?);
     }
     if let Some(value) = opts.get(&NvimString::from("time_interval")).cloned() {
         state.config.time_interval = validated_f64("time_interval", value)?.max(1.0);
@@ -969,14 +954,6 @@ fn apply_runtime_options(state: &mut RuntimeState, opts: &Dictionary) -> Result<
     }
     if let Some(value) = opts.get(&NvimString::from("hide_target_hack")).cloned() {
         state.config.hide_target_hack = bool_from_object("hide_target_hack", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("max_kept_windows")).cloned() {
-        let parsed = i64_from_object("max_kept_windows", value)?;
-        if parsed < 0 {
-            return Err(invalid_key("max_kept_windows", "non-negative integer"));
-        }
-        state.config.max_kept_windows = usize::try_from(parsed)
-            .map_err(|_| invalid_key("max_kept_windows", "non-negative integer"))?;
     }
     if let Some(value) = opts.get(&NvimString::from("windows_zindex")).cloned() {
         let parsed = i64_from_object("windows_zindex", value)?;
@@ -1362,427 +1339,6 @@ fn apply_runtime_options(state: &mut RuntimeState, opts: &Dictionary) -> Result<
     Ok(())
 }
 
-fn build_render_frame(
-    state: &RuntimeState,
-    mode: &str,
-    render_corners: [Point; 4],
-    target: Point,
-    vertical_bar: bool,
-    gradient_indexes: Option<(usize, usize)>,
-) -> RenderFrame {
-    let gradient = gradient_indexes.map(|(index_head, index_tail)| {
-        let origin = render_corners[index_head];
-        let direction = Point {
-            row: render_corners[index_tail].row - origin.row,
-            col: render_corners[index_tail].col - origin.col,
-        };
-        let length_squared = direction.row * direction.row + direction.col * direction.col;
-        let direction_scaled = if length_squared > 1.0 {
-            Point {
-                row: direction.row / length_squared,
-                col: direction.col / length_squared,
-            }
-        } else {
-            Point::ZERO
-        };
-
-        GradientInfo {
-            origin,
-            direction_scaled,
-        }
-    });
-
-    RenderFrame {
-        mode: mode.to_string(),
-        corners: render_corners,
-        target,
-        target_corners: state.target_corners,
-        vertical_bar,
-        particles: state.particles.clone(),
-        cursor_color: state.config.cursor_color.clone(),
-        cursor_color_insert_mode: state.config.cursor_color_insert_mode.clone(),
-        normal_bg: state.config.normal_bg.clone(),
-        transparent_bg_fallback_color: state.config.transparent_bg_fallback_color.clone(),
-        cterm_cursor_colors: state.config.cterm_cursor_colors.clone(),
-        cterm_bg: state.config.cterm_bg,
-        color_at_cursor: state.color_at_cursor.clone(),
-        hide_target_hack: state.config.hide_target_hack,
-        never_draw_over_target: state.config.never_draw_over_target,
-        legacy_computing_symbols_support: state.config.legacy_computing_symbols_support,
-        legacy_computing_symbols_support_vertical_bars: state
-            .config
-            .legacy_computing_symbols_support_vertical_bars,
-        use_diagonal_blocks: state.config.use_diagonal_blocks,
-        max_slope_horizontal: state.config.max_slope_horizontal,
-        min_slope_vertical: state.config.min_slope_vertical,
-        max_angle_difference_diagonal: state.config.max_angle_difference_diagonal,
-        max_offset_diagonal: state.config.max_offset_diagonal,
-        min_shade_no_diagonal: state.config.min_shade_no_diagonal,
-        min_shade_no_diagonal_vertical_bar: state.config.min_shade_no_diagonal_vertical_bar,
-        max_shade_no_matrix: state.config.max_shade_no_matrix,
-        particle_max_lifetime: state.config.particle_max_lifetime,
-        particle_switch_octant_braille: state.config.particle_switch_octant_braille,
-        particles_over_text: state.config.particles_over_text,
-        color_levels: state.config.color_levels,
-        gamma: state.config.gamma,
-        gradient_exponent: state.config.gradient_exponent,
-        matrix_pixel_threshold: state.config.matrix_pixel_threshold,
-        matrix_pixel_threshold_vertical_bar: state.config.matrix_pixel_threshold_vertical_bar,
-        matrix_pixel_min_factor: state.config.matrix_pixel_min_factor,
-        max_kept_windows: state.config.max_kept_windows,
-        windows_zindex: state.config.windows_zindex,
-        gradient,
-    }
-}
-
-fn gradient_indexes_for_corners(
-    current_corners: &[Point; 4],
-    target_corners: &[Point; 4],
-) -> Option<(usize, usize)> {
-    let mut distance_head_to_target_squared = f64::INFINITY;
-    let mut distance_tail_to_target_squared = 0.0_f64;
-    let mut index_head = 0_usize;
-    let mut index_tail = 0_usize;
-
-    for index in 0..4 {
-        let distance_squared = current_corners[index].distance_squared(target_corners[index]);
-        if distance_squared < distance_head_to_target_squared {
-            distance_head_to_target_squared = distance_squared;
-            index_head = index;
-        }
-        if distance_squared > distance_tail_to_target_squared {
-            distance_tail_to_target_squared = distance_squared;
-            index_tail = index;
-        }
-    }
-
-    if distance_tail_to_target_squared <= EPSILON {
-        None
-    } else {
-        Some((index_head, index_tail))
-    }
-}
-
-fn reset_animation_timing(state: &mut RuntimeState) {
-    state.last_tick_ms = None;
-    state.lag_ms = 0.0;
-}
-
-fn clamp_row_to_window(row: f64, scroll_shift: ScrollShift) -> f64 {
-    row.max(scroll_shift.min_row).min(scroll_shift.max_row)
-}
-
-fn apply_scroll_shift_to_state(
-    state: &mut RuntimeState,
-    vertical_bar: bool,
-    horizontal_bar: bool,
-    scroll_shift: ScrollShift,
-) {
-    let shifted_row = clamp_row_to_window(
-        state.current_corners[0].row - scroll_shift.shift,
-        scroll_shift,
-    );
-    let shifted_col = state.current_corners[0].col;
-    state.current_corners =
-        corners_for_cursor(shifted_row, shifted_col, vertical_bar, horizontal_bar);
-    state.previous_center = center(&state.current_corners);
-
-    for particle in &mut state.particles {
-        particle.position.row -= scroll_shift.shift;
-    }
-}
-
-fn should_jump_to_target(
-    state: &RuntimeState,
-    handles_changed: bool,
-    target_row: f64,
-    target_col: f64,
-) -> bool {
-    if handles_changed {
-        return !state.config.smear_between_buffers;
-    }
-
-    let current_row = state.current_corners[0].row;
-    let current_col = state.current_corners[0].col;
-    let delta_row = (target_row - current_row).abs();
-    let delta_col = (target_col - current_col).abs();
-
-    (!state.config.smear_between_neighbor_lines && delta_row <= 1.5)
-        || (delta_row < state.config.min_vertical_distance_smear
-            && delta_col < state.config.min_horizontal_distance_smear)
-        || (!state.config.smear_horizontally && delta_row <= 0.5)
-        || (!state.config.smear_vertically && delta_col <= 0.5)
-        || (!state.config.smear_diagonally && delta_row > 0.5 && delta_col > 0.5)
-}
-
-fn external_mode_ignores_cursor(config: &RuntimeConfig, mode: &str) -> bool {
-    mode == "c" && !config.smear_to_cmd
-}
-
-fn external_mode_requires_jump(config: &RuntimeConfig, mode: &str) -> bool {
-    (mode == "i" && !config.smear_insert_mode)
-        || (mode == "R" && !config.smear_replace_mode)
-        || (mode == "t" && !config.smear_terminal_mode)
-}
-
-fn transition_cursor_event(
-    state: &mut RuntimeState,
-    mode: &str,
-    event: CursorEventContext,
-    source: EventSource,
-) -> TransitionEffects {
-    if !state.enabled {
-        state.animating = false;
-        reset_animation_timing(state);
-        return TransitionEffects::clear_all();
-    }
-
-    if state.disabled_in_buffer {
-        if source == EventSource::External {
-            return TransitionEffects::noop();
-        }
-        if !state.animating {
-            reset_animation_timing(state);
-            return TransitionEffects::clear_all();
-        }
-    }
-
-    let vertical_bar = state.config.cursor_is_vertical_bar(mode);
-    let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
-    let mut target_position = if source == EventSource::AnimationTick {
-        state.target_position
-    } else {
-        Point {
-            row: event.row,
-            col: event.col,
-        }
-    };
-    let handles_changed = state.last_window_handle != Some(event.current_win_handle)
-        || state.last_buffer_handle != Some(event.current_buf_handle);
-
-    if source == EventSource::External && external_mode_ignores_cursor(&state.config, mode) {
-        return TransitionEffects::noop();
-    }
-
-    if source == EventSource::External && external_mode_requires_jump(&state.config, mode) {
-        let corners = corners_for_cursor(
-            target_position.row,
-            target_position.col,
-            vertical_bar,
-            horizontal_bar,
-        );
-        state.current_corners = corners;
-        state.target_corners = corners;
-        state.target_position = target_position;
-        state.previous_center = center(&state.current_corners);
-        // Match upstream Lua behavior: jump updates position/target but does not
-        // force-stop an in-flight animation loop or clear velocity state.
-        state.initialized = true;
-        state.last_window_handle = Some(event.current_win_handle);
-        state.last_buffer_handle = Some(event.current_buf_handle);
-        state.last_top_row = Some(event.current_top_row);
-        state.last_line = Some(event.current_line);
-        return TransitionEffects::clear_all();
-    }
-
-    if !state.initialized {
-        let corners = corners_for_cursor(
-            target_position.row,
-            target_position.col,
-            vertical_bar,
-            horizontal_bar,
-        );
-        state.current_corners = corners;
-        state.target_corners = corners;
-        state.target_position = target_position;
-        state.velocity_corners = zero_velocity_corners();
-        state.previous_center = center(&state.current_corners);
-        state.particles.clear();
-        state.rng_state = event.seed;
-        state.disabled_in_buffer = false;
-        state.initialized = true;
-        state.animating = false;
-        reset_animation_timing(state);
-        state.last_window_handle = Some(event.current_win_handle);
-        state.last_buffer_handle = Some(event.current_buf_handle);
-        state.last_top_row = Some(event.current_top_row);
-        state.last_line = Some(event.current_line);
-        state.cursor_hidden = false;
-        let frame = build_render_frame(
-            state,
-            mode,
-            state.current_corners,
-            target_position,
-            vertical_bar,
-            None,
-        );
-        return TransitionEffects::draw(frame, None);
-    }
-
-    if source == EventSource::AnimationTick && !state.animating {
-        return TransitionEffects::noop();
-    }
-
-    if source == EventSource::External {
-        if let Some(scroll_shift) = event.scroll_shift {
-            apply_scroll_shift_to_state(state, vertical_bar, horizontal_bar, scroll_shift);
-            target_position.row =
-                clamp_row_to_window(target_position.row - scroll_shift.shift, scroll_shift);
-        }
-
-        if should_jump_to_target(
-            state,
-            handles_changed,
-            target_position.row,
-            target_position.col,
-        ) {
-            let corners = corners_for_cursor(
-                target_position.row,
-                target_position.col,
-                vertical_bar,
-                horizontal_bar,
-            );
-            state.current_corners = corners;
-            state.target_corners = corners;
-            state.target_position = target_position;
-            state.velocity_corners = zero_velocity_corners();
-            state.previous_center = center(&state.current_corners);
-            state.animating = false;
-            reset_animation_timing(state);
-            state.last_window_handle = Some(event.current_win_handle);
-            state.last_buffer_handle = Some(event.current_buf_handle);
-            state.last_top_row = Some(event.current_top_row);
-            state.last_line = Some(event.current_line);
-            return TransitionEffects::clear_all();
-        }
-        state.target_corners = corners_for_cursor(
-            target_position.row,
-            target_position.col,
-            vertical_bar,
-            horizontal_bar,
-        );
-        state.target_position = target_position;
-        state.stiffnesses = compute_stiffnesses(
-            &state.config,
-            mode,
-            &state.current_corners,
-            &state.target_corners,
-        );
-    }
-
-    let was_animating = state.animating;
-    if source == EventSource::External && !was_animating {
-        state.velocity_corners = initial_velocity(
-            &state.current_corners,
-            &state.target_corners,
-            state.config.anticipation,
-        );
-        state.animating = true;
-    }
-    let just_started = source == EventSource::External && !was_animating && state.animating;
-
-    if source == EventSource::External {
-        state.last_window_handle = Some(event.current_win_handle);
-        state.last_buffer_handle = Some(event.current_buf_handle);
-        state.last_top_row = Some(event.current_top_row);
-        state.last_line = Some(event.current_line);
-    }
-
-    let should_advance = match source {
-        EventSource::AnimationTick => state.animating,
-        // Match upstream behavior: target updates do not advance physics while already animating.
-        // The first transition after a jump starts animation immediately.
-        EventSource::External => just_started,
-    };
-
-    if should_advance {
-        let step_interval = if just_started {
-            state.last_tick_ms = Some(event.now_ms);
-            BASE_TIME_INTERVAL
-        } else {
-            let interval = match state.last_tick_ms {
-                Some(previous) => (event.now_ms - previous).max(0.0),
-                None => BASE_TIME_INTERVAL,
-            };
-            state.last_tick_ms = Some(event.now_ms);
-            interval
-        };
-
-        let particles = std::mem::take(&mut state.particles);
-        let step_input = build_step_input(
-            state,
-            mode,
-            step_interval,
-            vertical_bar,
-            horizontal_bar,
-            particles,
-        );
-        let step_output = simulate_step(step_input);
-
-        state.current_corners = step_output.current_corners;
-        state.velocity_corners = step_output.velocity_corners;
-        state.previous_center = step_output.previous_center;
-        state.rng_state = step_output.rng_state;
-        state.particles = step_output.particles;
-        let mut notify_delay_disabled = false;
-        if step_output.disabled_due_to_delay && !state.disabled_in_buffer {
-            state.disabled_in_buffer = true;
-            notify_delay_disabled = true;
-        }
-
-        if reached_target(
-            &state.config,
-            mode,
-            &state.current_corners,
-            &state.target_corners,
-            &state.velocity_corners,
-            &state.particles,
-        ) {
-            state.current_corners = state.target_corners;
-            state.velocity_corners = zero_velocity_corners();
-            state.animating = false;
-            reset_animation_timing(state);
-            return TransitionEffects::clear_all().with_delay_notification(notify_delay_disabled);
-        }
-
-        if state.lag_ms > EPSILON {
-            return TransitionEffects::noop_with_step(step_interval)
-                .with_delay_notification(notify_delay_disabled);
-        }
-
-        let render_corners =
-            corners_for_render(&state.config, &state.current_corners, &state.target_corners);
-        let frame = build_render_frame(
-            state,
-            mode,
-            render_corners,
-            target_position,
-            vertical_bar,
-            Some((step_output.index_head, step_output.index_tail)),
-        );
-        return TransitionEffects::draw(frame, Some(step_interval))
-            .with_delay_notification(notify_delay_disabled);
-    }
-
-    if source == EventSource::External {
-        return TransitionEffects::noop();
-    }
-
-    let gradient_indexes =
-        gradient_indexes_for_corners(&state.current_corners, &state.target_corners);
-    let render_corners =
-        corners_for_render(&state.config, &state.current_corners, &state.target_corners);
-    let frame = build_render_frame(
-        state,
-        mode,
-        render_corners,
-        target_position,
-        vertical_bar,
-        gradient_indexes,
-    );
-    TransitionEffects::draw(frame, None)
-}
-
 fn on_cursor_event_impl(source: EventSource) -> Result<()> {
     let mode = mode_string();
     let namespace_id = ensure_namespace_id();
@@ -1803,7 +1359,7 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
 
     let fallback_target_position = if source == EventSource::AnimationTick {
         let state = state_lock();
-        if state.initialized {
+        if state.is_initialized() {
             Some((state.target_position.row, state.target_position.col))
         } else {
             None
@@ -1828,21 +1384,17 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
     let current_buf_handle = i64::from(buffer.handle());
     let current_top_row = line_value("w0")?;
     let current_line = line_value(".")?;
-    let (
-        scroll_buffer_space,
-        previous_window_handle,
-        previous_buffer_handle,
-        previous_top_row,
-        previous_line,
-        current_corners,
-    ) = {
+    let current_location = CursorLocation::new(
+        current_win_handle,
+        current_buf_handle,
+        current_top_row,
+        current_line,
+    );
+    let (scroll_buffer_space, previous_location, current_corners) = {
         let state = state_lock();
         (
             state.config.scroll_buffer_space,
-            state.last_window_handle,
-            state.last_buffer_handle,
-            state.last_top_row,
-            state.last_line,
+            state.tracked_location(),
             state.current_corners,
         )
     };
@@ -1851,14 +1403,8 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
             &window,
             scroll_buffer_space,
             &current_corners,
-            previous_window_handle,
-            previous_buffer_handle,
-            current_win_handle,
-            current_buf_handle,
-            previous_top_row,
-            previous_line,
-            current_top_row,
-            current_line,
+            previous_location,
+            current_location,
         )?
     } else {
         None
@@ -1870,17 +1416,14 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         col: cursor_col,
         now_ms: event_now_ms,
         seed: seed_from_clock(),
-        current_win_handle,
-        current_buf_handle,
-        current_top_row,
-        current_line,
+        cursor_location: current_location,
         scroll_shift,
     };
 
     let effects = {
         let mut state = state_lock();
         state.namespace_id = Some(namespace_id);
-        transition_cursor_event(&mut state, &mode, event, source)
+        reduce_cursor_event(&mut state, &mode, event, source)
     };
 
     if effects.notify_delay_disabled {
@@ -1904,45 +1447,47 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
             }
             let mut state = state_lock();
             if should_unhide_while_animating {
-                if state.cursor_hidden {
+                if state.is_cursor_hidden() {
                     if !state.config.hide_target_hack {
                         unhide_real_cursor();
                     }
-                    state.cursor_hidden = false;
+                    state.set_cursor_hidden(false);
                 }
-            } else if !state.cursor_hidden && mode != "c" {
+            } else if !state.is_cursor_hidden() && mode != "c" {
                 if !state.config.hide_target_hack {
                     hide_real_cursor();
                 }
-                state.cursor_hidden = true;
+                state.set_cursor_hidden(true);
             }
         }
         RenderAction::ClearAll => {
-            let max_kept_windows = {
-                let state = state_lock();
-                state.config.max_kept_windows
-            };
-            clear_all_namespaces(namespace_id, max_kept_windows);
+            clear_active_render_windows(namespace_id);
             if mode == "c" {
                 let _ = api::command("redraw");
             }
             let mut state = state_lock();
-            if state.cursor_hidden {
+            if state.is_cursor_hidden() {
                 if !state.config.hide_target_hack {
                     unhide_real_cursor();
                 }
-                state.cursor_hidden = false;
+                state.set_cursor_hidden(false);
             }
         }
         RenderAction::Noop => {}
     }
+
+    apply_render_cleanup_action(namespace_id, effects.render_cleanup_action);
 
     let callback_duration_ms = (now_ms() - event_now_ms).max(0.0);
     let should_schedule =
         source == EventSource::AnimationTick || effects.step_interval_ms.is_some();
     let maybe_delay = {
         let mut state = state_lock();
-        if should_schedule && state.enabled && state.animating && !state.disabled_in_buffer {
+        if should_schedule
+            && state.is_enabled()
+            && state.is_animating()
+            && !state.is_delay_disabled()
+        {
             let step_interval_ms = effects
                 .step_interval_ms
                 .unwrap_or(state.config.time_interval);
@@ -1967,7 +1512,7 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
 fn on_external_event_trigger() -> Result<()> {
     if !is_enabled() {
         let mut state = state_lock();
-        state.pending_external_event = None;
+        state.clear_pending_external_event();
         return Ok(());
     }
 
@@ -1977,7 +1522,7 @@ fn on_external_event_trigger() -> Result<()> {
     }
     if skip_current_buffer_events(&buffer)? {
         let mut state = state_lock();
-        state.pending_external_event = None;
+        state.clear_pending_external_event();
         return Ok(());
     }
 
@@ -1992,7 +1537,7 @@ fn on_external_event_trigger() -> Result<()> {
     if mode == "c" && !smear_to_cmd {
         clear_external_event_timer();
         let mut state = state_lock();
-        state.pending_external_event = None;
+        state.clear_pending_external_event();
         return Ok(());
     }
 
@@ -2000,21 +1545,26 @@ fn on_external_event_trigger() -> Result<()> {
     let Some(snapshot) = snapshot else {
         {
             let mut state = state_lock();
-            state.pending_external_event = None;
+            state.clear_pending_external_event();
         }
         return Ok(());
     };
 
     {
         let mut state = state_lock();
-        state.pending_external_event = Some(snapshot);
+        state.set_pending_external_event(Some(snapshot));
     }
     schedule_external_event_timer(delay_ms);
     Ok(())
 }
 
 fn schedule_external_event_trigger() {
+    if !mark_external_trigger_pending_if_idle() {
+        return;
+    }
+
     schedule(|_| {
+        clear_external_trigger_pending();
         if let Err(err) = on_external_event_trigger() {
             warn(&format!("external event trigger failed: {err}"));
         }
@@ -2033,7 +1583,18 @@ pub(crate) fn on_key_event() -> Result<()> {
     if skip_current_buffer_events(&buffer)? {
         return Ok(());
     }
-    schedule_external_event_trigger();
+    let now = now_ms();
+    let (key_delay_ms, delay_after_key_ms) = {
+        let state = state_lock();
+        (
+            as_delay_ms(state.config.delay_after_key),
+            state.config.delay_after_key.max(0.0),
+        )
+    };
+    if elapsed_ms_since_last_autocmd_event(now) <= delay_after_key_ms {
+        return Ok(());
+    }
+    schedule_key_event_timer(key_delay_ms);
     Ok(())
 }
 
@@ -2045,8 +1606,8 @@ fn replace_real_cursor_from_event(only_hide_real_cursor: bool) -> Result<()> {
         let mut state = state_lock();
         state.namespace_id = Some(namespace_id);
 
-        if !state.enabled
-            || state.animating
+        if !state.is_enabled()
+            || state.is_animating()
             || state.config.hide_target_hack
             || !state.config.mode_allowed(&mode)
             || !smear_outside_cmd_row(&state.current_corners)?
@@ -2054,9 +1615,9 @@ fn replace_real_cursor_from_event(only_hide_real_cursor: bool) -> Result<()> {
             return Ok(());
         }
 
-        if !state.cursor_hidden {
+        if !state.is_cursor_hidden() {
             hide_real_cursor();
-            state.cursor_hidden = true;
+            state.set_cursor_hidden(true);
         }
 
         if only_hide_real_cursor {
@@ -2100,6 +1661,13 @@ fn on_cursor_event(args: AutocmdCallbackArgs) -> bool {
             return Ok(());
         }
 
+        note_autocmd_event_now();
+
+        // `vim.on_key` is a fallback for cursor-affecting actions that do not emit
+        // movement/window autocmds. Once an autocmd arrived, discard any pending
+        // key-triggered callback to avoid duplicate smears after key sequences.
+        clear_key_event_timer();
+
         if args.event == "CursorMoved" || args.event == "CursorMovedI" {
             let mut state = state_lock();
             update_tracked_cursor_color(&mut state);
@@ -2120,7 +1688,7 @@ fn on_cursor_event(args: AutocmdCallbackArgs) -> bool {
 
 fn on_buf_enter(_args: AutocmdCallbackArgs) -> bool {
     let mut state = state_lock();
-    state.disabled_in_buffer = false;
+    state.set_delay_disabled(false);
     false
 }
 
@@ -2150,48 +1718,29 @@ fn jump_to_current_cursor() -> Result<()> {
         return Ok(());
     };
 
-    let current_win_handle = i64::from(window.handle());
-    let current_buf_handle = i64::from(buffer.handle());
-    let current_top_row = line_value("w0")?;
-    let current_line = line_value(".")?;
+    let location = CursorLocation::new(
+        i64::from(window.handle()),
+        i64::from(buffer.handle()),
+        line_value("w0")?,
+        line_value(".")?,
+    );
 
-    let (max_kept_windows, hide_target_hack, unhide_cursor) = {
+    let (hide_target_hack, unhide_cursor) = {
         let mut state = state_lock();
         state.namespace_id = Some(namespace_id);
 
-        let vertical_bar = state.config.cursor_is_vertical_bar(&mode);
-        let horizontal_bar = state.config.cursor_is_horizontal_bar(&mode);
-        let corners = corners_for_cursor(row, col, vertical_bar, horizontal_bar);
+        let cursor_shape = CursorShape::new(
+            state.config.cursor_is_vertical_bar(&mode),
+            state.config.cursor_is_horizontal_bar(&mode),
+        );
+        let unhide_cursor =
+            state.sync_to_current_cursor(Point { row, col }, cursor_shape, location);
 
-        state.current_corners = corners;
-        state.target_corners = corners;
-        state.target_position = Point { row, col };
-        state.velocity_corners = zero_velocity_corners();
-        state.previous_center = center(&state.current_corners);
-        state.particles.clear();
-        state.animating = false;
-        state.initialized = true;
-        state.pending_external_event = None;
-        state.last_window_handle = Some(current_win_handle);
-        state.last_buffer_handle = Some(current_buf_handle);
-        state.last_top_row = Some(current_top_row);
-        state.last_line = Some(current_line);
-        reset_animation_timing(&mut state);
-
-        let unhide_cursor = state.cursor_hidden;
-        state.cursor_hidden = false;
-
-        (
-            state.config.max_kept_windows,
-            state.config.hide_target_hack,
-            unhide_cursor,
-        )
+        (state.config.hide_target_hack, unhide_cursor)
     };
 
-    clear_animation_timer();
-    clear_external_event_timer();
-    clear_key_event_timer();
-    clear_all_namespaces(namespace_id, max_kept_windows);
+    reset_transient_event_state();
+    clear_all_namespaces(namespace_id);
     if unhide_cursor && !hide_target_hack {
         unhide_real_cursor();
     }
@@ -2256,28 +1805,14 @@ pub(crate) fn setup(opts: Dictionary) -> Result<()> {
         state.namespace_id = Some(namespace_id);
         // Upstream Lua setup defaults enabled=true when omitted.
         if !has_enabled_option {
-            state.enabled = true;
+            state.set_enabled(true);
         }
         apply_runtime_options(&mut state, &opts)?;
         set_log_level(state.config.logging_level);
-        state.initialized = false;
-        state.animating = false;
-        state.target_position = Point::ZERO;
-        state.last_tick_ms = None;
-        state.lag_ms = 0.0;
-        state.disabled_in_buffer = false;
-        state.last_window_handle = None;
-        state.last_buffer_handle = None;
-        state.last_top_row = None;
-        state.last_line = None;
-        state.cursor_hidden = false;
-        state.pending_external_event = None;
-        state.color_at_cursor = None;
-        state.enabled
+        state.clear_runtime_state();
+        state.is_enabled()
     };
-    clear_animation_timer();
-    clear_external_event_timer();
-    clear_key_event_timer();
+    reset_transient_event_state();
 
     setup_user_command()?;
     clear_autocmd_group();
@@ -2291,26 +1826,17 @@ pub(crate) fn setup(opts: Dictionary) -> Result<()> {
 }
 
 pub(crate) fn toggle() -> Result<()> {
-    let (is_enabled, namespace_id, max_kept_windows, hide_target_hack) = {
+    let (is_enabled, namespace_id, hide_target_hack) = {
         let mut state = state_lock();
-        state.enabled = !state.enabled;
-        if !state.enabled {
-            state.animating = false;
-            state.initialized = false;
-            state.target_position = Point::ZERO;
-            state.last_tick_ms = None;
-            state.lag_ms = 0.0;
-            state.last_window_handle = None;
-            state.last_buffer_handle = None;
-            state.last_top_row = None;
-            state.last_line = None;
-            state.pending_external_event = None;
-            state.color_at_cursor = None;
+        let toggled_enabled = !state.is_enabled();
+        if toggled_enabled {
+            state.set_enabled(true);
+        } else {
+            state.disable();
         }
         (
-            state.enabled,
+            state.is_enabled(),
             state.namespace_id,
-            state.config.max_kept_windows,
             state.config.hide_target_hack,
         )
     };
@@ -2323,10 +1849,8 @@ pub(crate) fn toggle() -> Result<()> {
         } else {
             clear_autocmd_group();
             set_on_key_listener(namespace_id, false)?;
-            clear_animation_timer();
-            clear_external_event_timer();
-            clear_key_event_timer();
-            clear_all_namespaces(namespace_id, max_kept_windows);
+            reset_transient_event_state();
+            clear_all_namespaces(namespace_id);
             if !hide_target_hack {
                 unhide_real_cursor();
             }
@@ -2334,4 +1858,60 @@ pub(crate) fn toggle() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EngineState, MIN_RENDER_CLEANUP_DELAY_MS, RenderCleanupGeneration, render_cleanup_delay_ms,
+    };
+    use crate::config::RuntimeConfig;
+
+    #[test]
+    fn cleanup_delay_has_floor() {
+        let config = RuntimeConfig {
+            time_interval: 0.0,
+            delay_event_to_smear: 0.0,
+            delay_after_key: 0.0,
+            ..RuntimeConfig::default()
+        };
+
+        assert_eq!(
+            render_cleanup_delay_ms(&config),
+            MIN_RENDER_CLEANUP_DELAY_MS
+        );
+    }
+
+    #[test]
+    fn cleanup_delay_tracks_config_when_above_floor() {
+        let config = RuntimeConfig {
+            time_interval: 160.0,
+            delay_event_to_smear: 40.0,
+            delay_after_key: 20.0,
+            ..RuntimeConfig::default()
+        };
+
+        assert_eq!(render_cleanup_delay_ms(&config), 220);
+    }
+
+    #[test]
+    fn cleanup_generation_bumps_and_wraps() {
+        let mut generation = RenderCleanupGeneration::default();
+        assert_eq!(generation.current(), 0);
+        assert_eq!(generation.bump(), 1);
+        assert_eq!(generation.current(), 1);
+
+        generation = RenderCleanupGeneration { value: u64::MAX };
+        assert_eq!(generation.bump(), 0);
+        assert_eq!(generation.current(), 0);
+    }
+
+    #[test]
+    fn engine_state_exposes_cleanup_generation_transitions() {
+        let mut state = EngineState::default();
+        assert_eq!(state.current_render_cleanup_generation(), 0);
+        assert_eq!(state.bump_render_cleanup_generation(), 1);
+        assert_eq!(state.bump_render_cleanup_generation(), 2);
+        assert_eq!(state.current_render_cleanup_generation(), 2);
+    }
 }
