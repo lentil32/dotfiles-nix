@@ -46,4 +46,5 @@ List:
 - nvim-oxi
 - oil.nvim
 - snacks.nvim
+- ...
 

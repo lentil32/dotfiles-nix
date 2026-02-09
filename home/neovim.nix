@@ -104,6 +104,7 @@ in
           "rs_text"
           "rs_snacks_preview"
           "rs_autocmds"
+          "rs_smear_cursor"
         ];
         rustPluginList = map (crate: mkRustPlugin { inherit crate; }) rustPluginOrder;
         categoriesConfig = {
@@ -124,7 +125,6 @@ in
               vim.hop-nvim
               vim.nvim-autopairs
               vim.nvim-surround
-              vim.smear-cursor-nvim
               vim.sidekick-nvim
               vim.overseer-nvim
               (mkPlugin "witch-line" (

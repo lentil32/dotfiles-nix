@@ -359,6 +359,7 @@ source = "git+https://github.com/noib3/nvim-oxi?rev=fef0f72702f6928815eeec358d7a
 dependencies = [
  "mlua",
  "nvim-oxi-api",
+ "nvim-oxi-libuv",
  "nvim-oxi-luajit",
  "nvim-oxi-macros",
  "nvim-oxi-types",
@@ -376,6 +377,15 @@ dependencies = [
  "nvim-oxi-types",
  "serde",
  "serde_repr",
+ "thiserror",
+]
+
+[[package]]
+name = "nvim-oxi-libuv"
+version = "0.6.0"
+source = "git+https://github.com/noib3/nvim-oxi?rev=fef0f72702f6928815eeec358d7aa834b7290ded#fef0f72702f6928815eeec358d7aa834b7290ded"
+dependencies = [
+ "nvim-oxi-luajit",
  "thiserror",
 ]
 
@@ -663,6 +673,13 @@ dependencies = [
 
 [[package]]
 name = "rs_readline"
+version = "0.1.0"
+dependencies = [
+ "nvim-oxi",
+]
+
+[[package]]
+name = "rs_smear_cursor"
 version = "0.1.0"
 dependencies = [
  "nvim-oxi",

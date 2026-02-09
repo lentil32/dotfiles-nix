@@ -5,6 +5,7 @@ members = [
   "libs/nvim-oxi-utils",
   "plugins/project_root",
   "plugins/readline",
+  "plugins/smear_cursor",
   "plugins/snacks_preview",
   "libs/support",
   "plugins/text",

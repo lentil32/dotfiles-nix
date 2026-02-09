@@ -153,14 +153,17 @@ require("lze").load({
     end,
   },
   {
-    "smear-cursor.nvim",
+    "rs-smear-cursor",
     for_cat = "general",
     event = "DeferredUIEnter",
+    -- Already available via startupPlugins; no packadd needed.
+    load = function(_)
+    end,
     after = function()
       if not should_enable_smear_cursor() then
         return
       end
-      require("smear_cursor").setup({})
+      require("rs_smear_cursor").setup({})
     end,
   },
   {
