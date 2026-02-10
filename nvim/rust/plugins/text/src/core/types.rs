@@ -1,11 +1,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LineRange {
+pub(crate) struct LineRange {
     start: usize,
     end: usize,
 }
 
 impl LineRange {
-    pub const fn new(start: usize, end: usize) -> Result<Self, TextRangeError> {
+    pub(crate) const fn new(start: usize, end: usize) -> Result<Self, TextRangeError> {
         if start == 0 || end == 0 {
             return Err(TextRangeError::InvalidLineIndex { value: 0 });
         }
@@ -17,7 +17,7 @@ impl LineRange {
         Ok(Self { start, end })
     }
 
-    pub const fn ensure_within(self, line_count: usize) -> Result<Self, TextRangeError> {
+    pub(crate) const fn ensure_within(self, line_count: usize) -> Result<Self, TextRangeError> {
         if line_count == 0 {
             return Err(TextRangeError::EmptyBuffer);
         }
@@ -31,13 +31,13 @@ impl LineRange {
         Ok(self)
     }
 
-    pub const fn to_zero_based(self) -> (usize, usize) {
+    pub(crate) const fn to_zero_based(self) -> (usize, usize) {
         (self.start - 1, self.end)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextRangeError {
+pub(crate) enum TextRangeError {
     InvalidLineIndex {
         value: i64,
     },

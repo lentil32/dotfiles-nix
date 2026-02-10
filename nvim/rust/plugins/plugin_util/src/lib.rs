@@ -61,7 +61,10 @@ fn is_dir_path(path: &str) -> bool {
     path_is_dir(Path::new(path))
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "nvim callback signatures pass owned Lua values by value"
+)]
 fn is_dir(path: Option<String>) -> bool {
     path.as_deref().is_some_and(is_dir_path)
 }

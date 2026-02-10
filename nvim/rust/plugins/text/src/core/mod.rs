@@ -3,25 +3,25 @@ use std::collections::HashSet;
 
 mod types;
 
-pub use types::{LineRange, TextRangeError};
+pub(crate) use types::{LineRange, TextRangeError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Column(pub usize);
+pub(crate) struct Column(pub(crate) usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDirection {
+pub(crate) enum SortDirection {
     Asc,
     Desc,
 }
 
-pub fn parse_line_index(value: i64) -> Result<usize, TextRangeError> {
+pub(crate) fn parse_line_index(value: i64) -> Result<usize, TextRangeError> {
     if value < 1 {
         return Err(TextRangeError::InvalidLineIndex { value });
     }
     usize::try_from(value).map_err(|_| TextRangeError::InvalidLineIndex { value })
 }
 
-pub fn resolve_line_range(
+pub(crate) fn resolve_line_range(
     start_line: Option<i64>,
     end_line: Option<i64>,
     cursor_row: usize,
@@ -83,7 +83,7 @@ where
     indexed.into_iter().map(|entry| entry.line).collect()
 }
 
-pub fn sort_lines(lines: &[String], direction: SortDirection) -> Vec<String> {
+pub(crate) fn sort_lines(lines: &[String], direction: SortDirection) -> Vec<String> {
     sort_with(lines, |left, right| {
         stable_cmp(left.line.cmp(&right.line), direction, left.idx, right.idx)
     })
@@ -108,7 +108,7 @@ fn slice_from_column(line: &str, column: Column) -> &str {
     ""
 }
 
-pub fn sort_lines_by_column(
+pub(crate) fn sort_lines_by_column(
     lines: &[String],
     column: Column,
     direction: SortDirection,
@@ -120,7 +120,7 @@ pub fn sort_lines_by_column(
     })
 }
 
-pub fn uniquify_lines(lines: &[String]) -> Vec<String> {
+pub(crate) fn uniquify_lines(lines: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for line in lines.iter().cloned() {
@@ -131,17 +131,17 @@ pub fn uniquify_lines(lines: &[String]) -> Vec<String> {
     out
 }
 
-pub trait RngCore {
+pub(crate) trait RngCore {
     fn next_u64(&mut self) -> u64;
 }
 
 #[derive(Debug, Clone)]
-pub struct SmallRng {
+pub(crate) struct SmallRng {
     state: u64,
 }
 
 impl SmallRng {
-    pub const fn new(seed: u64) -> Self {
+    pub(crate) const fn new(seed: u64) -> Self {
         let seed = if seed == 0 {
             0x9E37_79B9_7F4A_7C15
         } else {
@@ -174,7 +174,7 @@ fn shuffle_with_rng<T>(items: &mut [T], rng: &mut impl RngCore) {
     }
 }
 
-pub fn randomize_lines(lines: &[String], seed: u64) -> Vec<String> {
+pub(crate) fn randomize_lines(lines: &[String], seed: u64) -> Vec<String> {
     let mut out = lines.to_vec();
     let mut rng = SmallRng::new(seed);
     shuffle_with_rng(&mut out, &mut rng);
@@ -222,7 +222,7 @@ fn kill_line_back_to_indentation(line: &str, column: Column) -> String {
     out
 }
 
-pub fn kill_back_to_indentation(lines: &[String], column: Column) -> Vec<String> {
+pub(crate) fn kill_back_to_indentation(lines: &[String], column: Column) -> Vec<String> {
     lines
         .iter()
         .map(|line| kill_line_back_to_indentation(line, column))
@@ -329,18 +329,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_line_range_uses_cursor_when_range_missing() -> Result<(), &'static str> {
-        let range = resolve_line_range(None, None, 4, 8).map_err(|_| "expected valid range")?;
+    fn resolve_line_range_uses_cursor_when_range_missing() {
+        let range = resolve_line_range(None, None, 4, 8);
+        assert!(range.is_ok(), "expected valid range");
+        let Some(range) = range.ok() else {
+            panic!("expected valid range");
+        };
         assert_eq!(range.to_zero_based(), (3, 4));
-        Ok(())
     }
 
     #[test]
-    fn resolve_line_range_reorders_start_end() -> Result<(), &'static str> {
-        let range =
-            resolve_line_range(Some(9), Some(3), 1, 10).map_err(|_| "expected valid range")?;
+    fn resolve_line_range_reorders_start_end() {
+        let range = resolve_line_range(Some(9), Some(3), 1, 10);
+        assert!(range.is_ok(), "expected valid range");
+        let Some(range) = range.ok() else {
+            panic!("expected valid range");
+        };
         assert_eq!(range.to_zero_based(), (2, 9));
-        Ok(())
     }
 
     #[test]

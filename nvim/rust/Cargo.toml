@@ -13,6 +13,9 @@ members = [
   "libs/nvim-utils",
 ]
 
+[workspace.package]
+rust-version = "1.90"
+
 [patch.crates-io]
 nvim-oxi = { git = "https://github.com/noib3/nvim-oxi", rev = "fef0f72702f6928815eeec358d7aa834b7290ded" }
 
@@ -23,21 +26,44 @@ nonempty = "0.12.0"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = "deny"
+missing_debug_implementations = "allow"
+unreachable_pub = "allow"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_rust_codeblocks = "deny"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
+bare_urls = "deny"
+redundant_explicit_links = "warn"
+missing_crate_level_docs = "allow"
+private_doc_tests = "allow"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "allow", priority = -1 }
 nursery = { level = "allow", priority = -1 }
+cargo = { level = "allow", priority = -1 }
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
 doc_markdown = "allow"
 too_many_lines = "allow"
-items_after_test_module = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+panic_in_result_fn = "allow"
+unreachable = "deny"
+indexing_slicing = "allow"
+exit = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+missing_assert_message = "allow"
+items_after_test_module = "allow"

@@ -213,7 +213,7 @@ static HIGHLIGHT_PALETTE_CACHE: LazyLock<Mutex<Option<HighlightPaletteKey>>> =
     LazyLock::new(|| Mutex::new(None));
 
 fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
-    eprintln!("[smear_cursor][draw] {context} failed: {err}");
+    api::err_writeln(&format!("[smear_cursor][draw] {context} failed: {err}"));
 }
 
 struct EventIgnoreGuard {
@@ -2377,9 +2377,7 @@ pub(crate) fn draw_current(namespace_id: u32, frame: &RenderFrame) -> Result<()>
                                     EdgeType::Left => &mut intersections.left,
                                     EdgeType::Right => &mut intersections.right,
                                     EdgeType::None => continue,
-                                    EdgeType::LeftDiagonal | EdgeType::RightDiagonal => {
-                                        unreachable!()
-                                    }
+                                    EdgeType::LeftDiagonal | EdgeType::RightDiagonal => continue,
                                 };
                                 if current.is_none_or(|existing| intersection > existing) {
                                     *current = Some(intersection);

@@ -178,7 +178,7 @@ pub mod notify {
     }
 
     fn report_echo_error(context: &str, err: &Error) {
-        eprintln!("nvim-oxi echo failed ({context}): {err}");
+        api::err_writeln(&format!("nvim-oxi echo failed ({context}): {err}"));
     }
 
     fn echo_message(

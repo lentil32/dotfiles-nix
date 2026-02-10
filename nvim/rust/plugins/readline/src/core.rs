@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InsertAction {
+pub(crate) enum InsertAction {
     BeginningOfLine,
     EndOfLine,
     ForwardWord,
@@ -8,7 +8,7 @@ pub enum InsertAction {
 }
 
 impl InsertAction {
-    pub const fn key_sequence(self) -> &'static str {
+    pub(crate) const fn key_sequence(self) -> &'static str {
         match self {
             Self::BeginningOfLine => "<C-o>0",
             Self::EndOfLine => "<C-o>$",
@@ -20,12 +20,12 @@ impl InsertAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransposeResult {
-    pub new_line: String,
-    pub new_col: usize,
+pub(crate) struct TransposeResult {
+    pub(crate) new_line: String,
+    pub(crate) new_col: usize,
 }
 
-pub fn transpose_chars(line: &str, cursor_col: usize) -> Option<TransposeResult> {
+pub(crate) fn transpose_chars(line: &str, cursor_col: usize) -> Option<TransposeResult> {
     let mut chars: Vec<char> = line.chars().collect();
     let char_count = chars.len();
 
@@ -71,26 +71,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transpose_ascii_middle() -> Result<(), &'static str> {
-        let result = transpose_chars("abcd", 2).ok_or("expected transpose")?;
+    fn transpose_ascii_middle() {
+        let result = transpose_chars("abcd", 2);
+        assert!(result.is_some(), "expected transpose");
+        let Some(result) = result else {
+            panic!("expected transpose");
+        };
         assert_eq!(result.new_line, "acbd");
         assert_eq!(result.new_col, 3);
-        Ok(())
     }
 
     #[test]
-    fn transpose_end_swaps_last_two() -> Result<(), &'static str> {
-        let result = transpose_chars("ab", 2).ok_or("expected transpose")?;
+    fn transpose_end_swaps_last_two() {
+        let result = transpose_chars("ab", 2);
+        assert!(result.is_some(), "expected transpose");
+        let Some(result) = result else {
+            panic!("expected transpose");
+        };
         assert_eq!(result.new_line, "ba");
         assert_eq!(result.new_col, 2);
-        Ok(())
     }
 
     #[test]
-    fn transpose_unicode_preserves_boundaries() -> Result<(), &'static str> {
-        let result = transpose_chars("a💡b", 5).ok_or("expected transpose")?;
+    fn transpose_unicode_preserves_boundaries() {
+        let result = transpose_chars("a💡b", 5);
+        assert!(result.is_some(), "expected transpose");
+        let Some(result) = result else {
+            panic!("expected transpose");
+        };
         assert_eq!(result.new_line, "ab💡");
         assert_eq!(result.new_col, "ab💡".len());
-        Ok(())
     }
 }

@@ -1,4 +1,12 @@
 # Workspace-level clippy tuning.
 # Lint levels live in Cargo.toml ([workspace.lints]).
 # Only keep keys for lints that are not fully allowed/denied at the workspace level.
+msrv = "1.90.0"
 too-many-arguments-threshold = 10
+cognitive-complexity-threshold = 20
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-indexing-slicing-in-tests = true

@@ -244,7 +244,10 @@ fn apply_config(config: Option<&Dictionary>) -> bool {
     true
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "nvim callback signatures pass owned Lua values by value"
+)]
 fn setup(config: Option<Dictionary>) -> Result<()> {
     let config_changed = apply_config(config.as_ref());
     if config_changed {

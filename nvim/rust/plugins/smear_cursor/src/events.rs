@@ -166,7 +166,7 @@ fn notify_log(level: i64, message: &str) {
         Object::from(payload),
     ]);
     if let Err(err) = api::call_function::<_, Object>("luaeval", args) {
-        eprintln!("[{LOG_SOURCE_NAME}] vim.notify failed: {err}");
+        api::err_writeln(&format!("[{LOG_SOURCE_NAME}] vim.notify failed: {err}"));
     }
 }
 
