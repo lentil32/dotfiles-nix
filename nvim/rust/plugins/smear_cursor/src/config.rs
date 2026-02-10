@@ -103,6 +103,11 @@ impl RuntimeConfig {
     pub(crate) fn cursor_is_horizontal_bar(&self, mode: &str) -> bool {
         mode == "R" && self.horizontal_bar_cursor_replace_mode
     }
+
+    pub(crate) fn requires_cursor_color_sampling(&self) -> bool {
+        self.cursor_color.as_deref() == Some("none")
+            || self.cursor_color_insert_mode.as_deref() == Some("none")
+    }
 }
 
 impl Default for RuntimeConfig {

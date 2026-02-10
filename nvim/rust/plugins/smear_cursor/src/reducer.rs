@@ -1,7 +1,4 @@
-use crate::animation::{
-    center, compute_stiffnesses, corners_for_cursor, corners_for_render, initial_velocity,
-    reached_target, simulate_step, zero_velocity_corners,
-};
+use crate::animation::{compute_stiffnesses, corners_for_render, reached_target, simulate_step};
 use crate::config::RuntimeConfig;
 use crate::draw::{GradientInfo, RenderFrame};
 use crate::state::{CursorLocation, CursorShape, RuntimeState};
@@ -112,17 +109,17 @@ fn build_step_input(
         mode: mode.to_string(),
         time_interval,
         config_time_interval: state.config.time_interval,
-        current_corners: state.current_corners,
-        target_corners: state.target_corners,
-        velocity_corners: state.velocity_corners,
-        stiffnesses: state.stiffnesses,
+        current_corners: state.current_corners(),
+        target_corners: state.target_corners(),
+        velocity_corners: state.velocity_corners(),
+        stiffnesses: state.stiffnesses(),
         max_length: state.config.max_length,
         max_length_insert_mode: state.config.max_length_insert_mode,
         damping: state.config.damping,
         damping_insert_mode: state.config.damping_insert_mode,
         delay_disable: state.config.delay_disable,
         particles,
-        previous_center: state.previous_center,
+        previous_center: state.previous_center(),
         particle_damping: state.config.particle_damping,
         particles_enabled: state.config.particles_enabled,
         particle_gravity: state.config.particle_gravity,
@@ -141,7 +138,7 @@ fn build_step_input(
         vertical_bar,
         horizontal_bar,
         block_aspect_ratio: state.config.block_aspect_ratio,
-        rng_state: state.rng_state,
+        rng_state: state.rng_state(),
     }
 }
 
@@ -179,16 +176,16 @@ pub(crate) fn build_render_frame(
         mode: mode.to_string(),
         corners: render_corners,
         target,
-        target_corners: state.target_corners,
+        target_corners: state.target_corners(),
         vertical_bar,
-        particles: state.particles.clone(),
+        particles: state.particles().to_vec(),
         cursor_color: state.config.cursor_color.clone(),
         cursor_color_insert_mode: state.config.cursor_color_insert_mode.clone(),
         normal_bg: state.config.normal_bg.clone(),
         transparent_bg_fallback_color: state.config.transparent_bg_fallback_color.clone(),
         cterm_cursor_colors: state.config.cterm_cursor_colors.clone(),
         cterm_bg: state.config.cterm_bg,
-        color_at_cursor: state.color_at_cursor.clone(),
+        color_at_cursor: state.color_at_cursor().map(str::to_owned),
         hide_target_hack: state.config.hide_target_hack,
         never_draw_over_target: state.config.never_draw_over_target,
         legacy_computing_symbols_support: state.config.legacy_computing_symbols_support,
@@ -259,18 +256,13 @@ fn apply_scroll_shift_to_state(
     horizontal_bar: bool,
     scroll_shift: ScrollShift,
 ) {
-    let shifted_row = clamp_row_to_window(
-        state.current_corners[0].row - scroll_shift.shift,
-        scroll_shift,
+    state.apply_scroll_shift(
+        scroll_shift.shift,
+        scroll_shift.min_row,
+        scroll_shift.max_row,
+        vertical_bar,
+        horizontal_bar,
     );
-    let shifted_col = state.current_corners[0].col;
-    state.current_corners =
-        corners_for_cursor(shifted_row, shifted_col, vertical_bar, horizontal_bar);
-    state.previous_center = center(&state.current_corners);
-
-    for particle in &mut state.particles {
-        particle.position.row -= scroll_shift.shift;
-    }
 }
 
 fn should_jump_to_target(
@@ -284,8 +276,9 @@ fn should_jump_to_target(
         return !state.config.smear_between_buffers;
     }
 
-    let current_row = state.current_corners[0].row;
-    let current_col = state.current_corners[0].col;
+    let current_corners = state.current_corners();
+    let current_row = current_corners[0].row;
+    let current_col = current_corners[0].col;
     let delta_row = (target_row - current_row).abs();
     let delta_col = (target_col - current_col).abs();
 
@@ -339,7 +332,7 @@ pub(crate) fn reduce_cursor_event(
     let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
     let cursor_shape = CursorShape::new(vertical_bar, horizontal_bar);
     let mut target_position = match source {
-        EventSource::AnimationTick => state.target_position,
+        EventSource::AnimationTick => state.target_position(),
         EventSource::External => Point {
             row: event.row,
             col: event.col,
@@ -380,7 +373,7 @@ pub(crate) fn reduce_cursor_event(
         let frame = build_render_frame(
             state,
             mode,
-            state.current_corners,
+            state.current_corners(),
             target_position,
             vertical_bar,
             None,
@@ -416,12 +409,11 @@ pub(crate) fn reduce_cursor_event(
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             state.set_target(target_position, cursor_shape);
-            state.stiffnesses = compute_stiffnesses(
-                &state.config,
-                mode,
-                &state.current_corners,
-                &state.target_corners,
-            );
+            let current_corners = state.current_corners();
+            let target_corners = state.target_corners();
+            let stiffnesses =
+                compute_stiffnesses(&state.config, mode, &current_corners, &target_corners);
+            state.set_stiffnesses(stiffnesses);
         }
         EventSource::AnimationTick => {}
     }
@@ -430,12 +422,7 @@ pub(crate) fn reduce_cursor_event(
     let just_started = match source {
         EventSource::External => {
             if !was_animating {
-                state.velocity_corners = initial_velocity(
-                    &state.current_corners,
-                    &state.target_corners,
-                    state.config.anticipation,
-                );
-                state.start_animation();
+                state.start_animation_towards_target();
             }
             state.update_tracking(event.cursor_location);
             !was_animating && state.is_animating()
@@ -462,7 +449,7 @@ pub(crate) fn reduce_cursor_event(
             interval
         };
 
-        let particles = std::mem::take(&mut state.particles);
+        let particles = state.take_particles();
         let step_input = build_step_input(
             state,
             mode,
@@ -472,30 +459,29 @@ pub(crate) fn reduce_cursor_event(
             particles,
         );
         let step_output = simulate_step(step_input);
+        let step_indexes = (step_output.index_head, step_output.index_tail);
+        let disabled_due_to_delay = step_output.disabled_due_to_delay;
+        state.apply_step_output(step_output);
 
-        state.current_corners = step_output.current_corners;
-        state.velocity_corners = step_output.velocity_corners;
-        state.previous_center = step_output.previous_center;
-        state.rng_state = step_output.rng_state;
-        state.particles = step_output.particles;
-        let notify_delay_disabled =
-            if step_output.disabled_due_to_delay && !state.is_delay_disabled() {
-                state.set_delay_disabled(true);
-                true
-            } else {
-                false
-            };
+        let notify_delay_disabled = if disabled_due_to_delay && !state.is_delay_disabled() {
+            state.set_delay_disabled(true);
+            true
+        } else {
+            false
+        };
 
+        let current_corners = state.current_corners();
+        let target_corners = state.target_corners();
+        let velocity_corners = state.velocity_corners();
         if reached_target(
             &state.config,
             mode,
-            &state.current_corners,
-            &state.target_corners,
-            &state.velocity_corners,
-            &state.particles,
+            &current_corners,
+            &target_corners,
+            &velocity_corners,
+            state.particles(),
         ) {
-            state.current_corners = state.target_corners;
-            state.velocity_corners = zero_velocity_corners();
+            state.settle_at_target();
             state.stop_animation();
             reset_animation_timing(state);
             return TransitionEffects::clear_all()
@@ -509,15 +495,16 @@ pub(crate) fn reduce_cursor_event(
                 .with_render_cleanup_action(RenderCleanupAction::Invalidate);
         }
 
-        let render_corners =
-            corners_for_render(&state.config, &state.current_corners, &state.target_corners);
+        let current_corners = state.current_corners();
+        let target_corners = state.target_corners();
+        let render_corners = corners_for_render(&state.config, &current_corners, &target_corners);
         let frame = build_render_frame(
             state,
             mode,
             render_corners,
             target_position,
             vertical_bar,
-            Some((step_output.index_head, step_output.index_tail)),
+            Some(step_indexes),
         );
         return TransitionEffects::draw(frame, Some(step_interval))
             .with_delay_notification(notify_delay_disabled)
@@ -529,10 +516,11 @@ pub(crate) fn reduce_cursor_event(
             TransitionEffects::noop().with_render_cleanup_action(RenderCleanupAction::Invalidate)
         }
         EventSource::AnimationTick => {
-            let gradient_indexes =
-                gradient_indexes_for_corners(&state.current_corners, &state.target_corners);
+            let current_corners = state.current_corners();
+            let target_corners = state.target_corners();
+            let gradient_indexes = gradient_indexes_for_corners(&current_corners, &target_corners);
             let render_corners =
-                corners_for_render(&state.config, &state.current_corners, &state.target_corners);
+                corners_for_render(&state.config, &current_corners, &target_corners);
             let frame = build_render_frame(
                 state,
                 mode,

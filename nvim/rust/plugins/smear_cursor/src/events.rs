@@ -11,19 +11,22 @@ use crate::reducer::{
     CursorEventContext, EventSource, RenderAction, RenderCleanupAction, ScrollShift, as_delay_ms,
     build_render_frame, external_settle_delay_ms, next_animation_delay_ms, reduce_cursor_event,
 };
-use crate::state::{CursorLocation, CursorShape, CursorSnapshot, RuntimeState};
+use crate::state::{
+    ColorOptionsPatch, CtermCursorColorsPatch, CursorLocation, CursorShape, CursorSnapshot,
+    MotionOptionsPatch, OptionalChange, ParticleOptionsPatch, RenderingOptionsPatch,
+    RuntimeOptionsPatch, RuntimeState, RuntimeSwitchesPatch, SmearBehaviorPatch,
+};
 use crate::types::{DEFAULT_RNG_STATE, EPSILON, Point};
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{
-    ClearAutocmdsOpts, CreateAugroupOpts, CreateAutocmdOpts, CreateCommandOpts, OptionOpts,
-    WinTextHeightOpts,
+    CreateAugroupOpts, CreateAutocmdOpts, CreateCommandOpts, OptionOpts, WinTextHeightOpts,
 };
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::libuv::TimerHandle;
 use nvim_oxi::schedule;
 use nvim_oxi::{Array, Dictionary, Object, Result, String as NvimString};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -125,13 +128,111 @@ impl DerefMut for RuntimeStateGuard {
 static ENGINE_STATE: LazyLock<Mutex<EngineState>> =
     LazyLock::new(|| Mutex::new(EngineState::default()));
 static LOG_LEVEL: AtomicI64 = AtomicI64::new(LOG_LEVEL_INFO);
+
+struct EventLoopState {
+    animation_timer: Option<TimerHandle>,
+    external_event_timer: Option<TimerHandle>,
+    key_event_timer: Option<TimerHandle>,
+    render_cleanup_timer: Option<TimerHandle>,
+    external_trigger_pending: bool,
+    last_autocmd_event_ms: f64,
+}
+
+impl EventLoopState {
+    const fn new() -> Self {
+        Self {
+            animation_timer: None,
+            external_event_timer: None,
+            key_event_timer: None,
+            render_cleanup_timer: None,
+            external_trigger_pending: false,
+            last_autocmd_event_ms: 0.0,
+        }
+    }
+
+    fn is_animation_timer_scheduled(&self) -> bool {
+        self.animation_timer.is_some()
+    }
+
+    fn clear_animation_timer(&mut self) {
+        let _ = self.animation_timer.take();
+    }
+
+    fn set_animation_timer(&mut self, handle: TimerHandle) {
+        self.animation_timer = Some(handle);
+    }
+
+    fn clear_external_event_timer(&mut self) {
+        let _ = self.external_event_timer.take();
+    }
+
+    fn set_external_event_timer(&mut self, handle: TimerHandle) {
+        self.external_event_timer = Some(handle);
+    }
+
+    fn clear_key_event_timer(&mut self) {
+        let _ = self.key_event_timer.take();
+    }
+
+    fn set_key_event_timer(&mut self, handle: TimerHandle) {
+        self.key_event_timer = Some(handle);
+    }
+
+    fn clear_render_cleanup_timer(&mut self) {
+        let _ = self.render_cleanup_timer.take();
+    }
+
+    fn set_render_cleanup_timer(&mut self, handle: TimerHandle) {
+        self.render_cleanup_timer = Some(handle);
+    }
+
+    fn clear_external_trigger_pending(&mut self) {
+        self.external_trigger_pending = false;
+    }
+
+    fn mark_external_trigger_pending_if_idle(&mut self) -> bool {
+        if self.external_trigger_pending {
+            false
+        } else {
+            self.external_trigger_pending = true;
+            true
+        }
+    }
+
+    fn note_autocmd_event(&mut self, now_ms: f64) {
+        self.last_autocmd_event_ms = now_ms;
+    }
+
+    fn clear_autocmd_event_timestamp(&mut self) {
+        self.last_autocmd_event_ms = 0.0;
+    }
+
+    fn elapsed_ms_since_last_autocmd_event(&self, now_ms: f64) -> f64 {
+        let last = self.last_autocmd_event_ms;
+        if last <= 0.0 {
+            f64::INFINITY
+        } else {
+            (now_ms - last).max(0.0)
+        }
+    }
+}
+
 thread_local! {
-    static ANIMATION_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
-    static EXTERNAL_EVENT_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
-    static KEY_EVENT_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
-    static RENDER_CLEANUP_TIMER: RefCell<Option<TimerHandle>> = const { RefCell::new(None) };
-    static EXTERNAL_TRIGGER_PENDING: Cell<bool> = const { Cell::new(false) };
-    static LAST_AUTOCMD_EVENT_MS: Cell<f64> = const { Cell::new(0.0) };
+    static EVENT_LOOP_STATE: RefCell<EventLoopState> = const { RefCell::new(EventLoopState::new()) };
+}
+
+fn with_event_loop_state<R>(mutator: impl FnOnce(&mut EventLoopState) -> R) -> R {
+    EVENT_LOOP_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        mutator(&mut state)
+    })
+}
+
+fn read_event_loop_state<R>(reader: impl FnOnce(&EventLoopState) -> R) -> R {
+    EVENT_LOOP_STATE.with(|state| {
+        let state = state.borrow();
+        reader(&state)
+    })
 }
 
 fn set_log_level(level: i64) {
@@ -219,27 +320,19 @@ fn unhide_real_cursor() {
 }
 
 fn clear_animation_timer() {
-    ANIMATION_TIMER.with(|timer_slot| {
-        let _ = timer_slot.borrow_mut().take();
-    });
+    with_event_loop_state(|state| state.clear_animation_timer());
 }
 
 fn clear_external_event_timer() {
-    EXTERNAL_EVENT_TIMER.with(|timer_slot| {
-        let _ = timer_slot.borrow_mut().take();
-    });
+    with_event_loop_state(|state| state.clear_external_event_timer());
 }
 
 fn clear_key_event_timer() {
-    KEY_EVENT_TIMER.with(|timer_slot| {
-        let _ = timer_slot.borrow_mut().take();
-    });
+    with_event_loop_state(|state| state.clear_key_event_timer());
 }
 
 fn clear_render_cleanup_timer() {
-    RENDER_CLEANUP_TIMER.with(|timer_slot| {
-        let _ = timer_slot.borrow_mut().take();
-    });
+    with_event_loop_state(|state| state.clear_render_cleanup_timer());
 }
 
 fn bump_render_cleanup_generation() -> u64 {
@@ -258,37 +351,23 @@ fn invalidate_render_cleanup() {
 }
 
 fn clear_external_trigger_pending() {
-    EXTERNAL_TRIGGER_PENDING.with(|pending| pending.set(false));
+    with_event_loop_state(|state| state.clear_external_trigger_pending());
 }
 
 fn mark_external_trigger_pending_if_idle() -> bool {
-    EXTERNAL_TRIGGER_PENDING.with(|pending| {
-        if pending.get() {
-            false
-        } else {
-            pending.set(true);
-            true
-        }
-    })
+    with_event_loop_state(|state| state.mark_external_trigger_pending_if_idle())
 }
 
 fn note_autocmd_event_now() {
-    LAST_AUTOCMD_EVENT_MS.with(|value| value.set(now_ms()));
+    with_event_loop_state(|state| state.note_autocmd_event(now_ms()));
 }
 
 fn clear_autocmd_event_timestamp() {
-    LAST_AUTOCMD_EVENT_MS.with(|value| value.set(0.0));
+    with_event_loop_state(|state| state.clear_autocmd_event_timestamp());
 }
 
 fn elapsed_ms_since_last_autocmd_event(now_ms: f64) -> f64 {
-    LAST_AUTOCMD_EVENT_MS.with(|value| {
-        let last = value.get();
-        if last <= 0.0 {
-            f64::INFINITY
-        } else {
-            (now_ms - last).max(0.0)
-        }
-    })
+    read_event_loop_state(|state| state.elapsed_ms_since_last_autocmd_event(now_ms))
 }
 
 fn reset_transient_event_state() {
@@ -315,7 +394,7 @@ fn engine_lock() -> std::sync::MutexGuard<'static, EngineState> {
             Ok(guard) => return guard,
             Err(poisoned) => {
                 let mut guard = poisoned.into_inner();
-                let namespace_id = guard.runtime.namespace_id;
+                let namespace_id = guard.runtime.namespace_id();
                 *guard = EngineState::default();
                 drop(guard);
 
@@ -478,11 +557,6 @@ fn skip_current_buffer_events(buffer: &api::Buffer) -> Result<bool> {
         .any(|entry| entry == &filetype))
 }
 
-fn should_track_cursor_color(config: &RuntimeConfig) -> bool {
-    config.cursor_color.as_deref() == Some("none")
-        || config.cursor_color_insert_mode.as_deref() == Some("none")
-}
-
 fn cursor_color_at_current_position() -> Result<Option<String>> {
     let args = Array::from_iter([Object::from(CURSOR_COLOR_LUAEVAL_EXPR)]);
     let value: Object = api::call_function("luaeval", args)?;
@@ -493,13 +567,13 @@ fn cursor_color_at_current_position() -> Result<Option<String>> {
 }
 
 fn update_tracked_cursor_color(state: &mut RuntimeState) {
-    if !should_track_cursor_color(&state.config) {
-        state.color_at_cursor = None;
+    if !state.config.requires_cursor_color_sampling() {
+        state.clear_color_at_cursor();
         return;
     }
 
     match cursor_color_at_current_position() {
-        Ok(color) => state.color_at_cursor = color,
+        Ok(color) => state.set_color_at_cursor(color),
         Err(err) => warn(&format!("cursor color sampling failed: {err}")),
     }
 }
@@ -722,7 +796,7 @@ fn on_external_settle_tick() -> Result<()> {
 }
 
 fn schedule_animation_tick(delay_ms: u64) {
-    let already_scheduled = ANIMATION_TIMER.with(|timer_slot| timer_slot.borrow().is_some());
+    let already_scheduled = read_event_loop_state(EventLoopState::is_animation_timer_scheduled);
     if already_scheduled {
         return;
     }
@@ -737,9 +811,7 @@ fn schedule_animation_tick(delay_ms: u64) {
         });
     }) {
         Ok(handle) => {
-            ANIMATION_TIMER.with(|timer_slot| {
-                *timer_slot.borrow_mut() = Some(handle);
-            });
+            with_event_loop_state(|state| state.set_animation_timer(handle));
         }
         Err(err) => {
             warn(&format!("failed to schedule animation tick: {err}"));
@@ -760,9 +832,7 @@ fn schedule_external_event_timer(delay_ms: u64) {
         });
     }) {
         Ok(handle) => {
-            EXTERNAL_EVENT_TIMER.with(|timer_slot| {
-                *timer_slot.borrow_mut() = Some(handle);
-            });
+            with_event_loop_state(|state| state.set_external_event_timer(handle));
         }
         Err(err) => {
             warn(&format!("failed to schedule external settle tick: {err}"));
@@ -786,9 +856,7 @@ fn schedule_key_event_timer(delay_ms: u64) {
         });
     }) {
         Ok(handle) => {
-            KEY_EVENT_TIMER.with(|timer_slot| {
-                *timer_slot.borrow_mut() = Some(handle);
-            });
+            with_event_loop_state(|state| state.set_key_event_timer(handle));
         }
         Err(err) => {
             warn(&format!("failed to schedule key-event tick: {err}"));
@@ -818,9 +886,7 @@ fn schedule_render_cleanup_timer(namespace_id: u32, delay_ms: u64) {
         });
     }) {
         Ok(handle) => {
-            RENDER_CLEANUP_TIMER.with(|timer_slot| {
-                *timer_slot.borrow_mut() = Some(handle);
-            });
+            with_event_loop_state(|state| state.set_render_cleanup_timer(handle));
         }
         Err(err) => {
             warn(&format!("failed to schedule render cleanup: {err}"));
@@ -857,10 +923,8 @@ fn set_on_key_listener(namespace_id: u32, enabled: bool) -> Result<()> {
 }
 
 fn clear_autocmd_group() {
-    let opts = ClearAutocmdsOpts::builder()
-        .group(AUTOCMD_GROUP_NAME)
-        .build();
-    if let Err(err) = api::clear_autocmds(&opts) {
+    let opts = CreateAugroupOpts::builder().clear(true).build();
+    if let Err(err) = api::create_augroup(AUTOCMD_GROUP_NAME, &opts) {
         warn(&format!("clear autocmd group failed: {err}"));
     }
 }
@@ -868,17 +932,17 @@ fn clear_autocmd_group() {
 fn ensure_namespace_id() -> u32 {
     if let Some(namespace_id) = {
         let state = state_lock();
-        state.namespace_id
+        state.namespace_id()
     } {
         return namespace_id;
     }
 
     let created = api::create_namespace("rs_smear_cursor");
     let mut state = state_lock();
-    match state.namespace_id {
+    match state.namespace_id() {
         Some(existing) => existing,
         None => {
-            state.namespace_id = Some(created);
+            state.set_namespace_id(created);
             created
         }
     }
@@ -914,99 +978,6 @@ fn validated_cterm_color_index(key: &str, value: Object) -> Result<u16> {
         return Err(invalid_key(key, "integer between 0 and 255"));
     }
     Ok(parsed as u16)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum OptionalChange<T> {
-    Set(T),
-    Clear,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct CtermCursorColorsPatch {
-    colors: Vec<u16>,
-    color_levels: u32,
-}
-
-#[derive(Debug, Default, Clone, PartialEq)]
-struct RuntimeOptionsPatch {
-    enabled: Option<bool>,
-    time_interval: Option<f64>,
-    delay_disable: Option<OptionalChange<f64>>,
-    delay_event_to_smear: Option<f64>,
-    delay_after_key: Option<f64>,
-    smear_to_cmd: Option<bool>,
-    smear_insert_mode: Option<bool>,
-    smear_replace_mode: Option<bool>,
-    smear_terminal_mode: Option<bool>,
-    vertical_bar_cursor: Option<bool>,
-    vertical_bar_cursor_insert_mode: Option<bool>,
-    horizontal_bar_cursor_replace_mode: Option<bool>,
-    hide_target_hack: Option<bool>,
-    windows_zindex: Option<u32>,
-    filetypes_disabled: Option<Vec<String>>,
-    logging_level: Option<i64>,
-    cursor_color: Option<OptionalChange<String>>,
-    cursor_color_insert_mode: Option<OptionalChange<String>>,
-    normal_bg: Option<OptionalChange<String>>,
-    transparent_bg_fallback_color: Option<String>,
-    cterm_bg: Option<OptionalChange<u16>>,
-    cterm_cursor_colors: Option<OptionalChange<CtermCursorColorsPatch>>,
-    smear_between_buffers: Option<bool>,
-    smear_between_neighbor_lines: Option<bool>,
-    min_horizontal_distance_smear: Option<f64>,
-    min_vertical_distance_smear: Option<f64>,
-    smear_horizontally: Option<bool>,
-    smear_vertically: Option<bool>,
-    smear_diagonally: Option<bool>,
-    scroll_buffer_space: Option<bool>,
-    stiffness: Option<f64>,
-    trailing_stiffness: Option<f64>,
-    trailing_exponent: Option<f64>,
-    stiffness_insert_mode: Option<f64>,
-    trailing_stiffness_insert_mode: Option<f64>,
-    trailing_exponent_insert_mode: Option<f64>,
-    anticipation: Option<f64>,
-    damping: Option<f64>,
-    damping_insert_mode: Option<f64>,
-    distance_stop_animating: Option<f64>,
-    distance_stop_animating_vertical_bar: Option<f64>,
-    max_length: Option<f64>,
-    max_length_insert_mode: Option<f64>,
-    particles_enabled: Option<bool>,
-    particle_max_num: Option<usize>,
-    particle_spread: Option<f64>,
-    particles_per_second: Option<f64>,
-    particles_per_length: Option<f64>,
-    particle_max_lifetime: Option<f64>,
-    particle_lifetime_distribution_exponent: Option<f64>,
-    particle_max_initial_velocity: Option<f64>,
-    particle_velocity_from_cursor: Option<f64>,
-    particle_random_velocity: Option<f64>,
-    particle_damping: Option<f64>,
-    particle_gravity: Option<f64>,
-    min_distance_emit_particles: Option<f64>,
-    particle_switch_octant_braille: Option<f64>,
-    particles_over_text: Option<bool>,
-    volume_reduction_exponent: Option<f64>,
-    minimum_volume_factor: Option<f64>,
-    never_draw_over_target: Option<bool>,
-    legacy_computing_symbols_support: Option<bool>,
-    legacy_computing_symbols_support_vertical_bars: Option<bool>,
-    use_diagonal_blocks: Option<bool>,
-    max_slope_horizontal: Option<f64>,
-    min_slope_vertical: Option<f64>,
-    max_angle_difference_diagonal: Option<f64>,
-    max_offset_diagonal: Option<f64>,
-    min_shade_no_diagonal: Option<f64>,
-    min_shade_no_diagonal_vertical_bar: Option<f64>,
-    max_shade_no_matrix: Option<f64>,
-    color_levels: Option<u32>,
-    gamma: Option<f64>,
-    gradient_exponent: Option<f64>,
-    matrix_pixel_threshold: Option<f64>,
-    matrix_pixel_threshold_vertical_bar: Option<f64>,
-    matrix_pixel_min_factor: Option<f64>,
 }
 
 fn option_object(opts: &Dictionary, key: &str) -> Option<Object> {
@@ -1123,561 +1094,348 @@ fn parse_optional_cterm_cursor_colors(
     })))
 }
 
-fn apply_optional_change<T>(target: &mut Option<T>, change: OptionalChange<T>) {
-    match change {
-        OptionalChange::Set(value) => *target = Some(value),
-        OptionalChange::Clear => *target = None,
-    }
-}
-
 impl RuntimeOptionsPatch {
     fn parse(opts: &Dictionary) -> Result<Self> {
         Ok(Self {
-            enabled: parse_optional_with(opts, "enabled", bool_from_object)?,
-            time_interval: parse_optional_with(opts, "time_interval", validated_f64)?
-                .map(|parsed| parsed.max(1.0)),
-            delay_disable: parse_optional_change_with(
-                opts,
-                "delay_disable",
-                validated_non_negative_f64,
-            )?,
-            delay_event_to_smear: parse_optional_with(
-                opts,
-                "delay_event_to_smear",
-                validated_non_negative_f64,
-            )?,
-            delay_after_key: parse_optional_with(
-                opts,
-                "delay_after_key",
-                validated_non_negative_f64,
-            )?,
-            smear_to_cmd: parse_optional_with(opts, "smear_to_cmd", bool_from_object)?,
-            smear_insert_mode: parse_optional_with(opts, "smear_insert_mode", bool_from_object)?,
-            smear_replace_mode: parse_optional_with(opts, "smear_replace_mode", bool_from_object)?,
-            smear_terminal_mode: parse_optional_with(
-                opts,
-                "smear_terminal_mode",
-                bool_from_object,
-            )?,
-            vertical_bar_cursor: parse_optional_with(
-                opts,
-                "vertical_bar_cursor",
-                bool_from_object,
-            )?,
-            vertical_bar_cursor_insert_mode: parse_optional_with(
-                opts,
-                "vertical_bar_cursor_insert_mode",
-                bool_from_object,
-            )?,
-            horizontal_bar_cursor_replace_mode: parse_optional_with(
-                opts,
-                "horizontal_bar_cursor_replace_mode",
-                bool_from_object,
-            )?,
-            hide_target_hack: parse_optional_with(opts, "hide_target_hack", bool_from_object)?,
-            windows_zindex: parse_optional_non_negative_u32(opts, "windows_zindex")?,
-            filetypes_disabled: parse_optional_filetypes_disabled(opts, "filetypes_disabled")?,
-            logging_level: parse_optional_non_negative_i64(opts, "logging_level")?,
-            cursor_color: parse_optional_change_with(opts, "cursor_color", string_from_object)?,
-            cursor_color_insert_mode: parse_optional_change_with(
-                opts,
-                "cursor_color_insert_mode",
-                string_from_object,
-            )?,
-            normal_bg: parse_optional_change_with(opts, "normal_bg", string_from_object)?,
-            transparent_bg_fallback_color: parse_optional_with(
-                opts,
-                "transparent_bg_fallback_color",
-                string_from_object,
-            )?,
-            cterm_bg: parse_optional_change_with(opts, "cterm_bg", validated_cterm_color_index)?,
-            cterm_cursor_colors: parse_optional_cterm_cursor_colors(opts, "cterm_cursor_colors")?,
-            smear_between_buffers: parse_optional_with(
-                opts,
-                "smear_between_buffers",
-                bool_from_object,
-            )?,
-            smear_between_neighbor_lines: parse_optional_with(
-                opts,
-                "smear_between_neighbor_lines",
-                bool_from_object,
-            )?,
-            min_horizontal_distance_smear: parse_optional_with(
-                opts,
-                "min_horizontal_distance_smear",
-                validated_non_negative_f64,
-            )?,
-            min_vertical_distance_smear: parse_optional_with(
-                opts,
-                "min_vertical_distance_smear",
-                validated_non_negative_f64,
-            )?,
-            smear_horizontally: parse_optional_with(opts, "smear_horizontally", bool_from_object)?,
-            smear_vertically: parse_optional_with(opts, "smear_vertically", bool_from_object)?,
-            smear_diagonally: parse_optional_with(opts, "smear_diagonally", bool_from_object)?,
-            scroll_buffer_space: parse_optional_with(
-                opts,
-                "scroll_buffer_space",
-                bool_from_object,
-            )?,
-            stiffness: parse_optional_with(opts, "stiffness", validated_non_negative_f64)?,
-            trailing_stiffness: parse_optional_with(
-                opts,
-                "trailing_stiffness",
-                validated_non_negative_f64,
-            )?,
-            trailing_exponent: parse_optional_with(
-                opts,
-                "trailing_exponent",
-                validated_non_negative_f64,
-            )?,
-            stiffness_insert_mode: parse_optional_with(
-                opts,
-                "stiffness_insert_mode",
-                validated_non_negative_f64,
-            )?,
-            trailing_stiffness_insert_mode: parse_optional_with(
-                opts,
-                "trailing_stiffness_insert_mode",
-                validated_non_negative_f64,
-            )?,
-            trailing_exponent_insert_mode: parse_optional_with(
-                opts,
-                "trailing_exponent_insert_mode",
-                validated_non_negative_f64,
-            )?,
-            anticipation: parse_optional_with(opts, "anticipation", validated_non_negative_f64)?,
-            damping: parse_optional_with(opts, "damping", validated_non_negative_f64)?,
-            damping_insert_mode: parse_optional_with(
-                opts,
-                "damping_insert_mode",
-                validated_non_negative_f64,
-            )?,
-            distance_stop_animating: parse_optional_with(
-                opts,
-                "distance_stop_animating",
-                validated_non_negative_f64,
-            )?,
-            distance_stop_animating_vertical_bar: parse_optional_with(
-                opts,
-                "distance_stop_animating_vertical_bar",
-                validated_non_negative_f64,
-            )?,
-            max_length: parse_optional_with(opts, "max_length", validated_non_negative_f64)?,
-            max_length_insert_mode: parse_optional_with(
-                opts,
-                "max_length_insert_mode",
-                validated_non_negative_f64,
-            )?,
-            particles_enabled: parse_optional_with(opts, "particles_enabled", bool_from_object)?,
-            particle_max_num: parse_optional_non_negative_usize(opts, "particle_max_num")?,
-            particle_spread: parse_optional_with(
-                opts,
-                "particle_spread",
-                validated_non_negative_f64,
-            )?,
-            particles_per_second: parse_optional_with(
-                opts,
-                "particles_per_second",
-                validated_non_negative_f64,
-            )?,
-            particles_per_length: parse_optional_with(
-                opts,
-                "particles_per_length",
-                validated_non_negative_f64,
-            )?,
-            particle_max_lifetime: parse_optional_with(
-                opts,
-                "particle_max_lifetime",
-                validated_non_negative_f64,
-            )?,
-            particle_lifetime_distribution_exponent: parse_optional_with(
-                opts,
-                "particle_lifetime_distribution_exponent",
-                validated_non_negative_f64,
-            )?,
-            particle_max_initial_velocity: parse_optional_with(
-                opts,
-                "particle_max_initial_velocity",
-                validated_non_negative_f64,
-            )?,
-            particle_velocity_from_cursor: parse_optional_with(
-                opts,
-                "particle_velocity_from_cursor",
-                validated_non_negative_f64,
-            )?,
-            particle_random_velocity: parse_optional_with(
-                opts,
-                "particle_random_velocity",
-                validated_non_negative_f64,
-            )?,
-            particle_damping: parse_optional_with(
-                opts,
-                "particle_damping",
-                validated_non_negative_f64,
-            )?,
-            particle_gravity: parse_optional_with(
-                opts,
-                "particle_gravity",
-                validated_non_negative_f64,
-            )?,
-            min_distance_emit_particles: parse_optional_with(
-                opts,
-                "min_distance_emit_particles",
-                validated_non_negative_f64,
-            )?,
-            particle_switch_octant_braille: parse_optional_with(
-                opts,
-                "particle_switch_octant_braille",
-                validated_non_negative_f64,
-            )?,
-            particles_over_text: parse_optional_with(
-                opts,
-                "particles_over_text",
-                bool_from_object,
-            )?,
-            volume_reduction_exponent: parse_optional_with(
-                opts,
-                "volume_reduction_exponent",
-                validated_non_negative_f64,
-            )?,
-            minimum_volume_factor: parse_optional_with(
-                opts,
-                "minimum_volume_factor",
-                validated_non_negative_f64,
-            )?,
-            never_draw_over_target: parse_optional_with(
-                opts,
-                "never_draw_over_target",
-                bool_from_object,
-            )?,
-            legacy_computing_symbols_support: parse_optional_with(
-                opts,
-                "legacy_computing_symbols_support",
-                bool_from_object,
-            )?,
-            legacy_computing_symbols_support_vertical_bars: parse_optional_with(
-                opts,
-                "legacy_computing_symbols_support_vertical_bars",
-                bool_from_object,
-            )?,
-            use_diagonal_blocks: parse_optional_with(
-                opts,
-                "use_diagonal_blocks",
-                bool_from_object,
-            )?,
-            max_slope_horizontal: parse_optional_with(
-                opts,
-                "max_slope_horizontal",
-                validated_non_negative_f64,
-            )?,
-            min_slope_vertical: parse_optional_with(
-                opts,
-                "min_slope_vertical",
-                validated_non_negative_f64,
-            )?,
-            max_angle_difference_diagonal: parse_optional_with(
-                opts,
-                "max_angle_difference_diagonal",
-                validated_non_negative_f64,
-            )?,
-            max_offset_diagonal: parse_optional_with(
-                opts,
-                "max_offset_diagonal",
-                validated_non_negative_f64,
-            )?,
-            min_shade_no_diagonal: parse_optional_with(
-                opts,
-                "min_shade_no_diagonal",
-                validated_non_negative_f64,
-            )?,
-            min_shade_no_diagonal_vertical_bar: parse_optional_with(
-                opts,
-                "min_shade_no_diagonal_vertical_bar",
-                validated_non_negative_f64,
-            )?,
-            max_shade_no_matrix: parse_optional_with(
-                opts,
-                "max_shade_no_matrix",
-                validated_non_negative_f64,
-            )?,
-            color_levels: parse_optional_positive_u32(opts, "color_levels")?,
-            gamma: parse_optional_with(opts, "gamma", validated_positive_f64)?,
-            gradient_exponent: parse_optional_with(
-                opts,
-                "gradient_exponent",
-                validated_non_negative_f64,
-            )?,
-            matrix_pixel_threshold: parse_optional_with(
-                opts,
-                "matrix_pixel_threshold",
-                validated_non_negative_f64,
-            )?,
-            matrix_pixel_threshold_vertical_bar: parse_optional_with(
-                opts,
-                "matrix_pixel_threshold_vertical_bar",
-                validated_non_negative_f64,
-            )?,
-            matrix_pixel_min_factor: parse_optional_with(
-                opts,
-                "matrix_pixel_min_factor",
-                validated_non_negative_f64,
-            )?,
+            runtime: RuntimeSwitchesPatch {
+                enabled: parse_optional_with(opts, "enabled", bool_from_object)?,
+                time_interval: parse_optional_with(opts, "time_interval", validated_f64)?
+                    .map(|parsed| parsed.max(1.0)),
+                delay_disable: parse_optional_change_with(
+                    opts,
+                    "delay_disable",
+                    validated_non_negative_f64,
+                )?,
+                delay_event_to_smear: parse_optional_with(
+                    opts,
+                    "delay_event_to_smear",
+                    validated_non_negative_f64,
+                )?,
+                delay_after_key: parse_optional_with(
+                    opts,
+                    "delay_after_key",
+                    validated_non_negative_f64,
+                )?,
+                smear_to_cmd: parse_optional_with(opts, "smear_to_cmd", bool_from_object)?,
+                smear_insert_mode: parse_optional_with(
+                    opts,
+                    "smear_insert_mode",
+                    bool_from_object,
+                )?,
+                smear_replace_mode: parse_optional_with(
+                    opts,
+                    "smear_replace_mode",
+                    bool_from_object,
+                )?,
+                smear_terminal_mode: parse_optional_with(
+                    opts,
+                    "smear_terminal_mode",
+                    bool_from_object,
+                )?,
+                vertical_bar_cursor: parse_optional_with(
+                    opts,
+                    "vertical_bar_cursor",
+                    bool_from_object,
+                )?,
+                vertical_bar_cursor_insert_mode: parse_optional_with(
+                    opts,
+                    "vertical_bar_cursor_insert_mode",
+                    bool_from_object,
+                )?,
+                horizontal_bar_cursor_replace_mode: parse_optional_with(
+                    opts,
+                    "horizontal_bar_cursor_replace_mode",
+                    bool_from_object,
+                )?,
+                hide_target_hack: parse_optional_with(opts, "hide_target_hack", bool_from_object)?,
+                windows_zindex: parse_optional_non_negative_u32(opts, "windows_zindex")?,
+                filetypes_disabled: parse_optional_filetypes_disabled(opts, "filetypes_disabled")?,
+                logging_level: parse_optional_non_negative_i64(opts, "logging_level")?,
+            },
+            color: ColorOptionsPatch {
+                cursor_color: parse_optional_change_with(opts, "cursor_color", string_from_object)?,
+                cursor_color_insert_mode: parse_optional_change_with(
+                    opts,
+                    "cursor_color_insert_mode",
+                    string_from_object,
+                )?,
+                normal_bg: parse_optional_change_with(opts, "normal_bg", string_from_object)?,
+                transparent_bg_fallback_color: parse_optional_with(
+                    opts,
+                    "transparent_bg_fallback_color",
+                    string_from_object,
+                )?,
+                cterm_bg: parse_optional_change_with(
+                    opts,
+                    "cterm_bg",
+                    validated_cterm_color_index,
+                )?,
+                cterm_cursor_colors: parse_optional_cterm_cursor_colors(
+                    opts,
+                    "cterm_cursor_colors",
+                )?,
+            },
+            smear: SmearBehaviorPatch {
+                smear_between_buffers: parse_optional_with(
+                    opts,
+                    "smear_between_buffers",
+                    bool_from_object,
+                )?,
+                smear_between_neighbor_lines: parse_optional_with(
+                    opts,
+                    "smear_between_neighbor_lines",
+                    bool_from_object,
+                )?,
+                min_horizontal_distance_smear: parse_optional_with(
+                    opts,
+                    "min_horizontal_distance_smear",
+                    validated_non_negative_f64,
+                )?,
+                min_vertical_distance_smear: parse_optional_with(
+                    opts,
+                    "min_vertical_distance_smear",
+                    validated_non_negative_f64,
+                )?,
+                smear_horizontally: parse_optional_with(
+                    opts,
+                    "smear_horizontally",
+                    bool_from_object,
+                )?,
+                smear_vertically: parse_optional_with(opts, "smear_vertically", bool_from_object)?,
+                smear_diagonally: parse_optional_with(opts, "smear_diagonally", bool_from_object)?,
+                scroll_buffer_space: parse_optional_with(
+                    opts,
+                    "scroll_buffer_space",
+                    bool_from_object,
+                )?,
+            },
+            motion: MotionOptionsPatch {
+                stiffness: parse_optional_with(opts, "stiffness", validated_non_negative_f64)?,
+                trailing_stiffness: parse_optional_with(
+                    opts,
+                    "trailing_stiffness",
+                    validated_non_negative_f64,
+                )?,
+                trailing_exponent: parse_optional_with(
+                    opts,
+                    "trailing_exponent",
+                    validated_non_negative_f64,
+                )?,
+                stiffness_insert_mode: parse_optional_with(
+                    opts,
+                    "stiffness_insert_mode",
+                    validated_non_negative_f64,
+                )?,
+                trailing_stiffness_insert_mode: parse_optional_with(
+                    opts,
+                    "trailing_stiffness_insert_mode",
+                    validated_non_negative_f64,
+                )?,
+                trailing_exponent_insert_mode: parse_optional_with(
+                    opts,
+                    "trailing_exponent_insert_mode",
+                    validated_non_negative_f64,
+                )?,
+                anticipation: parse_optional_with(
+                    opts,
+                    "anticipation",
+                    validated_non_negative_f64,
+                )?,
+                damping: parse_optional_with(opts, "damping", validated_non_negative_f64)?,
+                damping_insert_mode: parse_optional_with(
+                    opts,
+                    "damping_insert_mode",
+                    validated_non_negative_f64,
+                )?,
+                distance_stop_animating: parse_optional_with(
+                    opts,
+                    "distance_stop_animating",
+                    validated_non_negative_f64,
+                )?,
+                distance_stop_animating_vertical_bar: parse_optional_with(
+                    opts,
+                    "distance_stop_animating_vertical_bar",
+                    validated_non_negative_f64,
+                )?,
+                max_length: parse_optional_with(opts, "max_length", validated_non_negative_f64)?,
+                max_length_insert_mode: parse_optional_with(
+                    opts,
+                    "max_length_insert_mode",
+                    validated_non_negative_f64,
+                )?,
+            },
+            particles: ParticleOptionsPatch {
+                particles_enabled: parse_optional_with(
+                    opts,
+                    "particles_enabled",
+                    bool_from_object,
+                )?,
+                particle_max_num: parse_optional_non_negative_usize(opts, "particle_max_num")?,
+                particle_spread: parse_optional_with(
+                    opts,
+                    "particle_spread",
+                    validated_non_negative_f64,
+                )?,
+                particles_per_second: parse_optional_with(
+                    opts,
+                    "particles_per_second",
+                    validated_non_negative_f64,
+                )?,
+                particles_per_length: parse_optional_with(
+                    opts,
+                    "particles_per_length",
+                    validated_non_negative_f64,
+                )?,
+                particle_max_lifetime: parse_optional_with(
+                    opts,
+                    "particle_max_lifetime",
+                    validated_non_negative_f64,
+                )?,
+                particle_lifetime_distribution_exponent: parse_optional_with(
+                    opts,
+                    "particle_lifetime_distribution_exponent",
+                    validated_non_negative_f64,
+                )?,
+                particle_max_initial_velocity: parse_optional_with(
+                    opts,
+                    "particle_max_initial_velocity",
+                    validated_non_negative_f64,
+                )?,
+                particle_velocity_from_cursor: parse_optional_with(
+                    opts,
+                    "particle_velocity_from_cursor",
+                    validated_non_negative_f64,
+                )?,
+                particle_random_velocity: parse_optional_with(
+                    opts,
+                    "particle_random_velocity",
+                    validated_non_negative_f64,
+                )?,
+                particle_damping: parse_optional_with(
+                    opts,
+                    "particle_damping",
+                    validated_non_negative_f64,
+                )?,
+                particle_gravity: parse_optional_with(
+                    opts,
+                    "particle_gravity",
+                    validated_non_negative_f64,
+                )?,
+                min_distance_emit_particles: parse_optional_with(
+                    opts,
+                    "min_distance_emit_particles",
+                    validated_non_negative_f64,
+                )?,
+                particle_switch_octant_braille: parse_optional_with(
+                    opts,
+                    "particle_switch_octant_braille",
+                    validated_non_negative_f64,
+                )?,
+                particles_over_text: parse_optional_with(
+                    opts,
+                    "particles_over_text",
+                    bool_from_object,
+                )?,
+                volume_reduction_exponent: parse_optional_with(
+                    opts,
+                    "volume_reduction_exponent",
+                    validated_non_negative_f64,
+                )?,
+                minimum_volume_factor: parse_optional_with(
+                    opts,
+                    "minimum_volume_factor",
+                    validated_non_negative_f64,
+                )?,
+            },
+            rendering: RenderingOptionsPatch {
+                never_draw_over_target: parse_optional_with(
+                    opts,
+                    "never_draw_over_target",
+                    bool_from_object,
+                )?,
+                legacy_computing_symbols_support: parse_optional_with(
+                    opts,
+                    "legacy_computing_symbols_support",
+                    bool_from_object,
+                )?,
+                legacy_computing_symbols_support_vertical_bars: parse_optional_with(
+                    opts,
+                    "legacy_computing_symbols_support_vertical_bars",
+                    bool_from_object,
+                )?,
+                use_diagonal_blocks: parse_optional_with(
+                    opts,
+                    "use_diagonal_blocks",
+                    bool_from_object,
+                )?,
+                max_slope_horizontal: parse_optional_with(
+                    opts,
+                    "max_slope_horizontal",
+                    validated_non_negative_f64,
+                )?,
+                min_slope_vertical: parse_optional_with(
+                    opts,
+                    "min_slope_vertical",
+                    validated_non_negative_f64,
+                )?,
+                max_angle_difference_diagonal: parse_optional_with(
+                    opts,
+                    "max_angle_difference_diagonal",
+                    validated_non_negative_f64,
+                )?,
+                max_offset_diagonal: parse_optional_with(
+                    opts,
+                    "max_offset_diagonal",
+                    validated_non_negative_f64,
+                )?,
+                min_shade_no_diagonal: parse_optional_with(
+                    opts,
+                    "min_shade_no_diagonal",
+                    validated_non_negative_f64,
+                )?,
+                min_shade_no_diagonal_vertical_bar: parse_optional_with(
+                    opts,
+                    "min_shade_no_diagonal_vertical_bar",
+                    validated_non_negative_f64,
+                )?,
+                max_shade_no_matrix: parse_optional_with(
+                    opts,
+                    "max_shade_no_matrix",
+                    validated_non_negative_f64,
+                )?,
+                color_levels: parse_optional_positive_u32(opts, "color_levels")?,
+                gamma: parse_optional_with(opts, "gamma", validated_positive_f64)?,
+                gradient_exponent: parse_optional_with(
+                    opts,
+                    "gradient_exponent",
+                    validated_non_negative_f64,
+                )?,
+                matrix_pixel_threshold: parse_optional_with(
+                    opts,
+                    "matrix_pixel_threshold",
+                    validated_non_negative_f64,
+                )?,
+                matrix_pixel_threshold_vertical_bar: parse_optional_with(
+                    opts,
+                    "matrix_pixel_threshold_vertical_bar",
+                    validated_non_negative_f64,
+                )?,
+                matrix_pixel_min_factor: parse_optional_with(
+                    opts,
+                    "matrix_pixel_min_factor",
+                    validated_non_negative_f64,
+                )?,
+            },
         })
-    }
-
-    fn apply(self, state: &mut RuntimeState) {
-        if let Some(value) = self.enabled {
-            state.set_enabled(value);
-        }
-        if let Some(value) = self.time_interval {
-            state.config.time_interval = value;
-        }
-        if let Some(value) = self.delay_disable {
-            match value {
-                OptionalChange::Set(delay) => state.config.delay_disable = Some(delay),
-                OptionalChange::Clear => state.config.delay_disable = None,
-            }
-        }
-        if let Some(value) = self.delay_event_to_smear {
-            state.config.delay_event_to_smear = value;
-        }
-        if let Some(value) = self.delay_after_key {
-            state.config.delay_after_key = value;
-        }
-        if let Some(value) = self.smear_to_cmd {
-            state.config.smear_to_cmd = value;
-        }
-        if let Some(value) = self.smear_insert_mode {
-            state.config.smear_insert_mode = value;
-        }
-        if let Some(value) = self.smear_replace_mode {
-            state.config.smear_replace_mode = value;
-        }
-        if let Some(value) = self.smear_terminal_mode {
-            state.config.smear_terminal_mode = value;
-        }
-        if let Some(value) = self.vertical_bar_cursor {
-            state.config.vertical_bar_cursor = value;
-        }
-        if let Some(value) = self.vertical_bar_cursor_insert_mode {
-            state.config.vertical_bar_cursor_insert_mode = value;
-        }
-        if let Some(value) = self.horizontal_bar_cursor_replace_mode {
-            state.config.horizontal_bar_cursor_replace_mode = value;
-        }
-        if let Some(value) = self.hide_target_hack {
-            state.config.hide_target_hack = value;
-        }
-        if let Some(value) = self.windows_zindex {
-            state.config.windows_zindex = value;
-        }
-        if let Some(value) = self.filetypes_disabled {
-            state.config.filetypes_disabled = value;
-        }
-        if let Some(value) = self.logging_level {
-            state.config.logging_level = value;
-            set_log_level(value);
-        }
-        if let Some(change) = self.cursor_color {
-            apply_optional_change(&mut state.config.cursor_color, change);
-        }
-        if let Some(change) = self.cursor_color_insert_mode {
-            apply_optional_change(&mut state.config.cursor_color_insert_mode, change);
-        }
-        if let Some(change) = self.normal_bg {
-            apply_optional_change(&mut state.config.normal_bg, change);
-        }
-        if let Some(value) = self.transparent_bg_fallback_color {
-            state.config.transparent_bg_fallback_color = value;
-        }
-        if let Some(change) = self.cterm_bg {
-            apply_optional_change(&mut state.config.cterm_bg, change);
-        }
-        if let Some(change) = self.cterm_cursor_colors {
-            match change {
-                OptionalChange::Set(patch) => {
-                    state.config.color_levels = patch.color_levels;
-                    state.config.cterm_cursor_colors = Some(patch.colors);
-                }
-                OptionalChange::Clear => state.config.cterm_cursor_colors = None,
-            }
-        }
-        if let Some(value) = self.smear_between_buffers {
-            state.config.smear_between_buffers = value;
-        }
-        if let Some(value) = self.smear_between_neighbor_lines {
-            state.config.smear_between_neighbor_lines = value;
-        }
-        if let Some(value) = self.min_horizontal_distance_smear {
-            state.config.min_horizontal_distance_smear = value;
-        }
-        if let Some(value) = self.min_vertical_distance_smear {
-            state.config.min_vertical_distance_smear = value;
-        }
-        if let Some(value) = self.smear_horizontally {
-            state.config.smear_horizontally = value;
-        }
-        if let Some(value) = self.smear_vertically {
-            state.config.smear_vertically = value;
-        }
-        if let Some(value) = self.smear_diagonally {
-            state.config.smear_diagonally = value;
-        }
-        if let Some(value) = self.scroll_buffer_space {
-            state.config.scroll_buffer_space = value;
-        }
-        if let Some(value) = self.stiffness {
-            state.config.stiffness = value;
-        }
-        if let Some(value) = self.trailing_stiffness {
-            state.config.trailing_stiffness = value;
-        }
-        if let Some(value) = self.trailing_exponent {
-            state.config.trailing_exponent = value;
-        }
-        if let Some(value) = self.stiffness_insert_mode {
-            state.config.stiffness_insert_mode = value;
-        }
-        if let Some(value) = self.trailing_stiffness_insert_mode {
-            state.config.trailing_stiffness_insert_mode = value;
-        }
-        if let Some(value) = self.trailing_exponent_insert_mode {
-            state.config.trailing_exponent_insert_mode = value;
-        }
-        if let Some(value) = self.anticipation {
-            state.config.anticipation = value;
-        }
-        if let Some(value) = self.damping {
-            state.config.damping = value;
-        }
-        if let Some(value) = self.damping_insert_mode {
-            state.config.damping_insert_mode = value;
-        }
-        if let Some(value) = self.distance_stop_animating {
-            state.config.distance_stop_animating = value;
-        }
-        if let Some(value) = self.distance_stop_animating_vertical_bar {
-            state.config.distance_stop_animating_vertical_bar = value;
-        }
-        if let Some(value) = self.max_length {
-            state.config.max_length = value;
-        }
-        if let Some(value) = self.max_length_insert_mode {
-            state.config.max_length_insert_mode = value;
-        }
-        if let Some(value) = self.particles_enabled {
-            state.config.particles_enabled = value;
-        }
-        if let Some(value) = self.particle_max_num {
-            state.config.particle_max_num = value;
-        }
-        if let Some(value) = self.particle_spread {
-            state.config.particle_spread = value;
-        }
-        if let Some(value) = self.particles_per_second {
-            state.config.particles_per_second = value;
-        }
-        if let Some(value) = self.particles_per_length {
-            state.config.particles_per_length = value;
-        }
-        if let Some(value) = self.particle_max_lifetime {
-            state.config.particle_max_lifetime = value;
-        }
-        if let Some(value) = self.particle_lifetime_distribution_exponent {
-            state.config.particle_lifetime_distribution_exponent = value;
-        }
-        if let Some(value) = self.particle_max_initial_velocity {
-            state.config.particle_max_initial_velocity = value;
-        }
-        if let Some(value) = self.particle_velocity_from_cursor {
-            state.config.particle_velocity_from_cursor = value;
-        }
-        if let Some(value) = self.particle_random_velocity {
-            state.config.particle_random_velocity = value;
-        }
-        if let Some(value) = self.particle_damping {
-            state.config.particle_damping = value;
-        }
-        if let Some(value) = self.particle_gravity {
-            state.config.particle_gravity = value;
-        }
-        if let Some(value) = self.min_distance_emit_particles {
-            state.config.min_distance_emit_particles = value;
-        }
-        if let Some(value) = self.particle_switch_octant_braille {
-            state.config.particle_switch_octant_braille = value;
-        }
-        if let Some(value) = self.particles_over_text {
-            state.config.particles_over_text = value;
-        }
-        if let Some(value) = self.volume_reduction_exponent {
-            state.config.volume_reduction_exponent = value;
-        }
-        if let Some(value) = self.minimum_volume_factor {
-            state.config.minimum_volume_factor = value;
-        }
-        if let Some(value) = self.never_draw_over_target {
-            state.config.never_draw_over_target = value;
-        }
-        if let Some(value) = self.legacy_computing_symbols_support {
-            state.config.legacy_computing_symbols_support = value;
-        }
-        if let Some(value) = self.legacy_computing_symbols_support_vertical_bars {
-            state.config.legacy_computing_symbols_support_vertical_bars = value;
-        }
-        if let Some(value) = self.use_diagonal_blocks {
-            state.config.use_diagonal_blocks = value;
-        }
-        if let Some(value) = self.max_slope_horizontal {
-            state.config.max_slope_horizontal = value;
-        }
-        if let Some(value) = self.min_slope_vertical {
-            state.config.min_slope_vertical = value;
-        }
-        if let Some(value) = self.max_angle_difference_diagonal {
-            state.config.max_angle_difference_diagonal = value;
-        }
-        if let Some(value) = self.max_offset_diagonal {
-            state.config.max_offset_diagonal = value;
-        }
-        if let Some(value) = self.min_shade_no_diagonal {
-            state.config.min_shade_no_diagonal = value;
-        }
-        if let Some(value) = self.min_shade_no_diagonal_vertical_bar {
-            state.config.min_shade_no_diagonal_vertical_bar = value;
-        }
-        if let Some(value) = self.max_shade_no_matrix {
-            state.config.max_shade_no_matrix = value;
-        }
-        if let Some(value) = self.color_levels {
-            state.config.color_levels = value;
-        }
-        if let Some(value) = self.gamma {
-            state.config.gamma = value;
-        }
-        if let Some(value) = self.gradient_exponent {
-            state.config.gradient_exponent = value;
-        }
-        if let Some(value) = self.matrix_pixel_threshold {
-            state.config.matrix_pixel_threshold = value;
-        }
-        if let Some(value) = self.matrix_pixel_threshold_vertical_bar {
-            state.config.matrix_pixel_threshold_vertical_bar = value;
-        }
-        if let Some(value) = self.matrix_pixel_min_factor {
-            state.config.matrix_pixel_min_factor = value;
-        }
-
-        if !should_track_cursor_color(&state.config) {
-            state.color_at_cursor = None;
-        }
     }
 }
 
 fn apply_runtime_options(state: &mut RuntimeState, opts: &Dictionary) -> Result<()> {
     let patch = RuntimeOptionsPatch::parse(opts)?;
-    patch.apply(state);
+    let effects = state.apply_runtime_options_patch(patch);
+    if let Some(logging_level) = effects.logging_level {
+        set_log_level(logging_level);
+    }
     Ok(())
 }
 
@@ -1703,7 +1461,8 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         EventSource::AnimationTick => {
             let state = state_lock();
             if state.is_initialized() {
-                Some((state.target_position.row, state.target_position.col))
+                let target = state.target_position();
+                Some((target.row, target.col))
             } else {
                 None
             }
@@ -1738,7 +1497,7 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         (
             state.config.scroll_buffer_space,
             state.tracked_location(),
-            state.current_corners,
+            state.current_corners(),
         )
     };
     let scroll_shift = match source {
@@ -1764,7 +1523,7 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
 
     let effects = {
         let mut state = state_lock();
-        state.namespace_id = Some(namespace_id);
+        state.set_namespace_id(namespace_id);
         reduce_cursor_event(&mut state, &mode, event, source)
     };
 
@@ -1952,13 +1711,14 @@ fn replace_real_cursor_from_event(only_hide_real_cursor: bool) -> Result<()> {
 
     let maybe_frame = {
         let mut state = state_lock();
-        state.namespace_id = Some(namespace_id);
+        state.set_namespace_id(namespace_id);
+        let current_corners = state.current_corners();
 
         if !state.is_enabled()
             || state.is_animating()
             || state.config.hide_target_hack
             || !state.config.mode_allowed(&mode)
-            || !smear_outside_cmd_row(&state.current_corners)?
+            || !smear_outside_cmd_row(&current_corners)?
         {
             return Ok(());
         }
@@ -1976,7 +1736,7 @@ fn replace_real_cursor_from_event(only_hide_real_cursor: bool) -> Result<()> {
         let mut frame = build_render_frame(
             &state,
             &mode,
-            state.current_corners,
+            current_corners,
             Point {
                 row: -1.0,
                 col: -1.0,
@@ -2075,7 +1835,7 @@ fn jump_to_current_cursor() -> Result<()> {
 
     let (hide_target_hack, unhide_cursor) = {
         let mut state = state_lock();
-        state.namespace_id = Some(namespace_id);
+        state.set_namespace_id(namespace_id);
 
         let cursor_shape = CursorShape::new(
             state.config.cursor_is_vertical_bar(&mode),
@@ -2154,7 +1914,7 @@ pub(crate) fn setup(opts: Dictionary) -> Result<()> {
     let has_enabled_option = opts.get(&NvimString::from("enabled")).is_some();
     let enabled = {
         let mut state = state_lock();
-        state.namespace_id = Some(namespace_id);
+        state.set_namespace_id(namespace_id);
         // Upstream Lua setup defaults enabled=true when omitted.
         if !has_enabled_option {
             state.set_enabled(true);
@@ -2188,7 +1948,7 @@ pub(crate) fn toggle() -> Result<()> {
         }
         (
             state.is_enabled(),
-            state.namespace_id,
+            state.namespace_id(),
             state.config.hide_target_hack,
         )
     };
@@ -2215,8 +1975,9 @@ pub(crate) fn toggle() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineState, MIN_RENDER_CLEANUP_DELAY_MS, OptionalChange, RenderCleanupGeneration,
-        RuntimeOptionsPatch, apply_runtime_options, render_cleanup_delay_ms,
+        ColorOptionsPatch, EngineState, EventLoopState, MIN_RENDER_CLEANUP_DELAY_MS,
+        OptionalChange, RenderCleanupGeneration, RuntimeOptionsPatch, RuntimeSwitchesPatch,
+        apply_runtime_options, render_cleanup_delay_ms,
     };
     use crate::config::RuntimeConfig;
     use crate::state::RuntimeState;
@@ -2271,13 +2032,49 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_state_pending_flag_is_idempotent_until_cleared() {
+        let mut state = EventLoopState::new();
+        assert!(state.mark_external_trigger_pending_if_idle());
+        assert!(!state.mark_external_trigger_pending_if_idle());
+        state.clear_external_trigger_pending();
+        assert!(state.mark_external_trigger_pending_if_idle());
+    }
+
+    #[test]
+    fn event_loop_state_elapsed_autocmd_time_handles_unset_and_monotonicity() {
+        let mut state = EventLoopState::new();
+        assert!(
+            state
+                .elapsed_ms_since_last_autocmd_event(10.0)
+                .is_infinite()
+        );
+
+        state.note_autocmd_event(20.0);
+        assert_eq!(state.elapsed_ms_since_last_autocmd_event(25.0), 5.0);
+        assert_eq!(state.elapsed_ms_since_last_autocmd_event(19.0), 0.0);
+
+        state.clear_autocmd_event_timestamp();
+        assert!(
+            state
+                .elapsed_ms_since_last_autocmd_event(30.0)
+                .is_infinite()
+        );
+    }
+
+    #[test]
     fn runtime_options_patch_apply_clears_nullable_fields() {
         let mut state = RuntimeState::default();
         state.config.delay_disable = Some(12.0);
         state.config.cursor_color = Some("#abcdef".to_string());
         let patch = RuntimeOptionsPatch {
-            delay_disable: Some(OptionalChange::Clear),
-            cursor_color: Some(OptionalChange::Clear),
+            runtime: RuntimeSwitchesPatch {
+                delay_disable: Some(OptionalChange::Clear),
+                ..RuntimeSwitchesPatch::default()
+            },
+            color: ColorOptionsPatch {
+                cursor_color: Some(OptionalChange::Clear),
+                ..ColorOptionsPatch::default()
+            },
             ..RuntimeOptionsPatch::default()
         };
 
@@ -2313,7 +2110,10 @@ mod tests {
         let mut state = RuntimeState::default();
         state.config.filetypes_disabled = vec!["lua".to_string(), "nix".to_string()];
         let patch = RuntimeOptionsPatch {
-            filetypes_disabled: Some(Vec::new()),
+            runtime: RuntimeSwitchesPatch {
+                filetypes_disabled: Some(Vec::new()),
+                ..RuntimeSwitchesPatch::default()
+            },
             ..RuntimeOptionsPatch::default()
         };
 

@@ -216,6 +216,12 @@ fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
     api::err_writeln(&format!("[smear_cursor][draw] {context} failed: {err}"));
 }
 
+fn clear_render_namespace(buffer: &mut api::Buffer, namespace_id: u32, context: &str) {
+    if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
+        log_draw_error(context, &err);
+    }
+}
+
 struct EventIgnoreGuard {
     previous: Option<String>,
 }
@@ -537,9 +543,7 @@ fn close_orphan_render_windows(namespace_id: u32) {
             continue;
         }
 
-        if let Err(err) = buffer.del_extmark(namespace_id, EXTMARK_ID) {
-            log_draw_error("delete render extmark", &err);
-        }
+        clear_render_namespace(&mut buffer, namespace_id, "clear orphan render namespace");
         if let Err(err) = window.close(true) {
             log_draw_error("close orphan render window", &err);
         }
@@ -547,9 +551,7 @@ fn close_orphan_render_windows(namespace_id: u32) {
 }
 
 pub(crate) fn clear_buffer_namespace(buffer: &mut api::Buffer, namespace_id: u32) {
-    if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
-        log_draw_error("clear render namespace", &err);
-    }
+    clear_render_namespace(buffer, namespace_id, "clear render namespace");
 }
 
 fn float_window_config(row: i64, col: i64, zindex: u32) -> WindowConfig {
@@ -594,10 +596,8 @@ fn initialize_window_options(window: &api::Window) -> Result<()> {
 }
 
 fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {
-    if let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id)
-        && let Err(err) = buffer.del_extmark(namespace_id, EXTMARK_ID)
-    {
-        log_draw_error("delete cached render extmark", &err);
+    if let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id) {
+        clear_render_namespace(&mut buffer, namespace_id, "clear cached render namespace");
     }
     if let Some(window) = window_from_handle_i32(handles.window_id)
         && let Err(err) = window.close(true)
@@ -775,10 +775,12 @@ fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
                 rollover,
                 EpochRollover::ReleasedForReuse | EpochRollover::RecoveredStaleInUse
             ) {
-                if let Some(mut buffer) = maybe_buffer
-                    && let Err(err) = buffer.del_extmark(namespace_id, EXTMARK_ID)
-                {
-                    log_draw_error("delete reused render extmark", &err);
+                if let Some(mut buffer) = maybe_buffer {
+                    clear_render_namespace(
+                        &mut buffer,
+                        namespace_id,
+                        "clear reused render namespace",
+                    );
                 }
 
                 if let Some(mut window) = maybe_window
