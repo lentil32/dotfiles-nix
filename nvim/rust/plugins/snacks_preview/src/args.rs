@@ -78,7 +78,15 @@ fn require_preview_token(args: &Dictionary, key: &str) -> ParseResult<PreviewTok
 }
 
 fn require_nonempty_string(args: &Dictionary, key: &str) -> ParseResult<NonEmptyString> {
-    let value = dict::require_string(args, key).map_err(ArgsError::from)?;
+    let value = dict::require_string_nonempty(args, key).map_err(|err| match err {
+        OxiError::InvalidValue {
+            expected: "non-empty string",
+            ..
+        } => ArgsError::EmptyValue {
+            key: key.to_string(),
+        },
+        _ => ArgsError::from(err),
+    })?;
     NonEmptyString::try_new(value).map_err(|_| ArgsError::EmptyValue {
         key: key.to_string(),
     })

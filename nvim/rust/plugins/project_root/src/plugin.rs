@@ -7,7 +7,7 @@ use nvim_oxi::api::Buffer;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts};
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::{Array, Dictionary, Function, Result, String as NvimString};
-use nvim_oxi_utils::{guard, notify, state::StateCell};
+use nvim_oxi_utils::{guard, handles, notify, state::StateCell};
 use nvim_utils::path::path_is_dir;
 
 use crate::buffer::{
@@ -149,16 +149,16 @@ fn get_project_root() -> Result<Option<String>> {
     let alt_root = if alt <= 0 {
         debug_log(|| "get_project_root: no alternate buffer".to_string());
         None
-    } else if let Ok(handle) = i32::try_from(alt) {
-        let alt_buf = Buffer::from(handle);
+    } else if let Some(alt_buf) = handles::valid_buffer(alt) {
         let root = cached_or_refresh_root(&alt_buf)?;
+        let handle = alt_buf.handle();
         debug_log(|| {
             let root_value = root.as_deref().unwrap_or("<none>");
             format!("get_project_root: alternate buf={handle} root='{root_value}'")
         });
         root
     } else {
-        debug_log(|| format!("get_project_root: alternate buffer handle overflow (value={alt})"));
+        debug_log(|| format!("get_project_root: invalid alternate buffer handle (value={alt})"));
         None
     };
 

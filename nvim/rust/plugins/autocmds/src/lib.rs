@@ -204,14 +204,7 @@ fn win_for_buf(buf: &Buffer) -> Result<Option<Window>> {
     if win_id == -1 {
         return Ok(None);
     }
-    let Ok(handle) = i32::try_from(win_id) else {
-        return Ok(None);
-    };
-    let win = Window::from(handle);
-    if !win.is_valid() {
-        return Ok(None);
-    }
-    Ok(Some(win))
+    Ok(handles::valid_window(win_id))
 }
 
 fn maybe_show_dashboard() -> Result<()> {

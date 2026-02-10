@@ -419,8 +419,10 @@ mod tests {
 
     #[test]
     fn transient_reset_clears_only_transient_fields() {
-        let mut state = RuntimeState::default();
-        state.target_position = Point { row: 4.0, col: 9.0 };
+        let mut state = RuntimeState {
+            target_position: Point { row: 4.0, col: 9.0 },
+            ..RuntimeState::default()
+        };
         state.set_delay_disabled(true);
         state.update_tracking(CursorLocation::new(11, 22, 33, 44));
         state.set_cursor_hidden(true);

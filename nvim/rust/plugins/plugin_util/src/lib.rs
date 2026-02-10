@@ -11,7 +11,7 @@ use nvim_oxi::api::opts::{ClearAutocmdsOpts, OptionOpts, OptionScope};
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, mlua};
 use nvim_oxi_utils::{handles, lua, notify};
-use nvim_utils::path::{path_is_dir, strip_known_prefixes};
+use nvim_utils::path::{path_is_dir, split_uri_scheme_and_rest, strip_known_prefixes};
 use support::cycle::next_item;
 
 type OptMap = HashMap<String, Object>;
@@ -146,20 +146,8 @@ fn edit_path(path: Option<String>) -> Result<()> {
 }
 
 fn parse_url_scheme_and_rest(url: &str) -> Option<(String, String)> {
-    let (scheme_name, rest) = url.split_once("://")?;
-    let mut chars = scheme_name.chars();
-    let first = chars.next()?;
-    if !first.is_ascii_alphabetic() {
-        return None;
-    }
-    if !chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')) {
-        return None;
-    }
+    let (scheme_name, rest) = split_uri_scheme_and_rest(url)?;
     Some((format!("{scheme_name}://"), rest.to_string()))
-}
-
-fn parse_url_scheme(url: &str) -> Option<String> {
-    parse_url_scheme_and_rest(url).map(|(scheme, _)| scheme)
 }
 
 fn vim_notify_once_error(lua: &mlua::Lua, message: &str) {
@@ -191,7 +179,7 @@ fn oil_get_adapter(lua: &mlua::Lua, bufnr: i64, silent: bool) -> mlua::Result<ml
     let api_table: mlua::Table = vim.get("api")?;
     let nvim_buf_get_name: mlua::Function = api_table.get("nvim_buf_get_name")?;
     let bufname: String = nvim_buf_get_name.call(bufnr)?;
-    let Some(mut scheme) = parse_url_scheme(&bufname) else {
+    let Some((mut scheme, _rest)) = parse_url_scheme_and_rest(&bufname) else {
         return Ok(mlua::Value::Nil);
     };
 
@@ -295,7 +283,16 @@ fn autocmds_oil_last_buf_for_win(win: Option<i64>) -> Option<i64> {
     let Ok(oil_last_buf_for_win) = autocmds.get::<mlua::Function>("oil_last_buf_for_win") else {
         return None;
     };
-    oil_last_buf_for_win.call::<Option<i64>>(win).ok().flatten()
+    match oil_last_buf_for_win.call::<Option<i64>>(win) {
+        Ok(value) => value,
+        Err(err) => {
+            notify::warn(
+                LOG_CONTEXT,
+                &format!("oil_last_buf_for_win call failed: {err}"),
+            );
+            None
+        }
+    }
 }
 
 fn delete_buffer_via_command(buf_handle: i64, force: bool, wipe: bool) -> Result<()> {
@@ -526,9 +523,8 @@ fn oil_winbar() -> String {
         Ok(vim) => vim,
         Err(_) => return String::new(),
     };
-    let winid = match statusline_winid(&vim) {
-        Some(id) => id,
-        _ => return String::new(),
+    let Some(winid) = statusline_winid(&vim) else {
+        return String::new();
     };
     let Some(win) = handles::valid_window(winid) else {
         return String::new();
@@ -574,7 +570,13 @@ fn vim_joinpath(lua: &mlua::Lua, lhs: &str, rhs: &str) -> Option<String> {
     let vim: mlua::Table = lua.globals().get("vim").ok()?;
     let fs: mlua::Table = vim.get("fs").ok()?;
     let joinpath: mlua::Function = fs.get("joinpath").ok()?;
-    joinpath.call((lhs, rhs)).ok()
+    match joinpath.call((lhs, rhs)) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            notify::warn(LOG_CONTEXT, &format!("vim.fs.joinpath failed: {err}"));
+            None
+        }
+    }
 }
 
 fn oil_select_other_window() -> Result<()> {

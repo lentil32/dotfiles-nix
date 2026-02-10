@@ -23,3 +23,19 @@ fn require_string_ok() {
     let value = dict::require_string(&dict, "name");
     assert!(matches!(value, Ok(ref val) if val == "snacks"));
 }
+
+#[test]
+fn require_string_nonempty_rejects_empty_value() {
+    let mut dict = Dictionary::new();
+    dict.insert("name", "");
+    let err = dict::require_string_nonempty(&dict, "name");
+    assert!(matches!(err, Err(Error::InvalidValue { .. })));
+}
+
+#[test]
+fn require_string_nonempty_accepts_nonempty_value() {
+    let mut dict = Dictionary::new();
+    dict.insert("name", "preview");
+    let value = dict::require_string_nonempty(&dict, "name");
+    assert!(matches!(value, Ok(ref val) if val == "preview"));
+}

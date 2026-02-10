@@ -1,6 +1,7 @@
 use crate::core::{RootIndicators, default_root_indicators, root_indicators_from_vec};
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Dictionary, String as NvimString};
+use nvim_oxi_utils::dict;
 
 #[derive(Debug, Clone)]
 pub struct ProjectRootConfig {
@@ -9,9 +10,8 @@ pub struct ProjectRootConfig {
 
 impl ProjectRootConfig {
     fn parse_root_indicators(config: &Dictionary) -> Option<RootIndicators> {
-        let key = NvimString::from("root_indicators");
-        let value = config.get(&key)?;
-        let values = Vec::<NvimString>::from_object(value.clone()).ok()?;
+        let value = dict::get_object(config, "root_indicators")?;
+        let values = Vec::<NvimString>::from_object(value).ok()?;
         let strings: Vec<String> = values
             .into_iter()
             .map(|val| val.to_string_lossy().into_owned())

@@ -128,7 +128,7 @@ fn on_wezterm_tab_title_command_error(title: &TabTitle, err: &std::io::Error) {
         return;
     }
     if let Some(next_title) = next_title {
-        start_wezterm_tab_title_update(next_title);
+        start_wezterm_tab_title_update(&next_title);
     }
 }
 
@@ -155,7 +155,7 @@ fn on_wezterm_working_dir_command_error(cwd: &String, err: &std::io::Error) {
         return;
     }
     if let Some(next_cwd) = next_cwd {
-        start_wezterm_working_dir_update(next_cwd);
+        start_wezterm_working_dir_update(&next_cwd);
     }
 }
 
@@ -170,7 +170,7 @@ fn on_wezterm_tab_title_status(title: &TabTitle, status: std::process::ExitStatu
         }
     };
     if let Some(next_title) = next_title {
-        start_wezterm_tab_title_update(next_title);
+        start_wezterm_tab_title_update(&next_title);
     }
 }
 
@@ -185,21 +185,21 @@ fn on_wezterm_working_dir_status(cwd: &String, status: std::process::ExitStatus)
         }
     };
     if let Some(next_cwd) = next_cwd {
-        start_wezterm_working_dir_update(next_cwd);
+        start_wezterm_working_dir_update(&next_cwd);
     }
 }
 
-fn start_wezterm_tab_title_update(title: TabTitle) {
-    match run_wezterm_cli(&title) {
-        Ok(status) => on_wezterm_tab_title_status(&title, status),
-        Err(err) => on_wezterm_tab_title_command_error(&title, &err),
+fn start_wezterm_tab_title_update(title: &TabTitle) {
+    match run_wezterm_cli(title) {
+        Ok(status) => on_wezterm_tab_title_status(title, status),
+        Err(err) => on_wezterm_tab_title_command_error(title, &err),
     }
 }
 
-fn start_wezterm_working_dir_update(cwd: String) {
-    match run_wezterm_set_working_dir(&cwd) {
-        Ok(status) => on_wezterm_working_dir_status(&cwd, status),
-        Err(err) => on_wezterm_working_dir_command_error(&cwd, &err),
+fn start_wezterm_working_dir_update(cwd: &String) {
+    match run_wezterm_set_working_dir(cwd) {
+        Ok(status) => on_wezterm_working_dir_status(cwd, status),
+        Err(err) => on_wezterm_working_dir_command_error(cwd, &err),
     }
 }
 
@@ -222,7 +222,7 @@ fn update_wezterm_tab_title(context: &WeztermContext) -> Result<AutocmdAction> {
         }
     };
     if let Some(next_title) = next_title {
-        start_wezterm_tab_title_update(next_title);
+        start_wezterm_tab_title_update(&next_title);
     }
     Ok(AutocmdAction::Keep)
 }
@@ -245,7 +245,7 @@ fn update_wezterm_working_dir() -> Result<AutocmdAction> {
         }
     };
     if let Some(next_cwd) = next_cwd {
-        start_wezterm_working_dir_update(next_cwd);
+        start_wezterm_working_dir_update(&next_cwd);
     }
     Ok(AutocmdAction::Keep)
 }

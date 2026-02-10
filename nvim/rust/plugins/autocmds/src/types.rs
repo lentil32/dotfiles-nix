@@ -138,8 +138,8 @@ fn require_nonempty_field(
     dict: &Dictionary,
     key: &'static str,
 ) -> Result<NonEmptyString, OilActionsPostParseError> {
-    let value =
-        dict::get_string_nonempty(dict, key).ok_or(OilActionsPostParseError::EmptyValue { key })?;
+    let value = dict::require_string_nonempty(dict, key)
+        .map_err(|_| OilActionsPostParseError::EmptyValue { key })?;
     NonEmptyString::try_new(value).map_err(|_| OilActionsPostParseError::EmptyValue { key })
 }
 

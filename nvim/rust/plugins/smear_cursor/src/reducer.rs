@@ -32,7 +32,7 @@ pub(crate) enum EventSource {
 
 #[derive(Debug)]
 pub(crate) enum RenderAction {
-    Draw(RenderFrame),
+    Draw(Box<RenderFrame>),
     ClearAll,
     Noop,
 }
@@ -64,7 +64,7 @@ impl TransitionEffects {
 
     fn draw(frame: RenderFrame, step_interval_ms: Option<f64>) -> Self {
         Self {
-            render_action: RenderAction::Draw(frame),
+            render_action: RenderAction::Draw(Box::new(frame)),
             step_interval_ms,
             notify_delay_disabled: false,
             render_cleanup_action: RenderCleanupAction::None,
@@ -321,27 +321,29 @@ pub(crate) fn reduce_cursor_event(
     }
 
     if state.is_delay_disabled() {
-        if source == EventSource::External {
-            return TransitionEffects::noop()
-                .with_render_cleanup_action(RenderCleanupAction::Schedule);
-        }
-        if !state.is_animating() {
-            reset_animation_timing(state);
-            return TransitionEffects::clear_all()
-                .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        match source {
+            EventSource::External => {
+                return TransitionEffects::noop()
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            }
+            EventSource::AnimationTick if !state.is_animating() => {
+                reset_animation_timing(state);
+                return TransitionEffects::clear_all()
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            }
+            EventSource::AnimationTick => {}
         }
     }
 
     let vertical_bar = state.config.cursor_is_vertical_bar(mode);
     let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
     let cursor_shape = CursorShape::new(vertical_bar, horizontal_bar);
-    let mut target_position = if source == EventSource::AnimationTick {
-        state.target_position
-    } else {
-        Point {
+    let mut target_position = match source {
+        EventSource::AnimationTick => state.target_position,
+        EventSource::External => Point {
             row: event.row,
             col: event.col,
-        }
+        },
     };
     let (window_changed, buffer_changed) =
         state.tracked_location().map_or((false, false), |tracked| {
@@ -351,16 +353,21 @@ pub(crate) fn reduce_cursor_event(
             )
         });
 
-    if source == EventSource::External && external_mode_ignores_cursor(&state.config, mode) {
-        return TransitionEffects::noop().with_render_cleanup_action(RenderCleanupAction::Schedule);
-    }
-
-    if source == EventSource::External && external_mode_requires_jump(&state.config, mode) {
-        // Match upstream Lua behavior: jump updates position/target but does not
-        // force-stop an in-flight animation loop or clear velocity state.
-        state.jump_preserving_motion(target_position, cursor_shape, event.cursor_location);
-        return TransitionEffects::clear_all()
-            .with_render_cleanup_action(RenderCleanupAction::Schedule);
+    match source {
+        EventSource::External => {
+            if external_mode_ignores_cursor(&state.config, mode) {
+                return TransitionEffects::noop()
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            }
+            if external_mode_requires_jump(&state.config, mode) {
+                // Match upstream Lua behavior: jump updates position/target but does not
+                // force-stop an in-flight animation loop or clear velocity state.
+                state.jump_preserving_motion(target_position, cursor_shape, event.cursor_location);
+                return TransitionEffects::clear_all()
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            }
+        }
+        EventSource::AnimationTick => {}
     }
 
     if !state.is_initialized() {
@@ -382,51 +389,59 @@ pub(crate) fn reduce_cursor_event(
             .with_render_cleanup_action(RenderCleanupAction::Schedule);
     }
 
-    if source == EventSource::AnimationTick && !state.is_animating() {
-        return TransitionEffects::noop();
+    match source {
+        EventSource::AnimationTick if !state.is_animating() => {
+            return TransitionEffects::noop();
+        }
+        EventSource::AnimationTick | EventSource::External => {}
     }
 
-    if source == EventSource::External {
-        if let Some(scroll_shift) = event.scroll_shift {
-            apply_scroll_shift_to_state(state, vertical_bar, horizontal_bar, scroll_shift);
-            target_position.row =
-                clamp_row_to_window(target_position.row - scroll_shift.shift, scroll_shift);
-        }
+    match source {
+        EventSource::External => {
+            if let Some(scroll_shift) = event.scroll_shift {
+                apply_scroll_shift_to_state(state, vertical_bar, horizontal_bar, scroll_shift);
+                target_position.row =
+                    clamp_row_to_window(target_position.row - scroll_shift.shift, scroll_shift);
+            }
 
-        if should_jump_to_target(
-            state,
-            window_changed,
-            buffer_changed,
-            target_position.row,
-            target_position.col,
-        ) {
-            state.jump_and_stop_animation(target_position, cursor_shape, event.cursor_location);
-            return TransitionEffects::clear_all()
-                .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            if should_jump_to_target(
+                state,
+                window_changed,
+                buffer_changed,
+                target_position.row,
+                target_position.col,
+            ) {
+                state.jump_and_stop_animation(target_position, cursor_shape, event.cursor_location);
+                return TransitionEffects::clear_all()
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            }
+            state.set_target(target_position, cursor_shape);
+            state.stiffnesses = compute_stiffnesses(
+                &state.config,
+                mode,
+                &state.current_corners,
+                &state.target_corners,
+            );
         }
-        state.set_target(target_position, cursor_shape);
-        state.stiffnesses = compute_stiffnesses(
-            &state.config,
-            mode,
-            &state.current_corners,
-            &state.target_corners,
-        );
+        EventSource::AnimationTick => {}
     }
 
     let was_animating = state.is_animating();
-    if source == EventSource::External && !was_animating {
-        state.velocity_corners = initial_velocity(
-            &state.current_corners,
-            &state.target_corners,
-            state.config.anticipation,
-        );
-        state.start_animation();
-    }
-    let just_started = source == EventSource::External && !was_animating && state.is_animating();
-
-    if source == EventSource::External {
-        state.update_tracking(event.cursor_location);
-    }
+    let just_started = match source {
+        EventSource::External => {
+            if !was_animating {
+                state.velocity_corners = initial_velocity(
+                    &state.current_corners,
+                    &state.target_corners,
+                    state.config.anticipation,
+                );
+                state.start_animation();
+            }
+            state.update_tracking(event.cursor_location);
+            !was_animating && state.is_animating()
+        }
+        EventSource::AnimationTick => false,
+    };
 
     let should_advance = match source {
         EventSource::AnimationTick => state.is_animating(),
@@ -440,10 +455,9 @@ pub(crate) fn reduce_cursor_event(
             state.set_last_tick_ms(Some(event.now_ms));
             BASE_TIME_INTERVAL
         } else {
-            let interval = match state.last_tick_ms() {
-                Some(previous) => (event.now_ms - previous).max(0.0),
-                None => BASE_TIME_INTERVAL,
-            };
+            let interval = state.last_tick_ms().map_or(BASE_TIME_INTERVAL, |previous| {
+                (event.now_ms - previous).max(0.0)
+            });
             state.set_last_tick_ms(Some(event.now_ms));
             interval
         };
@@ -464,11 +478,13 @@ pub(crate) fn reduce_cursor_event(
         state.previous_center = step_output.previous_center;
         state.rng_state = step_output.rng_state;
         state.particles = step_output.particles;
-        let mut notify_delay_disabled = false;
-        if step_output.disabled_due_to_delay && !state.is_delay_disabled() {
-            state.set_delay_disabled(true);
-            notify_delay_disabled = true;
-        }
+        let notify_delay_disabled =
+            if step_output.disabled_due_to_delay && !state.is_delay_disabled() {
+                state.set_delay_disabled(true);
+                true
+            } else {
+                false
+            };
 
         if reached_target(
             &state.config,
@@ -508,24 +524,27 @@ pub(crate) fn reduce_cursor_event(
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
 
-    if source == EventSource::External {
-        return TransitionEffects::noop()
-            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+    match source {
+        EventSource::External => {
+            TransitionEffects::noop().with_render_cleanup_action(RenderCleanupAction::Invalidate)
+        }
+        EventSource::AnimationTick => {
+            let gradient_indexes =
+                gradient_indexes_for_corners(&state.current_corners, &state.target_corners);
+            let render_corners =
+                corners_for_render(&state.config, &state.current_corners, &state.target_corners);
+            let frame = build_render_frame(
+                state,
+                mode,
+                render_corners,
+                target_position,
+                vertical_bar,
+                gradient_indexes,
+            );
+            TransitionEffects::draw(frame, None)
+                .with_render_cleanup_action(RenderCleanupAction::None)
+        }
     }
-
-    let gradient_indexes =
-        gradient_indexes_for_corners(&state.current_corners, &state.target_corners);
-    let render_corners =
-        corners_for_render(&state.config, &state.current_corners, &state.target_corners);
-    let frame = build_render_frame(
-        state,
-        mode,
-        render_corners,
-        target_position,
-        vertical_bar,
-        gradient_indexes,
-    );
-    TransitionEffects::draw(frame, None).with_render_cleanup_action(RenderCleanupAction::None)
 }
 
 pub(crate) fn as_delay_ms(value: f64) -> u64 {

@@ -8,12 +8,13 @@ use nvim_oxi::api::types::{
     ExtmarkVirtTextPosition, GetHlInfos, WindowConfig, WindowRelativeTo, WindowStyle,
 };
 use nvim_oxi::{Array, Dictionary, Object};
+use nvim_oxi_utils::handles;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 const EXTMARK_ID: u32 = 999;
-const DEFAULT_CURSOR_COLOR: u32 = 0xD0D0D0;
-const DEFAULT_BACKGROUND_COLOR: u32 = 0x303030;
+const DEFAULT_CURSOR_COLOR: u32 = 0x00D0_D0D0;
+const DEFAULT_BACKGROUND_COLOR: u32 = 0x0030_3030;
 const BRAILLE_CODE_MIN: i64 = 0x2800;
 const BRAILLE_CODE_MAX: i64 = 0x28FF;
 const OCTANT_CODE_MIN: i64 = 0x1CD00;
@@ -201,24 +202,19 @@ impl Default for TabWindows {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct DrawState {
     tabs: HashMap<i32, TabWindows>,
     bulge_above: bool,
 }
 
-impl Default for DrawState {
-    fn default() -> Self {
-        Self {
-            tabs: HashMap::new(),
-            bulge_above: false,
-        }
-    }
-}
-
 static DRAW_STATE: LazyLock<Mutex<DrawState>> = LazyLock::new(|| Mutex::new(DrawState::default()));
 static HIGHLIGHT_PALETTE_CACHE: LazyLock<Mutex<Option<HighlightPaletteKey>>> =
     LazyLock::new(|| Mutex::new(None));
+
+fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
+    eprintln!("[smear_cursor][draw] {context} failed: {err}");
+}
 
 struct EventIgnoreGuard {
     previous: Option<String>,
@@ -228,7 +224,9 @@ impl EventIgnoreGuard {
     fn set_all() -> Self {
         let opts = OptionOpts::builder().build();
         let previous = api::get_option_value::<String>("eventignore", &opts).ok();
-        let _ = api::set_option_value("eventignore", "all", &opts);
+        if let Err(err) = api::set_option_value("eventignore", "all", &opts) {
+            log_draw_error("set eventignore=all", &err);
+        }
         Self { previous }
     }
 }
@@ -239,7 +237,9 @@ impl Drop for EventIgnoreGuard {
             return;
         };
         let opts = OptionOpts::builder().build();
-        let _ = api::set_option_value("eventignore", previous, &opts);
+        if let Err(err) = api::set_option_value("eventignore", previous, &opts) {
+            log_draw_error("restore eventignore", &err);
+        }
     }
 }
 
@@ -398,17 +398,17 @@ fn set_highlight_group(
     foreground: &str,
     background: &str,
     blend: u8,
-    ctermfg: Option<u16>,
-    ctermbg: Option<u16>,
+    cterm_fg: Option<u16>,
+    cterm_bg: Option<u16>,
 ) -> Result<()> {
     let mut highlight = Dictionary::new();
     highlight.insert("fg", foreground);
     highlight.insert("bg", background);
     highlight.insert("blend", i64::from(blend));
-    if let Some(value) = ctermfg {
+    if let Some(value) = cterm_fg {
         highlight.insert("ctermfg", i64::from(value));
     }
-    if let Some(value) = ctermbg {
+    if let Some(value) = cterm_bg {
         highlight.insert("ctermbg", i64::from(value));
     }
 
@@ -490,21 +490,11 @@ fn ensure_highlight_palette(frame: &RenderFrame) -> Result<()> {
 }
 
 fn window_from_handle_i32(handle: i32) -> Option<api::Window> {
-    let window = api::Window::from(handle);
-    if window.is_valid() {
-        Some(window)
-    } else {
-        None
-    }
+    handles::valid_window(i64::from(handle))
 }
 
 fn buffer_from_handle_i32(handle: i32) -> Option<api::Buffer> {
-    let buffer = api::Buffer::from(handle);
-    if buffer.is_valid() {
-        Some(buffer)
-    } else {
-        None
-    }
+    handles::valid_buffer(i64::from(handle))
 }
 
 fn buffer_has_render_marker(buffer: &api::Buffer) -> bool {
@@ -527,7 +517,13 @@ fn window_buffer(window: &api::Window) -> Option<api::Buffer> {
         return None;
     }
     let args = Array::from_iter([Object::from(window.handle())]);
-    let buffer_handle: i32 = api::call_function("nvim_win_get_buf", args).ok()?;
+    let buffer_handle: i32 = match api::call_function("nvim_win_get_buf", args) {
+        Ok(handle) => handle,
+        Err(err) => {
+            log_draw_error("nvim_win_get_buf", &err);
+            return None;
+        }
+    };
     buffer_from_handle_i32(buffer_handle)
 }
 
@@ -541,13 +537,19 @@ fn close_orphan_render_windows(namespace_id: u32) {
             continue;
         }
 
-        let _ = buffer.del_extmark(namespace_id, EXTMARK_ID);
-        let _ = window.close(true);
+        if let Err(err) = buffer.del_extmark(namespace_id, EXTMARK_ID) {
+            log_draw_error("delete render extmark", &err);
+        }
+        if let Err(err) = window.close(true) {
+            log_draw_error("close orphan render window", &err);
+        }
     }
 }
 
 pub(crate) fn clear_buffer_namespace(buffer: &mut api::Buffer, namespace_id: u32) {
-    let _ = buffer.clear_namespace(namespace_id, 0..);
+    if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
+        log_draw_error("clear render namespace", &err);
+    }
 }
 
 fn float_window_config(row: i64, col: i64, zindex: u32) -> WindowConfig {
@@ -592,11 +594,15 @@ fn initialize_window_options(window: &api::Window) -> Result<()> {
 }
 
 fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {
-    if let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id) {
-        let _ = buffer.del_extmark(namespace_id, EXTMARK_ID);
+    if let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id)
+        && let Err(err) = buffer.del_extmark(namespace_id, EXTMARK_ID)
+    {
+        log_draw_error("delete cached render extmark", &err);
     }
-    if let Some(window) = window_from_handle_i32(handles.window_id) {
-        let _ = window.close(true);
+    if let Some(window) = window_from_handle_i32(handles.window_id)
+        && let Err(err) = window.close(true)
+    {
+        log_draw_error("close cached render window", &err);
     }
 }
 
@@ -623,11 +629,11 @@ fn get_or_create_window(
 
         if let (Some(mut window), Some(buffer)) = (maybe_window, maybe_buffer) {
             let config = float_window_config(row, col, zindex);
-            if window.set_config(&config).is_ok() {
-                if tab_windows.windows[index].mark_in_use(tab_windows.current_epoch) {
-                    tab_windows.frame_demand = tab_windows.frame_demand.saturating_add(1);
-                    return Ok((window, buffer));
-                }
+            if window.set_config(&config).is_ok()
+                && tab_windows.windows[index].mark_in_use(tab_windows.current_epoch)
+            {
+                tab_windows.frame_demand = tab_windows.frame_demand.saturating_add(1);
+                return Ok((window, buffer));
             }
         }
 
@@ -672,12 +678,7 @@ fn ceil_div_u64(lhs: u64, rhs: u64) -> u64 {
     if rhs == 0 {
         return 0;
     }
-    let quotient = lhs / rhs;
-    if lhs % rhs == 0 {
-        quotient
-    } else {
-        quotient.saturating_add(1)
-    }
+    lhs.div_ceil(rhs)
 }
 
 fn next_adaptive_budget(previous: AdaptiveBudgetState, frame_demand: usize) -> AdaptiveBudgetState {
@@ -774,8 +775,10 @@ fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
                 rollover,
                 EpochRollover::ReleasedForReuse | EpochRollover::RecoveredStaleInUse
             ) {
-                if let Some(mut buffer) = maybe_buffer {
-                    let _ = buffer.del_extmark(namespace_id, EXTMARK_ID);
+                if let Some(mut buffer) = maybe_buffer
+                    && let Err(err) = buffer.del_extmark(namespace_id, EXTMARK_ID)
+                {
+                    log_draw_error("delete reused render extmark", &err);
                 }
 
                 if let Some(mut window) = maybe_window
@@ -1456,7 +1459,7 @@ fn draw_character(
         .virt_text_win_col(0)
         .build();
 
-    let _ = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts)?;
+    buffer.set_extmark(namespace_id, 0, 0, &extmark_opts)?;
     Ok(())
 }
 
@@ -2002,7 +2005,7 @@ fn draw_matrix_character(
     let bit_2 = usize::from(matrix[0][1] > threshold);
     let bit_3 = usize::from(matrix[1][0] > threshold);
     let bit_4 = usize::from(matrix[1][1] > threshold);
-    let index = bit_1 * 1 + bit_2 * 2 + bit_3 * 4 + bit_4 * 8;
+    let index = bit_1 + bit_2 * 2 + bit_3 * 4 + bit_4 * 8;
     if index == 0 {
         return Ok(false);
     }
@@ -2225,7 +2228,7 @@ fn draw_particles(
         let hl_group = resources.hl_groups[level_index].as_str();
 
         if lifetime_average > lifetime_switch_octant_braille {
-            let _ = draw_octant_character(
+            draw_octant_character(
                 resources,
                 namespace_id,
                 row,
@@ -2235,7 +2238,7 @@ fn draw_particles(
                 resources.particle_zindex,
             )?;
         } else {
-            let _ = draw_braille_character(
+            draw_braille_character(
                 resources,
                 namespace_id,
                 row,
@@ -2422,7 +2425,7 @@ pub(crate) fn draw_current(namespace_id: u32, frame: &RenderFrame) -> Result<()>
                     if is_vertically_shifted {
                         let shade = horizontal_shade
                             * compute_gradient_shade(row as f64 + 0.5, col as f64 + 0.5, frame);
-                        let _ = draw_vertically_shifted_sub_block(
+                        draw_vertically_shifted_sub_block(
                             &mut resources,
                             namespace_id,
                             frame,
@@ -2445,7 +2448,7 @@ pub(crate) fn draw_current(namespace_id: u32, frame: &RenderFrame) -> Result<()>
 
                         let shade = vertical_shade
                             * compute_gradient_shade(row as f64 + 0.5, col as f64 + 0.5, frame);
-                        let _ = draw_horizontally_shifted_sub_block(
+                        draw_horizontally_shifted_sub_block(
                             &mut resources,
                             namespace_id,
                             frame,
@@ -2495,7 +2498,7 @@ pub(crate) fn draw_current(namespace_id: u32, frame: &RenderFrame) -> Result<()>
                     }
                 }
 
-                let _ = draw_matrix_character(
+                draw_matrix_character(
                     &mut resources,
                     namespace_id,
                     frame,

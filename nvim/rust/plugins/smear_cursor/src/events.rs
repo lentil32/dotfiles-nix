@@ -165,11 +165,17 @@ fn notify_log(level: i64, message: &str) {
         Object::from("vim.notify(_A[1], _A[2])"),
         Object::from(payload),
     ]);
-    let _ = api::call_function::<_, Object>("luaeval", args);
+    if let Err(err) = api::call_function::<_, Object>("luaeval", args) {
+        eprintln!("[{LOG_SOURCE_NAME}] vim.notify failed: {err}");
+    }
 }
 
 fn warn(message: &str) {
     notify_log(LOG_LEVEL_WARN, message);
+}
+
+fn debug(message: &str) {
+    notify_log(LOG_LEVEL_DEBUG, message);
 }
 
 fn ensure_hideable_guicursor() {
@@ -187,7 +193,9 @@ fn ensure_hideable_guicursor() {
         guicursor.push(',');
     }
     guicursor.push_str("a:SmearCursorHideable");
-    let _ = api::set_option_value("guicursor", guicursor, &opts);
+    if let Err(err) = api::set_option_value("guicursor", guicursor, &opts) {
+        warn(&format!("set guicursor failed: {err}"));
+    }
 }
 
 fn hide_real_cursor() {
@@ -195,7 +203,9 @@ fn hide_real_cursor() {
         .foreground("white")
         .blend(100)
         .build();
-    let _ = api::set_hl(0, "SmearCursorHideable", &opts);
+    if let Err(err) = api::set_hl(0, "SmearCursorHideable", &opts) {
+        warn(&format!("set highlight failed: {err}"));
+    }
 }
 
 fn unhide_real_cursor() {
@@ -203,7 +213,9 @@ fn unhide_real_cursor() {
         .foreground("none")
         .blend(0)
         .build();
-    let _ = api::set_hl(0, "SmearCursorHideable", &opts);
+    if let Err(err) = api::set_hl(0, "SmearCursorHideable", &opts) {
+        warn(&format!("restore highlight failed: {err}"));
+    }
 }
 
 fn clear_animation_timer() {
@@ -241,7 +253,7 @@ fn current_render_cleanup_generation() -> u64 {
 }
 
 fn invalidate_render_cleanup() {
-    let _ = bump_render_cleanup_generation();
+    bump_render_cleanup_generation();
     clear_render_cleanup_timer();
 }
 
@@ -382,11 +394,11 @@ fn screen_cursor_position(window: &api::Window) -> Result<Option<(f64, f64)>> {
             .get(&NvimString::from("wincol"))
             .cloned()
             .ok_or_else(|| nvim_oxi::api::Error::Other("getwininfo.wincol missing".into()))?;
-        let winrow = i64_from_object("getwininfo.winrow", winrow_obj)?;
-        let wincol = i64_from_object("getwininfo.wincol", wincol_obj)?;
+        let info_row = i64_from_object("getwininfo.winrow", winrow_obj)?;
+        let info_col = i64_from_object("getwininfo.wincol", wincol_obj)?;
 
-        row = row.saturating_add(winrow.saturating_sub(1));
-        col = col.saturating_add(wincol.saturating_sub(1));
+        row = row.saturating_add(info_row.saturating_sub(1));
+        col = col.saturating_add(info_col.saturating_sub(1));
     }
 
     Ok(Some((row as f64, col as f64)))
@@ -848,7 +860,9 @@ fn clear_autocmd_group() {
     let opts = ClearAutocmdsOpts::builder()
         .group(AUTOCMD_GROUP_NAME)
         .build();
-    let _ = api::clear_autocmds(&opts);
+    if let Err(err) = api::clear_autocmds(&opts) {
+        warn(&format!("clear autocmd group failed: {err}"));
+    }
 }
 
 fn ensure_namespace_id() -> u32 {
@@ -902,440 +916,768 @@ fn validated_cterm_color_index(key: &str, value: Object) -> Result<u16> {
     Ok(parsed as u16)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum OptionalChange<T> {
+    Set(T),
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CtermCursorColorsPatch {
+    colors: Vec<u16>,
+    color_levels: u32,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+struct RuntimeOptionsPatch {
+    enabled: Option<bool>,
+    time_interval: Option<f64>,
+    delay_disable: Option<OptionalChange<f64>>,
+    delay_event_to_smear: Option<f64>,
+    delay_after_key: Option<f64>,
+    smear_to_cmd: Option<bool>,
+    smear_insert_mode: Option<bool>,
+    smear_replace_mode: Option<bool>,
+    smear_terminal_mode: Option<bool>,
+    vertical_bar_cursor: Option<bool>,
+    vertical_bar_cursor_insert_mode: Option<bool>,
+    horizontal_bar_cursor_replace_mode: Option<bool>,
+    hide_target_hack: Option<bool>,
+    windows_zindex: Option<u32>,
+    filetypes_disabled: Option<Vec<String>>,
+    logging_level: Option<i64>,
+    cursor_color: Option<OptionalChange<String>>,
+    cursor_color_insert_mode: Option<OptionalChange<String>>,
+    normal_bg: Option<OptionalChange<String>>,
+    transparent_bg_fallback_color: Option<String>,
+    cterm_bg: Option<OptionalChange<u16>>,
+    cterm_cursor_colors: Option<OptionalChange<CtermCursorColorsPatch>>,
+    smear_between_buffers: Option<bool>,
+    smear_between_neighbor_lines: Option<bool>,
+    min_horizontal_distance_smear: Option<f64>,
+    min_vertical_distance_smear: Option<f64>,
+    smear_horizontally: Option<bool>,
+    smear_vertically: Option<bool>,
+    smear_diagonally: Option<bool>,
+    scroll_buffer_space: Option<bool>,
+    stiffness: Option<f64>,
+    trailing_stiffness: Option<f64>,
+    trailing_exponent: Option<f64>,
+    stiffness_insert_mode: Option<f64>,
+    trailing_stiffness_insert_mode: Option<f64>,
+    trailing_exponent_insert_mode: Option<f64>,
+    anticipation: Option<f64>,
+    damping: Option<f64>,
+    damping_insert_mode: Option<f64>,
+    distance_stop_animating: Option<f64>,
+    distance_stop_animating_vertical_bar: Option<f64>,
+    max_length: Option<f64>,
+    max_length_insert_mode: Option<f64>,
+    particles_enabled: Option<bool>,
+    particle_max_num: Option<usize>,
+    particle_spread: Option<f64>,
+    particles_per_second: Option<f64>,
+    particles_per_length: Option<f64>,
+    particle_max_lifetime: Option<f64>,
+    particle_lifetime_distribution_exponent: Option<f64>,
+    particle_max_initial_velocity: Option<f64>,
+    particle_velocity_from_cursor: Option<f64>,
+    particle_random_velocity: Option<f64>,
+    particle_damping: Option<f64>,
+    particle_gravity: Option<f64>,
+    min_distance_emit_particles: Option<f64>,
+    particle_switch_octant_braille: Option<f64>,
+    particles_over_text: Option<bool>,
+    volume_reduction_exponent: Option<f64>,
+    minimum_volume_factor: Option<f64>,
+    never_draw_over_target: Option<bool>,
+    legacy_computing_symbols_support: Option<bool>,
+    legacy_computing_symbols_support_vertical_bars: Option<bool>,
+    use_diagonal_blocks: Option<bool>,
+    max_slope_horizontal: Option<f64>,
+    min_slope_vertical: Option<f64>,
+    max_angle_difference_diagonal: Option<f64>,
+    max_offset_diagonal: Option<f64>,
+    min_shade_no_diagonal: Option<f64>,
+    min_shade_no_diagonal_vertical_bar: Option<f64>,
+    max_shade_no_matrix: Option<f64>,
+    color_levels: Option<u32>,
+    gamma: Option<f64>,
+    gradient_exponent: Option<f64>,
+    matrix_pixel_threshold: Option<f64>,
+    matrix_pixel_threshold_vertical_bar: Option<f64>,
+    matrix_pixel_min_factor: Option<f64>,
+}
+
+fn option_object(opts: &Dictionary, key: &str) -> Option<Object> {
+    opts.get(&NvimString::from(key)).cloned()
+}
+
+fn parse_optional_with<T, F>(opts: &Dictionary, key: &'static str, parse: F) -> Result<Option<T>>
+where
+    F: Fn(&str, Object) -> Result<T>,
+{
+    option_object(opts, key)
+        .map(|value| parse(key, value))
+        .transpose()
+}
+
+fn parse_optional_change_with<T, F>(
+    opts: &Dictionary,
+    key: &'static str,
+    parse: F,
+) -> Result<Option<OptionalChange<T>>>
+where
+    F: Fn(&str, Object) -> Result<T>,
+{
+    let Some(value) = option_object(opts, key) else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(Some(OptionalChange::Clear));
+    }
+    parse(key, value).map(|parsed| Some(OptionalChange::Set(parsed)))
+}
+
+fn parse_optional_non_negative_i64(opts: &Dictionary, key: &'static str) -> Result<Option<i64>> {
+    parse_optional_with(opts, key, i64_from_object)?
+        .map(|parsed| {
+            if parsed < 0 {
+                return Err(invalid_key(key, "non-negative integer"));
+            }
+            Ok(parsed)
+        })
+        .transpose()
+}
+
+fn parse_optional_non_negative_u32(opts: &Dictionary, key: &'static str) -> Result<Option<u32>> {
+    parse_optional_non_negative_i64(opts, key)?
+        .map(|parsed| u32::try_from(parsed).map_err(|_| invalid_key(key, "non-negative integer")))
+        .transpose()
+}
+
+fn parse_optional_non_negative_usize(
+    opts: &Dictionary,
+    key: &'static str,
+) -> Result<Option<usize>> {
+    parse_optional_non_negative_i64(opts, key)?
+        .map(|parsed| usize::try_from(parsed).map_err(|_| invalid_key(key, "non-negative integer")))
+        .transpose()
+}
+
+fn parse_optional_positive_u32(opts: &Dictionary, key: &'static str) -> Result<Option<u32>> {
+    parse_optional_with(opts, key, i64_from_object)?
+        .map(|parsed| {
+            if parsed < 1 {
+                return Err(invalid_key(key, "positive integer"));
+            }
+            u32::try_from(parsed).map_err(|_| invalid_key(key, "positive integer"))
+        })
+        .transpose()
+}
+
+fn parse_optional_filetypes_disabled(
+    opts: &Dictionary,
+    key: &'static str,
+) -> Result<Option<Vec<String>>> {
+    let Some(value) = option_object(opts, key) else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(Some(Vec::new()));
+    }
+
+    let values =
+        parse_indexed_objects(key, value, None).map_err(|_| invalid_key(key, "array[string]"))?;
+    let mut filetypes = Vec::with_capacity(values.len());
+    for (index, entry) in values.into_iter().enumerate() {
+        let entry_key = format!("{key}[{}]", index + 1);
+        filetypes.push(string_from_object(&entry_key, entry)?);
+    }
+    Ok(Some(filetypes))
+}
+
+fn parse_optional_cterm_cursor_colors(
+    opts: &Dictionary,
+    key: &'static str,
+) -> Result<Option<OptionalChange<CtermCursorColorsPatch>>> {
+    let Some(value) = option_object(opts, key) else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(Some(OptionalChange::Clear));
+    }
+
+    let values =
+        parse_indexed_objects(key, value, None).map_err(|_| invalid_key(key, "array[integer]"))?;
+    let mut colors = Vec::with_capacity(values.len());
+    for (index, entry) in values.into_iter().enumerate() {
+        let entry_key = format!("{key}[{}]", index + 1);
+        colors.push(validated_cterm_color_index(&entry_key, entry)?);
+    }
+    let color_levels =
+        u32::try_from(colors.len()).map_err(|_| invalid_key(key, "array length too large"))?;
+    Ok(Some(OptionalChange::Set(CtermCursorColorsPatch {
+        colors,
+        color_levels,
+    })))
+}
+
+fn apply_optional_change<T>(target: &mut Option<T>, change: OptionalChange<T>) {
+    match change {
+        OptionalChange::Set(value) => *target = Some(value),
+        OptionalChange::Clear => *target = None,
+    }
+}
+
+impl RuntimeOptionsPatch {
+    fn parse(opts: &Dictionary) -> Result<Self> {
+        Ok(Self {
+            enabled: parse_optional_with(opts, "enabled", bool_from_object)?,
+            time_interval: parse_optional_with(opts, "time_interval", validated_f64)?
+                .map(|parsed| parsed.max(1.0)),
+            delay_disable: parse_optional_change_with(
+                opts,
+                "delay_disable",
+                validated_non_negative_f64,
+            )?,
+            delay_event_to_smear: parse_optional_with(
+                opts,
+                "delay_event_to_smear",
+                validated_non_negative_f64,
+            )?,
+            delay_after_key: parse_optional_with(
+                opts,
+                "delay_after_key",
+                validated_non_negative_f64,
+            )?,
+            smear_to_cmd: parse_optional_with(opts, "smear_to_cmd", bool_from_object)?,
+            smear_insert_mode: parse_optional_with(opts, "smear_insert_mode", bool_from_object)?,
+            smear_replace_mode: parse_optional_with(opts, "smear_replace_mode", bool_from_object)?,
+            smear_terminal_mode: parse_optional_with(
+                opts,
+                "smear_terminal_mode",
+                bool_from_object,
+            )?,
+            vertical_bar_cursor: parse_optional_with(
+                opts,
+                "vertical_bar_cursor",
+                bool_from_object,
+            )?,
+            vertical_bar_cursor_insert_mode: parse_optional_with(
+                opts,
+                "vertical_bar_cursor_insert_mode",
+                bool_from_object,
+            )?,
+            horizontal_bar_cursor_replace_mode: parse_optional_with(
+                opts,
+                "horizontal_bar_cursor_replace_mode",
+                bool_from_object,
+            )?,
+            hide_target_hack: parse_optional_with(opts, "hide_target_hack", bool_from_object)?,
+            windows_zindex: parse_optional_non_negative_u32(opts, "windows_zindex")?,
+            filetypes_disabled: parse_optional_filetypes_disabled(opts, "filetypes_disabled")?,
+            logging_level: parse_optional_non_negative_i64(opts, "logging_level")?,
+            cursor_color: parse_optional_change_with(opts, "cursor_color", string_from_object)?,
+            cursor_color_insert_mode: parse_optional_change_with(
+                opts,
+                "cursor_color_insert_mode",
+                string_from_object,
+            )?,
+            normal_bg: parse_optional_change_with(opts, "normal_bg", string_from_object)?,
+            transparent_bg_fallback_color: parse_optional_with(
+                opts,
+                "transparent_bg_fallback_color",
+                string_from_object,
+            )?,
+            cterm_bg: parse_optional_change_with(opts, "cterm_bg", validated_cterm_color_index)?,
+            cterm_cursor_colors: parse_optional_cterm_cursor_colors(opts, "cterm_cursor_colors")?,
+            smear_between_buffers: parse_optional_with(
+                opts,
+                "smear_between_buffers",
+                bool_from_object,
+            )?,
+            smear_between_neighbor_lines: parse_optional_with(
+                opts,
+                "smear_between_neighbor_lines",
+                bool_from_object,
+            )?,
+            min_horizontal_distance_smear: parse_optional_with(
+                opts,
+                "min_horizontal_distance_smear",
+                validated_non_negative_f64,
+            )?,
+            min_vertical_distance_smear: parse_optional_with(
+                opts,
+                "min_vertical_distance_smear",
+                validated_non_negative_f64,
+            )?,
+            smear_horizontally: parse_optional_with(opts, "smear_horizontally", bool_from_object)?,
+            smear_vertically: parse_optional_with(opts, "smear_vertically", bool_from_object)?,
+            smear_diagonally: parse_optional_with(opts, "smear_diagonally", bool_from_object)?,
+            scroll_buffer_space: parse_optional_with(
+                opts,
+                "scroll_buffer_space",
+                bool_from_object,
+            )?,
+            stiffness: parse_optional_with(opts, "stiffness", validated_non_negative_f64)?,
+            trailing_stiffness: parse_optional_with(
+                opts,
+                "trailing_stiffness",
+                validated_non_negative_f64,
+            )?,
+            trailing_exponent: parse_optional_with(
+                opts,
+                "trailing_exponent",
+                validated_non_negative_f64,
+            )?,
+            stiffness_insert_mode: parse_optional_with(
+                opts,
+                "stiffness_insert_mode",
+                validated_non_negative_f64,
+            )?,
+            trailing_stiffness_insert_mode: parse_optional_with(
+                opts,
+                "trailing_stiffness_insert_mode",
+                validated_non_negative_f64,
+            )?,
+            trailing_exponent_insert_mode: parse_optional_with(
+                opts,
+                "trailing_exponent_insert_mode",
+                validated_non_negative_f64,
+            )?,
+            anticipation: parse_optional_with(opts, "anticipation", validated_non_negative_f64)?,
+            damping: parse_optional_with(opts, "damping", validated_non_negative_f64)?,
+            damping_insert_mode: parse_optional_with(
+                opts,
+                "damping_insert_mode",
+                validated_non_negative_f64,
+            )?,
+            distance_stop_animating: parse_optional_with(
+                opts,
+                "distance_stop_animating",
+                validated_non_negative_f64,
+            )?,
+            distance_stop_animating_vertical_bar: parse_optional_with(
+                opts,
+                "distance_stop_animating_vertical_bar",
+                validated_non_negative_f64,
+            )?,
+            max_length: parse_optional_with(opts, "max_length", validated_non_negative_f64)?,
+            max_length_insert_mode: parse_optional_with(
+                opts,
+                "max_length_insert_mode",
+                validated_non_negative_f64,
+            )?,
+            particles_enabled: parse_optional_with(opts, "particles_enabled", bool_from_object)?,
+            particle_max_num: parse_optional_non_negative_usize(opts, "particle_max_num")?,
+            particle_spread: parse_optional_with(
+                opts,
+                "particle_spread",
+                validated_non_negative_f64,
+            )?,
+            particles_per_second: parse_optional_with(
+                opts,
+                "particles_per_second",
+                validated_non_negative_f64,
+            )?,
+            particles_per_length: parse_optional_with(
+                opts,
+                "particles_per_length",
+                validated_non_negative_f64,
+            )?,
+            particle_max_lifetime: parse_optional_with(
+                opts,
+                "particle_max_lifetime",
+                validated_non_negative_f64,
+            )?,
+            particle_lifetime_distribution_exponent: parse_optional_with(
+                opts,
+                "particle_lifetime_distribution_exponent",
+                validated_non_negative_f64,
+            )?,
+            particle_max_initial_velocity: parse_optional_with(
+                opts,
+                "particle_max_initial_velocity",
+                validated_non_negative_f64,
+            )?,
+            particle_velocity_from_cursor: parse_optional_with(
+                opts,
+                "particle_velocity_from_cursor",
+                validated_non_negative_f64,
+            )?,
+            particle_random_velocity: parse_optional_with(
+                opts,
+                "particle_random_velocity",
+                validated_non_negative_f64,
+            )?,
+            particle_damping: parse_optional_with(
+                opts,
+                "particle_damping",
+                validated_non_negative_f64,
+            )?,
+            particle_gravity: parse_optional_with(
+                opts,
+                "particle_gravity",
+                validated_non_negative_f64,
+            )?,
+            min_distance_emit_particles: parse_optional_with(
+                opts,
+                "min_distance_emit_particles",
+                validated_non_negative_f64,
+            )?,
+            particle_switch_octant_braille: parse_optional_with(
+                opts,
+                "particle_switch_octant_braille",
+                validated_non_negative_f64,
+            )?,
+            particles_over_text: parse_optional_with(
+                opts,
+                "particles_over_text",
+                bool_from_object,
+            )?,
+            volume_reduction_exponent: parse_optional_with(
+                opts,
+                "volume_reduction_exponent",
+                validated_non_negative_f64,
+            )?,
+            minimum_volume_factor: parse_optional_with(
+                opts,
+                "minimum_volume_factor",
+                validated_non_negative_f64,
+            )?,
+            never_draw_over_target: parse_optional_with(
+                opts,
+                "never_draw_over_target",
+                bool_from_object,
+            )?,
+            legacy_computing_symbols_support: parse_optional_with(
+                opts,
+                "legacy_computing_symbols_support",
+                bool_from_object,
+            )?,
+            legacy_computing_symbols_support_vertical_bars: parse_optional_with(
+                opts,
+                "legacy_computing_symbols_support_vertical_bars",
+                bool_from_object,
+            )?,
+            use_diagonal_blocks: parse_optional_with(
+                opts,
+                "use_diagonal_blocks",
+                bool_from_object,
+            )?,
+            max_slope_horizontal: parse_optional_with(
+                opts,
+                "max_slope_horizontal",
+                validated_non_negative_f64,
+            )?,
+            min_slope_vertical: parse_optional_with(
+                opts,
+                "min_slope_vertical",
+                validated_non_negative_f64,
+            )?,
+            max_angle_difference_diagonal: parse_optional_with(
+                opts,
+                "max_angle_difference_diagonal",
+                validated_non_negative_f64,
+            )?,
+            max_offset_diagonal: parse_optional_with(
+                opts,
+                "max_offset_diagonal",
+                validated_non_negative_f64,
+            )?,
+            min_shade_no_diagonal: parse_optional_with(
+                opts,
+                "min_shade_no_diagonal",
+                validated_non_negative_f64,
+            )?,
+            min_shade_no_diagonal_vertical_bar: parse_optional_with(
+                opts,
+                "min_shade_no_diagonal_vertical_bar",
+                validated_non_negative_f64,
+            )?,
+            max_shade_no_matrix: parse_optional_with(
+                opts,
+                "max_shade_no_matrix",
+                validated_non_negative_f64,
+            )?,
+            color_levels: parse_optional_positive_u32(opts, "color_levels")?,
+            gamma: parse_optional_with(opts, "gamma", validated_positive_f64)?,
+            gradient_exponent: parse_optional_with(
+                opts,
+                "gradient_exponent",
+                validated_non_negative_f64,
+            )?,
+            matrix_pixel_threshold: parse_optional_with(
+                opts,
+                "matrix_pixel_threshold",
+                validated_non_negative_f64,
+            )?,
+            matrix_pixel_threshold_vertical_bar: parse_optional_with(
+                opts,
+                "matrix_pixel_threshold_vertical_bar",
+                validated_non_negative_f64,
+            )?,
+            matrix_pixel_min_factor: parse_optional_with(
+                opts,
+                "matrix_pixel_min_factor",
+                validated_non_negative_f64,
+            )?,
+        })
+    }
+
+    fn apply(self, state: &mut RuntimeState) {
+        if let Some(value) = self.enabled {
+            state.set_enabled(value);
+        }
+        if let Some(value) = self.time_interval {
+            state.config.time_interval = value;
+        }
+        if let Some(value) = self.delay_disable {
+            match value {
+                OptionalChange::Set(delay) => state.config.delay_disable = Some(delay),
+                OptionalChange::Clear => state.config.delay_disable = None,
+            }
+        }
+        if let Some(value) = self.delay_event_to_smear {
+            state.config.delay_event_to_smear = value;
+        }
+        if let Some(value) = self.delay_after_key {
+            state.config.delay_after_key = value;
+        }
+        if let Some(value) = self.smear_to_cmd {
+            state.config.smear_to_cmd = value;
+        }
+        if let Some(value) = self.smear_insert_mode {
+            state.config.smear_insert_mode = value;
+        }
+        if let Some(value) = self.smear_replace_mode {
+            state.config.smear_replace_mode = value;
+        }
+        if let Some(value) = self.smear_terminal_mode {
+            state.config.smear_terminal_mode = value;
+        }
+        if let Some(value) = self.vertical_bar_cursor {
+            state.config.vertical_bar_cursor = value;
+        }
+        if let Some(value) = self.vertical_bar_cursor_insert_mode {
+            state.config.vertical_bar_cursor_insert_mode = value;
+        }
+        if let Some(value) = self.horizontal_bar_cursor_replace_mode {
+            state.config.horizontal_bar_cursor_replace_mode = value;
+        }
+        if let Some(value) = self.hide_target_hack {
+            state.config.hide_target_hack = value;
+        }
+        if let Some(value) = self.windows_zindex {
+            state.config.windows_zindex = value;
+        }
+        if let Some(value) = self.filetypes_disabled {
+            state.config.filetypes_disabled = value;
+        }
+        if let Some(value) = self.logging_level {
+            state.config.logging_level = value;
+            set_log_level(value);
+        }
+        if let Some(change) = self.cursor_color {
+            apply_optional_change(&mut state.config.cursor_color, change);
+        }
+        if let Some(change) = self.cursor_color_insert_mode {
+            apply_optional_change(&mut state.config.cursor_color_insert_mode, change);
+        }
+        if let Some(change) = self.normal_bg {
+            apply_optional_change(&mut state.config.normal_bg, change);
+        }
+        if let Some(value) = self.transparent_bg_fallback_color {
+            state.config.transparent_bg_fallback_color = value;
+        }
+        if let Some(change) = self.cterm_bg {
+            apply_optional_change(&mut state.config.cterm_bg, change);
+        }
+        if let Some(change) = self.cterm_cursor_colors {
+            match change {
+                OptionalChange::Set(patch) => {
+                    state.config.color_levels = patch.color_levels;
+                    state.config.cterm_cursor_colors = Some(patch.colors);
+                }
+                OptionalChange::Clear => state.config.cterm_cursor_colors = None,
+            }
+        }
+        if let Some(value) = self.smear_between_buffers {
+            state.config.smear_between_buffers = value;
+        }
+        if let Some(value) = self.smear_between_neighbor_lines {
+            state.config.smear_between_neighbor_lines = value;
+        }
+        if let Some(value) = self.min_horizontal_distance_smear {
+            state.config.min_horizontal_distance_smear = value;
+        }
+        if let Some(value) = self.min_vertical_distance_smear {
+            state.config.min_vertical_distance_smear = value;
+        }
+        if let Some(value) = self.smear_horizontally {
+            state.config.smear_horizontally = value;
+        }
+        if let Some(value) = self.smear_vertically {
+            state.config.smear_vertically = value;
+        }
+        if let Some(value) = self.smear_diagonally {
+            state.config.smear_diagonally = value;
+        }
+        if let Some(value) = self.scroll_buffer_space {
+            state.config.scroll_buffer_space = value;
+        }
+        if let Some(value) = self.stiffness {
+            state.config.stiffness = value;
+        }
+        if let Some(value) = self.trailing_stiffness {
+            state.config.trailing_stiffness = value;
+        }
+        if let Some(value) = self.trailing_exponent {
+            state.config.trailing_exponent = value;
+        }
+        if let Some(value) = self.stiffness_insert_mode {
+            state.config.stiffness_insert_mode = value;
+        }
+        if let Some(value) = self.trailing_stiffness_insert_mode {
+            state.config.trailing_stiffness_insert_mode = value;
+        }
+        if let Some(value) = self.trailing_exponent_insert_mode {
+            state.config.trailing_exponent_insert_mode = value;
+        }
+        if let Some(value) = self.anticipation {
+            state.config.anticipation = value;
+        }
+        if let Some(value) = self.damping {
+            state.config.damping = value;
+        }
+        if let Some(value) = self.damping_insert_mode {
+            state.config.damping_insert_mode = value;
+        }
+        if let Some(value) = self.distance_stop_animating {
+            state.config.distance_stop_animating = value;
+        }
+        if let Some(value) = self.distance_stop_animating_vertical_bar {
+            state.config.distance_stop_animating_vertical_bar = value;
+        }
+        if let Some(value) = self.max_length {
+            state.config.max_length = value;
+        }
+        if let Some(value) = self.max_length_insert_mode {
+            state.config.max_length_insert_mode = value;
+        }
+        if let Some(value) = self.particles_enabled {
+            state.config.particles_enabled = value;
+        }
+        if let Some(value) = self.particle_max_num {
+            state.config.particle_max_num = value;
+        }
+        if let Some(value) = self.particle_spread {
+            state.config.particle_spread = value;
+        }
+        if let Some(value) = self.particles_per_second {
+            state.config.particles_per_second = value;
+        }
+        if let Some(value) = self.particles_per_length {
+            state.config.particles_per_length = value;
+        }
+        if let Some(value) = self.particle_max_lifetime {
+            state.config.particle_max_lifetime = value;
+        }
+        if let Some(value) = self.particle_lifetime_distribution_exponent {
+            state.config.particle_lifetime_distribution_exponent = value;
+        }
+        if let Some(value) = self.particle_max_initial_velocity {
+            state.config.particle_max_initial_velocity = value;
+        }
+        if let Some(value) = self.particle_velocity_from_cursor {
+            state.config.particle_velocity_from_cursor = value;
+        }
+        if let Some(value) = self.particle_random_velocity {
+            state.config.particle_random_velocity = value;
+        }
+        if let Some(value) = self.particle_damping {
+            state.config.particle_damping = value;
+        }
+        if let Some(value) = self.particle_gravity {
+            state.config.particle_gravity = value;
+        }
+        if let Some(value) = self.min_distance_emit_particles {
+            state.config.min_distance_emit_particles = value;
+        }
+        if let Some(value) = self.particle_switch_octant_braille {
+            state.config.particle_switch_octant_braille = value;
+        }
+        if let Some(value) = self.particles_over_text {
+            state.config.particles_over_text = value;
+        }
+        if let Some(value) = self.volume_reduction_exponent {
+            state.config.volume_reduction_exponent = value;
+        }
+        if let Some(value) = self.minimum_volume_factor {
+            state.config.minimum_volume_factor = value;
+        }
+        if let Some(value) = self.never_draw_over_target {
+            state.config.never_draw_over_target = value;
+        }
+        if let Some(value) = self.legacy_computing_symbols_support {
+            state.config.legacy_computing_symbols_support = value;
+        }
+        if let Some(value) = self.legacy_computing_symbols_support_vertical_bars {
+            state.config.legacy_computing_symbols_support_vertical_bars = value;
+        }
+        if let Some(value) = self.use_diagonal_blocks {
+            state.config.use_diagonal_blocks = value;
+        }
+        if let Some(value) = self.max_slope_horizontal {
+            state.config.max_slope_horizontal = value;
+        }
+        if let Some(value) = self.min_slope_vertical {
+            state.config.min_slope_vertical = value;
+        }
+        if let Some(value) = self.max_angle_difference_diagonal {
+            state.config.max_angle_difference_diagonal = value;
+        }
+        if let Some(value) = self.max_offset_diagonal {
+            state.config.max_offset_diagonal = value;
+        }
+        if let Some(value) = self.min_shade_no_diagonal {
+            state.config.min_shade_no_diagonal = value;
+        }
+        if let Some(value) = self.min_shade_no_diagonal_vertical_bar {
+            state.config.min_shade_no_diagonal_vertical_bar = value;
+        }
+        if let Some(value) = self.max_shade_no_matrix {
+            state.config.max_shade_no_matrix = value;
+        }
+        if let Some(value) = self.color_levels {
+            state.config.color_levels = value;
+        }
+        if let Some(value) = self.gamma {
+            state.config.gamma = value;
+        }
+        if let Some(value) = self.gradient_exponent {
+            state.config.gradient_exponent = value;
+        }
+        if let Some(value) = self.matrix_pixel_threshold {
+            state.config.matrix_pixel_threshold = value;
+        }
+        if let Some(value) = self.matrix_pixel_threshold_vertical_bar {
+            state.config.matrix_pixel_threshold_vertical_bar = value;
+        }
+        if let Some(value) = self.matrix_pixel_min_factor {
+            state.config.matrix_pixel_min_factor = value;
+        }
+
+        if !should_track_cursor_color(&state.config) {
+            state.color_at_cursor = None;
+        }
+    }
+}
+
 fn apply_runtime_options(state: &mut RuntimeState, opts: &Dictionary) -> Result<()> {
-    if let Some(value) = opts.get(&NvimString::from("enabled")).cloned() {
-        state.set_enabled(bool_from_object("enabled", value)?);
-    }
-    if let Some(value) = opts.get(&NvimString::from("time_interval")).cloned() {
-        state.config.time_interval = validated_f64("time_interval", value)?.max(1.0);
-    }
-    if let Some(value) = opts.get(&NvimString::from("delay_disable")).cloned() {
-        if value.is_nil() {
-            state.config.delay_disable = None;
-        } else {
-            state.config.delay_disable = Some(validated_non_negative_f64("delay_disable", value)?);
-        }
-    }
-    if let Some(value) = opts.get(&NvimString::from("delay_event_to_smear")).cloned() {
-        state.config.delay_event_to_smear =
-            validated_non_negative_f64("delay_event_to_smear", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("delay_after_key")).cloned() {
-        state.config.delay_after_key = validated_non_negative_f64("delay_after_key", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("smear_to_cmd")).cloned() {
-        state.config.smear_to_cmd = bool_from_object("smear_to_cmd", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("smear_insert_mode")).cloned() {
-        state.config.smear_insert_mode = bool_from_object("smear_insert_mode", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("smear_replace_mode")).cloned() {
-        state.config.smear_replace_mode = bool_from_object("smear_replace_mode", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("smear_terminal_mode")).cloned() {
-        state.config.smear_terminal_mode = bool_from_object("smear_terminal_mode", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("vertical_bar_cursor")).cloned() {
-        state.config.vertical_bar_cursor = bool_from_object("vertical_bar_cursor", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("vertical_bar_cursor_insert_mode"))
-        .cloned()
-    {
-        state.config.vertical_bar_cursor_insert_mode =
-            bool_from_object("vertical_bar_cursor_insert_mode", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("horizontal_bar_cursor_replace_mode"))
-        .cloned()
-    {
-        state.config.horizontal_bar_cursor_replace_mode =
-            bool_from_object("horizontal_bar_cursor_replace_mode", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("hide_target_hack")).cloned() {
-        state.config.hide_target_hack = bool_from_object("hide_target_hack", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("windows_zindex")).cloned() {
-        let parsed = i64_from_object("windows_zindex", value)?;
-        if parsed < 0 {
-            return Err(invalid_key("windows_zindex", "non-negative integer"));
-        }
-        state.config.windows_zindex = u32::try_from(parsed)
-            .map_err(|_| invalid_key("windows_zindex", "non-negative integer"))?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("filetypes_disabled")).cloned() {
-        if value.is_nil() {
-            state.config.filetypes_disabled.clear();
-        } else {
-            let values = parse_indexed_objects("filetypes_disabled", value, None)
-                .map_err(|_| invalid_key("filetypes_disabled", "array[string]"))?;
-            let mut filetypes = Vec::with_capacity(values.len());
-            for (index, entry) in values.into_iter().enumerate() {
-                let key = format!("filetypes_disabled[{}]", index + 1);
-                filetypes.push(string_from_object(&key, entry)?);
-            }
-            state.config.filetypes_disabled = filetypes;
-        }
-    }
-    if let Some(value) = opts.get(&NvimString::from("logging_level")).cloned() {
-        let parsed = i64_from_object("logging_level", value)?;
-        if parsed < 0 {
-            return Err(invalid_key("logging_level", "non-negative integer"));
-        }
-        state.config.logging_level = parsed;
-        set_log_level(parsed);
-    }
-    if let Some(value) = opts.get(&NvimString::from("cursor_color")).cloned() {
-        if value.is_nil() {
-            state.config.cursor_color = None;
-        } else {
-            state.config.cursor_color = Some(string_from_object("cursor_color", value)?);
-        }
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("cursor_color_insert_mode"))
-        .cloned()
-    {
-        if value.is_nil() {
-            state.config.cursor_color_insert_mode = None;
-        } else {
-            state.config.cursor_color_insert_mode =
-                Some(string_from_object("cursor_color_insert_mode", value)?);
-        }
-    }
-    if let Some(value) = opts.get(&NvimString::from("normal_bg")).cloned() {
-        if value.is_nil() {
-            state.config.normal_bg = None;
-        } else {
-            state.config.normal_bg = Some(string_from_object("normal_bg", value)?);
-        }
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("transparent_bg_fallback_color"))
-        .cloned()
-    {
-        state.config.transparent_bg_fallback_color =
-            string_from_object("transparent_bg_fallback_color", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("cterm_bg")).cloned() {
-        if value.is_nil() {
-            state.config.cterm_bg = None;
-        } else {
-            state.config.cterm_bg = Some(validated_cterm_color_index("cterm_bg", value)?);
-        }
-    }
-    if let Some(value) = opts.get(&NvimString::from("cterm_cursor_colors")).cloned() {
-        if value.is_nil() {
-            state.config.cterm_cursor_colors = None;
-        } else {
-            let values = parse_indexed_objects("cterm_cursor_colors", value, None)
-                .map_err(|_| invalid_key("cterm_cursor_colors", "array[integer]"))?;
-            let mut colors = Vec::with_capacity(values.len());
-            for (index, entry) in values.into_iter().enumerate() {
-                let key = format!("cterm_cursor_colors[{}]", index + 1);
-                colors.push(validated_cterm_color_index(&key, entry)?);
-            }
-            state.config.color_levels = u32::try_from(colors.len())
-                .map_err(|_| invalid_key("cterm_cursor_colors", "array length too large"))?;
-            state.config.cterm_cursor_colors = Some(colors);
-        }
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("smear_between_buffers"))
-        .cloned()
-    {
-        state.config.smear_between_buffers = bool_from_object("smear_between_buffers", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("smear_between_neighbor_lines"))
-        .cloned()
-    {
-        state.config.smear_between_neighbor_lines =
-            bool_from_object("smear_between_neighbor_lines", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("min_horizontal_distance_smear"))
-        .cloned()
-    {
-        state.config.min_horizontal_distance_smear =
-            validated_non_negative_f64("min_horizontal_distance_smear", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("min_vertical_distance_smear"))
-        .cloned()
-    {
-        state.config.min_vertical_distance_smear =
-            validated_non_negative_f64("min_vertical_distance_smear", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("smear_horizontally")).cloned() {
-        state.config.smear_horizontally = bool_from_object("smear_horizontally", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("smear_vertically")).cloned() {
-        state.config.smear_vertically = bool_from_object("smear_vertically", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("smear_diagonally")).cloned() {
-        state.config.smear_diagonally = bool_from_object("smear_diagonally", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("scroll_buffer_space")).cloned() {
-        state.config.scroll_buffer_space = bool_from_object("scroll_buffer_space", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("stiffness")).cloned() {
-        state.config.stiffness = validated_non_negative_f64("stiffness", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("trailing_stiffness")).cloned() {
-        state.config.trailing_stiffness = validated_non_negative_f64("trailing_stiffness", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("trailing_exponent")).cloned() {
-        state.config.trailing_exponent = validated_non_negative_f64("trailing_exponent", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("stiffness_insert_mode"))
-        .cloned()
-    {
-        state.config.stiffness_insert_mode =
-            validated_non_negative_f64("stiffness_insert_mode", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("trailing_stiffness_insert_mode"))
-        .cloned()
-    {
-        state.config.trailing_stiffness_insert_mode =
-            validated_non_negative_f64("trailing_stiffness_insert_mode", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("trailing_exponent_insert_mode"))
-        .cloned()
-    {
-        state.config.trailing_exponent_insert_mode =
-            validated_non_negative_f64("trailing_exponent_insert_mode", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("anticipation")).cloned() {
-        state.config.anticipation = validated_non_negative_f64("anticipation", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("damping")).cloned() {
-        state.config.damping = validated_non_negative_f64("damping", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("damping_insert_mode")).cloned() {
-        state.config.damping_insert_mode =
-            validated_non_negative_f64("damping_insert_mode", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("distance_stop_animating"))
-        .cloned()
-    {
-        state.config.distance_stop_animating =
-            validated_non_negative_f64("distance_stop_animating", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("distance_stop_animating_vertical_bar"))
-        .cloned()
-    {
-        state.config.distance_stop_animating_vertical_bar =
-            validated_non_negative_f64("distance_stop_animating_vertical_bar", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("max_length")).cloned() {
-        state.config.max_length = validated_non_negative_f64("max_length", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("max_length_insert_mode"))
-        .cloned()
-    {
-        state.config.max_length_insert_mode =
-            validated_non_negative_f64("max_length_insert_mode", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particles_enabled")).cloned() {
-        state.config.particles_enabled = bool_from_object("particles_enabled", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particle_max_num")).cloned() {
-        let parsed = i64_from_object("particle_max_num", value)?;
-        if parsed < 0 {
-            return Err(invalid_key("particle_max_num", "non-negative integer"));
-        }
-        state.config.particle_max_num = usize::try_from(parsed)
-            .map_err(|_| invalid_key("particle_max_num", "non-negative integer"))?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particle_spread")).cloned() {
-        state.config.particle_spread = validated_non_negative_f64("particle_spread", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particles_per_second")).cloned() {
-        state.config.particles_per_second =
-            validated_non_negative_f64("particles_per_second", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particles_per_length")).cloned() {
-        state.config.particles_per_length =
-            validated_non_negative_f64("particles_per_length", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("particle_max_lifetime"))
-        .cloned()
-    {
-        state.config.particle_max_lifetime =
-            validated_non_negative_f64("particle_max_lifetime", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("particle_lifetime_distribution_exponent"))
-        .cloned()
-    {
-        state.config.particle_lifetime_distribution_exponent =
-            validated_non_negative_f64("particle_lifetime_distribution_exponent", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("particle_max_initial_velocity"))
-        .cloned()
-    {
-        state.config.particle_max_initial_velocity =
-            validated_non_negative_f64("particle_max_initial_velocity", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("particle_velocity_from_cursor"))
-        .cloned()
-    {
-        state.config.particle_velocity_from_cursor =
-            validated_non_negative_f64("particle_velocity_from_cursor", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("particle_random_velocity"))
-        .cloned()
-    {
-        state.config.particle_random_velocity =
-            validated_non_negative_f64("particle_random_velocity", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particle_damping")).cloned() {
-        state.config.particle_damping = validated_non_negative_f64("particle_damping", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particle_gravity")).cloned() {
-        state.config.particle_gravity = validated_non_negative_f64("particle_gravity", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("min_distance_emit_particles"))
-        .cloned()
-    {
-        state.config.min_distance_emit_particles =
-            validated_non_negative_f64("min_distance_emit_particles", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("particle_switch_octant_braille"))
-        .cloned()
-    {
-        state.config.particle_switch_octant_braille =
-            validated_non_negative_f64("particle_switch_octant_braille", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("particles_over_text")).cloned() {
-        state.config.particles_over_text = bool_from_object("particles_over_text", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("volume_reduction_exponent"))
-        .cloned()
-    {
-        state.config.volume_reduction_exponent =
-            validated_non_negative_f64("volume_reduction_exponent", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("minimum_volume_factor"))
-        .cloned()
-    {
-        state.config.minimum_volume_factor =
-            validated_non_negative_f64("minimum_volume_factor", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("never_draw_over_target"))
-        .cloned()
-    {
-        state.config.never_draw_over_target = bool_from_object("never_draw_over_target", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("legacy_computing_symbols_support"))
-        .cloned()
-    {
-        state.config.legacy_computing_symbols_support =
-            bool_from_object("legacy_computing_symbols_support", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from(
-            "legacy_computing_symbols_support_vertical_bars",
-        ))
-        .cloned()
-    {
-        state.config.legacy_computing_symbols_support_vertical_bars =
-            bool_from_object("legacy_computing_symbols_support_vertical_bars", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("use_diagonal_blocks")).cloned() {
-        state.config.use_diagonal_blocks = bool_from_object("use_diagonal_blocks", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("max_slope_horizontal")).cloned() {
-        state.config.max_slope_horizontal =
-            validated_non_negative_f64("max_slope_horizontal", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("min_slope_vertical")).cloned() {
-        state.config.min_slope_vertical = validated_non_negative_f64("min_slope_vertical", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("max_angle_difference_diagonal"))
-        .cloned()
-    {
-        state.config.max_angle_difference_diagonal =
-            validated_non_negative_f64("max_angle_difference_diagonal", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("max_offset_diagonal")).cloned() {
-        state.config.max_offset_diagonal =
-            validated_non_negative_f64("max_offset_diagonal", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("min_shade_no_diagonal"))
-        .cloned()
-    {
-        state.config.min_shade_no_diagonal =
-            validated_non_negative_f64("min_shade_no_diagonal", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("min_shade_no_diagonal_vertical_bar"))
-        .cloned()
-    {
-        state.config.min_shade_no_diagonal_vertical_bar =
-            validated_non_negative_f64("min_shade_no_diagonal_vertical_bar", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("max_shade_no_matrix")).cloned() {
-        state.config.max_shade_no_matrix =
-            validated_non_negative_f64("max_shade_no_matrix", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("color_levels")).cloned() {
-        let parsed = i64_from_object("color_levels", value)?;
-        if parsed < 1 {
-            return Err(invalid_key("color_levels", "positive integer"));
-        }
-        state.config.color_levels =
-            u32::try_from(parsed).map_err(|_| invalid_key("color_levels", "positive integer"))?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("gamma")).cloned() {
-        state.config.gamma = validated_positive_f64("gamma", value)?;
-    }
-    if let Some(value) = opts.get(&NvimString::from("gradient_exponent")).cloned() {
-        state.config.gradient_exponent = validated_non_negative_f64("gradient_exponent", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("matrix_pixel_threshold"))
-        .cloned()
-    {
-        state.config.matrix_pixel_threshold =
-            validated_non_negative_f64("matrix_pixel_threshold", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("matrix_pixel_threshold_vertical_bar"))
-        .cloned()
-    {
-        state.config.matrix_pixel_threshold_vertical_bar =
-            validated_non_negative_f64("matrix_pixel_threshold_vertical_bar", value)?;
-    }
-    if let Some(value) = opts
-        .get(&NvimString::from("matrix_pixel_min_factor"))
-        .cloned()
-    {
-        state.config.matrix_pixel_min_factor =
-            validated_non_negative_f64("matrix_pixel_min_factor", value)?;
-    }
-    if !should_track_cursor_color(&state.config) {
-        state.color_at_cursor = None;
-    }
+    let patch = RuntimeOptionsPatch::parse(opts)?;
+    patch.apply(state);
     Ok(())
 }
 
@@ -1357,15 +1699,16 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         return Ok(());
     }
 
-    let fallback_target_position = if source == EventSource::AnimationTick {
-        let state = state_lock();
-        if state.is_initialized() {
-            Some((state.target_position.row, state.target_position.col))
-        } else {
-            None
+    let fallback_target_position = match source {
+        EventSource::AnimationTick => {
+            let state = state_lock();
+            if state.is_initialized() {
+                Some((state.target_position.row, state.target_position.col))
+            } else {
+                None
+            }
         }
-    } else {
-        None
+        EventSource::External => None,
     };
 
     let maybe_cursor_position = if let Some(position) = fallback_target_position {
@@ -1398,16 +1741,15 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
             state.current_corners,
         )
     };
-    let scroll_shift = if source == EventSource::External {
-        maybe_scroll_shift(
+    let scroll_shift = match source {
+        EventSource::External => maybe_scroll_shift(
             &window,
             scroll_buffer_space,
             &current_corners,
             previous_location,
             current_location,
-        )?
-    } else {
-        None
+        )?,
+        EventSource::AnimationTick => None,
     };
 
     let event_now_ms = now_ms();
@@ -1426,18 +1768,20 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         reduce_cursor_event(&mut state, &mode, event, source)
     };
 
-    if effects.notify_delay_disabled {
-        let _ = api::command(
+    if effects.notify_delay_disabled
+        && let Err(err) = api::command(
             "lua vim.notify(\"Smear cursor disabled in the current buffer due to high delay.\")",
-        );
+        )
+    {
+        warn(&format!("delay-disabled notify failed: {err}"));
     }
 
     match effects.render_action {
         RenderAction::Draw(frame) => {
             let redraw_cmd = mode == "c" && smear_outside_cmd_row(&frame.corners)?;
             draw_current(namespace_id, &frame)?;
-            if redraw_cmd {
-                let _ = api::command("redraw");
+            if redraw_cmd && let Err(err) = api::command("redraw") {
+                debug(&format!("redraw after draw failed: {err}"));
             }
 
             let should_unhide_while_animating =
@@ -1462,8 +1806,10 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         }
         RenderAction::ClearAll => {
             clear_active_render_windows(namespace_id);
-            if mode == "c" {
-                let _ = api::command("redraw");
+            if mode == "c"
+                && let Err(err) = api::command("redraw")
+            {
+                debug(&format!("redraw after clear failed: {err}"));
             }
             let mut state = state_lock();
             if state.is_cursor_hidden() {
@@ -1479,8 +1825,10 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
     apply_render_cleanup_action(namespace_id, effects.render_cleanup_action);
 
     let callback_duration_ms = (now_ms() - event_now_ms).max(0.0);
-    let should_schedule =
-        source == EventSource::AnimationTick || effects.step_interval_ms.is_some();
+    let should_schedule = match source {
+        EventSource::AnimationTick => true,
+        EventSource::External => effects.step_interval_ms.is_some(),
+    };
     let maybe_delay = {
         let mut state = state_lock();
         if should_schedule
@@ -1500,10 +1848,10 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
             None
         }
     };
-    if let Some(delay) = maybe_delay {
-        schedule_animation_tick(delay);
-    } else if source == EventSource::AnimationTick {
-        clear_animation_timer();
+    match (maybe_delay, source) {
+        (Some(delay), _) => schedule_animation_tick(delay),
+        (None, EventSource::AnimationTick) => clear_animation_timer(),
+        (None, EventSource::External) => {}
     }
 
     Ok(())
@@ -1785,7 +2133,11 @@ fn setup_autocmds() -> Result<()> {
 }
 
 fn setup_user_command() -> Result<()> {
-    let _ = api::del_user_command("SmearCursorToggle");
+    if let Err(err) = api::del_user_command("SmearCursorToggle") {
+        debug(&format!(
+            "delete existing SmearCursorToggle failed (continuing): {err}"
+        ));
+    }
     api::create_user_command(
         "SmearCursorToggle",
         "lua require('rs_smear_cursor').toggle()",
@@ -1863,9 +2215,12 @@ pub(crate) fn toggle() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineState, MIN_RENDER_CLEANUP_DELAY_MS, RenderCleanupGeneration, render_cleanup_delay_ms,
+        EngineState, MIN_RENDER_CLEANUP_DELAY_MS, OptionalChange, RenderCleanupGeneration,
+        RuntimeOptionsPatch, apply_runtime_options, render_cleanup_delay_ms,
     };
     use crate::config::RuntimeConfig;
+    use crate::state::RuntimeState;
+    use nvim_oxi::{Array, Dictionary, Object};
 
     #[test]
     fn cleanup_delay_has_floor() {
@@ -1913,5 +2268,56 @@ mod tests {
         assert_eq!(state.bump_render_cleanup_generation(), 1);
         assert_eq!(state.bump_render_cleanup_generation(), 2);
         assert_eq!(state.current_render_cleanup_generation(), 2);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_clears_nullable_fields() {
+        let mut state = RuntimeState::default();
+        state.config.delay_disable = Some(12.0);
+        state.config.cursor_color = Some("#abcdef".to_string());
+        let patch = RuntimeOptionsPatch {
+            delay_disable: Some(OptionalChange::Clear),
+            cursor_color: Some(OptionalChange::Clear),
+            ..RuntimeOptionsPatch::default()
+        };
+
+        patch.apply(&mut state);
+        assert_eq!(state.config.delay_disable, None);
+        assert_eq!(state.config.cursor_color, None);
+    }
+
+    #[test]
+    fn runtime_options_patch_explicit_color_levels_override_cterm_array_length() {
+        let mut state = RuntimeState::default();
+        let mut opts = Dictionary::new();
+        opts.insert(
+            "cterm_cursor_colors",
+            Object::from(Array::from_iter([
+                Object::from(17_i64),
+                Object::from(42_i64),
+            ])),
+        );
+        opts.insert("color_levels", 9_i64);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert_eq!(state.config.cterm_cursor_colors, Some(vec![17_u16, 42_u16]));
+        assert_eq!(state.config.color_levels, 9_u32);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_clears_filetypes_list() {
+        let mut state = RuntimeState::default();
+        state.config.filetypes_disabled = vec!["lua".to_string(), "nix".to_string()];
+        let patch = RuntimeOptionsPatch {
+            filetypes_disabled: Some(Vec::new()),
+            ..RuntimeOptionsPatch::default()
+        };
+
+        patch.apply(&mut state);
+        assert!(state.config.filetypes_disabled.is_empty());
     }
 }

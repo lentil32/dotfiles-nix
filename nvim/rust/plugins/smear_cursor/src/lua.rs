@@ -1,23 +1,18 @@
 use crate::types::EPSILON;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Dictionary, Object, Result, String as NvimString};
+use nvim_oxi_utils::{Error as OxiError, dict};
 
-fn error(message: String) -> nvim_oxi::Error {
-    nvim_oxi::api::Error::Other(message).into()
+fn to_nvim_error(err: OxiError) -> nvim_oxi::Error {
+    nvim_oxi::api::Error::Other(err.to_string()).into()
 }
 
-fn missing_key(key: &str) -> nvim_oxi::Error {
-    error(format!("missing key '{key}'"))
-}
-
-pub(crate) fn invalid_key(key: &str, expected: &str) -> nvim_oxi::Error {
-    error(format!("invalid key '{key}', expected {expected}"))
+pub(crate) fn invalid_key(key: &str, expected: &'static str) -> nvim_oxi::Error {
+    to_nvim_error(OxiError::invalid_value(key, expected))
 }
 
 pub(crate) fn get_object(args: &Dictionary, key: &str) -> Result<Object> {
-    args.get(&NvimString::from(key))
-        .cloned()
-        .ok_or_else(|| missing_key(key))
+    dict::get_object(args, key).ok_or_else(|| to_nvim_error(OxiError::missing_key(key)))
 }
 
 pub(crate) fn f64_from_object(key: &str, value: Object) -> Result<f64> {
@@ -34,12 +29,12 @@ pub(crate) fn i64_from_object(key: &str, value: Object) -> Result<i64> {
     if let Ok(parsed) = i64::from_object(value.clone()) {
         return Ok(parsed);
     }
-    if let Ok(parsed) = f64::from_object(value) {
-        if parsed.is_finite() {
-            let rounded = parsed.round();
-            if (rounded - parsed).abs() <= EPSILON {
-                return Ok(rounded as i64);
-            }
+    if let Ok(parsed) = f64::from_object(value)
+        && parsed.is_finite()
+    {
+        let rounded = parsed.round();
+        if (rounded - parsed).abs() <= EPSILON {
+            return Ok(rounded as i64);
         }
     }
     Err(invalid_key(key, "integer"))
@@ -62,7 +57,7 @@ pub(crate) fn get_f64(args: &Dictionary, key: &str) -> Result<f64> {
 }
 
 pub(crate) fn get_optional_f64(args: &Dictionary, key: &str) -> Result<Option<f64>> {
-    let Some(value) = args.get(&NvimString::from(key)).cloned() else {
+    let Some(value) = dict::get_object(args, key) else {
         return Ok(None);
     };
     if value.is_nil() {
@@ -89,10 +84,10 @@ pub(crate) fn parse_indexed_objects(
     expected_len: Option<usize>,
 ) -> Result<Vec<Object>> {
     if let Ok(values) = Vec::<Object>::from_object(value.clone()) {
-        if let Some(length) = expected_len {
-            if values.len() != length {
-                return Err(invalid_key(key, "array"));
-            }
+        if let Some(length) = expected_len
+            && values.len() != length
+        {
+            return Err(invalid_key(key, "array"));
         }
         return Ok(values);
     }

@@ -356,6 +356,14 @@ pub mod dict {
             .map_err(|_| Error::invalid_value(key, "string"))
     }
 
+    pub fn require_string_nonempty(dict: &Dictionary, key: &str) -> Result<String> {
+        let value = require_string(dict, key)?;
+        if value.is_empty() {
+            return Err(Error::invalid_value(key, "non-empty string"));
+        }
+        Ok(value)
+    }
+
     pub fn get_string_nonempty(dict: &Dictionary, key: &str) -> Option<String> {
         get_string(dict, key).filter(|val| !val.is_empty())
     }

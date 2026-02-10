@@ -41,29 +41,29 @@ pub mod path {
         fs::metadata(path).is_ok_and(|meta| meta.is_dir())
     }
 
-    pub fn has_uri_scheme(value: &str) -> bool {
-        let mut chars = value.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
+    pub fn split_uri_scheme_and_rest(value: &str) -> Option<(&str, &str)> {
+        let (scheme, rest) = value.split_once("://")?;
+        let mut chars = scheme.chars();
+        let first = chars.next()?;
         if !first.is_ascii_alphabetic() {
-            return false;
+            return None;
         }
-        for ch in chars {
-            if ch == ':' {
-                return value.contains("://");
-            }
-            if !(ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '.') {
-                return false;
-            }
+        if !chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')) {
+            return None;
         }
-        false
+        Some((scheme, rest))
+    }
+
+    pub fn has_uri_scheme(value: &str) -> bool {
+        split_uri_scheme_and_rest(value).is_some()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::path::{has_uri_scheme, normalize_path, strip_known_prefixes};
+    use super::path::{
+        has_uri_scheme, normalize_path, split_uri_scheme_and_rest, strip_known_prefixes,
+    };
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
     use rstest::rstest;
@@ -90,6 +90,21 @@ mod tests {
     #[case("", false)]
     fn has_uri_scheme_cases(#[case] input: &str, #[case] expected: bool) {
         assert_eq!(has_uri_scheme(input), expected);
+    }
+
+    #[rstest]
+    #[case("http://example.com", Some(("http", "example.com")))]
+    #[case("git+ssh://host/repo", Some(("git+ssh", "host/repo")))]
+    #[case("file://path", Some(("file", "path")))]
+    #[case("C:\\\\path", None)]
+    #[case("1://bad", None)]
+    #[case("://bad", None)]
+    #[case("", None)]
+    fn split_uri_scheme_and_rest_cases(
+        #[case] input: &str,
+        #[case] expected: Option<(&str, &str)>,
+    ) {
+        assert_eq!(split_uri_scheme_and_rest(input), expected);
     }
 
     #[test]
