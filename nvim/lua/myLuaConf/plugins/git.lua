@@ -13,6 +13,9 @@ return {
         integrations = { diffview = true, snacks = true },
         graph_style = "unicode",
         disable_insert_on_commit = true,
+        filewatcher = {
+          enabled = false,
+        },
         commit_editor = {
           kind = "tab",
           show_staged_diff = true,
