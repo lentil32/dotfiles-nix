@@ -4,6 +4,59 @@
   pkgs-unstable,
   ...
 }:
+let
+  opengrepVersion = "1.16.0";
+  opengrepReleaseBaseUrl = "https://github.com/opengrep/opengrep/releases/download/v${opengrepVersion}";
+
+  opengrepReleaseForSystem =
+    if pkgs.stdenvNoCC.hostPlatform.system == "aarch64-darwin" then
+      {
+        asset = "opengrep_osx_arm64";
+        hash = "sha256-A7vovzBnqdXskhSFjBlWhH4L+2N3Ordt9KBjorjXOzc=";
+      }
+    else if pkgs.stdenvNoCC.hostPlatform.system == "x86_64-darwin" then
+      {
+        asset = "opengrep_osx_x86";
+        hash = "sha256-chHowwVU7Jji/p2GIlm7bUioJKfdJ/9Lsk9+gnGs7tk=";
+      }
+    else
+      throw "Unsupported platform for opengrep: ${pkgs.stdenvNoCC.hostPlatform.system}";
+
+  opengrep = pkgs.stdenvNoCC.mkDerivation {
+    pname = "opengrep";
+    version = opengrepVersion;
+
+    src = pkgs.fetchurl {
+      url = "${opengrepReleaseBaseUrl}/${opengrepReleaseForSystem.asset}";
+      hash = opengrepReleaseForSystem.hash;
+    };
+
+    dontUnpack = true;
+
+    installPhase = ''
+      runHook preInstall
+      install -Dm755 "$src" "$out/bin/opengrep"
+      runHook postInstall
+    '';
+
+    doInstallCheck = true;
+    installCheckPhase = ''
+      test -x "$out/bin/opengrep"
+    '';
+
+    meta = with lib; {
+      description = "Open-source static analysis tool";
+      homepage = "https://github.com/opengrep/opengrep";
+      license = licenses.lgpl21Only;
+      platforms = [
+        "aarch64-darwin"
+        "x86_64-darwin"
+      ];
+      mainProgram = "opengrep";
+      sourceProvenance = [ sourceTypes.binaryNativeCode ];
+    };
+  };
+in
 {
   home.packages = with pkgs; [
     # archives
@@ -42,7 +95,7 @@
 
     aria2 # A lightweight multi-protocol & multi-source command-line download utility
     ripgrep-all # rga - search in PDFs, Office docs, archives, etc.
-    nur.repos.trev.opengrep
+    opengrep
     socat # replacement of openbsd-netcat
     nmap # A utility for network discovery and security auditing
 

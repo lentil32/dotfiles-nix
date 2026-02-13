@@ -223,7 +223,7 @@ in
           "mode main"
         ];
         e = [
-          "exec-and-forget ${pkgs.emacs-30}/bin/emacsclient -ca \"open -a Emacs\""
+          "exec-and-forget ${pkgs.emacs30}/bin/emacsclient -ca \"${pkgs.emacs30}/bin/emacs\""
           "mode main"
         ];
         f = [

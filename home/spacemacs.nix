@@ -9,7 +9,9 @@ let
 in
 {
   home.packages = [
-    pkgs.emacs-30
+    # Use nixpkgs' Emacs 30 (substitutable from cache.nixos.org) instead of
+    # the overlay-built `emacs-30` derivation which compiles from source.
+    pkgs.emacs30
   ];
 
   home.activation.updateSpacemacs = lib.hm.dag.entryAfter [ "writeBoundary" ] ''

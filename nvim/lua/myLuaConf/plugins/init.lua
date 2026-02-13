@@ -38,8 +38,16 @@ require("lze").load({
     event = "DeferredUIEnter",
     after = function()
       local wk = require("which-key")
-      wk.setup({ delay = 300 })
-      wk.add(keymaps.list())
+      wk.setup({
+        delay = 300,
+        -- Avoid auto-triggers (g/z/[...]) and ModeChanged popups in x/o modes.
+        -- Keep which-key focused on leader/localleader which is what we use it for.
+        triggers = {
+          { "<leader>", mode = { "n", "x" } },
+          { "<localleader>", mode = { "n", "x" } },
+        },
+        spec = keymaps.list(),
+      })
     end,
   },
   {

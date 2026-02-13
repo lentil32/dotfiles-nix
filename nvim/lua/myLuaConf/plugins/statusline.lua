@@ -1,66 +1,3 @@
-local function sidekick_status()
-  local ok, status = pcall(require, "sidekick.status")
-  if ok then
-    return status
-  end
-  return nil
-end
-
-local project = require("myLuaConf.project")
-
-local function copilot_icon()
-  return vim.fn.nr2char(0xF4B8) .. " "
-end
-
-local function project_icon()
-  return vim.fn.nr2char(0xEA62) .. " "
-end
-
-local function project_label()
-  local root = project.project_root()
-  if not root or root == "" then
-    return nil
-  end
-  local name = vim.fn.fnamemodify(root, ":t")
-  if name == "" then
-    name = vim.fn.fnamemodify(root, ":~")
-  end
-  return project_icon() .. name
-end
-
-local function overseer_status()
-  local ok_constants, constants = pcall(require, "overseer.constants")
-  local ok_tasks, task_list = pcall(require, "overseer.task_list")
-  local ok_util, util = pcall(require, "overseer.util")
-  if not (ok_constants and ok_tasks and ok_util) then
-    return ""
-  end
-
-  local symbols = {
-    [constants.STATUS.FAILURE] = "󰅚 ",
-    [constants.STATUS.CANCELED] = " ",
-    [constants.STATUS.SUCCESS] = "󰄴 ",
-    [constants.STATUS.RUNNING] = "󰑮 ",
-  }
-
-  local tasks = task_list.list_tasks({ include_ephemeral = true })
-  if type(tasks) ~= "table" then
-    return ""
-  end
-  local tasks_by_status = util.tbl_group_by(tasks, "status")
-  local pieces = {}
-  for _, status in ipairs(constants.STATUS.values) do
-    local status_tasks = tasks_by_status[status]
-    if symbols[status] and status_tasks then
-      table.insert(pieces, string.format("%s%s", symbols[status], #status_tasks))
-    end
-  end
-  if #pieces > 0 then
-    return table.concat(pieces, " ")
-  end
-  return ""
-end
-
 return {
   {
     "witch-line",
@@ -70,7 +7,28 @@ return {
       vim.o.laststatus = 2
 
       require("witch-line").setup({
-        cache = { enabled = false },
+        -- Keep witch-line cache enabled for performance.
+        -- Important: component functions must NOT capture upvalues.
+        cache = { enabled = true },
+        abstracts = {
+          -- Disable git branch/diff logic for Oil buffers (oil://... paths don't behave like real files).
+          {
+            [0] = "git.branch",
+            static = {
+              disabled = {
+                filetypes = { "NvimTree", "neo-tree", "alpha", "dashboard", "TelescopePrompt", "oil" },
+              },
+            },
+          },
+          {
+            [0] = "git.diff.interface",
+            static = {
+              disabled = {
+                filetypes = { "NvimTree", "neo-tree", "alpha", "dashboard", "TelescopePrompt", "oil" },
+              },
+            },
+          },
+        },
         statusline = {
           global = {
             "mode",
@@ -86,7 +44,16 @@ return {
               id = "project.label",
               events = { "BufEnter", "DirChanged" },
               update = function()
-                return project_label() or ""
+                local root = require("myLuaConf.project").project_root()
+                if not root or root == "" then
+                  return ""
+                end
+                local name = vim.fn.fnamemodify(root, ":t")
+                if name == "" then
+                  name = vim.fn.fnamemodify(root, ":~")
+                end
+                local icon = vim.fn.nr2char(0xEA62) .. " "
+                return icon .. name
               end,
               style = "Directory",
             },
@@ -95,11 +62,11 @@ return {
               id = "sidekick.status",
               timing = true,
               update = function()
-                return copilot_icon()
+                return vim.fn.nr2char(0xF4B8) .. " "
               end,
               style = function()
-                local status = sidekick_status()
-                if not status then
+                local ok, status = pcall(require, "sidekick.status")
+                if not ok then
                   return nil
                 end
                 local info = status.get()
@@ -115,8 +82,8 @@ return {
                 return nil
               end,
               hidden = function()
-                local status = sidekick_status()
-                return not status or status.get() == nil
+                local ok, status = pcall(require, "sidekick.status")
+                return (not ok) or status.get() == nil
               end,
             },
             "%=",
@@ -124,7 +91,36 @@ return {
               id = "overseer.status",
               timing = true,
               update = function()
-                return overseer_status()
+                local ok_constants, constants = pcall(require, "overseer.constants")
+                local ok_tasks, task_list = pcall(require, "overseer.task_list")
+                local ok_util, util = pcall(require, "overseer.util")
+                if not (ok_constants and ok_tasks and ok_util) then
+                  return ""
+                end
+
+                local symbols = {
+                  [constants.STATUS.FAILURE] = "󰅚 ",
+                  [constants.STATUS.CANCELED] = " ",
+                  [constants.STATUS.SUCCESS] = "󰄴 ",
+                  [constants.STATUS.RUNNING] = "󰑮 ",
+                }
+
+                local tasks = task_list.list_tasks({ include_ephemeral = true })
+                if type(tasks) ~= "table" then
+                  return ""
+                end
+                local tasks_by_status = util.tbl_group_by(tasks, "status")
+                local pieces = {}
+                for _, status in ipairs(constants.STATUS.values) do
+                  local status_tasks = tasks_by_status[status]
+                  if symbols[status] and status_tasks then
+                    table.insert(pieces, string.format("%s%s", symbols[status], #status_tasks))
+                  end
+                end
+                if #pieces > 0 then
+                  return table.concat(pieces, " ")
+                end
+                return ""
               end,
             },
             {

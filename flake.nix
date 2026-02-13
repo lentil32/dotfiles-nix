@@ -15,11 +15,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    nix-darwin-emacs = {
-      url = "github:lentil32/nix-darwin-emacs";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     sops-nix = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -29,10 +24,6 @@
     treefmt-nix.url = "github:numtide/treefmt-nix";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
-
-    ghostty = {
-      url = "github:ghostty-org/ghostty";
-    };
 
     nixCats.url = "github:BirdeeHub/nixCats-nvim";
 
@@ -78,13 +69,11 @@
       nixpkgs-unstable,
       nix-darwin,
       home-manager,
-      nix-darwin-emacs,
       sops-nix,
       rust-overlay,
       treefmt-nix,
       crane,
       flake-utils,
-      ghostty,
       nix-homebrew,
       nur,
       homebrew-core,
@@ -123,9 +112,7 @@
 
       nixpkgsConfig = {
         overlays = [
-          nix-darwin-emacs.overlays.emacs
           rust-overlay.overlays.default
-          ghostty.overlays.default
           nur.overlays.default
           (final: prev: {
             pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
@@ -166,7 +153,6 @@
           pkgs-unstable
           username
           useremail
-          ghostty
           ;
       };
 

@@ -1,4 +1,4 @@
-.PHONY: darwin darwin-debug nvim nvim-profile update-emacs update-flake update-all deploy-emacs deploy-flake deploy-all history gc fmt check clean help
+.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc fmt check clean help
 
 hostname := $(shell hostname)
 user := $(shell whoami)
@@ -37,15 +37,11 @@ nvim:
 nvim-profile:
 	bash ./home/scripts/nvim-profile.sh $(ARGS)
 
-update-emacs:
-	gh repo sync lentil32/nix-darwin-emacs --source nix-giant/nix-darwin-emacs
-
 update-flake:
 	nix flake update
 
 update-all: update-flake
 
-deploy-emacs: update-emacs darwin
 deploy-flake: update-flake darwin
 deploy-all: update-all darwin
 

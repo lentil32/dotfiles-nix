@@ -74,7 +74,6 @@ let
 
     # Development
     { cask = "cyberduck"; }
-    { cask = "ghostty"; }
     {
       desc = "REST client";
       cask = "insomnia";
