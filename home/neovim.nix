@@ -179,7 +179,7 @@ in
             runtimeDeps = [
               p.nil
               p.rust-analyzer
-              p.lua-language-server
+              p.emmylua-ls
               p.ruff
               p.yaml-language-server
             ];
@@ -190,7 +190,6 @@ in
               vim.conform-nvim
             ];
             runtimeDeps = [
-              p.stylua
               p.taplo
               p.yamlfmt
             ];
@@ -201,7 +200,6 @@ in
               vim.nvim-lint
             ];
             runtimeDeps = [
-              p.selene
               p.yamllint
             ];
           };

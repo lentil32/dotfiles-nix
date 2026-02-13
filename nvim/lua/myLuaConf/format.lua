@@ -12,7 +12,7 @@ require("lze").load({
           typescriptreact = { "biome" },
           json = { "biome" },
           jsonc = { "biome" },
-          lua = { "stylua" },
+          lua = { lsp_format = "prefer" },
           rust = { "rustfmt" },
           toml = { "taplo" },
           yaml = { "yamlfmt" },

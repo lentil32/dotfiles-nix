@@ -43,16 +43,14 @@ require("lze").load({
     end,
   },
   {
-    "lua_ls",
+    "emmylua_ls",
     enabled = nixCats("lsp") or false,
     lsp = {
       filetypes = { "lua" },
       settings = {
         Lua = {
-          diagnostics = { globals = { "vim" } },
-          workspace = {
-            library = vim.api.nvim_get_runtime_file("", true),
-            checkThirdParty = false,
+          diagnostics = {
+            globals = { "vim" },
           },
         },
       },

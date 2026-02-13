@@ -11,7 +11,6 @@ require("lze").load({
         typescript = { "biomejs" },
         typescriptreact = { "biomejs" },
         jsonc = { "biomejs" },
-        lua = { "selene" },
         rust = { "clippy" },
         yaml = { "yamllint" },
         ["yaml.ansible"] = { "yamllint" },

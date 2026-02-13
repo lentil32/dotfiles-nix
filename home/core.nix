@@ -131,7 +131,8 @@ in
     emacs-lsp-booster
     eslint # maybe needed by flycheck
     ispell
-    lua-language-server
+    emmylua-check
+    emmylua-ls
     multimarkdown
     nil
     nixfmt-rfc-style
