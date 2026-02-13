@@ -2,10 +2,9 @@ local plugin_util = require("rs_plugin_util")
 
 return function(_, bufnr)
   local function format_buffer()
-    local ok, conform = pcall(require, "conform")
-    if ok and conform.format then
-      conform.format()
-    end
+    ---@module "conform"
+    local conform = require("conform")
+    conform.format()
   end
 
   local function ts_cmd(cmd)

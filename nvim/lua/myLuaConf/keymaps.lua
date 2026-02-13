@@ -1,4 +1,3 @@
-local lua_helpers = require("myLuaConf.lua_helpers")
 local oil = require("myLuaConf.oil")
 local plugin_util = require("rs_plugin_util")
 local project = require("myLuaConf.project")
@@ -181,8 +180,9 @@ function M.list()
     {
       "<leader>fj",
       function()
-        local oil_util = lua_helpers.try_require("oil.util")
-        if oil_util and oil_util.is_oil_bufnr(vim.api.nvim_get_current_buf()) then
+        ---@module "oil.util"
+        local oil_util = require("oil.util")
+        if oil_util.is_oil_bufnr(vim.api.nvim_get_current_buf()) then
           local keys = vim.api.nvim_replace_termcodes("<BS>", true, false, true)
           vim.api.nvim_feedkeys(keys, "m", false)
           return

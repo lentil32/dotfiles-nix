@@ -1,14 +1,9 @@
 local catUtils = require("nixCatsUtils")
-local lua_helpers = require("myLuaConf.lua_helpers")
-
-local capabilities
-do
-  local blink = lua_helpers.try_require("blink.cmp")
-  if blink and blink.get_lsp_capabilities then
-    capabilities = blink.get_lsp_capabilities()
-  end
-end
 local on_attach = require("myLuaConf.LSPs.on_attach")
+
+---@module "blink.cmp"
+local blink = require("blink.cmp")
+local capabilities = blink.get_lsp_capabilities()
 
 require("lze").load({
   {
@@ -20,11 +15,7 @@ require("lze").load({
       vim.lsp.enable(plugin.name)
     end,
     before = function(_)
-      local base = { on_attach = on_attach }
-      if capabilities then
-        base.capabilities = capabilities
-      end
-      vim.lsp.config("*", base)
+      vim.lsp.config("*", { on_attach = on_attach, capabilities = capabilities })
     end,
   },
   {
@@ -46,7 +37,7 @@ require("lze").load({
     after = function()
       require("lazydev").setup({
         library = {
-          { words = { "nixCats" }, path = (nixCats.nixCatsPath or "") .. "/lua" },
+          { words = { "nixCats" }, path = nixCats.nixCatsPath .. "/lua" },
         },
       })
     end,
