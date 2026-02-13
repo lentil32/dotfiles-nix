@@ -11,6 +11,19 @@ local function mermaid_args()
   return { "-i", "{src}", "-o", "{file}", "-b", "transparent", "-t", theme, "-s", "{scale}" }
 end
 
+local convert = {
+  magick = {
+    default = { "{src}[0]", "-scale", "1920x1080>" },
+    vector = { "-density", 192, "{src}[{page}]" },
+    math = { "-density", 192, "{src}[{page}]", "-trim" },
+    pdf = { "-density", 192, "{src}[{page}]", "-background", "white", "-alpha", "remove", "-trim" },
+  },
+}
+
+if not vim.g.neovide then
+  convert.mermaid = mermaid_args
+end
+
 ---@type snacks.image.Config
 local image_opts = {
   enabled = true,
@@ -65,15 +78,7 @@ local image_opts = {
     chart = "󰄧 ",
     image = " ",
   },
-  convert = {
-    mermaid = mermaid_args,
-    magick = {
-      default = { "{src}[0]", "-scale", "1920x1080>" },
-      vector = { "-density", 192, "{src}[{page}]" },
-      math = { "-density", 192, "{src}[{page}]", "-trim" },
-      pdf = { "-density", 192, "{src}[{page}]", "-background", "white", "-alpha", "remove", "-trim" },
-    },
-  },
+  convert = convert,
   math = {
     enabled = true,
     typst = {
