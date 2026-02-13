@@ -47,6 +47,10 @@ let
       cask = "codex-app";
     }
     { formulae = "anomalyco/tap/opencode"; }
+    {
+      desc = "Agent terminal notifications + voice packs";
+      formulae = "peonping/tap/peon-ping";
+    }
 
     # IM & audio & video
     { cask = "discord"; }
