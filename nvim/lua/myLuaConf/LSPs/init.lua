@@ -34,6 +34,7 @@ require("lze").load({
     for_cat = "lsp",
     cmd = { "LazyDev" },
     ft = "lua",
+    on_require = { "lazydev" },
     after = function()
       require("lazydev").setup({
         library = {
