@@ -82,12 +82,10 @@ impl RootCacheRecord {
         let indicator_part = parts.next().unwrap_or_default();
         let value = match has_root {
             "0" if root_part.is_empty() && indicator_part.is_empty() => RootCacheValue::Missing,
-            "1" if !root_part.is_empty() && !indicator_part.is_empty() => {
-                RootCacheValue::Found {
-                    root: root_part.to_owned(),
-                    indicator: indicator_part.to_owned(),
-                }
-            }
+            "1" if !root_part.is_empty() && !indicator_part.is_empty() => RootCacheValue::Found {
+                root: root_part.to_owned(),
+                indicator: indicator_part.to_owned(),
+            },
             _ => return None,
         };
         Some(Self {

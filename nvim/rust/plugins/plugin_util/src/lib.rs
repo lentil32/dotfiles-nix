@@ -225,9 +225,10 @@ fn oil_get_adapter(lua: &mlua::Lua, bufnr: i64, silent: bool) -> mlua::Result<ml
         scheme = alias;
     }
 
-    let get_adapter_by_scheme: mlua::Function = config.get("get_adapter_by_scheme").map_err(
-        |err| mlua::Error::RuntimeError(format!("oil.config.get_adapter_by_scheme missing: {err}")),
-    )?;
+    let get_adapter_by_scheme: mlua::Function =
+        config.get("get_adapter_by_scheme").map_err(|err| {
+            mlua::Error::RuntimeError(format!("oil.config.get_adapter_by_scheme missing: {err}"))
+        })?;
     let adapter: mlua::Value = get_adapter_by_scheme.call(scheme)?;
 
     if matches!(adapter, mlua::Value::Nil) && !silent {
@@ -560,7 +561,8 @@ fn oil_winbar_result() -> Result<Option<String>> {
     };
     let bufnr = i64::from(win.get_buf()?.handle());
 
-    let get_current_dir: mlua::Function = oil.get("get_current_dir").map_err(nvim_oxi::Error::from)?;
+    let get_current_dir: mlua::Function =
+        oil.get("get_current_dir").map_err(nvim_oxi::Error::from)?;
     let Some(dir) = get_current_dir
         .call::<Option<String>>(bufnr)
         .map_err(nvim_oxi::Error::from)?

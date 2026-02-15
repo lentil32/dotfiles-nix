@@ -170,7 +170,12 @@ require("lze").load({
       if not should_enable_smear_cursor() then
         return
       end
-      require("rs_smear_cursor").setup({})
+      require("rs_smear_cursor").setup({
+        smear_terminal_mode = true,
+        filetypes_disabled = {
+          "snacks_picker_preview",
+        },
+      })
     end,
   },
   {

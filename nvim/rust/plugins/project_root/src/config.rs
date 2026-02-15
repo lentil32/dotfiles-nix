@@ -10,12 +10,9 @@ pub struct ProjectRootConfig {
 impl ProjectRootConfig {
     fn parse_root_indicators(config: &Dictionary) -> Option<RootIndicators> {
         let value = decode::get_object(config, "root_indicators")?;
-        let values = decode::parse_from_object::<Vec<NvimString>>(
-            value,
-            "root_indicators",
-            "array[string]",
-        )
-        .ok()?;
+        let values =
+            decode::parse_from_object::<Vec<NvimString>>(value, "root_indicators", "array[string]")
+                .ok()?;
         let strings: Vec<String> = values
             .into_iter()
             .map(|val| val.to_string_lossy().into_owned())

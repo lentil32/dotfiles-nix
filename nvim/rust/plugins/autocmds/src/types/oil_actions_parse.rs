@@ -23,19 +23,10 @@ pub struct OilActionsPostArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OilActionsPostParseError {
-    InvalidPayloadType {
-        expected: &'static str,
-    },
-    MissingKey {
-        key: String,
-    },
-    InvalidValue {
-        key: String,
-        expected: &'static str,
-    },
-    EmptyValue {
-        key: String,
-    },
+    InvalidPayloadType { expected: &'static str },
+    MissingKey { key: String },
+    InvalidValue { key: String, expected: &'static str },
+    EmptyValue { key: String },
     EmptyActions,
 }
 

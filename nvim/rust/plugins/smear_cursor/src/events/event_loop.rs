@@ -1,13 +1,20 @@
 use nvim_oxi::libuv::TimerHandle;
 use std::cell::RefCell;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExternalEventTimerKind {
+    Settle,
+    Throttle,
+}
+
 pub(super) struct EventLoopState {
     animation_timer: Option<TimerHandle>,
-    external_event_timer: Option<TimerHandle>,
+    external_event_timer: Option<(TimerHandle, ExternalEventTimerKind)>,
     key_event_timer: Option<TimerHandle>,
     render_cleanup_timer: Option<TimerHandle>,
     external_trigger_pending: bool,
     last_autocmd_event_ms: f64,
+    last_external_dispatch_ms: f64,
 }
 
 impl EventLoopState {
@@ -19,6 +26,7 @@ impl EventLoopState {
             render_cleanup_timer: None,
             external_trigger_pending: false,
             last_autocmd_event_ms: 0.0,
+            last_external_dispatch_ms: 0.0,
         }
     }
 
@@ -38,8 +46,16 @@ impl EventLoopState {
         let _ = self.external_event_timer.take();
     }
 
-    pub(super) fn set_external_event_timer(&mut self, handle: TimerHandle) {
-        self.external_event_timer = Some(handle);
+    pub(super) fn external_event_timer_kind(&self) -> Option<ExternalEventTimerKind> {
+        self.external_event_timer.as_ref().map(|(_, kind)| *kind)
+    }
+
+    pub(super) fn set_external_event_timer(
+        &mut self,
+        handle: TimerHandle,
+        kind: ExternalEventTimerKind,
+    ) {
+        self.external_event_timer = Some((handle, kind));
     }
 
     pub(super) fn clear_key_event_timer(&mut self) {
@@ -87,6 +103,23 @@ impl EventLoopState {
             (now_ms - last).max(0.0)
         }
     }
+
+    pub(super) fn note_external_dispatch(&mut self, now_ms: f64) {
+        self.last_external_dispatch_ms = now_ms;
+    }
+
+    pub(super) fn clear_external_dispatch_timestamp(&mut self) {
+        self.last_external_dispatch_ms = 0.0;
+    }
+
+    pub(super) fn elapsed_ms_since_last_external_dispatch(&self, now_ms: f64) -> f64 {
+        let last = self.last_external_dispatch_ms;
+        if last <= 0.0 {
+            f64::INFINITY
+        } else {
+            (now_ms - last).max(0.0)
+        }
+    }
 }
 
 thread_local! {
@@ -123,8 +156,12 @@ pub(super) fn clear_external_event_timer() {
     with_event_loop_state(EventLoopState::clear_external_event_timer);
 }
 
-pub(super) fn set_external_event_timer(handle: TimerHandle) {
-    with_event_loop_state(|state| state.set_external_event_timer(handle));
+pub(super) fn external_event_timer_kind() -> Option<ExternalEventTimerKind> {
+    read_event_loop_state(EventLoopState::external_event_timer_kind)
+}
+
+pub(super) fn set_external_event_timer(handle: TimerHandle, kind: ExternalEventTimerKind) {
+    with_event_loop_state(|state| state.set_external_event_timer(handle, kind));
 }
 
 pub(super) fn clear_key_event_timer() {
@@ -161,4 +198,16 @@ pub(super) fn clear_autocmd_event_timestamp() {
 
 pub(super) fn elapsed_ms_since_last_autocmd_event(now_ms: f64) -> f64 {
     read_event_loop_state(|state| state.elapsed_ms_since_last_autocmd_event(now_ms))
+}
+
+pub(super) fn note_external_dispatch(now_ms: f64) {
+    with_event_loop_state(|state| state.note_external_dispatch(now_ms));
+}
+
+pub(super) fn clear_external_dispatch_timestamp() {
+    with_event_loop_state(EventLoopState::clear_external_dispatch_timestamp);
+}
+
+pub(super) fn elapsed_ms_since_last_external_dispatch(now_ms: f64) -> f64 {
+    read_event_loop_state(|state| state.elapsed_ms_since_last_external_dispatch(now_ms))
 }

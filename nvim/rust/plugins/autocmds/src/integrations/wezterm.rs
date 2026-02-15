@@ -614,7 +614,11 @@ fn should_skip_sync_for_current_buffer() -> Result<bool> {
     }
     let buftype: NvimString =
         api::get_option_value("buftype", &OptionOpts::builder().buf(current).build())?;
-    Ok(buftype.to_string_lossy() == "terminal")
+    Ok(!buftype_requires_wezterm_sync(&buftype.to_string_lossy()))
+}
+
+fn buftype_requires_wezterm_sync(buftype: &str) -> bool {
+    matches!(buftype, "" | "acwrite")
 }
 
 fn sync_wezterm_state() -> Result<AutocmdAction> {
@@ -896,5 +900,18 @@ mod tests {
         assert_eq!(snapshot.stats.executed, 1);
         assert_eq!(snapshot.stats.wakeup_failures, 1);
         assert_eq!(snapshot.stats.enqueue_failures, 1);
+    }
+
+    #[test]
+    fn buftype_requires_wezterm_sync_allows_normal_and_acwrite_buffers() {
+        assert!(super::buftype_requires_wezterm_sync(""));
+        assert!(super::buftype_requires_wezterm_sync("acwrite"));
+    }
+
+    #[test]
+    fn buftype_requires_wezterm_sync_skips_special_ui_buffers() {
+        assert!(!super::buftype_requires_wezterm_sync("terminal"));
+        assert!(!super::buftype_requires_wezterm_sync("nofile"));
+        assert!(!super::buftype_requires_wezterm_sync("prompt"));
     }
 }

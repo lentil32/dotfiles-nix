@@ -1,7 +1,7 @@
 //! Shared nvim-oxi helpers for plugin crates.
 
-mod error;
 pub mod decode;
+mod error;
 
 pub use error::{Error, Result};
 
@@ -215,17 +215,11 @@ pub mod state_machine {
         type Effect;
         type Command;
 
-        fn reduce(
-            &mut self,
-            event: Self::Event,
-        ) -> Transition<Self::Effect, Self::Command>;
+        fn reduce(&mut self, event: Self::Event) -> Transition<Self::Effect, Self::Command>;
     }
 
     /// Apply one event to a machine.
-    pub fn apply_event<M>(
-        machine: &mut M,
-        event: M::Event,
-    ) -> Transition<M::Effect, M::Command>
+    pub fn apply_event<M>(machine: &mut M, event: M::Event) -> Transition<M::Effect, M::Command>
     where
         M: Machine,
     {

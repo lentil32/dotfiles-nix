@@ -139,10 +139,7 @@ fn refresh_root_for_path(
     Ok(root)
 }
 
-fn refresh_root_for_buffer(
-    buf: &Buffer,
-    context: &ProjectRootContext,
-) -> Result<Option<String>> {
+fn refresh_root_for_buffer(buf: &Buffer, context: &ProjectRootContext) -> Result<Option<String>> {
     let Some((path, key)) = buffer_path_and_key(buf, "refresh_root_for_buffer")? else {
         return Ok(None);
     };

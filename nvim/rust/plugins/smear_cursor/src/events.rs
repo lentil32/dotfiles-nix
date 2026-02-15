@@ -144,7 +144,9 @@ static ENGINE_CONTEXT: LazyLock<EngineContext> = LazyLock::new(EngineContext::ne
 
 fn set_log_level(level: i64) {
     let normalized = if level < 0 { 0 } else { level };
-    ENGINE_CONTEXT.log_level.store(normalized, Ordering::Relaxed);
+    ENGINE_CONTEXT
+        .log_level
+        .store(normalized, Ordering::Relaxed);
 }
 
 fn should_log(level: i64) -> bool {
@@ -269,12 +271,24 @@ fn note_autocmd_event_now() {
     event_loop::note_autocmd_event(now_ms());
 }
 
+fn note_external_dispatch_now() {
+    event_loop::note_external_dispatch(now_ms());
+}
+
 fn clear_autocmd_event_timestamp() {
     event_loop::clear_autocmd_event_timestamp();
 }
 
+fn clear_external_dispatch_timestamp() {
+    event_loop::clear_external_dispatch_timestamp();
+}
+
 fn elapsed_ms_since_last_autocmd_event(now_ms: f64) -> f64 {
     event_loop::elapsed_ms_since_last_autocmd_event(now_ms)
+}
+
+fn elapsed_ms_since_last_external_dispatch(now_ms: f64) -> f64 {
+    event_loop::elapsed_ms_since_last_external_dispatch(now_ms)
 }
 
 fn reset_transient_event_state() {
@@ -283,6 +297,7 @@ fn reset_transient_event_state() {
     clear_key_event_timer();
     clear_external_trigger_pending();
     clear_autocmd_event_timestamp();
+    clear_external_dispatch_timestamp();
     invalidate_render_cleanup();
 }
 
@@ -292,6 +307,7 @@ fn reset_transient_event_state_without_generation_bump() {
     clear_key_event_timer();
     clear_external_trigger_pending();
     clear_autocmd_event_timestamp();
+    clear_external_dispatch_timestamp();
     clear_render_cleanup_timer();
 }
 
@@ -427,32 +443,89 @@ fn cursor_position_for_mode(
     screen_cursor_position(window)
 }
 
-fn current_buffer_filetype(buffer: &api::Buffer) -> Result<String> {
+fn current_buffer_option_string(buffer: &api::Buffer, option_name: &str) -> Result<String> {
     let opts = OptionOpts::builder().buf(buffer.clone()).build();
-    let filetype: String = api::get_option_value("filetype", &opts)?;
-    Ok(filetype)
+    let value: String = api::get_option_value(option_name, &opts)?;
+    Ok(value)
+}
+
+fn current_buffer_filetype(buffer: &api::Buffer) -> Result<String> {
+    current_buffer_option_string(buffer, "filetype")
+}
+
+fn current_buffer_buftype(buffer: &api::Buffer) -> Result<String> {
+    current_buffer_option_string(buffer, "buftype")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BufferEventPolicy {
+    Normal,
+    ThrottledUi,
+}
+
+impl BufferEventPolicy {
+    const THROTTLED_UI_DELAY_FLOOR_MS: u64 = 12;
+
+    fn from_buftype(buftype: &str) -> Self {
+        match buftype {
+            "" | "acwrite" => Self::Normal,
+            _ => Self::ThrottledUi,
+        }
+    }
+
+    const fn settle_delay_floor_ms(self) -> u64 {
+        match self {
+            Self::Normal => 0,
+            Self::ThrottledUi => Self::THROTTLED_UI_DELAY_FLOOR_MS,
+        }
+    }
+
+    const fn should_use_debounced_external_settle(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    const fn use_key_fallback(self) -> bool {
+        true
+    }
+
+    const fn should_prepaint_cursor(self) -> bool {
+        true
+    }
+}
+
+fn remaining_throttle_delay_ms(throttle_interval_ms: u64, elapsed_ms: f64) -> u64 {
+    as_delay_ms((throttle_interval_ms as f64 - elapsed_ms).max(0.0))
+}
+
+fn should_replace_external_timer_with_throttle(
+    existing_kind: Option<event_loop::ExternalEventTimerKind>,
+) -> bool {
+    matches!(
+        existing_kind,
+        Some(event_loop::ExternalEventTimerKind::Settle)
+    )
+}
+
+fn current_buffer_event_policy(buffer: &api::Buffer) -> Result<BufferEventPolicy> {
+    let buftype = current_buffer_buftype(buffer)?;
+    Ok(BufferEventPolicy::from_buftype(&buftype))
 }
 
 fn skip_current_buffer_events(buffer: &api::Buffer) -> Result<bool> {
-    let should_check_filetype = {
+    let filetypes_disabled = {
         let state = state_lock();
         if state.is_delay_disabled() {
             return Ok(true);
         }
-        !state.config.filetypes_disabled.is_empty()
+        state.config.filetypes_disabled.clone()
     };
 
-    if !should_check_filetype {
+    if filetypes_disabled.is_empty() {
         return Ok(false);
     }
 
     let filetype = current_buffer_filetype(buffer)?;
-    let state = state_lock();
-    Ok(state
-        .config
-        .filetypes_disabled
-        .iter()
-        .any(|entry| entry == &filetype))
+    Ok(filetypes_disabled.iter().any(|entry| entry == &filetype))
 }
 
 fn cursor_color_at_current_position() -> Result<Option<String>> {
@@ -717,6 +790,36 @@ fn schedule_animation_tick(delay_ms: u64) {
     }
 }
 
+fn schedule_external_throttle_timer(delay_ms: u64) {
+    let existing_kind = event_loop::external_event_timer_kind();
+    if existing_kind == Some(event_loop::ExternalEventTimerKind::Throttle) {
+        return;
+    }
+    if should_replace_external_timer_with_throttle(existing_kind) {
+        clear_external_event_timer();
+    }
+
+    let timeout = Duration::from_millis(delay_ms);
+    match TimerHandle::once(timeout, || {
+        schedule(|_| {
+            clear_external_event_timer();
+            if let Err(err) = on_external_event_trigger() {
+                warn(&format!("external throttle tick failed: {err}"));
+            }
+        });
+    }) {
+        Ok(handle) => {
+            event_loop::set_external_event_timer(
+                handle,
+                event_loop::ExternalEventTimerKind::Throttle,
+            );
+        }
+        Err(err) => {
+            warn(&format!("failed to schedule external throttle tick: {err}"));
+        }
+    }
+}
+
 fn schedule_external_event_timer(delay_ms: u64) {
     clear_external_event_timer();
 
@@ -730,7 +833,10 @@ fn schedule_external_event_timer(delay_ms: u64) {
         });
     }) {
         Ok(handle) => {
-            event_loop::set_external_event_timer(handle);
+            event_loop::set_external_event_timer(
+                handle,
+                event_loop::ExternalEventTimerKind::Settle,
+            );
         }
         Err(err) => {
             warn(&format!("failed to schedule external settle tick: {err}"));
@@ -1041,10 +1147,14 @@ fn on_external_event_trigger() -> Result<()> {
     if !buffer.is_valid() {
         return Ok(());
     }
+    let policy = current_buffer_event_policy(&buffer)?;
     if skip_current_buffer_events(&buffer)? {
         let mut state = state_lock();
         state.clear_pending_external_event();
         return Ok(());
+    }
+    if !policy.should_use_debounced_external_settle() {
+        return on_throttled_ui_external_event_trigger(policy);
     }
 
     let mode = mode_string();
@@ -1079,6 +1189,21 @@ fn on_external_event_trigger() -> Result<()> {
     Ok(())
 }
 
+fn on_throttled_ui_external_event_trigger(policy: BufferEventPolicy) -> Result<()> {
+    let throttle_interval_ms = policy.settle_delay_floor_ms();
+    let elapsed_ms = elapsed_ms_since_last_external_dispatch(now_ms());
+    let remaining_delay_ms = remaining_throttle_delay_ms(throttle_interval_ms, elapsed_ms);
+
+    if remaining_delay_ms == 0 {
+        on_cursor_event_impl(EventSource::External)?;
+        note_external_dispatch_now();
+        return Ok(());
+    }
+
+    schedule_external_throttle_timer(remaining_delay_ms);
+    Ok(())
+}
+
 fn schedule_external_event_trigger() {
     if !mark_external_trigger_pending_if_idle() {
         return;
@@ -1101,7 +1226,15 @@ pub(crate) fn on_key_event() -> Result<()> {
     if !buffer.is_valid() {
         return Ok(());
     }
+    let policy = current_buffer_event_policy(&buffer)?;
     if skip_current_buffer_events(&buffer)? {
+        return Ok(());
+    }
+    if !policy.use_key_fallback() {
+        return Ok(());
+    }
+    if !policy.should_use_debounced_external_settle() {
+        schedule_external_event_trigger();
         return Ok(());
     }
     let now = now_ms();
@@ -1179,6 +1312,7 @@ fn on_cursor_event(args: AutocmdCallbackArgs) -> bool {
         if !buffer.is_valid() {
             return Ok(());
         }
+        let policy = current_buffer_event_policy(&buffer)?;
         if skip_current_buffer_events(&buffer)? {
             return Ok(());
         }
@@ -1194,7 +1328,9 @@ fn on_cursor_event(args: AutocmdCallbackArgs) -> bool {
             let mut state = state_lock();
             update_tracked_cursor_color(&mut state);
         }
-        replace_real_cursor_from_event(false)?;
+        if policy.should_prepaint_cursor() {
+            replace_real_cursor_from_event(false)?;
+        }
         schedule_external_event_trigger();
         Ok(())
     })();
@@ -1599,5 +1735,68 @@ mod tests {
 
         patch.apply(&mut state);
         assert!(state.config.filetypes_disabled.is_empty());
+    }
+
+    #[test]
+    fn buffer_event_policy_classifies_normal_and_acwrite_as_normal() {
+        assert_eq!(
+            super::BufferEventPolicy::from_buftype(""),
+            super::BufferEventPolicy::Normal
+        );
+        assert_eq!(
+            super::BufferEventPolicy::from_buftype("acwrite"),
+            super::BufferEventPolicy::Normal
+        );
+    }
+
+    #[test]
+    fn buffer_event_policy_throttles_ui_buffers_including_terminal() {
+        assert_eq!(
+            super::BufferEventPolicy::from_buftype("nofile"),
+            super::BufferEventPolicy::ThrottledUi
+        );
+        assert_eq!(
+            super::BufferEventPolicy::from_buftype("prompt"),
+            super::BufferEventPolicy::ThrottledUi
+        );
+        assert_eq!(
+            super::BufferEventPolicy::from_buftype("terminal"),
+            super::BufferEventPolicy::ThrottledUi
+        );
+    }
+
+    #[test]
+    fn throttled_ui_policy_enables_key_fallback_and_uses_throttle_floor() {
+        let policy = super::BufferEventPolicy::ThrottledUi;
+        assert!(policy.use_key_fallback());
+        assert_eq!(policy.settle_delay_floor_ms(), 12);
+        assert!(!policy.should_use_debounced_external_settle());
+        assert!(policy.should_prepaint_cursor());
+    }
+
+    #[test]
+    fn normal_policy_uses_debounced_external_settle() {
+        let policy = super::BufferEventPolicy::Normal;
+        assert!(policy.use_key_fallback());
+        assert!(policy.should_use_debounced_external_settle());
+        assert_eq!(policy.settle_delay_floor_ms(), 0);
+    }
+
+    #[test]
+    fn remaining_throttle_delay_clamps_at_zero_after_interval() {
+        assert_eq!(super::remaining_throttle_delay_ms(12, 4.0), 8);
+        assert_eq!(super::remaining_throttle_delay_ms(12, 12.0), 0);
+        assert_eq!(super::remaining_throttle_delay_ms(12, f64::INFINITY), 0);
+    }
+
+    #[test]
+    fn throttle_timer_replaces_settle_timer_kind_only() {
+        assert!(super::should_replace_external_timer_with_throttle(Some(
+            super::event_loop::ExternalEventTimerKind::Settle
+        )));
+        assert!(!super::should_replace_external_timer_with_throttle(Some(
+            super::event_loop::ExternalEventTimerKind::Throttle
+        )));
+        assert!(!super::should_replace_external_timer_with_throttle(None));
     }
 }
