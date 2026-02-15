@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use nvim_oxi::conversion::FromObject;
+use nvim_oxi::serde::Deserializer;
 use nvim_oxi::{Dictionary, Object, String as NvimString};
-use nvim_oxi_utils::dict;
 use nvim_oxi_utils::handles::{BufHandle, WinHandle};
+use serde::Deserialize;
 use support::NonEmptyString;
 
 pub type OilMap = HashMap<WinHandle, BufHandle>;
@@ -134,15 +135,6 @@ impl std::fmt::Display for OilActionsPostParseError {
     }
 }
 
-fn require_nonempty_field(
-    dict: &Dictionary,
-    key: &'static str,
-) -> Result<NonEmptyString, OilActionsPostParseError> {
-    let value = dict::require_string_nonempty(dict, key)
-        .map_err(|_| OilActionsPostParseError::EmptyValue { key })?;
-    NonEmptyString::try_new(value).map_err(|_| OilActionsPostParseError::EmptyValue { key })
-}
-
 impl OilActionsPostArgs {
     pub fn parse(data: Object) -> Result<Self, OilActionsPostParseError> {
         let dict = Dictionary::try_from(data).map_err(|_| {
@@ -155,32 +147,54 @@ impl OilActionsPostArgs {
             .get(&actions_key)
             .cloned()
             .ok_or(OilActionsPostParseError::MissingKey { key: "actions" })?;
-        let actions = Vec::<Dictionary>::from_object(actions_obj).map_err(|_| {
-            OilActionsPostParseError::InvalidValue {
-                key: "actions",
-                expected: "array of dictionaries",
-            }
-        })?;
+        let actions =
+            Vec::<RawOilAction>::deserialize(Deserializer::new(actions_obj)).map_err(|_| {
+                OilActionsPostParseError::InvalidValue {
+                    key: "actions",
+                    expected: "array of dictionaries",
+                }
+            })?;
         let first = actions
             .into_iter()
             .next()
             .ok_or(OilActionsPostParseError::EmptyActions)?;
-        let action = OilAction::parse(&first)?;
+        let action = OilAction::parse(first)?;
         Ok(Self { action })
     }
 }
 
 impl OilAction {
-    fn parse(action: &Dictionary) -> Result<Self, OilActionsPostParseError> {
-        let action_type = dict::get_string_nonempty(action, "type")
-            .ok_or(OilActionsPostParseError::EmptyValue { key: "type" })?;
-        if action_type != "move" {
+    fn parse(action: RawOilAction) -> Result<Self, OilActionsPostParseError> {
+        let action_type = require_nonempty_field(action.action_type, "type")?;
+        if action_type.as_str() != "move" {
             return Ok(Self::Other);
         }
-        let src_url = require_nonempty_field(action, "src_url")?;
-        let dest_url = require_nonempty_field(action, "dest_url")?;
+        let src_url = require_nonempty_field(action.src_url, "src_url")?;
+        let dest_url = require_nonempty_field(action.dest_url, "dest_url")?;
         Ok(Self::Move(OilMoveAction { src_url, dest_url }))
     }
+}
+
+fn require_nonempty_field(
+    value: Option<Object>,
+    key: &'static str,
+) -> Result<NonEmptyString, OilActionsPostParseError> {
+    let value = value.ok_or(OilActionsPostParseError::EmptyValue { key })?;
+    let value = NvimString::from_object(value)
+        .map_err(|_| OilActionsPostParseError::EmptyValue { key })?
+        .to_string_lossy()
+        .into_owned();
+    NonEmptyString::try_new(value).map_err(|_| OilActionsPostParseError::EmptyValue { key })
+}
+
+#[derive(Debug, Deserialize)]
+struct RawOilAction {
+    #[serde(rename = "type", default)]
+    action_type: Option<Object>,
+    #[serde(default)]
+    src_url: Option<Object>,
+    #[serde(default)]
+    dest_url: Option<Object>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

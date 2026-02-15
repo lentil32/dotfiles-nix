@@ -1,7 +1,7 @@
 use crate::types::EPSILON;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Dictionary, Object, Result, String as NvimString};
-use nvim_oxi_utils::{Error as OxiError, dict};
+use nvim_oxi_utils::Error as OxiError;
 
 fn to_nvim_error(err: OxiError) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(err.to_string()).into()
@@ -9,10 +9,6 @@ fn to_nvim_error(err: OxiError) -> nvim_oxi::Error {
 
 pub(crate) fn invalid_key(key: &str, expected: &'static str) -> nvim_oxi::Error {
     to_nvim_error(OxiError::invalid_value(key, expected))
-}
-
-pub(crate) fn get_object(args: &Dictionary, key: &str) -> Result<Object> {
-    dict::get_object(args, key).ok_or_else(|| to_nvim_error(OxiError::missing_key(key)))
 }
 
 pub(crate) fn f64_from_object(key: &str, value: Object) -> Result<f64> {
@@ -50,32 +46,6 @@ pub(crate) fn string_from_object(key: &str, value: Object) -> Result<String> {
     }
     let parsed = NvimString::from_object(value).map_err(|_| invalid_key(key, "string"))?;
     Ok(parsed.to_string_lossy().into_owned())
-}
-
-pub(crate) fn get_f64(args: &Dictionary, key: &str) -> Result<f64> {
-    f64_from_object(key, get_object(args, key)?)
-}
-
-pub(crate) fn get_optional_f64(args: &Dictionary, key: &str) -> Result<Option<f64>> {
-    let Some(value) = dict::get_object(args, key) else {
-        return Ok(None);
-    };
-    if value.is_nil() {
-        return Ok(None);
-    }
-    Ok(Some(f64_from_object(key, value)?))
-}
-
-pub(crate) fn get_i64(args: &Dictionary, key: &str) -> Result<i64> {
-    i64_from_object(key, get_object(args, key)?)
-}
-
-pub(crate) fn get_bool(args: &Dictionary, key: &str) -> Result<bool> {
-    bool_from_object(key, get_object(args, key)?)
-}
-
-pub(crate) fn get_string(args: &Dictionary, key: &str) -> Result<String> {
-    string_from_object(key, get_object(args, key)?)
 }
 
 pub(crate) fn parse_indexed_objects(

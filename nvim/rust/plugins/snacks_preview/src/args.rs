@@ -1,9 +1,9 @@
 use crate::core::PreviewToken;
 use nvim_oxi::conversion::FromObject;
-use nvim_oxi::{Array, Dictionary};
-use nvim_oxi_utils::Error as OxiError;
-use nvim_oxi_utils::dict;
+use nvim_oxi::serde::Deserializer;
+use nvim_oxi::{Dictionary, Object, String as NvimString};
 use nvim_oxi_utils::handles::{BufHandle, WinHandle};
+use serde::Deserialize;
 use support::NonEmptyString;
 
 #[derive(Debug)]
@@ -37,68 +37,128 @@ impl std::fmt::Display for ArgsError {
     }
 }
 
-impl From<OxiError> for ArgsError {
-    fn from(err: OxiError) -> Self {
-        match err {
-            OxiError::MissingKey { key } => Self::MissingKey { key },
-            OxiError::InvalidValue { key, expected } => Self::InvalidValue { key, expected },
-            OxiError::Nvim(err) => Self::Unexpected {
-                message: err.to_string(),
-            },
+fn decode<T>(args: &Dictionary) -> ParseResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    T::deserialize(Deserializer::new(Object::from(args.clone()))).map_err(|err| {
+        ArgsError::Unexpected {
+            message: err.to_string(),
         }
-    }
+    })
 }
 
-fn require_i64(args: &Dictionary, key: &str) -> ParseResult<i64> {
-    dict::require_i64(args, key).map_err(ArgsError::from)
+fn require_from_object<T>(
+    maybe_obj: Option<Object>,
+    key: &'static str,
+    expected: &'static str,
+) -> ParseResult<T>
+where
+    T: FromObject,
+{
+    let obj = maybe_obj.ok_or_else(|| ArgsError::MissingKey {
+        key: key.to_string(),
+    })?;
+    T::from_object(obj).map_err(|_| ArgsError::InvalidValue {
+        key: key.to_string(),
+        expected,
+    })
 }
 
-fn require_buf_handle(args: &Dictionary, key: &str) -> ParseResult<BufHandle> {
-    let value = require_i64(args, key)?;
+fn require_i64(maybe_obj: Option<Object>, key: &'static str) -> ParseResult<i64> {
+    require_from_object(maybe_obj, key, "i64")
+}
+
+fn require_string(maybe_obj: Option<Object>, key: &'static str) -> ParseResult<String> {
+    let value: NvimString = require_from_object(maybe_obj, key, "string")?;
+    Ok(value.to_string_lossy().into_owned())
+}
+
+fn parse_buf_handle(value: i64, key: &'static str) -> ParseResult<BufHandle> {
     BufHandle::try_from_i64(value).ok_or_else(|| ArgsError::InvalidHandle {
         key: key.to_string(),
         value,
     })
 }
 
-fn require_win_handle(args: &Dictionary, key: &str) -> ParseResult<WinHandle> {
-    let value = require_i64(args, key)?;
+fn parse_win_handle(value: i64, key: &'static str) -> ParseResult<WinHandle> {
     WinHandle::try_from_i64(value).ok_or_else(|| ArgsError::InvalidHandle {
         key: key.to_string(),
         value,
     })
 }
 
-fn require_preview_token(args: &Dictionary, key: &str) -> ParseResult<PreviewToken> {
-    let value = require_i64(args, key)?;
+fn parse_preview_token(value: i64, key: &'static str) -> ParseResult<PreviewToken> {
     PreviewToken::try_new(value).ok_or_else(|| ArgsError::InvalidToken {
         key: key.to_string(),
         value,
     })
 }
 
-fn require_nonempty_string(args: &Dictionary, key: &str) -> ParseResult<NonEmptyString> {
-    let value = dict::require_string_nonempty(args, key).map_err(|err| match err {
-        OxiError::InvalidValue {
-            expected: "non-empty string",
-            ..
-        } => ArgsError::EmptyValue {
-            key: key.to_string(),
-        },
-        _ => ArgsError::from(err),
-    })?;
+fn parse_nonempty_string(value: String, key: &'static str) -> ParseResult<NonEmptyString> {
     NonEmptyString::try_new(value).map_err(|_| ArgsError::EmptyValue {
         key: key.to_string(),
     })
 }
 
-fn first_img_src(args: &Dictionary) -> Option<NonEmptyString> {
-    let imgs_obj = dict::get_object(args, "imgs")?;
-    let imgs = Array::from_object(imgs_obj).ok()?;
-    let first = imgs.iter().next()?;
-    let img = Dictionary::from_object(first.clone()).ok()?;
-    let src = dict::get_string_nonempty(&img, "src")?;
+fn first_img_src(imgs: Option<Object>) -> Option<NonEmptyString> {
+    let imgs = Vec::<RawImage>::deserialize(Deserializer::new(imgs?)).ok()?;
+    let src = imgs.into_iter().next()?.src?;
     NonEmptyString::try_new(src).ok()
+}
+
+#[derive(Debug, Deserialize)]
+struct RawImage {
+    #[serde(default)]
+    src: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDocFindArgs {
+    #[serde(default)]
+    buf: Option<Object>,
+    #[serde(default)]
+    token: Option<Object>,
+    #[serde(default)]
+    win: Option<Object>,
+    #[serde(default)]
+    imgs: Option<Object>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAttachDocPreviewArgs {
+    #[serde(default)]
+    buf: Option<Object>,
+    #[serde(default)]
+    win: Option<Object>,
+    #[serde(default)]
+    path: Option<Object>,
+}
+
+fn decode_doc_find_args(args: &Dictionary) -> ParseResult<DocFindArgs> {
+    let raw: RawDocFindArgs = decode(args)?;
+    let buf_handle = parse_buf_handle(require_i64(raw.buf, "buf")?, "buf")?;
+    let token = parse_preview_token(require_i64(raw.token, "token")?, "token")?;
+    let win_handle = parse_win_handle(require_i64(raw.win, "win")?, "win")?;
+    let img_src = first_img_src(raw.imgs);
+    Ok(DocFindArgs {
+        buf_handle,
+        token,
+        win_handle,
+        img_src,
+    })
+}
+
+fn decode_attach_doc_preview_args(args: &Dictionary) -> ParseResult<AttachDocPreviewArgs> {
+    let raw: RawAttachDocPreviewArgs = decode(args)?;
+    let buf_handle = parse_buf_handle(require_i64(raw.buf, "buf")?, "buf")?;
+    let win_handle = parse_win_handle(require_i64(raw.win, "win")?, "win")?;
+    let path = parse_nonempty_string(require_string(raw.path, "path")?, "path")?;
+    Ok(AttachDocPreviewArgs {
+        buf_handle,
+        win_handle,
+        path,
+    })
 }
 
 #[derive(Debug)]
@@ -111,16 +171,7 @@ pub struct DocFindArgs {
 
 impl DocFindArgs {
     pub fn parse(args: &Dictionary) -> ParseResult<Self> {
-        let buf_handle = require_buf_handle(args, "buf")?;
-        let token = require_preview_token(args, "token")?;
-        let win_handle = require_win_handle(args, "win")?;
-        let img_src = first_img_src(args);
-        Ok(Self {
-            buf_handle,
-            token,
-            win_handle,
-            img_src,
-        })
+        decode_doc_find_args(args)
     }
 }
 
@@ -133,13 +184,93 @@ pub struct AttachDocPreviewArgs {
 
 impl AttachDocPreviewArgs {
     pub fn parse(args: &Dictionary) -> ParseResult<Self> {
-        let buf_handle = require_buf_handle(args, "buf")?;
-        let win_handle = require_win_handle(args, "win")?;
-        let path = require_nonempty_string(args, "path")?;
-        Ok(Self {
-            buf_handle,
-            win_handle,
-            path,
-        })
+        decode_attach_doc_preview_args(args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nvim_oxi::Array;
+
+    fn dict(entries: impl IntoIterator<Item = (&'static str, Object)>) -> Dictionary {
+        Dictionary::from_iter(entries)
+    }
+
+    #[test]
+    fn parse_doc_find_with_img_src() {
+        let args = dict([
+            ("buf", Object::from(10_i64)),
+            ("token", Object::from(1_i64)),
+            ("win", Object::from(20_i64)),
+            (
+                "imgs",
+                Object::from(Array::from_iter([Object::from(Dictionary::from_iter([(
+                    "src",
+                    Object::from("https://example.test/image.png"),
+                )]))])),
+            ),
+        ]);
+
+        let parsed = DocFindArgs::parse(&args).expect("expected valid args");
+        assert_eq!(parsed.buf_handle.raw(), 10);
+        assert_eq!(parsed.win_handle.raw(), 20);
+        assert_eq!(parsed.token.raw(), 1);
+        let img = parsed.img_src.expect("expected image source");
+        assert_eq!(img.as_str(), "https://example.test/image.png");
+    }
+
+    #[test]
+    fn parse_doc_find_ignores_empty_img_src() {
+        let args = dict([
+            ("buf", Object::from(10_i64)),
+            ("token", Object::from(1_i64)),
+            ("win", Object::from(20_i64)),
+            (
+                "imgs",
+                Object::from(Array::from_iter([Object::from(Dictionary::from_iter([(
+                    "src",
+                    Object::from(""),
+                )]))])),
+            ),
+        ]);
+
+        let parsed = DocFindArgs::parse(&args).expect("expected valid args");
+        assert!(parsed.img_src.is_none());
+    }
+
+    #[test]
+    fn parse_doc_find_rejects_missing_buf() {
+        let args = dict([
+            ("token", Object::from(1_i64)),
+            ("win", Object::from(20_i64)),
+        ]);
+        let err = DocFindArgs::parse(&args).expect_err("expected parse failure");
+        assert!(matches!(err, ArgsError::MissingKey { key } if key == "buf"));
+    }
+
+    #[test]
+    fn parse_attach_doc_preview_rejects_empty_path() {
+        let args = dict([
+            ("buf", Object::from(10_i64)),
+            ("win", Object::from(20_i64)),
+            ("path", Object::from("")),
+        ]);
+        let err = AttachDocPreviewArgs::parse(&args).expect_err("expected parse failure");
+        assert!(matches!(err, ArgsError::EmptyValue { key } if key == "path"));
+    }
+
+    #[test]
+    fn parse_attach_doc_preview_rejects_invalid_handle() {
+        let args = dict([
+            ("buf", Object::from(0_i64)),
+            ("win", Object::from(20_i64)),
+            ("path", Object::from("/tmp/doc.md")),
+        ]);
+        let err = AttachDocPreviewArgs::parse(&args).expect_err("expected parse failure");
+        assert!(matches!(
+            err,
+            ArgsError::InvalidHandle { key, value } if key == "buf" && value == 0
+        ));
     }
 }

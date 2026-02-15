@@ -14,7 +14,7 @@ use nvim_oxi::api;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, CreateCommandOpts, OptionOpts};
 use nvim_oxi::api::types::{AutocmdCallbackArgs, CommandArgs};
 use nvim_oxi::libuv::AsyncHandle;
-use nvim_oxi::{Array, Object, Result, String as NvimString};
+use nvim_oxi::{Array, Result, String as NvimString};
 use nvim_oxi_utils::{notify, state::StateCell};
 use support::{ProjectRoot, TabTitle};
 
@@ -433,12 +433,10 @@ fn current_buf_project_root() -> Result<Option<ProjectRoot>> {
     if !buf.is_valid() {
         return Ok(None);
     }
-    let args = Array::from_iter([
-        Object::from(buf.handle()),
-        Object::from(PROJECT_ROOT_VAR),
-        Object::from(""),
-    ]);
-    let root: NvimString = api::call_function("getbufvar", args)?;
+    let root = match buf.get_var::<NvimString>(PROJECT_ROOT_VAR) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
     Ok(ProjectRoot::try_new(root.to_string_lossy().into_owned()).ok())
 }
 

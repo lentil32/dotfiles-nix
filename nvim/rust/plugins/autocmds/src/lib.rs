@@ -2,8 +2,8 @@ mod integrations;
 mod types;
 
 use nvim_oxi::api;
-use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
-use nvim_oxi::api::types::AutocmdCallbackArgs;
+use nvim_oxi::api::opts::{CmdOpts, CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
+use nvim_oxi::api::types::{AutocmdCallbackArgs, CmdInfos};
 use nvim_oxi::api::{Buffer, Window};
 use nvim_oxi::{Array, Dictionary, Function, Result, String as NvimString, mlua, schedule};
 use nvim_oxi_utils::{
@@ -167,10 +167,11 @@ fn set_win_cwd(win: &Window, dir: &str) -> Result<()> {
 
     let dir = dir.to_string();
     let _: () = win.call(move |()| -> Result<()> {
-        let escaped: NvimString =
-            api::call_function("fnameescape", Array::from_iter([dir.as_str()]))?;
-        let cmd = format!("lcd {}", escaped.to_string_lossy());
-        api::command(&cmd)?;
+        let mut infos_builder = CmdInfos::builder();
+        infos_builder.cmd("lcd").args([dir]);
+        let infos = infos_builder.build();
+        let opts = CmdOpts::builder().build();
+        let _ = api::cmd(&infos, &opts)?;
         Ok(())
     })?;
     Ok(())

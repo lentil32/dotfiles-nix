@@ -648,6 +648,7 @@ dependencies = [
  "nvim-oxi",
  "nvim-oxi-utils",
  "nvim-utils",
+ "serde",
  "support",
 ]
 
@@ -685,6 +686,7 @@ dependencies = [
  "nvim-oxi",
  "nvim-oxi-utils",
  "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -694,6 +696,7 @@ dependencies = [
  "nvim-oxi",
  "nvim-oxi-utils",
  "nvim-utils",
+ "serde",
  "support",
 ]
 

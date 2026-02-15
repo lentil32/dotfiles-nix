@@ -3,7 +3,9 @@ use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::types::{Particle, Point};
 use nvim_oxi::Result;
 use nvim_oxi::api;
-use nvim_oxi::api::opts::{GetHighlightOpts, OptionOpts, OptionScope, SetExtmarkOpts};
+use nvim_oxi::api::opts::{
+    GetHighlightOpts, OptionOpts, OptionScope, SetExtmarkOpts, SetHighlightOpts,
+};
 use nvim_oxi::api::types::{
     ExtmarkVirtTextPosition, GetHlInfos, WindowConfig, WindowRelativeTo, WindowStyle,
 };
@@ -407,6 +409,18 @@ fn set_highlight_group(
     cterm_fg: Option<u16>,
     cterm_bg: Option<u16>,
 ) -> Result<()> {
+    if cterm_fg.is_none() && cterm_bg.is_none() {
+        let opts = SetHighlightOpts::builder()
+            .foreground(foreground)
+            .background(background)
+            .blend(blend)
+            .build();
+        api::set_hl(0, group, &opts)?;
+        return Ok(());
+    }
+
+    // nvim-oxi v0.6 SetHighlightOpts accepts cterm colors as string names, but this
+    // code needs numeric terminal color indices. Keep the raw API call for parity.
     let mut highlight = Dictionary::new();
     highlight.insert("fg", foreground);
     highlight.insert("bg", background);
@@ -522,15 +536,13 @@ fn window_buffer(window: &api::Window) -> Option<api::Buffer> {
     if !window.is_valid() {
         return None;
     }
-    let args = Array::from_iter([Object::from(window.handle())]);
-    let buffer_handle: i32 = match api::call_function("nvim_win_get_buf", args) {
-        Ok(handle) => handle,
+    match window.get_buf() {
+        Ok(buffer) => Some(buffer),
         Err(err) => {
-            log_draw_error("nvim_win_get_buf", &err);
-            return None;
+            log_draw_error("window.get_buf", &err);
+            None
         }
-    };
-    buffer_from_handle_i32(buffer_handle)
+    }
 }
 
 fn close_orphan_render_windows(namespace_id: u32) {

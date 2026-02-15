@@ -7,9 +7,10 @@ use definition_flow::{
     plan_definition_actions,
 };
 use nvim_oxi::api;
-use nvim_oxi::api::opts::{ClearAutocmdsOpts, OptionOpts, OptionScope};
+use nvim_oxi::api::opts::{ClearAutocmdsOpts, CmdOpts, OptionOpts, OptionScope};
+use nvim_oxi::api::types::CmdInfos;
 use nvim_oxi::api::{Buffer, Window};
-use nvim_oxi::{Array, Dictionary, Function, Object, Result, String as NvimString, mlua};
+use nvim_oxi::{Dictionary, Function, Object, Result, String as NvimString, mlua};
 use nvim_oxi_utils::{handles, lua, notify};
 use nvim_utils::path::{path_is_dir, split_uri_scheme_and_rest, strip_known_prefixes};
 use support::cycle::next_item;
@@ -135,6 +136,34 @@ fn get_var((buf, name, default): (Option<i64>, String, Object)) -> Object {
     default
 }
 
+fn run_cmd<S, I>(cmd: &str, args: I) -> Result<()>
+where
+    S: Into<String>,
+    I: IntoIterator<Item = S>,
+{
+    run_cmd_bang(cmd, args, false)
+}
+
+fn run_cmd_bang<S, I>(cmd: &str, args: I, bang: bool) -> Result<()>
+where
+    S: Into<String>,
+    I: IntoIterator<Item = S>,
+{
+    let mut infos_builder = CmdInfos::builder();
+    infos_builder.cmd(cmd).args(args);
+    if bang {
+        infos_builder.bang(true);
+    }
+    let infos = infos_builder.build();
+    let opts = CmdOpts::builder().build();
+    let _ = api::cmd(&infos, &opts)?;
+    Ok(())
+}
+
+fn run_cmd_noargs(cmd: &str) -> Result<()> {
+    run_cmd::<String, _>(cmd, std::iter::empty())
+}
+
 fn edit_path(path: Option<String>) -> Result<()> {
     let Some(path) = path else {
         return Ok(());
@@ -142,10 +171,7 @@ fn edit_path(path: Option<String>) -> Result<()> {
     if path.is_empty() {
         return Ok(());
     }
-    let escaped: NvimString = api::call_function("fnameescape", Array::from_iter([path.as_str()]))?;
-    let cmd = format!("edit {}", escaped.to_string_lossy());
-    api::command(&cmd)?;
-    Ok(())
+    run_cmd("edit", [path])
 }
 
 fn parse_url_scheme_and_rest(url: &str) -> Option<(String, String)> {
@@ -302,14 +328,8 @@ fn delete_buffer_via_command(buf_handle: i64, force: bool, wipe: bool) -> Result
     if buf_handle <= 0 {
         return Ok(());
     }
-    let cmd = match (wipe, force) {
-        (true, true) => format!("bwipeout! {buf_handle}"),
-        (true, false) => format!("bwipeout {buf_handle}"),
-        (false, true) => format!("bdelete! {buf_handle}"),
-        (false, false) => format!("bdelete {buf_handle}"),
-    };
-    api::command(&cmd)?;
-    Ok(())
+    let cmd = if wipe { "bwipeout" } else { "bdelete" };
+    run_cmd_bang(cmd, [buf_handle.to_string()], force)
 }
 
 fn snacks_bufdelete_delete(buf_handle: i64, force: bool, wipe: bool) -> Result<()> {
@@ -473,7 +493,7 @@ fn kill_window_and_buffer() -> Result<()> {
     }
 
     if api::list_wins().count() > 1 {
-        api::command("close")?;
+        run_cmd_noargs("close")?;
     }
 
     let buftype = buf_option_string(&buf, "buftype");
@@ -646,7 +666,7 @@ fn get_or_create_other_window() -> Result<(Window, bool)> {
     {
         return Ok((win, false));
     }
-    api::command("vsplit")?;
+    run_cmd_noargs("vsplit")?;
     let new_win = api::get_current_win();
     if cur.is_valid() {
         api::set_current_win(&cur)?;
