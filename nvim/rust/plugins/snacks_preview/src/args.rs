@@ -1,8 +1,8 @@
 use crate::reducer::PreviewToken;
-use nvim_oxi::conversion::FromObject;
 use nvim_oxi::serde::Deserializer;
-use nvim_oxi::{Dictionary, Object, String as NvimString};
+use nvim_oxi::{Dictionary, Object};
 use nvim_oxi_utils::handles::{BufHandle, WinHandle};
+use nvim_oxi_utils::{Error as DecodeError, decode};
 use serde::Deserialize;
 use support::NonEmptyString;
 
@@ -37,41 +37,18 @@ impl std::fmt::Display for ArgsError {
     }
 }
 
-fn decode<T>(args: &Dictionary) -> ParseResult<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    T::deserialize(Deserializer::new(Object::from(args.clone()))).map_err(|err| {
-        ArgsError::Unexpected {
-            message: err.to_string(),
+impl From<DecodeError> for ArgsError {
+    fn from(value: DecodeError) -> Self {
+        match value {
+            DecodeError::MissingKey { key } => Self::MissingKey { key },
+            DecodeError::InvalidValue { key, expected } => Self::InvalidValue { key, expected },
+            DecodeError::EmptyValue { key } => Self::EmptyValue { key },
+            DecodeError::Unexpected { message } => Self::Unexpected { message },
+            DecodeError::Nvim(err) => Self::Unexpected {
+                message: err.to_string(),
+            },
         }
-    })
-}
-
-fn require_from_object<T>(
-    maybe_obj: Option<Object>,
-    key: &'static str,
-    expected: &'static str,
-) -> ParseResult<T>
-where
-    T: FromObject,
-{
-    let obj = maybe_obj.ok_or_else(|| ArgsError::MissingKey {
-        key: key.to_string(),
-    })?;
-    T::from_object(obj).map_err(|_| ArgsError::InvalidValue {
-        key: key.to_string(),
-        expected,
-    })
-}
-
-fn require_i64(maybe_obj: Option<Object>, key: &'static str) -> ParseResult<i64> {
-    require_from_object(maybe_obj, key, "i64")
-}
-
-fn require_string(maybe_obj: Option<Object>, key: &'static str) -> ParseResult<String> {
-    let value: NvimString = require_from_object(maybe_obj, key, "string")?;
-    Ok(value.to_string_lossy().into_owned())
+    }
 }
 
 fn parse_buf_handle(value: i64, key: &'static str) -> ParseResult<BufHandle> {
@@ -136,10 +113,19 @@ struct RawAttachDocPreviewArgs {
 }
 
 fn decode_doc_find_args(args: &Dictionary) -> ParseResult<DocFindArgs> {
-    let raw: RawDocFindArgs = decode(args)?;
-    let buf_handle = parse_buf_handle(require_i64(raw.buf, "buf")?, "buf")?;
-    let token = parse_preview_token(require_i64(raw.token, "token")?, "token")?;
-    let win_handle = parse_win_handle(require_i64(raw.win, "win")?, "win")?;
+    let raw: RawDocFindArgs = decode::deserialize(args).map_err(ArgsError::from)?;
+    let buf_handle = parse_buf_handle(
+        decode::require_i64(raw.buf, "buf").map_err(ArgsError::from)?,
+        "buf",
+    )?;
+    let token = parse_preview_token(
+        decode::require_i64(raw.token, "token").map_err(ArgsError::from)?,
+        "token",
+    )?;
+    let win_handle = parse_win_handle(
+        decode::require_i64(raw.win, "win").map_err(ArgsError::from)?,
+        "win",
+    )?;
     let img_src = first_img_src(raw.imgs);
     Ok(DocFindArgs {
         buf_handle,
@@ -150,10 +136,19 @@ fn decode_doc_find_args(args: &Dictionary) -> ParseResult<DocFindArgs> {
 }
 
 fn decode_attach_doc_preview_args(args: &Dictionary) -> ParseResult<AttachDocPreviewArgs> {
-    let raw: RawAttachDocPreviewArgs = decode(args)?;
-    let buf_handle = parse_buf_handle(require_i64(raw.buf, "buf")?, "buf")?;
-    let win_handle = parse_win_handle(require_i64(raw.win, "win")?, "win")?;
-    let path = parse_nonempty_string(require_string(raw.path, "path")?, "path")?;
+    let raw: RawAttachDocPreviewArgs = decode::deserialize(args).map_err(ArgsError::from)?;
+    let buf_handle = parse_buf_handle(
+        decode::require_i64(raw.buf, "buf").map_err(ArgsError::from)?,
+        "buf",
+    )?;
+    let win_handle = parse_win_handle(
+        decode::require_i64(raw.win, "win").map_err(ArgsError::from)?,
+        "win",
+    )?;
+    let path = parse_nonempty_string(
+        decode::require_nonempty_string(raw.path, "path").map_err(ArgsError::from)?,
+        "path",
+    )?;
     Ok(AttachDocPreviewArgs {
         buf_handle,
         win_handle,

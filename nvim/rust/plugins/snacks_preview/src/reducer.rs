@@ -1,4 +1,4 @@
-use nvim_oxi_utils::state_machine::Transition;
+use nvim_oxi_utils::state_machine::{Machine, Transition};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -198,6 +198,16 @@ impl PreviewRegistry {
                 PreviewTransition::with_effects(effects)
             }
         }
+    }
+}
+
+impl Machine for PreviewRegistry {
+    type Event = PreviewEvent;
+    type Effect = PreviewEffect;
+    type Command = PreviewCommand;
+
+    fn reduce(&mut self, event: Self::Event) -> PreviewTransition {
+        Self::reduce(self, event)
     }
 }
 

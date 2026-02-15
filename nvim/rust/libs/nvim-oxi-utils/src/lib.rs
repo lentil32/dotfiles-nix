@@ -1,6 +1,7 @@
 //! Shared nvim-oxi helpers for plugin crates.
 
 mod error;
+pub mod decode;
 
 pub use error::{Error, Result};
 
@@ -207,6 +208,29 @@ pub mod state_machine {
             self.effects.is_empty() && self.command.is_none()
         }
     }
+
+    /// Generic reducer contract for state machines that emit effects and commands.
+    pub trait Machine {
+        type Event;
+        type Effect;
+        type Command;
+
+        fn reduce(
+            &mut self,
+            event: Self::Event,
+        ) -> Transition<Self::Effect, Self::Command>;
+    }
+
+    /// Apply one event to a machine.
+    pub fn apply_event<M>(
+        machine: &mut M,
+        event: M::Event,
+    ) -> Transition<M::Effect, M::Command>
+    where
+        M: Machine,
+    {
+        machine.reduce(event)
+    }
 }
 
 pub mod lua {
@@ -402,6 +426,7 @@ pub mod handles {
 }
 
 pub mod dict {
+    use crate::decode;
     use crate::{Error, Result};
     use nvim_oxi::conversion::FromObject;
     use nvim_oxi::{Dictionary, Object, String as NvimString};
@@ -413,9 +438,7 @@ pub mod dict {
     }
 
     pub fn require_i64(dict: &Dictionary, key: &str) -> Result<i64> {
-        let key_str = NvimString::from(key);
-        let obj = dict.get(&key_str).ok_or_else(|| Error::missing_key(key))?;
-        i64::from_object(obj.clone()).map_err(|_| Error::invalid_value(key, "i64"))
+        decode::require_i64(decode::get_object(dict, key), key)
     }
 
     pub fn get_string(dict: &Dictionary, key: &str) -> Option<String> {
@@ -426,11 +449,7 @@ pub mod dict {
     }
 
     pub fn require_string(dict: &Dictionary, key: &str) -> Result<String> {
-        let key_str = NvimString::from(key);
-        let obj = dict.get(&key_str).ok_or_else(|| Error::missing_key(key))?;
-        NvimString::from_object(obj.clone())
-            .map(|val| val.to_string_lossy().into_owned())
-            .map_err(|_| Error::invalid_value(key, "string"))
+        decode::require_string(decode::get_object(dict, key), key)
     }
 
     pub fn require_string_nonempty(dict: &Dictionary, key: &str) -> Result<String> {
@@ -446,8 +465,7 @@ pub mod dict {
     }
 
     pub fn get_object(dict: &Dictionary, key: &str) -> Option<Object> {
-        let key = NvimString::from(key);
-        dict.get(&key).cloned()
+        decode::get_object(dict, key)
     }
 }
 

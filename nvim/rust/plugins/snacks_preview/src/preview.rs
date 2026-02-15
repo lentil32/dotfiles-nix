@@ -17,7 +17,7 @@ use crate::bridge::{
 use crate::reducer::{
     PreviewCommand, PreviewEffect, PreviewEvent, PreviewTransition, RestoreNamePlan,
 };
-use crate::state::{apply_event, buf_key, is_current_preview_token};
+use crate::state::{buf_key, context};
 
 fn report_panic(label: &str, info: &guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
@@ -104,7 +104,7 @@ fn close_doc_preview(buf_handle: BufHandle) -> bool {
     let Some(key) = buf_key(buf_handle) else {
         return false;
     };
-    let transition = apply_event(PreviewEvent::Close { key });
+    let transition = context().apply_event(PreviewEvent::Close { key });
     if transition.is_empty() {
         return false;
     }
@@ -208,7 +208,7 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
     let Some(key) = buf_key(buf_handle) else {
         return Ok(());
     };
-    let transition = apply_event(PreviewEvent::Register {
+    let transition = context().apply_event(PreviewEvent::Register {
         key,
         group,
         restore_name_plan,
@@ -250,7 +250,7 @@ fn on_doc_find_inner(args: DocFindArgs) {
     let Some(key) = buf_key(buf_handle) else {
         return;
     };
-    let arrived_transition = apply_event(PreviewEvent::DocFindArrived { key, token });
+    let arrived_transition = context().apply_event(PreviewEvent::DocFindArrived { key, token });
     if arrived_transition.is_empty() {
         return;
     }
@@ -266,7 +266,7 @@ fn on_doc_find_inner(args: DocFindArgs) {
         guard::with_panic(
             (),
             || {
-                if !is_current_preview_token(key, token) {
+                if !context().is_current_preview_token(key, token) {
                     return;
                 }
                 if win_handle.valid_window().is_none() {
@@ -275,11 +275,11 @@ fn on_doc_find_inner(args: DocFindArgs) {
                 let Some(cleanup_id) = create_preview_cleanup(win_handle, &src) else {
                     return;
                 };
-                if !is_current_preview_token(key, token) {
+                if !context().is_current_preview_token(key, token) {
                     run_preview_cleanup(cleanup_id);
                     return;
                 }
-                let cleanup_effects = apply_event(PreviewEvent::CleanupOpened {
+                let cleanup_effects = context().apply_event(PreviewEvent::CleanupOpened {
                     key,
                     token,
                     cleanup_id,

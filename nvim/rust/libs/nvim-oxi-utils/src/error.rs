@@ -6,6 +6,10 @@ pub enum Error {
     MissingKey { key: String },
     #[error("invalid value for `{key}`; expected {expected}")]
     InvalidValue { key: String, expected: &'static str },
+    #[error("empty value for `{key}`")]
+    EmptyValue { key: String },
+    #[error("{message}")]
+    Unexpected { message: String },
     #[error("nvim error: {0}")]
     Nvim(#[from] nvim_oxi::Error),
 }
@@ -23,6 +27,18 @@ impl Error {
         Self::InvalidValue {
             key: key.to_string(),
             expected,
+        }
+    }
+
+    pub fn empty_value(key: &str) -> Self {
+        Self::EmptyValue {
+            key: key.to_string(),
+        }
+    }
+
+    pub fn unexpected(message: impl Into<String>) -> Self {
+        Self::Unexpected {
+            message: message.into(),
         }
     }
 }

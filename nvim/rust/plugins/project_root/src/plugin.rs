@@ -20,16 +20,33 @@ use crate::types::State;
 const PROJECT_ROOT_GROUP: &str = "ProjectRoot";
 const LOG_CONTEXT: &str = "project_root";
 
-static STATE: LazyLock<StateCell<State>> = LazyLock::new(|| StateCell::new(State::default()));
+#[derive(Debug)]
+struct ProjectRootContext {
+    state: StateCell<State>,
+}
 
-fn state_lock() -> nvim_oxi_utils::state::StateGuard<'static, State> {
-    STATE.lock_recover(|state| {
-        notify::warn(
-            LOG_CONTEXT,
-            "state mutex poisoned; resetting project_root state",
-        );
-        *state = State::default();
-    })
+impl ProjectRootContext {
+    fn new() -> Self {
+        Self {
+            state: StateCell::new(State::default()),
+        }
+    }
+
+    fn state_lock(&self) -> nvim_oxi_utils::state::StateGuard<'_, State> {
+        self.state.lock_recover(|state| {
+            notify::warn(
+                LOG_CONTEXT,
+                "state mutex poisoned; resetting project_root state",
+            );
+            *state = State::default();
+        })
+    }
+}
+
+static CONTEXT: LazyLock<ProjectRootContext> = LazyLock::new(ProjectRootContext::new);
+
+fn context() -> &'static ProjectRootContext {
+    &CONTEXT
 }
 
 fn report_panic(label: &str, info: &guard::PanicInfo) {
@@ -51,7 +68,7 @@ fn buffer_path_and_key(buf: &Buffer, label: &str) -> Result<Option<(PathBuf, Nor
     Ok(Some((path, key)))
 }
 
-fn cached_or_refresh_root(buf: &Buffer) -> Result<Option<String>> {
+fn cached_or_refresh_root(buf: &Buffer, context: &ProjectRootContext) -> Result<Option<String>> {
     let Some((path, key)) = buffer_path_and_key(buf, "cached_or_refresh_root")? else {
         return Ok(None);
     };
@@ -60,16 +77,16 @@ fn cached_or_refresh_root(buf: &Buffer) -> Result<Option<String>> {
         return Ok(Some(root));
     }
 
-    refresh_root_for_path(buf, &path, &key)
+    refresh_root_for_path(buf, &path, &key, context)
 }
 
-fn root_from_path(path: &Path) -> Option<PathBuf> {
-    root_match_from_path(path).map(|value| value.root)
+fn root_from_path(path: &Path, context: &ProjectRootContext) -> Option<PathBuf> {
+    root_match_from_path(path, context).map(|value| value.root)
 }
 
-fn root_match_from_path(path: &Path) -> Option<RootMatch> {
+fn root_match_from_path(path: &Path, context: &ProjectRootContext) -> Option<RootMatch> {
     let indicators = {
-        let state = state_lock();
+        let state = context.state_lock();
         state.root_indicators.clone()
     };
     let root = crate::core::root_match_from_path_with(path, &indicators, path_is_dir, Path::exists);
@@ -99,8 +116,9 @@ fn refresh_root_for_path(
     buf: &Buffer,
     path: &Path,
     key: &NormalizedPathKey,
+    context: &ProjectRootContext,
 ) -> Result<Option<String>> {
-    let root_match = root_match_from_path(path);
+    let root_match = root_match_from_path(path, context);
     let root = root_match
         .as_ref()
         .map(|match_value| match_value.root.to_string_lossy().into_owned());
@@ -121,17 +139,20 @@ fn refresh_root_for_path(
     Ok(root)
 }
 
-fn refresh_root_for_buffer(buf: &Buffer) -> Result<Option<String>> {
+fn refresh_root_for_buffer(
+    buf: &Buffer,
+    context: &ProjectRootContext,
+) -> Result<Option<String>> {
     let Some((path, key)) = buffer_path_and_key(buf, "refresh_root_for_buffer")? else {
         return Ok(None);
     };
-    refresh_root_for_path(buf, &path, &key)
+    refresh_root_for_path(buf, &path, &key, context)
 }
 
-fn get_project_root() -> Result<Option<String>> {
+fn get_project_root(context: &ProjectRootContext) -> Result<Option<String>> {
     let buf = api::get_current_buf();
     debug_log(|| format!("get_project_root: current buf={}", buf.handle()));
-    if let Some(root) = cached_or_refresh_root(&buf)? {
+    if let Some(root) = cached_or_refresh_root(&buf, context)? {
         debug_log(|| {
             format!(
                 "get_project_root: current buf={} root='{}'",
@@ -147,7 +168,7 @@ fn get_project_root() -> Result<Option<String>> {
         debug_log(|| "get_project_root: no alternate buffer".to_string());
         None
     } else if let Some(alt_buf) = handles::valid_buffer(alt) {
-        let root = cached_or_refresh_root(&alt_buf)?;
+        let root = cached_or_refresh_root(&alt_buf, context)?;
         let handle = alt_buf.handle();
         debug_log(|| {
             let root_value = root.as_deref().unwrap_or("<none>");
@@ -179,7 +200,7 @@ fn get_project_root() -> Result<Option<String>> {
     });
     let root = normalized
         .as_ref()
-        .and_then(|path| root_from_path(path))
+        .and_then(|path| root_from_path(path, context))
         .map(|path| path.to_string_lossy().into_owned());
     debug_log(|| {
         let root_value = root.as_deref().unwrap_or("<none>");
@@ -188,7 +209,7 @@ fn get_project_root() -> Result<Option<String>> {
     Ok(root)
 }
 
-fn setup_autocmd() -> Result<()> {
+fn setup_autocmd(context: &'static ProjectRootContext) -> Result<()> {
     let group = api::create_augroup(
         PROJECT_ROOT_GROUP,
         &CreateAugroupOpts::builder().clear(true).build(),
@@ -196,11 +217,11 @@ fn setup_autocmd() -> Result<()> {
 
     let opts = CreateAutocmdOpts::builder()
         .group(group)
-        .callback(|args: AutocmdCallbackArgs| {
+        .callback(move |args: AutocmdCallbackArgs| {
             guard::with_panic(
                 false,
                 || {
-                    if let Err(err) = refresh_root_for_buffer(&args.buffer) {
+                    if let Err(err) = refresh_root_for_buffer(&args.buffer, context) {
                         notify::warn(
                             LOG_CONTEXT,
                             &format!("refresh_root_for_buffer failed: {err}"),
@@ -231,9 +252,9 @@ fn invalidate_cached_roots() {
     }
 }
 
-fn apply_config(config: Option<&Dictionary>) -> bool {
+fn apply_config(config: Option<&Dictionary>, context: &ProjectRootContext) -> bool {
     let config = ProjectRootConfig::from_dict(config);
-    let mut state = state_lock();
+    let mut state = context.state_lock();
     if state.root_indicators == config.root_indicators {
         return false;
     }
@@ -246,13 +267,14 @@ fn apply_config(config: Option<&Dictionary>) -> bool {
     reason = "nvim callback signatures pass owned Lua values by value"
 )]
 fn setup(config: Option<Dictionary>) -> Result<()> {
-    let config_changed = apply_config(config.as_ref());
+    let context = context();
+    let config_changed = apply_config(config.as_ref(), context);
     if config_changed {
         invalidate_cached_roots();
     }
 
     let should_setup = {
-        let mut state = state_lock();
+        let mut state = context.state_lock();
         if state.did_setup {
             false
         } else {
@@ -262,10 +284,10 @@ fn setup(config: Option<Dictionary>) -> Result<()> {
     };
 
     if should_setup {
-        setup_autocmd()?;
+        setup_autocmd(context)?;
     }
 
-    if let Err(err) = refresh_root_for_buffer(&api::get_current_buf()) {
+    if let Err(err) = refresh_root_for_buffer(&api::get_current_buf(), context) {
         notify::warn(
             LOG_CONTEXT,
             &format!("initial refresh_root_for_buffer failed: {err}"),
@@ -276,16 +298,16 @@ fn setup(config: Option<Dictionary>) -> Result<()> {
 
 fn swap_root(buf: Option<Buffer>) -> Result<()> {
     let buf = buf.map_or_else(api::get_current_buf, |buf| buf);
-    let _ = refresh_root_for_buffer(&buf)?;
+    let _ = refresh_root_for_buffer(&buf, context())?;
     Ok(())
 }
 
 fn project_root_value() -> Result<Option<String>> {
-    get_project_root()
+    get_project_root(context())
 }
 
 fn project_root_or_warn_value() -> Result<Option<String>> {
-    let root = get_project_root()?;
+    let root = get_project_root(context())?;
     if root.is_none() {
         notify::warn("", "No project root found");
     }
@@ -293,7 +315,7 @@ fn project_root_or_warn_value() -> Result<Option<String>> {
 }
 
 fn show_project_root() -> Result<()> {
-    let Some(root) = get_project_root()? else {
+    let Some(root) = get_project_root(context())? else {
         notify::warn("", "No project root found");
         return Ok(());
     };

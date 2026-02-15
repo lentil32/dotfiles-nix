@@ -125,17 +125,30 @@ impl DerefMut for RuntimeStateGuard {
     }
 }
 
-static ENGINE_STATE: LazyLock<Mutex<EngineState>> =
-    LazyLock::new(|| Mutex::new(EngineState::default()));
-static LOG_LEVEL: AtomicI64 = AtomicI64::new(LOG_LEVEL_INFO);
+#[derive(Debug)]
+struct EngineContext {
+    state: Mutex<EngineState>,
+    log_level: AtomicI64,
+}
+
+impl EngineContext {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(EngineState::default()),
+            log_level: AtomicI64::new(LOG_LEVEL_INFO),
+        }
+    }
+}
+
+static ENGINE_CONTEXT: LazyLock<EngineContext> = LazyLock::new(EngineContext::new);
 
 fn set_log_level(level: i64) {
     let normalized = if level < 0 { 0 } else { level };
-    LOG_LEVEL.store(normalized, Ordering::Relaxed);
+    ENGINE_CONTEXT.log_level.store(normalized, Ordering::Relaxed);
 }
 
 fn should_log(level: i64) -> bool {
-    LOG_LEVEL.load(Ordering::Relaxed) <= level
+    ENGINE_CONTEXT.log_level.load(Ordering::Relaxed) <= level
 }
 
 fn log_level_name(level: i64) -> &'static str {
@@ -284,7 +297,7 @@ fn reset_transient_event_state_without_generation_bump() {
 
 fn engine_lock() -> std::sync::MutexGuard<'static, EngineState> {
     loop {
-        match ENGINE_STATE.lock() {
+        match ENGINE_CONTEXT.state.lock() {
             Ok(guard) => return guard,
             Err(poisoned) => {
                 let mut guard = poisoned.into_inner();
@@ -292,7 +305,7 @@ fn engine_lock() -> std::sync::MutexGuard<'static, EngineState> {
                 *guard = EngineState::default();
                 drop(guard);
 
-                ENGINE_STATE.clear_poison();
+                ENGINE_CONTEXT.state.clear_poison();
                 set_log_level(RuntimeConfig::default().logging_level);
                 warn("state mutex poisoned; resetting runtime state");
                 if let Some(namespace_id) = namespace_id {

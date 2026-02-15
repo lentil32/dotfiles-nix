@@ -1,13 +1,98 @@
 use std::fmt;
 
 use nvim_oxi::mlua;
+use support::NonEmptyString;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferNumber(i64);
+
+impl BufferNumber {
+    pub const fn try_new(raw: i64) -> Option<Self> {
+        if raw > 0 { Some(Self(raw)) } else { None }
+    }
+
+    pub const fn raw(self) -> i64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineNumber(i64);
+
+impl LineNumber {
+    pub const fn try_new(raw: i64) -> Option<Self> {
+        if raw > 0 { Some(Self(raw)) } else { None }
+    }
+
+    pub const fn raw(self) -> i64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnNumber(i64);
+
+impl ColumnNumber {
+    pub const fn try_new(raw: i64) -> Option<Self> {
+        if raw > 0 { Some(Self(raw)) } else { None }
+    }
+
+    pub const fn raw(self) -> i64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionLocation {
+    BufferOnly(BufferNumber),
+    FileOnly(NonEmptyString),
+    BufferAndFile {
+        bufnr: BufferNumber,
+        filename: NonEmptyString,
+    },
+}
+
+impl DefinitionLocation {
+    pub const fn bufnr(&self) -> Option<i64> {
+        match self {
+            Self::BufferOnly(bufnr) | Self::BufferAndFile { bufnr, .. } => Some(bufnr.raw()),
+            Self::FileOnly(_) => None,
+        }
+    }
+
+    pub fn filename(&self) -> Option<&str> {
+        match self {
+            Self::FileOnly(filename) | Self::BufferAndFile { filename, .. } => {
+                Some(filename.as_str())
+            }
+            Self::BufferOnly(_) => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionItem {
-    pub bufnr: Option<i64>,
-    pub filename: Option<String>,
-    pub lnum: i64,
-    pub col: i64,
+    location: DefinitionLocation,
+    lnum: LineNumber,
+    col: ColumnNumber,
+}
+
+impl DefinitionItem {
+    pub const fn bufnr(&self) -> Option<i64> {
+        self.location.bufnr()
+    }
+
+    pub fn filename(&self) -> Option<&str> {
+        self.location.filename()
+    }
+
+    pub const fn lnum(&self) -> i64 {
+        self.lnum.raw()
+    }
+
+    pub const fn col(&self) -> i64 {
+        self.col.raw()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,44 +124,48 @@ impl fmt::Display for DefinitionParseError {
 
 type DefinitionParseResult<T> = std::result::Result<T, DefinitionParseError>;
 
-fn parse_required_positive_field(
+fn parse_required_positive_field<T, F>(
     item: &mlua::Table,
     index: usize,
     field: &'static str,
-) -> DefinitionParseResult<i64> {
+    parse: F,
+) -> DefinitionParseResult<T>
+where
+    F: FnOnce(i64) -> Option<T>,
+{
     let value = item
         .get::<Option<i64>>(field)
         .map_err(|_| DefinitionParseError::InvalidField { index, field })?;
     let Some(value) = value else {
         return Err(DefinitionParseError::MissingField { index, field });
     };
-    if value <= 0 {
-        return Err(DefinitionParseError::InvalidField { index, field });
-    }
-    Ok(value)
+    parse(value).ok_or(DefinitionParseError::InvalidField { index, field })
 }
 
-fn parse_optional_bufnr(item: &mlua::Table, index: usize) -> DefinitionParseResult<Option<i64>> {
+fn parse_optional_bufnr(
+    item: &mlua::Table,
+    index: usize,
+) -> DefinitionParseResult<Option<BufferNumber>> {
     let value =
         item.get::<Option<i64>>("bufnr")
             .map_err(|_| DefinitionParseError::InvalidField {
                 index,
                 field: "bufnr",
             })?;
-    Ok(value.filter(|entry| *entry > 0))
+    Ok(value.and_then(BufferNumber::try_new))
 }
 
 fn parse_optional_filename(
     item: &mlua::Table,
     index: usize,
-) -> DefinitionParseResult<Option<String>> {
+) -> DefinitionParseResult<Option<NonEmptyString>> {
     let value =
         item.get::<Option<String>>("filename")
             .map_err(|_| DefinitionParseError::InvalidField {
                 index,
                 field: "filename",
             })?;
-    Ok(value.filter(|entry| !entry.is_empty()))
+    Ok(value.and_then(|entry| NonEmptyString::try_new(entry).ok()))
 }
 
 fn parse_definition_item(
@@ -85,14 +174,16 @@ fn parse_definition_item(
 ) -> DefinitionParseResult<DefinitionItem> {
     let bufnr = parse_optional_bufnr(item, index)?;
     let filename = parse_optional_filename(item, index)?;
-    if bufnr.is_none() && filename.is_none() {
-        return Err(DefinitionParseError::MissingLocation { index });
-    }
-    let lnum = parse_required_positive_field(item, index, "lnum")?;
-    let col = parse_required_positive_field(item, index, "col")?;
+    let location = match (bufnr, filename) {
+        (None, None) => return Err(DefinitionParseError::MissingLocation { index }),
+        (Some(bufnr), None) => DefinitionLocation::BufferOnly(bufnr),
+        (None, Some(filename)) => DefinitionLocation::FileOnly(filename),
+        (Some(bufnr), Some(filename)) => DefinitionLocation::BufferAndFile { bufnr, filename },
+    };
+    let lnum = parse_required_positive_field(item, index, "lnum", LineNumber::try_new)?;
+    let col = parse_required_positive_field(item, index, "col", ColumnNumber::try_new)?;
     Ok(DefinitionItem {
-        bufnr,
-        filename,
+        location,
         lnum,
         col,
     })
@@ -144,15 +235,20 @@ pub fn plan_definition_actions(
 
 #[cfg(test)]
 mod tests {
-    use super::{DefinitionAction, DefinitionItem, plan_definition_actions};
+    use super::{
+        BufferNumber, ColumnNumber, DefinitionAction, DefinitionItem, DefinitionLocation,
+        LineNumber, plan_definition_actions,
+    };
 
-    fn definition_item(bufnr: i64, lnum: i64, col: i64) -> DefinitionItem {
-        DefinitionItem {
-            bufnr: Some(bufnr),
-            filename: None,
+    fn definition_item(bufnr: i64, lnum: i64, col: i64) -> Result<DefinitionItem, &'static str> {
+        let bufnr = BufferNumber::try_new(bufnr).ok_or("expected valid bufnr")?;
+        let lnum = LineNumber::try_new(lnum).ok_or("expected valid line")?;
+        let col = ColumnNumber::try_new(col).ok_or("expected valid column")?;
+        Ok(DefinitionItem {
+            location: DefinitionLocation::BufferOnly(bufnr),
             lnum,
             col,
-        }
+        })
     }
 
     #[test]
@@ -164,27 +260,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_definition_actions_opens_primary_for_single_item() {
+    fn plan_definition_actions_opens_primary_for_single_item() -> Result<(), &'static str> {
         assert_eq!(
-            plan_definition_actions(vec![definition_item(1, 2, 3)], Some("defs".to_string())),
-            vec![DefinitionAction::OpenPrimary(definition_item(1, 2, 3))]
+            plan_definition_actions(vec![definition_item(1, 2, 3)?], Some("defs".to_string())),
+            vec![DefinitionAction::OpenPrimary(definition_item(1, 2, 3)?)]
         );
+        Ok(())
     }
 
     #[test]
-    fn plan_definition_actions_pushes_quickfix_for_multiple_items() {
+    fn plan_definition_actions_pushes_quickfix_for_multiple_items() -> Result<(), &'static str> {
         assert_eq!(
             plan_definition_actions(
-                vec![definition_item(1, 2, 3), definition_item(4, 5, 6)],
+                vec![definition_item(1, 2, 3)?, definition_item(4, 5, 6)?],
                 Some("defs".to_string())
             ),
             vec![
-                DefinitionAction::OpenPrimary(definition_item(1, 2, 3)),
+                DefinitionAction::OpenPrimary(definition_item(1, 2, 3)?),
                 DefinitionAction::PushQuickfix {
                     title: Some("defs".to_string()),
-                    items: vec![definition_item(1, 2, 3), definition_item(4, 5, 6)],
+                    items: vec![definition_item(1, 2, 3)?, definition_item(4, 5, 6)?],
                 }
             ]
         );
+        Ok(())
     }
 }

@@ -26,8 +26,13 @@ impl NormalizedPathKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RootCacheRecord {
     key: NormalizedPathKey,
-    root: Option<String>,
-    indicator: Option<String>,
+    value: RootCacheValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RootCacheValue {
+    Missing,
+    Found { root: String, indicator: String },
 }
 
 impl RootCacheRecord {
@@ -41,23 +46,22 @@ impl RootCacheRecord {
         let indicator = indicator
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
-        if root.is_none() && indicator.is_some() {
-            return None;
-        }
-        if root.is_some() && indicator.is_none() {
-            return None;
-        }
+        let value = match (root, indicator) {
+            (None, None) => RootCacheValue::Missing,
+            (Some(root), Some(indicator)) => RootCacheValue::Found { root, indicator },
+            _ => return None,
+        };
         Some(Self {
             key: key.clone(),
-            root,
-            indicator,
+            value,
         })
     }
 
     fn encode(&self) -> String {
-        let has_root = if self.root.is_some() { "1" } else { "0" };
-        let root = self.root.as_deref().unwrap_or("");
-        let indicator = self.indicator.as_deref().unwrap_or("");
+        let (has_root, root, indicator) = match &self.value {
+            RootCacheValue::Missing => ("0", "", ""),
+            RootCacheValue::Found { root, indicator } => ("1", root.as_str(), indicator.as_str()),
+        };
         format!(
             "{ROOT_CACHE_VERSION}\0{}\0{has_root}\0{root}\0{indicator}",
             self.key.as_str()
@@ -76,17 +80,19 @@ impl RootCacheRecord {
         let has_root = parts.next()?;
         let root_part = parts.next().unwrap_or_default();
         let indicator_part = parts.next().unwrap_or_default();
-        let (root, indicator) = match has_root {
-            "0" if root_part.is_empty() && indicator_part.is_empty() => (None, None),
+        let value = match has_root {
+            "0" if root_part.is_empty() && indicator_part.is_empty() => RootCacheValue::Missing,
             "1" if !root_part.is_empty() && !indicator_part.is_empty() => {
-                (Some(root_part.to_owned()), Some(indicator_part.to_owned()))
+                RootCacheValue::Found {
+                    root: root_part.to_owned(),
+                    indicator: indicator_part.to_owned(),
+                }
             }
             _ => return None,
         };
         Some(Self {
             key: NormalizedPathKey(key.to_owned()),
-            root,
-            indicator,
+            value,
         })
     }
 }
@@ -221,8 +227,10 @@ pub fn cached_root_by_key(buf: &Buffer, key: &NormalizedPathKey) -> Option<Strin
     if record.key != *key {
         return None;
     }
-    let root = record.root?;
-    let indicator = record.indicator?;
+    let (root, indicator) = match record.value {
+        RootCacheValue::Missing => return None,
+        RootCacheValue::Found { root, indicator } => (root, indicator),
+    };
     let root_path = Path::new(&root);
     if !path_is_dir(root_path) {
         return None;

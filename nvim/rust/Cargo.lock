@@ -423,6 +423,7 @@ name = "nvim-oxi-utils"
 version = "0.1.0"
 dependencies = [
  "nvim-oxi",
+ "serde",
  "thiserror",
 ]
 

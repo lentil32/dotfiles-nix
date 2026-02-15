@@ -5,7 +5,7 @@ use nvim_oxi_utils::{lua, notify};
 
 use crate::LOG_CONTEXT;
 use crate::reducer::PreviewToken;
-use crate::state::{register_cleanup_key, take_all_cleanup_keys_and_reset, take_cleanup_key};
+use crate::state::context;
 
 const BRIDGE_MODULE: &str = "myLuaConf.snacks_preview_bridge";
 
@@ -179,7 +179,7 @@ pub fn snacks_open_preview(win_handle: WinHandle, src: &str) -> Result<Option<i6
     let cleanup_key = lua
         .create_registry_value(cleanup)
         .map_err(nvim_oxi::Error::from)?;
-    let cleanup_id = register_cleanup_key(cleanup_key);
+    let cleanup_id = context().register_cleanup_key(cleanup_key);
     Ok(Some(cleanup_id))
 }
 
@@ -201,14 +201,14 @@ fn run_cleanup_registry_key(cleanup_key: mlua::RegistryKey) -> Result<()> {
 }
 
 pub fn snacks_close_preview(cleanup_id: i64) -> Result<()> {
-    let Some(cleanup_key) = take_cleanup_key(cleanup_id) else {
+    let Some(cleanup_key) = context().take_cleanup_key(cleanup_id) else {
         return Ok(());
     };
     run_cleanup_registry_key(cleanup_key)
 }
 
 pub fn reset_preview_state() {
-    let cleanup_keys = take_all_cleanup_keys_and_reset();
+    let cleanup_keys = context().take_all_cleanup_keys_and_reset();
     for cleanup_key in cleanup_keys {
         if let Err(err) = run_cleanup_registry_key(cleanup_key) {
             notify::warn(LOG_CONTEXT, &format!("preview cleanup reset failed: {err}"));

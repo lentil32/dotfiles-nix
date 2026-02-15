@@ -9,7 +9,7 @@ use nvim_oxi_utils::state::{StateCell, StateGuard};
 
 use crate::LOG_CONTEXT;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct State {
     pub registry: PreviewRegistry,
     next_cleanup_id: i64,
@@ -42,52 +42,69 @@ impl State {
     }
 }
 
-static STATE: LazyLock<StateCell<State>> = LazyLock::new(|| StateCell::new(State::default()));
+#[derive(Debug)]
+pub struct PreviewContext {
+    state: StateCell<State>,
+}
 
-pub fn state_lock() -> StateGuard<'static, State> {
-    STATE.lock_recover(|state| {
-        let dropped_cleanups = state.cleanups.len();
-        notify::warn(
-            LOG_CONTEXT,
-            &format!(
-                "state mutex poisoned; resetting preview registry (dropping {dropped_cleanups} pending cleanups)"
-            ),
-        );
-        *state = State::default();
-    })
+impl PreviewContext {
+    fn new() -> Self {
+        Self {
+            state: StateCell::new(State::default()),
+        }
+    }
+
+    fn state_lock(&self) -> StateGuard<'_, State> {
+        self.state.lock_recover(|state| {
+            let dropped_cleanups = state.cleanups.len();
+            notify::warn(
+                LOG_CONTEXT,
+                &format!(
+                    "state mutex poisoned; resetting preview registry (dropping {dropped_cleanups} pending cleanups)"
+                ),
+            );
+            *state = State::default();
+        })
+    }
+
+    pub fn is_current_preview_token(&self, key: BufKey, token: PreviewToken) -> bool {
+        let state = self.state_lock();
+        state.registry.is_token_current(key, token)
+    }
+
+    pub fn apply_event(&self, event: PreviewEvent) -> PreviewTransition {
+        let mut state = self.state_lock();
+        state.registry.reduce(event)
+    }
+
+    pub fn register_cleanup_key(&self, cleanup_key: mlua::RegistryKey) -> i64 {
+        let mut state = self.state_lock();
+        state.insert_cleanup(cleanup_key)
+    }
+
+    pub fn take_cleanup_key(&self, cleanup_id: i64) -> Option<mlua::RegistryKey> {
+        if cleanup_id <= 0 {
+            return None;
+        }
+        let mut state = self.state_lock();
+        state.take_cleanup(cleanup_id)
+    }
+
+    pub fn take_all_cleanup_keys_and_reset(&self) -> Vec<mlua::RegistryKey> {
+        let mut state = self.state_lock();
+        let cleanup_keys = state.take_all_cleanups();
+        state.registry = PreviewRegistry::default();
+        state.next_cleanup_id = 0;
+        cleanup_keys
+    }
+}
+
+static CONTEXT: LazyLock<PreviewContext> = LazyLock::new(PreviewContext::new);
+
+pub fn context() -> &'static PreviewContext {
+    &CONTEXT
 }
 
 pub const fn buf_key(buf_handle: BufHandle) -> Option<BufKey> {
     BufKey::try_new(buf_handle.raw())
-}
-
-pub fn is_current_preview_token(key: BufKey, token: PreviewToken) -> bool {
-    let state = state_lock();
-    state.registry.is_token_current(key, token)
-}
-
-pub fn apply_event(event: PreviewEvent) -> PreviewTransition {
-    let mut state = state_lock();
-    state.registry.reduce(event)
-}
-
-pub fn register_cleanup_key(cleanup_key: mlua::RegistryKey) -> i64 {
-    let mut state = state_lock();
-    state.insert_cleanup(cleanup_key)
-}
-
-pub fn take_cleanup_key(cleanup_id: i64) -> Option<mlua::RegistryKey> {
-    if cleanup_id <= 0 {
-        return None;
-    }
-    let mut state = state_lock();
-    state.take_cleanup(cleanup_id)
-}
-
-pub fn take_all_cleanup_keys_and_reset() -> Vec<mlua::RegistryKey> {
-    let mut state = state_lock();
-    let cleanup_keys = state.take_all_cleanups();
-    state.registry = PreviewRegistry::default();
-    state.next_cleanup_id = 0;
-    cleanup_keys
 }

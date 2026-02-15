@@ -210,9 +210,22 @@ struct DrawState {
     bulge_above: bool,
 }
 
-static DRAW_STATE: LazyLock<Mutex<DrawState>> = LazyLock::new(|| Mutex::new(DrawState::default()));
-static HIGHLIGHT_PALETTE_CACHE: LazyLock<Mutex<Option<HighlightPaletteKey>>> =
-    LazyLock::new(|| Mutex::new(None));
+#[derive(Debug)]
+struct DrawContext {
+    draw_state: Mutex<DrawState>,
+    highlight_palette_cache: Mutex<Option<HighlightPaletteKey>>,
+}
+
+impl DrawContext {
+    fn new() -> Self {
+        Self {
+            draw_state: Mutex::new(DrawState::default()),
+            highlight_palette_cache: Mutex::new(None),
+        }
+    }
+}
+
+static DRAW_CONTEXT: LazyLock<DrawContext> = LazyLock::new(DrawContext::new);
 
 fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
     api::err_writeln(&format!("[smear_cursor][draw] {context} failed: {err}"));
@@ -253,13 +266,13 @@ impl Drop for EventIgnoreGuard {
 
 fn draw_state_lock() -> std::sync::MutexGuard<'static, DrawState> {
     loop {
-        match DRAW_STATE.lock() {
+        match DRAW_CONTEXT.draw_state.lock() {
             Ok(guard) => return guard,
             Err(poisoned) => {
                 let mut guard = poisoned.into_inner();
                 *guard = DrawState::default();
                 drop(guard);
-                DRAW_STATE.clear_poison();
+                DRAW_CONTEXT.draw_state.clear_poison();
             }
         }
     }
@@ -267,13 +280,13 @@ fn draw_state_lock() -> std::sync::MutexGuard<'static, DrawState> {
 
 fn palette_cache_lock() -> std::sync::MutexGuard<'static, Option<HighlightPaletteKey>> {
     loop {
-        match HIGHLIGHT_PALETTE_CACHE.lock() {
+        match DRAW_CONTEXT.highlight_palette_cache.lock() {
             Ok(guard) => return guard,
             Err(poisoned) => {
                 let mut guard = poisoned.into_inner();
                 *guard = None;
                 drop(guard);
-                HIGHLIGHT_PALETTE_CACHE.clear_poison();
+                DRAW_CONTEXT.highlight_palette_cache.clear_poison();
             }
         }
     }

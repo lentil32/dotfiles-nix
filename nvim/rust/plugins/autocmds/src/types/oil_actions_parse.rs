@@ -1,6 +1,6 @@
-use nvim_oxi::conversion::FromObject;
 use nvim_oxi::serde::Deserializer;
-use nvim_oxi::{Dictionary, Object, String as NvimString};
+use nvim_oxi::{Dictionary, Object};
+use nvim_oxi_utils::{Error as DecodeError, decode};
 use serde::Deserialize;
 use support::NonEmptyString;
 
@@ -21,20 +21,20 @@ pub struct OilActionsPostArgs {
     pub action: OilAction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OilActionsPostParseError {
     InvalidPayloadType {
         expected: &'static str,
     },
     MissingKey {
-        key: &'static str,
+        key: String,
     },
     InvalidValue {
-        key: &'static str,
+        key: String,
         expected: &'static str,
     },
     EmptyValue {
-        key: &'static str,
+        key: String,
     },
     EmptyActions,
 }
@@ -62,15 +62,11 @@ impl OilActionsPostArgs {
                 expected: "dictionary",
             }
         })?;
-        let actions_key = NvimString::from("actions");
-        let actions_obj = dict
-            .get(&actions_key)
-            .cloned()
-            .ok_or(OilActionsPostParseError::MissingKey { key: "actions" })?;
+        let actions_obj = decode::require_object(&dict, "actions").map_err(map_decode_error)?;
         let actions =
             Vec::<RawOilAction>::deserialize(Deserializer::new(actions_obj)).map_err(|_| {
                 OilActionsPostParseError::InvalidValue {
-                    key: "actions",
+                    key: "actions".to_string(),
                     expected: "array of dictionaries",
                 }
             })?;
@@ -97,14 +93,32 @@ impl OilAction {
 
 fn require_nonempty_field(
     value: Option<Object>,
-    key: &'static str,
+    key: &str,
 ) -> Result<NonEmptyString, OilActionsPostParseError> {
-    let value = value.ok_or(OilActionsPostParseError::EmptyValue { key })?;
-    let value = NvimString::from_object(value)
-        .map_err(|_| OilActionsPostParseError::EmptyValue { key })?
-        .to_string_lossy()
-        .into_owned();
-    NonEmptyString::try_new(value).map_err(|_| OilActionsPostParseError::EmptyValue { key })
+    let Some(value) = value else {
+        return Err(OilActionsPostParseError::EmptyValue {
+            key: key.to_string(),
+        });
+    };
+    let value = decode::parse_from_object(value, key, "string").map_err(map_decode_error)?;
+    NonEmptyString::try_new(value).map_err(|_| OilActionsPostParseError::EmptyValue {
+        key: key.to_string(),
+    })
+}
+
+fn map_decode_error(value: DecodeError) -> OilActionsPostParseError {
+    match value {
+        DecodeError::MissingKey { key } => OilActionsPostParseError::MissingKey { key },
+        DecodeError::InvalidValue { key, expected } => {
+            OilActionsPostParseError::InvalidValue { key, expected }
+        }
+        DecodeError::EmptyValue { key } => OilActionsPostParseError::EmptyValue { key },
+        DecodeError::Unexpected { .. } | DecodeError::Nvim(_) => {
+            OilActionsPostParseError::InvalidPayloadType {
+                expected: "dictionary",
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,7 +188,7 @@ mod tests {
         let parsed = OilActionsPostArgs::parse(Object::from(payload));
         assert!(matches!(
             parsed,
-            Err(OilActionsPostParseError::MissingKey { key: "actions" })
+            Err(OilActionsPostParseError::MissingKey { key }) if key == "actions"
         ));
     }
 
@@ -196,7 +210,7 @@ mod tests {
         let parsed = OilActionsPostArgs::parse(payload);
         assert!(matches!(
             parsed,
-            Err(OilActionsPostParseError::EmptyValue { key: "src_url" })
+            Err(OilActionsPostParseError::EmptyValue { key }) if key == "src_url"
         ));
     }
 }

@@ -212,10 +212,9 @@ fn oil_get_adapter(lua: &mlua::Lua, bufnr: i64, silent: bool) -> mlua::Result<ml
         return Ok(mlua::Value::Nil);
     };
 
-    let is_oil_bufnr: mlua::Function = match oil_util.get("is_oil_bufnr") {
-        Ok(function) => function,
-        Err(_) => return Ok(mlua::Value::Nil),
-    };
+    let is_oil_bufnr: mlua::Function = oil_util.get("is_oil_bufnr").map_err(|err| {
+        mlua::Error::RuntimeError(format!("oil.util.is_oil_bufnr unavailable: {err}"))
+    })?;
     if !is_oil_bufnr.call::<bool>(bufnr)? {
         return Ok(mlua::Value::Nil);
     }
@@ -226,10 +225,9 @@ fn oil_get_adapter(lua: &mlua::Lua, bufnr: i64, silent: bool) -> mlua::Result<ml
         scheme = alias;
     }
 
-    let get_adapter_by_scheme: mlua::Function = match config.get("get_adapter_by_scheme") {
-        Ok(function) => function,
-        Err(_) => return Ok(mlua::Value::Nil),
-    };
+    let get_adapter_by_scheme: mlua::Function = config.get("get_adapter_by_scheme").map_err(
+        |err| mlua::Error::RuntimeError(format!("oil.config.get_adapter_by_scheme missing: {err}")),
+    )?;
     let adapter: mlua::Value = get_adapter_by_scheme.call(scheme)?;
 
     if matches!(adapter, mlua::Value::Nil) && !silent {
@@ -537,46 +535,46 @@ mod tests {
 }
 
 fn oil_winbar() -> String {
+    match oil_winbar_result() {
+        Ok(Some(value)) => value,
+        Ok(None) => String::new(),
+        Err(err) => {
+            notify::warn(LOG_CONTEXT, &format!("oil_winbar failed: {err}"));
+            String::new()
+        }
+    }
+}
+
+fn oil_winbar_result() -> Result<Option<String>> {
     let lua = lua::state();
     let Some(oil) = lua::try_require_table(&lua, "oil") else {
-        return String::new();
+        return Ok(None);
     };
 
-    let vim: mlua::Table = match lua.globals().get("vim") {
-        Ok(vim) => vim,
-        Err(_) => return String::new(),
-    };
+    let vim: mlua::Table = lua.globals().get("vim").map_err(nvim_oxi::Error::from)?;
     let Some(winid) = statusline_winid(&vim) else {
-        return String::new();
+        return Ok(None);
     };
     let Some(win) = handles::valid_window(winid) else {
-        return String::new();
+        return Ok(None);
     };
-    let bufnr = match win.get_buf() {
-        Ok(buf) => i64::from(buf.handle()),
-        Err(_) => return String::new(),
+    let bufnr = i64::from(win.get_buf()?.handle());
+
+    let get_current_dir: mlua::Function = oil.get("get_current_dir").map_err(nvim_oxi::Error::from)?;
+    let Some(dir) = get_current_dir
+        .call::<Option<String>>(bufnr)
+        .map_err(nvim_oxi::Error::from)?
+        .filter(|dir| !dir.is_empty())
+    else {
+        return Ok(None);
     };
 
-    let get_current_dir: mlua::Function = match oil.get("get_current_dir") {
-        Ok(function) => function,
-        Err(_) => return String::new(),
-    };
-    let dir = match get_current_dir.call::<Option<String>>(bufnr) {
-        Ok(Some(dir)) if !dir.is_empty() => dir,
-        _ => return String::new(),
-    };
-
-    let fn_table: mlua::Table = match vim.get("fn") {
-        Ok(table) => table,
-        Err(_) => return String::new(),
-    };
-    let fnamemodify: mlua::Function = match fn_table.get("fnamemodify") {
-        Ok(function) => function,
-        Err(_) => return String::new(),
-    };
-    fnamemodify
+    let fn_table: mlua::Table = vim.get("fn").map_err(nvim_oxi::Error::from)?;
+    let fnamemodify: mlua::Function = fn_table.get("fnamemodify").map_err(nvim_oxi::Error::from)?;
+    let rendered = fnamemodify
         .call::<String>((dir, ":~"))
-        .unwrap_or_else(|_| String::new())
+        .map_err(nvim_oxi::Error::from)?;
+    Ok(Some(rendered))
 }
 
 fn statusline_winid(vim: &mlua::Table) -> Option<i64> {
@@ -589,17 +587,16 @@ fn statusline_winid(vim: &mlua::Table) -> Option<i64> {
     from_scope("g").or_else(|| from_scope("v"))
 }
 
-fn vim_joinpath(lua: &mlua::Lua, lhs: &str, rhs: &str) -> Option<String> {
-    let vim: mlua::Table = lua.globals().get("vim").ok()?;
-    let fs: mlua::Table = vim.get("fs").ok()?;
-    let joinpath: mlua::Function = fs.get("joinpath").ok()?;
-    match joinpath.call((lhs, rhs)) {
-        Ok(path) => Some(path),
-        Err(err) => {
-            notify::warn(LOG_CONTEXT, &format!("vim.fs.joinpath failed: {err}"));
-            None
-        }
-    }
+fn vim_joinpath(lua: &mlua::Lua, lhs: &str, rhs: &str) -> Result<Option<String>> {
+    let vim: mlua::Table = lua.globals().get("vim").map_err(nvim_oxi::Error::from)?;
+    let Ok(fs) = vim.get::<mlua::Table>("fs") else {
+        return Ok(None);
+    };
+    let Ok(joinpath) = fs.get::<mlua::Function>("joinpath") else {
+        return Ok(None);
+    };
+    let path = joinpath.call((lhs, rhs)).map_err(nvim_oxi::Error::from)?;
+    Ok(Some(path))
 }
 
 fn oil_select_other_window() -> Result<()> {
@@ -608,24 +605,23 @@ fn oil_select_other_window() -> Result<()> {
         return Ok(());
     };
 
-    let get_cursor_entry: mlua::Function = match oil.get("get_cursor_entry") {
-        Ok(function) => function,
-        Err(_) => return Ok(()),
-    };
+    let get_cursor_entry: mlua::Function =
+        oil.get("get_cursor_entry").map_err(nvim_oxi::Error::from)?;
     let Some(entry) = get_cursor_entry.call::<Option<mlua::Table>>(())? else {
         return Ok(());
     };
-    let Some(name) = entry.get::<Option<String>>("name").ok().flatten() else {
+    let Some(name) = entry
+        .get::<Option<String>>("name")
+        .map_err(nvim_oxi::Error::from)?
+    else {
         return Ok(());
     };
     if name.is_empty() {
         return Ok(());
     }
 
-    let get_current_dir: mlua::Function = match oil.get("get_current_dir") {
-        Ok(function) => function,
-        Err(_) => return Ok(()),
-    };
+    let get_current_dir: mlua::Function =
+        oil.get("get_current_dir").map_err(nvim_oxi::Error::from)?;
     let Some(dir) = get_current_dir.call::<Option<String>>(())? else {
         return Ok(());
     };
@@ -633,7 +629,7 @@ fn oil_select_other_window() -> Result<()> {
         return Ok(());
     }
 
-    let path = vim_joinpath(&lua, &dir, &name).unwrap_or_else(|| format!("{dir}/{name}"));
+    let path = vim_joinpath(&lua, &dir, &name)?.unwrap_or_else(|| format!("{dir}/{name}"));
     let (target, _) = get_or_create_other_window()?;
     if target.is_valid() {
         api::set_current_win(&target)?;
@@ -717,13 +713,13 @@ fn open_definition_item_in_window(target_handle: i64, item: &DefinitionItem) -> 
     };
     api::set_current_win(&target)?;
 
-    if let Some(bufnr) = item.bufnr.and_then(handles::valid_buffer) {
+    if let Some(bufnr) = item.bufnr().and_then(handles::valid_buffer) {
         api::set_current_buf(&bufnr)?;
-    } else if let Some(filename) = item.filename.as_deref() {
+    } else if let Some(filename) = item.filename() {
         edit_path(Some(filename.to_string()))?;
     }
 
-    set_cursor_safe(&mut target, item.lnum, item.col);
+    set_cursor_safe(&mut target, item.lnum(), item.col());
     Ok(())
 }
 
@@ -743,18 +739,20 @@ fn push_definition_items_to_qflist(
     let qflist_items = lua.create_table().map_err(nvim_oxi::Error::from)?;
     for (index, item) in items.iter().enumerate() {
         let entry = lua.create_table().map_err(nvim_oxi::Error::from)?;
-        if let Some(bufnr) = item.bufnr {
+        if let Some(bufnr) = item.bufnr() {
             entry.set("bufnr", bufnr).map_err(nvim_oxi::Error::from)?;
         }
-        if let Some(filename) = item.filename.as_deref() {
+        if let Some(filename) = item.filename() {
             entry
                 .set("filename", filename)
                 .map_err(nvim_oxi::Error::from)?;
         }
         entry
-            .set("lnum", item.lnum)
+            .set("lnum", item.lnum())
             .map_err(nvim_oxi::Error::from)?;
-        entry.set("col", item.col).map_err(nvim_oxi::Error::from)?;
+        entry
+            .set("col", item.col())
+            .map_err(nvim_oxi::Error::from)?;
         qflist_items
             .raw_set(index + 1, entry)
             .map_err(nvim_oxi::Error::from)?;
