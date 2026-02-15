@@ -123,18 +123,6 @@ pub fn format_set_working_dir_failure(status: ExitStatus) -> String {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CliAvailability {
-    Enabled,
-    Disabled,
-}
-
-impl CliAvailability {
-    pub const fn is_enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-}
-
 #[derive(Debug, Default)]
 struct CliWarningGate {
     unavailable_reported: bool,
@@ -184,7 +172,6 @@ impl CliWarningGate {
 pub struct WeztermState {
     title: UpdateSlot<TabTitle>,
     cwd: UpdateSlot<String>,
-    cli_availability: CliAvailability,
     warning_gate: CliWarningGate,
 }
 
@@ -193,21 +180,12 @@ impl WeztermState {
         Self {
             title: UpdateSlot::new(),
             cwd: UpdateSlot::new(),
-            cli_availability: CliAvailability::Enabled,
             warning_gate: CliWarningGate {
                 unavailable_reported: false,
                 title_failed_reported: false,
                 cwd_failed_reported: false,
             },
         }
-    }
-
-    pub const fn cli_enabled(&self) -> bool {
-        self.cli_availability.is_enabled()
-    }
-
-    pub const fn disable_cli(&mut self) {
-        self.cli_availability = CliAvailability::Disabled;
     }
 
     pub fn clear_pending_updates(&mut self) {
