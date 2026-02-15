@@ -4,7 +4,7 @@ use nvim_oxi_utils::handles::{BufHandle, WinHandle};
 use nvim_oxi_utils::{lua, notify};
 
 use crate::LOG_CONTEXT;
-use crate::core::PreviewToken;
+use crate::reducer::PreviewToken;
 use crate::state::{register_cleanup_key, take_all_cleanup_keys_and_reset, take_cleanup_key};
 
 const BRIDGE_MODULE: &str = "myLuaConf.snacks_preview_bridge";

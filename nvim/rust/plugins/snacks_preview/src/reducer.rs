@@ -1,3 +1,4 @@
+use nvim_oxi_utils::state_machine::Transition;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,24 +55,7 @@ pub enum PreviewCommand {
     RequestDocFind(PreviewToken),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PreviewTransition {
-    pub effects: Vec<PreviewEffect>,
-    pub command: Option<PreviewCommand>,
-}
-
-impl PreviewTransition {
-    const fn with_effects(effects: Vec<PreviewEffect>) -> Self {
-        Self {
-            effects,
-            command: None,
-        }
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.effects.is_empty() && self.command.is_none()
-    }
-}
+pub type PreviewTransition = Transition<PreviewEffect, PreviewCommand>;
 
 #[derive(Debug, Clone)]
 pub enum PreviewEvent {
@@ -183,10 +167,9 @@ impl PreviewRegistry {
                 );
                 let effects =
                     replaced.map_or_else(Vec::new, |old| Self::replace_effects(&old, group));
-                PreviewTransition {
-                    effects,
-                    command: Some(PreviewCommand::RequestDocFind(token)),
-                }
+                let mut transition = PreviewTransition::with_effects(effects);
+                transition.set_command(PreviewCommand::RequestDocFind(token));
+                transition
             }
             PreviewEvent::DocFindArrived { key, token } => self
                 .get_preview(key)

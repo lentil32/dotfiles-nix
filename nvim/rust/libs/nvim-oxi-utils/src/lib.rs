@@ -101,6 +101,22 @@ pub mod state {
         pub fn clear_poison(&self) {
             self.inner.clear_poison();
         }
+
+        /// Lock the state and recover poisoned state via `recover`.
+        ///
+        /// This keeps poison handling consistent across plugin crates while
+        /// letting each caller define how state should be repaired.
+        pub fn lock_recover<F>(&self, recover: F) -> StateGuard<'_, T>
+        where
+            F: FnOnce(&mut T),
+        {
+            let mut guard = self.lock();
+            if guard.poisoned() {
+                recover(&mut guard);
+                self.clear_poison();
+            }
+            guard
+        }
     }
 
     /// Guard returned from `StateCell::lock` with poison information.
@@ -128,6 +144,67 @@ pub mod state {
     impl<T> DerefMut for StateGuard<'_, T> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.guard
+        }
+    }
+}
+
+pub mod state_machine {
+    /// Marker type for machines that never emit effects.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct NoEffect;
+
+    /// Marker type for machines that never emit commands.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct NoCommand;
+
+    /// Reducer output: effect list to execute and an optional command to dispatch.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Transition<E, C> {
+        pub effects: Vec<E>,
+        pub command: Option<C>,
+    }
+
+    impl<E, C> Default for Transition<E, C> {
+        fn default() -> Self {
+            Self {
+                effects: Vec::new(),
+                command: None,
+            }
+        }
+    }
+
+    impl<E, C> Transition<E, C> {
+        pub fn with_effect(effect: E) -> Self {
+            Self {
+                effects: vec![effect],
+                command: None,
+            }
+        }
+
+        pub fn with_effects(effects: Vec<E>) -> Self {
+            Self {
+                effects,
+                command: None,
+            }
+        }
+
+        pub fn with_command(command: C) -> Self {
+            Self {
+                effects: Vec::new(),
+                command: Some(command),
+            }
+        }
+
+        pub fn push_effect(&mut self, effect: E) {
+            self.effects.push(effect);
+        }
+
+        pub fn set_command(&mut self, command: C) {
+            self.command = Some(command);
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.effects.is_empty() && self.command.is_none()
         }
     }
 }

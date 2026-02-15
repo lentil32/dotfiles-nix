@@ -8,7 +8,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 
 use super::wezterm_core::{
-    WeztermState, derive_tab_title, format_cli_failure, format_set_working_dir_failure,
+    WeztermCommand, WeztermCompletion, WeztermEvent, WeztermState, derive_tab_title,
+    format_cli_failure, format_set_working_dir_failure,
 };
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, CreateCommandOpts, OptionOpts};
@@ -26,12 +27,6 @@ const WEZTERM_WORKER_QUEUE_CAPACITY: usize = 64;
 
 static WEZTERM_STATE: StateCell<WeztermState> = StateCell::new(WeztermState::new());
 static WEZTERM_DISPATCHER: LazyLock<WeztermDispatcher> = LazyLock::new(WeztermDispatcher::new);
-
-#[derive(Debug, Clone)]
-enum WeztermCommand {
-    SetTabTitle(TabTitle),
-    SetWorkingDir(String),
-}
 
 #[derive(Debug)]
 enum WeztermCommandResult {
@@ -396,16 +391,13 @@ fn wezterm_cli_available_at_startup() -> bool {
 }
 
 fn wezterm_state_lock() -> nvim_oxi_utils::state::StateGuard<'static, WeztermState> {
-    let mut guard = WEZTERM_STATE.lock();
-    if guard.poisoned() {
+    WEZTERM_STATE.lock_recover(|state| {
         notify::warn(
             WEZTERM_LOG_CONTEXT,
             "state mutex poisoned; resetting wezterm state",
         );
-        *guard = WeztermState::default();
-        WEZTERM_STATE.clear_poison();
-    }
-    guard
+        *state = WeztermState::default();
+    })
 }
 
 fn warn_cli_unavailable(state: &mut WeztermState, err: &std::io::Error) {
@@ -482,67 +474,61 @@ fn on_wezterm_tab_title_result(
     title: TabTitle,
     status: std::io::Result<ExitStatus>,
 ) -> Option<WeztermCommand> {
-    let next_title = {
-        let mut state = wezterm_state_lock();
-        match status {
-            Ok(exit_status) => {
-                if exit_status.success() {
-                    state.complete_title_success(&title)
-                } else {
-                    warn_title_failed(&mut state, &format_cli_failure(exit_status));
-                    state.complete_title_failure(&title)
-                }
+    let mut state = wezterm_state_lock();
+    let completion = match status {
+        Ok(exit_status) => {
+            if exit_status.success() {
+                WeztermCompletion::Success
+            } else {
+                warn_title_failed(&mut state, &format_cli_failure(exit_status));
+                WeztermCompletion::Failed
             }
-            Err(err) => {
-                if err.kind() == ErrorKind::NotFound {
-                    warn_cli_unavailable(&mut state, &err);
-                } else {
-                    warn_title_failed(&mut state, &format!("wezterm cli failed: {err}"));
-                }
-                let next = state.complete_title_failure(&title);
-                if err.kind() == ErrorKind::NotFound {
-                    state.clear_pending_updates();
-                }
-                next
+        }
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                warn_cli_unavailable(&mut state, &err);
+                WeztermCompletion::Unavailable
+            } else {
+                warn_title_failed(&mut state, &format!("wezterm cli failed: {err}"));
+                WeztermCompletion::Failed
             }
         }
     };
-    next_title.map(WeztermCommand::SetTabTitle)
+    state
+        .reduce(WeztermEvent::TitleCompleted { title, completion })
+        .command
 }
 
 fn on_wezterm_working_dir_result(
     cwd: String,
     status: std::io::Result<ExitStatus>,
 ) -> Option<WeztermCommand> {
-    let next_cwd = {
-        let mut state = wezterm_state_lock();
-        match status {
-            Ok(exit_status) => {
-                if exit_status.success() {
-                    state.complete_cwd_success(&cwd)
-                } else {
-                    warn_cwd_failed(&mut state, &format_set_working_dir_failure(exit_status));
-                    state.complete_cwd_failure(&cwd)
-                }
+    let mut state = wezterm_state_lock();
+    let completion = match status {
+        Ok(exit_status) => {
+            if exit_status.success() {
+                WeztermCompletion::Success
+            } else {
+                warn_cwd_failed(&mut state, &format_set_working_dir_failure(exit_status));
+                WeztermCompletion::Failed
             }
-            Err(err) => {
-                if err.kind() == ErrorKind::NotFound {
-                    warn_cli_unavailable(&mut state, &err);
-                } else {
-                    warn_cwd_failed(
-                        &mut state,
-                        &format!("wezterm set-working-directory failed: {err}"),
-                    );
-                }
-                let next = state.complete_cwd_failure(&cwd);
-                if err.kind() == ErrorKind::NotFound {
-                    state.clear_pending_updates();
-                }
-                next
+        }
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                warn_cli_unavailable(&mut state, &err);
+                WeztermCompletion::Unavailable
+            } else {
+                warn_cwd_failed(
+                    &mut state,
+                    &format!("wezterm set-working-directory failed: {err}"),
+                );
+                WeztermCompletion::Failed
             }
         }
     };
-    next_cwd.map(WeztermCommand::SetWorkingDir)
+    state
+        .reduce(WeztermEvent::WorkingDirCompleted { cwd, completion })
+        .command
 }
 
 fn on_wezterm_command_completion(result: WeztermCommandResult) {
@@ -588,17 +574,15 @@ fn update_wezterm_tab_title(context: &WeztermContext) -> Result<AutocmdAction> {
         return Ok(AutocmdAction::Keep);
     };
 
-    let (next_title, coalesced) = {
+    let next_command = {
         let mut state = wezterm_state_lock();
-        let next = state.request_title_update(title);
-        let coalesced = next.is_none();
-        (next, coalesced)
+        state.reduce(WeztermEvent::RequestTitle { title }).command
     };
-    if coalesced {
+    if next_command.is_none() {
         WEZTERM_DISPATCHER.mark_coalesced();
     }
-    if let Some(next_title) = next_title {
-        start_wezterm_update(WeztermCommand::SetTabTitle(next_title));
+    if let Some(next_command) = next_command {
+        start_wezterm_update(next_command);
     }
     Ok(AutocmdAction::Keep)
 }
@@ -608,17 +592,17 @@ fn update_wezterm_working_dir() -> Result<AutocmdAction> {
         return Ok(AutocmdAction::Keep);
     };
 
-    let (next_cwd, coalesced) = {
+    let next_command = {
         let mut state = wezterm_state_lock();
-        let next = state.request_cwd_update(cwd);
-        let coalesced = next.is_none();
-        (next, coalesced)
+        state
+            .reduce(WeztermEvent::RequestWorkingDir { cwd })
+            .command
     };
-    if coalesced {
+    if next_command.is_none() {
         WEZTERM_DISPATCHER.mark_coalesced();
     }
-    if let Some(next_cwd) = next_cwd {
-        start_wezterm_update(WeztermCommand::SetWorkingDir(next_cwd));
+    if let Some(next_command) = next_command {
+        start_wezterm_update(next_command);
     }
     Ok(AutocmdAction::Keep)
 }

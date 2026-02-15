@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::core::{BufKey, PreviewEvent, PreviewRegistry, PreviewToken, PreviewTransition};
+use crate::reducer::{BufKey, PreviewEvent, PreviewRegistry, PreviewToken, PreviewTransition};
 use nvim_oxi::mlua;
 use nvim_oxi_utils::handles::BufHandle;
 use nvim_oxi_utils::notify;
@@ -45,19 +45,16 @@ impl State {
 static STATE: LazyLock<StateCell<State>> = LazyLock::new(|| StateCell::new(State::default()));
 
 pub fn state_lock() -> StateGuard<'static, State> {
-    let mut guard = STATE.lock();
-    if guard.poisoned() {
-        let dropped_cleanups = guard.cleanups.len();
+    STATE.lock_recover(|state| {
+        let dropped_cleanups = state.cleanups.len();
         notify::warn(
             LOG_CONTEXT,
             &format!(
                 "state mutex poisoned; resetting preview registry (dropping {dropped_cleanups} pending cleanups)"
             ),
         );
-        *guard = State::default();
-        STATE.clear_poison();
-    }
-    guard
+        *state = State::default();
+    })
 }
 
 pub const fn buf_key(buf_handle: BufHandle) -> Option<BufKey> {

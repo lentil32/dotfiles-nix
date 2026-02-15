@@ -42,58 +42,75 @@ pub(crate) enum RenderCleanupAction {
 }
 
 #[derive(Debug)]
-pub(crate) struct TransitionEffects {
+pub(crate) struct RenderDecision {
     pub(crate) render_action: RenderAction,
-    pub(crate) step_interval_ms: Option<f64>,
-    pub(crate) notify_delay_disabled: bool,
     pub(crate) render_cleanup_action: RenderCleanupAction,
 }
 
-impl TransitionEffects {
-    fn clear_all() -> Self {
+#[derive(Debug)]
+pub(crate) struct CursorTransition {
+    pub(crate) render_decision: RenderDecision,
+    pub(crate) notify_delay_disabled: bool,
+    pub(crate) command: Option<CursorCommand>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CursorCommand {
+    StepIntervalMs(f64),
+}
+
+impl CursorTransition {
+    fn with_render_action(render_action: RenderAction) -> Self {
         Self {
-            render_action: RenderAction::ClearAll,
-            step_interval_ms: None,
+            render_decision: RenderDecision {
+                render_action,
+                render_cleanup_action: RenderCleanupAction::None,
+            },
             notify_delay_disabled: false,
-            render_cleanup_action: RenderCleanupAction::None,
+            command: None,
         }
     }
 
-    fn draw(frame: RenderFrame, step_interval_ms: Option<f64>) -> Self {
-        Self {
-            render_action: RenderAction::Draw(Box::new(frame)),
-            step_interval_ms,
-            notify_delay_disabled: false,
-            render_cleanup_action: RenderCleanupAction::None,
-        }
-    }
-
-    fn noop() -> Self {
-        Self {
-            render_action: RenderAction::Noop,
-            step_interval_ms: None,
-            notify_delay_disabled: false,
-            render_cleanup_action: RenderCleanupAction::None,
-        }
-    }
-
-    fn noop_with_step(step_interval_ms: f64) -> Self {
-        Self {
-            render_action: RenderAction::Noop,
-            step_interval_ms: Some(step_interval_ms),
-            notify_delay_disabled: false,
-            render_cleanup_action: RenderCleanupAction::None,
-        }
+    fn with_command(mut self, command: CursorCommand) -> Self {
+        self.command = Some(command);
+        self
     }
 
     fn with_delay_notification(mut self, enabled: bool) -> Self {
-        self.notify_delay_disabled = self.notify_delay_disabled || enabled;
+        if enabled {
+            self.notify_delay_disabled = true;
+        }
         self
     }
 
     fn with_render_cleanup_action(mut self, action: RenderCleanupAction) -> Self {
-        self.render_cleanup_action = action;
+        self.render_decision.render_cleanup_action = action;
         self
+    }
+}
+
+struct CursorTransitions;
+
+impl CursorTransitions {
+    fn clear_all() -> CursorTransition {
+        CursorTransition::with_render_action(RenderAction::ClearAll)
+    }
+
+    fn draw(frame: RenderFrame, step_interval_ms: Option<f64>) -> CursorTransition {
+        let transition = CursorTransition::with_render_action(RenderAction::Draw(Box::new(frame)));
+        match step_interval_ms {
+            Some(value) => transition.with_command(CursorCommand::StepIntervalMs(value)),
+            None => transition,
+        }
+    }
+
+    fn noop() -> CursorTransition {
+        CursorTransition::with_render_action(RenderAction::Noop)
+    }
+
+    fn noop_with_step(step_interval_ms: f64) -> CursorTransition {
+        CursorTransition::with_render_action(RenderAction::Noop)
+            .with_command(CursorCommand::StepIntervalMs(step_interval_ms))
     }
 }
 
@@ -305,23 +322,23 @@ pub(crate) fn reduce_cursor_event(
     mode: &str,
     event: CursorEventContext,
     source: EventSource,
-) -> TransitionEffects {
+) -> CursorTransition {
     if !state.is_enabled() {
         state.stop_animation();
         reset_animation_timing(state);
-        return TransitionEffects::clear_all()
+        return CursorTransitions::clear_all()
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
 
     if state.is_delay_disabled() {
         match source {
             EventSource::External => {
-                return TransitionEffects::noop()
+                return CursorTransitions::noop()
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             EventSource::AnimationTick if !state.is_animating() => {
                 reset_animation_timing(state);
-                return TransitionEffects::clear_all()
+                return CursorTransitions::clear_all()
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             EventSource::AnimationTick => {}
@@ -349,14 +366,14 @@ pub(crate) fn reduce_cursor_event(
     match source {
         EventSource::External => {
             if external_mode_ignores_cursor(&state.config, mode) {
-                return TransitionEffects::noop()
+                return CursorTransitions::noop()
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             if external_mode_requires_jump(&state.config, mode) {
                 // Match upstream Lua behavior: jump updates position/target but does not
                 // force-stop an in-flight animation loop or clear velocity state.
                 state.jump_preserving_motion(target_position, cursor_shape, event.cursor_location);
-                return TransitionEffects::clear_all()
+                return CursorTransitions::clear_all()
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
         }
@@ -378,13 +395,13 @@ pub(crate) fn reduce_cursor_event(
             vertical_bar,
             None,
         );
-        return TransitionEffects::draw(frame, None)
+        return CursorTransitions::draw(frame, None)
             .with_render_cleanup_action(RenderCleanupAction::Schedule);
     }
 
     match source {
         EventSource::AnimationTick if !state.is_animating() => {
-            return TransitionEffects::noop();
+            return CursorTransitions::noop();
         }
         EventSource::AnimationTick | EventSource::External => {}
     }
@@ -405,7 +422,7 @@ pub(crate) fn reduce_cursor_event(
                 target_position.col,
             ) {
                 state.jump_and_stop_animation(target_position, cursor_shape, event.cursor_location);
-                return TransitionEffects::clear_all()
+                return CursorTransitions::clear_all()
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             state.set_target(target_position, cursor_shape);
@@ -484,13 +501,13 @@ pub(crate) fn reduce_cursor_event(
             state.settle_at_target();
             state.stop_animation();
             reset_animation_timing(state);
-            return TransitionEffects::clear_all()
+            return CursorTransitions::clear_all()
                 .with_delay_notification(notify_delay_disabled)
                 .with_render_cleanup_action(RenderCleanupAction::Schedule);
         }
 
         if state.lag_ms() > EPSILON {
-            return TransitionEffects::noop_with_step(step_interval)
+            return CursorTransitions::noop_with_step(step_interval)
                 .with_delay_notification(notify_delay_disabled)
                 .with_render_cleanup_action(RenderCleanupAction::Invalidate);
         }
@@ -506,14 +523,14 @@ pub(crate) fn reduce_cursor_event(
             vertical_bar,
             Some(step_indexes),
         );
-        return TransitionEffects::draw(frame, Some(step_interval))
+        return CursorTransitions::draw(frame, Some(step_interval))
             .with_delay_notification(notify_delay_disabled)
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
 
     match source {
         EventSource::External => {
-            TransitionEffects::noop().with_render_cleanup_action(RenderCleanupAction::Invalidate)
+            CursorTransitions::noop().with_render_cleanup_action(RenderCleanupAction::Invalidate)
         }
         EventSource::AnimationTick => {
             let current_corners = state.current_corners();
@@ -529,7 +546,7 @@ pub(crate) fn reduce_cursor_event(
                 vertical_bar,
                 gradient_indexes,
             );
-            TransitionEffects::draw(frame, None)
+            CursorTransitions::draw(frame, None)
                 .with_render_cleanup_action(RenderCleanupAction::None)
         }
     }
@@ -575,11 +592,20 @@ pub(crate) fn external_settle_delay_ms(delay_event_to_smear: f64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CursorEventContext, EventSource, RenderAction, RenderCleanupAction, reduce_cursor_event,
+        CursorEventContext, CursorTransition, EventSource, RenderAction, RenderCleanupAction,
+        reduce_cursor_event,
     };
     use crate::state::{CursorLocation, RuntimeState};
     use proptest::collection::vec;
     use proptest::prelude::*;
+
+    fn render_action(transition: &CursorTransition) -> &RenderAction {
+        &transition.render_decision.render_action
+    }
+
+    fn render_cleanup_action(transition: &CursorTransition) -> RenderCleanupAction {
+        transition.render_decision.render_cleanup_action
+    }
 
     fn event(row: f64, col: f64) -> CursorEventContext {
         CursorEventContext {
@@ -617,9 +643,9 @@ mod tests {
         state.start_animation();
 
         let effects = reduce_cursor_event(&mut state, "n", event(3.0, 8.0), EventSource::External);
-        assert!(matches!(effects.render_action, RenderAction::ClearAll));
+        assert!(matches!(render_action(&effects), RenderAction::ClearAll));
         assert_eq!(
-            effects.render_cleanup_action,
+            render_cleanup_action(&effects),
             RenderCleanupAction::Invalidate
         );
         assert!(!state.is_animating());
@@ -629,9 +655,11 @@ mod tests {
     fn first_external_event_initializes_and_draws() {
         let mut state = RuntimeState::default();
         let effects = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
-
-        assert!(matches!(effects.render_action, RenderAction::Draw(_)));
-        assert_eq!(effects.render_cleanup_action, RenderCleanupAction::Schedule);
+        assert!(matches!(render_action(&effects), RenderAction::Draw(_)));
+        assert_eq!(
+            render_cleanup_action(&effects),
+            RenderCleanupAction::Schedule
+        );
         assert!(state.is_initialized());
         assert!(!state.is_animating());
     }
@@ -643,8 +671,8 @@ mod tests {
         state.stop_animation();
         let effects =
             reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::AnimationTick);
-        assert!(matches!(effects.render_action, RenderAction::Noop));
-        assert_eq!(effects.render_cleanup_action, RenderCleanupAction::None);
+        assert!(matches!(render_action(&effects), RenderAction::Noop));
+        assert_eq!(render_cleanup_action(&effects), RenderCleanupAction::None);
     }
 
     #[test]
@@ -663,9 +691,9 @@ mod tests {
         };
 
         let effects = reduce_cursor_event(&mut state, "n", switched_window, EventSource::External);
-        assert!(matches!(effects.render_action, RenderAction::Draw(_)));
+        assert!(matches!(render_action(&effects), RenderAction::Draw(_)));
         assert_eq!(
-            effects.render_cleanup_action,
+            render_cleanup_action(&effects),
             RenderCleanupAction::Invalidate
         );
     }
@@ -686,8 +714,11 @@ mod tests {
         };
 
         let effects = reduce_cursor_event(&mut state, "n", switched_window, EventSource::External);
-        assert!(matches!(effects.render_action, RenderAction::ClearAll));
-        assert_eq!(effects.render_cleanup_action, RenderCleanupAction::Schedule);
+        assert!(matches!(render_action(&effects), RenderAction::ClearAll));
+        assert_eq!(
+            render_cleanup_action(&effects),
+            RenderCleanupAction::Schedule
+        );
     }
 
     #[test]
@@ -710,15 +741,15 @@ mod tests {
                 scroll_shift: None,
             };
             let effects = reduce_cursor_event(&mut state, "n", event, EventSource::External);
-            if matches!(effects.render_action, RenderAction::Draw(_)) {
+            if matches!(render_action(&effects), RenderAction::Draw(_)) {
                 observed_draw = true;
             }
             assert!(
-                !matches!(effects.render_action, RenderAction::ClearAll),
+                !matches!(render_action(&effects), RenderAction::ClearAll),
                 "unexpected clear-all for repeated window switch step {step}"
             );
             assert_ne!(
-                effects.render_cleanup_action,
+                render_cleanup_action(&effects),
                 RenderCleanupAction::Schedule,
                 "unexpected cleanup scheduling while repeatedly switching windows at step {step}"
             );
@@ -765,9 +796,11 @@ mod tests {
                 initial_buffer.wrapping_add(i64::from(buffer_delta)),
             );
             let effects = reduce_cursor_event(&mut state, "n", switched, EventSource::External);
-
-            prop_assert!(matches!(effects.render_action, RenderAction::ClearAll));
-            prop_assert_eq!(effects.render_cleanup_action, RenderCleanupAction::Schedule);
+            prop_assert!(matches!(render_action(&effects), RenderAction::ClearAll));
+            prop_assert_eq!(
+                render_cleanup_action(&effects),
+                RenderCleanupAction::Schedule
+            );
         }
 
         #[test]
@@ -793,11 +826,11 @@ mod tests {
                 );
                 let effects = reduce_cursor_event(&mut state, "n", step_event, EventSource::External);
                 prop_assert!(
-                    !matches!(effects.render_action, RenderAction::ClearAll),
+                    !matches!(render_action(&effects), RenderAction::ClearAll),
                     "unexpected clear-all at step {index}"
                 );
                 prop_assert_ne!(
-                    effects.render_cleanup_action,
+                    render_cleanup_action(&effects),
                     RenderCleanupAction::Schedule,
                     "unexpected cleanup scheduling at step {}",
                     index
@@ -828,8 +861,11 @@ mod tests {
                     20,
                 );
                 let effects = reduce_cursor_event(&mut state, "n", tick, EventSource::AnimationTick);
-                prop_assert!(matches!(effects.render_action, RenderAction::Noop));
-                prop_assert_eq!(effects.render_cleanup_action, RenderCleanupAction::None);
+                prop_assert!(matches!(render_action(&effects), RenderAction::Noop));
+                prop_assert_eq!(
+                    render_cleanup_action(&effects),
+                    RenderCleanupAction::None
+                );
                 prop_assert!(state.is_initialized());
                 prop_assert!(!state.is_animating());
                 prop_assert_eq!(state.tracked_location(), tracked_before);
@@ -861,14 +897,19 @@ mod tests {
                     buffer_handle,
                 );
                 let effects = reduce_cursor_event(&mut state, "n", step_event, source);
-
-                if matches!(effects.render_action, RenderAction::ClearAll) {
-                    prop_assert_ne!(effects.render_cleanup_action, RenderCleanupAction::None);
+                if matches!(render_action(&effects), RenderAction::ClearAll) {
+                    prop_assert_ne!(
+                        render_cleanup_action(&effects),
+                        RenderCleanupAction::None
+                    );
                 }
                 if source == EventSource::External
-                    && matches!(effects.render_action, RenderAction::Noop)
+                    && matches!(render_action(&effects), RenderAction::Noop)
                 {
-                    prop_assert_ne!(effects.render_cleanup_action, RenderCleanupAction::None);
+                    prop_assert_ne!(
+                        render_cleanup_action(&effects),
+                        RenderCleanupAction::None
+                    );
                 }
 
                 now_ms += 8.0;

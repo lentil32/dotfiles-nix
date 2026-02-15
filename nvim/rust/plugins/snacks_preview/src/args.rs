@@ -1,4 +1,4 @@
-use crate::core::PreviewToken;
+use crate::reducer::PreviewToken;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::serde::Deserializer;
 use nvim_oxi::{Dictionary, Object, String as NvimString};

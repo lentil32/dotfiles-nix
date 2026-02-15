@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::ExitStatus;
 
+use nvim_oxi_utils::state_machine::{NoEffect, Transition};
 use support::{NonEmptyString, ProjectRoot, TabTitle};
 
 #[derive(Debug)]
@@ -136,6 +137,39 @@ enum FailureChannel {
     Cwd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeztermCompletion {
+    Success,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WeztermCommand {
+    SetTabTitle(TabTitle),
+    SetWorkingDir(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WeztermEvent {
+    RequestTitle {
+        title: TabTitle,
+    },
+    RequestWorkingDir {
+        cwd: String,
+    },
+    TitleCompleted {
+        title: TabTitle,
+        completion: WeztermCompletion,
+    },
+    WorkingDirCompleted {
+        cwd: String,
+        completion: WeztermCompletion,
+    },
+}
+
+pub type WeztermTransition = Transition<NoEffect, WeztermCommand>;
+
 impl CliWarningGate {
     const fn reset_after_success(&mut self, channel: FailureChannel) {
         self.unavailable_reported = false;
@@ -205,38 +239,79 @@ impl WeztermState {
         self.warning_gate.take_failed(FailureChannel::Cwd)
     }
 
-    pub fn request_title_update(&mut self, title: TabTitle) -> Option<TabTitle> {
-        self.title.request(title)
-    }
-
-    pub fn complete_title_success(&mut self, title: &TabTitle) -> Option<TabTitle> {
-        let completed = self.title.in_flight.as_ref() == Some(title);
-        let next = self.title.complete_success(title);
-        if completed {
-            self.warning_gate.reset_after_success(FailureChannel::Title);
+    fn complete_title(
+        &mut self,
+        title: TabTitle,
+        completion: WeztermCompletion,
+    ) -> WeztermTransition {
+        let next_title = match completion {
+            WeztermCompletion::Success => {
+                let completed = self.title.in_flight.as_ref() == Some(&title);
+                let next = self.title.complete_success(&title);
+                if completed {
+                    self.warning_gate.reset_after_success(FailureChannel::Title);
+                }
+                next
+            }
+            WeztermCompletion::Failed | WeztermCompletion::Unavailable => {
+                self.title.complete_failure(&title)
+            }
+        };
+        if completion == WeztermCompletion::Unavailable {
+            self.clear_pending_updates();
         }
-        next
+        next_title.map_or_else(WeztermTransition::default, |next| {
+            WeztermTransition::with_command(WeztermCommand::SetTabTitle(next))
+        })
     }
 
-    pub fn complete_title_failure(&mut self, title: &TabTitle) -> Option<TabTitle> {
-        self.title.complete_failure(title)
-    }
-
-    pub fn request_cwd_update(&mut self, cwd: String) -> Option<String> {
-        self.cwd.request(cwd)
-    }
-
-    pub fn complete_cwd_success(&mut self, cwd: &String) -> Option<String> {
-        let completed = self.cwd.in_flight.as_ref() == Some(cwd);
-        let next = self.cwd.complete_success(cwd);
-        if completed {
-            self.warning_gate.reset_after_success(FailureChannel::Cwd);
+    fn complete_working_dir(
+        &mut self,
+        cwd: String,
+        completion: WeztermCompletion,
+    ) -> WeztermTransition {
+        let next_cwd = match completion {
+            WeztermCompletion::Success => {
+                let completed = self.cwd.in_flight.as_ref() == Some(&cwd);
+                let next = self.cwd.complete_success(&cwd);
+                if completed {
+                    self.warning_gate.reset_after_success(FailureChannel::Cwd);
+                }
+                next
+            }
+            WeztermCompletion::Failed | WeztermCompletion::Unavailable => {
+                self.cwd.complete_failure(&cwd)
+            }
+        };
+        if completion == WeztermCompletion::Unavailable {
+            self.clear_pending_updates();
         }
-        next
+        next_cwd.map_or_else(WeztermTransition::default, |next| {
+            WeztermTransition::with_command(WeztermCommand::SetWorkingDir(next))
+        })
     }
 
-    pub fn complete_cwd_failure(&mut self, cwd: &String) -> Option<String> {
-        self.cwd.complete_failure(cwd)
+    pub fn reduce(&mut self, event: WeztermEvent) -> WeztermTransition {
+        match event {
+            WeztermEvent::RequestTitle { title } => self
+                .title
+                .request(title)
+                .map_or_else(WeztermTransition::default, |next| {
+                    WeztermTransition::with_command(WeztermCommand::SetTabTitle(next))
+                }),
+            WeztermEvent::RequestWorkingDir { cwd } => self
+                .cwd
+                .request(cwd)
+                .map_or_else(WeztermTransition::default, |next| {
+                    WeztermTransition::with_command(WeztermCommand::SetWorkingDir(next))
+                }),
+            WeztermEvent::TitleCompleted { title, completion } => {
+                self.complete_title(title, completion)
+            }
+            WeztermEvent::WorkingDirCompleted { cwd, completion } => {
+                self.complete_working_dir(cwd, completion)
+            }
+        }
     }
 }
 
@@ -276,15 +351,44 @@ mod tests {
         let tmp = "/tmp".to_string();
         let var = "/var".to_string();
         let tmp_in_flight = "/tmp".to_string();
-        assert_eq!(state.request_cwd_update(tmp.clone()), Some(tmp.clone()));
-        assert_eq!(state.request_cwd_update(tmp), None);
-        assert_eq!(state.request_cwd_update(var.clone()), None);
         assert_eq!(
-            state.complete_cwd_success(&tmp_in_flight),
-            Some(var.clone())
+            state
+                .reduce(WeztermEvent::RequestWorkingDir { cwd: tmp.clone() })
+                .command,
+            Some(WeztermCommand::SetWorkingDir(tmp.clone()))
         );
-        assert_eq!(state.complete_cwd_success(&var), None);
-        assert_eq!(state.request_cwd_update(var), None);
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestWorkingDir { cwd: tmp })
+                .is_empty()
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestWorkingDir { cwd: var.clone() })
+                .is_empty()
+        );
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::WorkingDirCompleted {
+                    cwd: tmp_in_flight,
+                    completion: WeztermCompletion::Success
+                })
+                .command,
+            Some(WeztermCommand::SetWorkingDir(var.clone()))
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::WorkingDirCompleted {
+                    cwd: var.clone(),
+                    completion: WeztermCompletion::Success
+                })
+                .is_empty()
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestWorkingDir { cwd: var })
+                .is_empty()
+        );
     }
 
     #[test]
@@ -294,13 +398,45 @@ mod tests {
         let b = title("b")?;
         let c = title("c")?;
 
-        assert_eq!(state.request_title_update(a.clone()), Some(a.clone()));
-        assert_eq!(state.request_title_update(b), None);
-        assert_eq!(state.request_title_update(c.clone()), None);
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::RequestTitle { title: a.clone() })
+                .command,
+            Some(WeztermCommand::SetTabTitle(a.clone()))
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestTitle { title: b })
+                .is_empty()
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestTitle { title: c.clone() })
+                .is_empty()
+        );
 
-        assert_eq!(state.complete_title_success(&a), Some(c.clone()));
-        assert_eq!(state.complete_title_success(&c), None);
-        assert_eq!(state.request_title_update(c), None);
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::TitleCompleted {
+                    title: a,
+                    completion: WeztermCompletion::Success
+                })
+                .command,
+            Some(WeztermCommand::SetTabTitle(c.clone()))
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::TitleCompleted {
+                    title: c.clone(),
+                    completion: WeztermCompletion::Success
+                })
+                .is_empty()
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestTitle { title: c })
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -310,12 +446,40 @@ mod tests {
         let a = title("a")?;
         let b = title("b")?;
 
-        assert_eq!(state.request_title_update(a.clone()), Some(a.clone()));
-        assert_eq!(state.request_title_update(b.clone()), None);
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::RequestTitle { title: a.clone() })
+                .command,
+            Some(WeztermCommand::SetTabTitle(a.clone()))
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestTitle { title: b.clone() })
+                .is_empty()
+        );
 
-        assert_eq!(state.complete_title_failure(&a), Some(b.clone()));
-        assert_eq!(state.complete_title_success(&b), None);
-        assert_eq!(state.request_title_update(b), None);
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::TitleCompleted {
+                    title: a,
+                    completion: WeztermCompletion::Failed
+                })
+                .command,
+            Some(WeztermCommand::SetTabTitle(b.clone()))
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::TitleCompleted {
+                    title: b.clone(),
+                    completion: WeztermCompletion::Success
+                })
+                .is_empty()
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestTitle { title: b })
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -331,10 +495,21 @@ mod tests {
 
         let current = title("current")?;
         assert_eq!(
-            state.request_title_update(current.clone()),
-            Some(current.clone())
+            state
+                .reduce(WeztermEvent::RequestTitle {
+                    title: current.clone()
+                })
+                .command,
+            Some(WeztermCommand::SetTabTitle(current.clone()))
         );
-        assert_eq!(state.complete_title_success(&current), None);
+        assert!(
+            state
+                .reduce(WeztermEvent::TitleCompleted {
+                    title: current,
+                    completion: WeztermCompletion::Success
+                })
+                .is_empty()
+        );
 
         assert!(state.take_warn_cli_unavailable());
         assert!(state.take_warn_title_failed());

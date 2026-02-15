@@ -23,16 +23,13 @@ const LOG_CONTEXT: &str = "project_root";
 static STATE: LazyLock<StateCell<State>> = LazyLock::new(|| StateCell::new(State::default()));
 
 fn state_lock() -> nvim_oxi_utils::state::StateGuard<'static, State> {
-    let mut guard = STATE.lock();
-    if guard.poisoned() {
+    STATE.lock_recover(|state| {
         notify::warn(
             LOG_CONTEXT,
             "state mutex poisoned; resetting project_root state",
         );
-        *guard = State::default();
-        STATE.clear_poison();
-    }
-    guard
+        *state = State::default();
+    })
 }
 
 fn report_panic(label: &str, info: &guard::PanicInfo) {

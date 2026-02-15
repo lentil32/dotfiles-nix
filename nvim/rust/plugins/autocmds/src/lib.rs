@@ -29,13 +29,10 @@ static STATE: LazyLock<StateCell<AutocmdState>> =
     LazyLock::new(|| StateCell::new(AutocmdState::default()));
 
 fn state_lock() -> nvim_oxi_utils::state::StateGuard<'static, AutocmdState> {
-    let mut guard = STATE.lock();
-    if guard.poisoned() {
+    STATE.lock_recover(|state| {
         notify::warn(LOG_CONTEXT, "state mutex poisoned; resetting autocmd state");
-        *guard = AutocmdState::default();
-        STATE.clear_poison();
-    }
-    guard
+        *state = AutocmdState::default();
+    })
 }
 
 fn report_panic(label: &str, info: &guard::PanicInfo) {
@@ -249,7 +246,7 @@ fn is_valid_buffer_handle(handle: BufHandle) -> bool {
 
 fn apply_oil_last_buf_event(event: OilLastBufEvent) {
     let mut state = state_lock();
-    state.oil_last_buf.apply(event);
+    let _ = state.oil_last_buf.reduce(event);
 }
 
 fn win_handle_for_query(win: Option<i64>) -> Option<WinHandle> {
@@ -271,7 +268,12 @@ fn oil_last_buf_for_win(win: Option<i64>) -> Option<i64> {
     }
 
     let mut state = state_lock();
-    let _ = state.oil_last_buf.clear_mapping_if_matches(win_handle, buf);
+    let _ = state
+        .oil_last_buf
+        .reduce(OilLastBufEvent::InvalidateIfMapped {
+            win: win_handle,
+            expected: buf,
+        });
     None
 }
 

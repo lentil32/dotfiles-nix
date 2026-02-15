@@ -1,7 +1,7 @@
 mod args;
 mod bridge;
-mod core;
 mod preview;
+mod reducer;
 mod state;
 
 use nvim_oxi::{Dictionary, Function};

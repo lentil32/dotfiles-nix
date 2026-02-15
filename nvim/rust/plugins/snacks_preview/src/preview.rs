@@ -14,7 +14,7 @@ use crate::bridge::{
     filetype_for_path, is_doc_preview_filetype, reset_preview_state, snacks_close_preview,
     snacks_doc_find, snacks_has_doc_preview, snacks_open_preview,
 };
-use crate::core::{
+use crate::reducer::{
     PreviewCommand, PreviewEffect, PreviewEvent, PreviewTransition, RestoreNamePlan,
 };
 use crate::state::{apply_event, buf_key, is_current_preview_token};
