@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Write};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TrySendError};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::machines::wezterm::{
     WeztermCommand, WeztermCompletion, WeztermEvent, WeztermState, derive_tab_title,
@@ -17,6 +18,7 @@ use nvim_oxi::api::types::{AutocmdCallbackArgs, CommandArgs};
 use nvim_oxi::libuv::AsyncHandle;
 use nvim_oxi::{Array, Result, String as NvimString};
 use nvim_oxi_utils::{notify, state::StateCell};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use support::{ProjectRoot, TabTitle};
 
 use crate::types::AutocmdAction;
@@ -24,9 +26,21 @@ use crate::types::AutocmdAction;
 const WEZTERM_LOG_CONTEXT: &str = "wezterm_tab";
 const PROJECT_ROOT_VAR: &str = "project_root";
 const WEZTERM_WORKER_QUEUE_CAPACITY: usize = 64;
+const WEZTERM_DEFAULT_COMPLETION_DRAIN_BATCH_SIZE: usize = 16;
+const WEZTERM_DEFAULT_SYNC_DEBOUNCE_WINDOW_MS: u64 = 75;
+const FILE_URL_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'/')
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 static WEZTERM_STATE: StateCell<WeztermState> = StateCell::new(WeztermState::new());
 static WEZTERM_DISPATCHER: LazyLock<WeztermDispatcher> = LazyLock::new(WeztermDispatcher::new);
+static WEZTERM_SYNC_POLICY: LazyLock<WeztermSyncPolicy> =
+    LazyLock::new(WeztermSyncPolicy::default_policy);
+static WEZTERM_SYNC_GATE: LazyLock<Mutex<WeztermSyncGate>> =
+    LazyLock::new(|| Mutex::new(WeztermSyncGate::new()));
 
 #[derive(Debug)]
 enum WeztermCommandResult {
@@ -38,6 +52,98 @@ enum WeztermCommandResult {
         cwd: String,
         status: std::io::Result<ExitStatus>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeztermCommandKind {
+    TabTitle,
+    WorkingDir,
+}
+
+impl WeztermCommand {
+    const fn kind(&self) -> WeztermCommandKind {
+        match self {
+            Self::SetTabTitle(_) => WeztermCommandKind::TabTitle,
+            Self::SetWorkingDir(_) => WeztermCommandKind::WorkingDir,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WeztermCommandBatch {
+    first: WeztermCommand,
+    second: Option<WeztermCommand>,
+}
+
+impl WeztermCommandBatch {
+    fn single(command: WeztermCommand) -> Self {
+        Self {
+            first: command,
+            second: None,
+        }
+    }
+
+    fn pair(first: WeztermCommand, second: WeztermCommand) -> Self {
+        debug_assert!(
+            first.kind() != second.kind(),
+            "batch pairs are expected to contain distinct command kinds"
+        );
+        Self {
+            first,
+            second: Some(second),
+        }
+    }
+
+    fn from_optional(
+        first: Option<WeztermCommand>,
+        second: Option<WeztermCommand>,
+    ) -> Option<Self> {
+        match (first, second) {
+            (Some(first), Some(second)) => Some(Self::pair(first, second)),
+            (Some(first), None) | (None, Some(first)) => Some(Self::single(first)),
+            (None, None) => None,
+        }
+    }
+
+    fn for_each<F>(self, mut f: F)
+    where
+        F: FnMut(WeztermCommand),
+    {
+        f(self.first);
+        if let Some(second) = self.second {
+            f(second);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WeztermWorkItem {
+    Single(WeztermCommand),
+    Batch(WeztermCommandBatch),
+}
+
+impl WeztermWorkItem {
+    fn from_command(command: WeztermCommand) -> Self {
+        Self::Single(command)
+    }
+
+    fn from_batch(batch: WeztermCommandBatch) -> Self {
+        if batch.second.is_none() {
+            Self::Single(batch.first)
+        } else {
+            Self::Batch(batch)
+        }
+    }
+
+    fn for_each_command<F>(self, mut f: F)
+    where
+        F: FnMut(WeztermCommand),
+    {
+        match self {
+            Self::Single(command) => f(command),
+            Self::Batch(batch) => batch.for_each(f),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +175,80 @@ struct WeztermSyncStats {
 struct WeztermSyncSnapshot {
     mode: WeztermRuntimeMode,
     stats: WeztermSyncStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletionDrainBatchSize(usize);
+
+impl CompletionDrainBatchSize {
+    const MIN: Self = Self(1);
+
+    const fn get(self) -> usize {
+        self.0
+    }
+
+    const fn try_new(value: usize) -> Option<Self> {
+        if value == 0 { None } else { Some(Self(value)) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WeztermSyncPolicy {
+    completion_drain_batch_size: CompletionDrainBatchSize,
+    autocmd_debounce_window: Duration,
+}
+
+impl WeztermSyncPolicy {
+    const fn try_new(
+        completion_drain_batch_size: usize,
+        autocmd_debounce_window: Duration,
+    ) -> Option<Self> {
+        let Some(completion_drain_batch_size) =
+            CompletionDrainBatchSize::try_new(completion_drain_batch_size)
+        else {
+            return None;
+        };
+        Some(Self {
+            completion_drain_batch_size,
+            autocmd_debounce_window,
+        })
+    }
+
+    fn default_policy() -> Self {
+        let debounce = Duration::from_millis(WEZTERM_DEFAULT_SYNC_DEBOUNCE_WINDOW_MS);
+        match Self::try_new(WEZTERM_DEFAULT_COMPLETION_DRAIN_BATCH_SIZE, debounce) {
+            Some(policy) => policy,
+            None => Self {
+                completion_drain_batch_size: CompletionDrainBatchSize::MIN,
+                autocmd_debounce_window: debounce,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WeztermSyncGate {
+    last_sync_started_at: Option<Instant>,
+}
+
+impl WeztermSyncGate {
+    const fn new() -> Self {
+        Self {
+            last_sync_started_at: None,
+        }
+    }
+
+    fn should_coalesce(&mut self, now: Instant, debounce_window: Duration) -> bool {
+        let Some(last_sync_started_at) = self.last_sync_started_at else {
+            self.last_sync_started_at = Some(now);
+            return false;
+        };
+        if now.saturating_duration_since(last_sync_started_at) < debounce_window {
+            return true;
+        }
+        self.last_sync_started_at = Some(now);
+        false
+    }
 }
 
 impl WeztermSyncSnapshot {
@@ -184,12 +364,6 @@ impl WeztermDispatcherShared {
         });
     }
 
-    fn record_executed(&self) {
-        self.with_stats(|stats| {
-            stats.executed = stats.executed.saturating_add(1);
-        });
-    }
-
     fn record_wakeup_failure(&self) {
         self.with_stats(|stats| {
             stats.wakeup_failures = stats.wakeup_failures.saturating_add(1);
@@ -206,25 +380,46 @@ impl WeztermDispatcherShared {
         self.with_completed_queue(VecDeque::pop_front)
     }
 
-    fn on_worker_result(&self, result: WeztermCommandResult) {
-        self.record_executed();
-        self.with_completed_queue(|queue| {
-            queue.push_back(result);
-        });
+    fn has_completed_results(&self) -> bool {
+        self.with_completed_queue(|queue| !queue.is_empty())
+    }
 
+    fn request_async_wakeup(&self) {
         if self.mode() != WeztermRuntimeMode::HealthyAsync {
             return;
         }
-
         let Some(wakeup) = &self.wakeup else {
             self.transition_to_degraded_polling();
             return;
         };
-
         if wakeup.send().is_err() {
             self.record_wakeup_failure();
             self.transition_to_degraded_polling();
         }
+    }
+
+    fn on_worker_result(&self, result: WeztermCommandResult) {
+        self.on_worker_results(std::iter::once(result));
+    }
+
+    fn on_worker_results<I>(&self, results: I)
+    where
+        I: IntoIterator<Item = WeztermCommandResult>,
+    {
+        let mut executed = 0u64;
+        self.with_completed_queue(|queue| {
+            for result in results {
+                queue.push_back(result);
+                executed = executed.saturating_add(1);
+            }
+        });
+        if executed == 0 {
+            return;
+        }
+        self.with_stats(|stats| {
+            stats.executed = stats.executed.saturating_add(executed);
+        });
+        self.request_async_wakeup();
     }
 
     fn snapshot(&self) -> WeztermSyncSnapshot {
@@ -236,8 +431,29 @@ impl WeztermDispatcherShared {
 }
 
 struct WeztermDispatcher {
-    sender: mpsc::SyncSender<WeztermCommand>,
+    sender: mpsc::SyncSender<WeztermWorkItem>,
     shared: Arc<WeztermDispatcherShared>,
+}
+
+#[derive(Debug)]
+enum WeztermDispatchError {
+    QueueFull(WeztermWorkItem),
+    WorkerDisconnected(WeztermWorkItem),
+}
+
+impl WeztermDispatchError {
+    fn into_parts(self) -> (WeztermWorkItem, std::io::Error) {
+        match self {
+            Self::QueueFull(command) => (
+                command,
+                Error::new(ErrorKind::WouldBlock, "wezterm worker queue is full"),
+            ),
+            Self::WorkerDisconnected(command) => (
+                command,
+                Error::new(ErrorKind::BrokenPipe, "wezterm worker channel disconnected"),
+            ),
+        }
+    }
 }
 
 trait WeztermCommandRunner: Send + Sync {
@@ -245,19 +461,89 @@ trait WeztermCommandRunner: Send + Sync {
     fn run_working_dir(&self, cwd: &str) -> std::io::Result<ExitStatus>;
 }
 
-struct SystemWeztermCommandRunner;
+#[cfg(unix)]
+fn successful_exit_status() -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    ExitStatus::from_raw(0)
+}
 
-impl WeztermCommandRunner for SystemWeztermCommandRunner {
+#[cfg(windows)]
+fn successful_exit_status() -> ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+    ExitStatus::from_raw(0)
+}
+
+fn tmux_passthrough_enabled() -> bool {
+    std::env::var_os("TMUX").is_some()
+}
+
+fn with_tmux_passthrough(osc: &str, passthrough_enabled: bool) -> String {
+    if !passthrough_enabled {
+        return osc.to_string();
+    }
+    let mut tmux_passthrough = String::from("\u{1b}Ptmux;");
+    for ch in osc.chars() {
+        if ch == '\u{1b}' {
+            tmux_passthrough.push(ch);
+        }
+        tmux_passthrough.push(ch);
+    }
+    tmux_passthrough.push_str("\u{1b}\\");
+    tmux_passthrough.push_str(osc);
+    tmux_passthrough
+}
+
+fn build_tab_title_sequence(title: &TabTitle) -> String {
+    let osc = format!("\u{1b}]1;{}\u{1b}\\", title.as_str());
+    with_tmux_passthrough(&osc, tmux_passthrough_enabled())
+}
+
+fn build_working_dir_sequence(cwd: &str) -> std::io::Result<String> {
+    let cwd = std::path::Path::new(cwd);
+    if !cwd.is_absolute() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("cwd {cwd:?} is not an absolute path"),
+        ));
+    }
+    let host = hostname::get()
+        .ok()
+        .and_then(|host| host.into_string().ok())
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    #[cfg(unix)]
+    let encoded_path = {
+        use std::os::unix::ffi::OsStrExt;
+        percent_encode(cwd.as_os_str().as_bytes(), FILE_URL_PATH_ENCODE_SET).to_string()
+    };
+    #[cfg(windows)]
+    let encoded_path = {
+        let normalized = cwd.to_string_lossy().replace('\\', "/");
+        percent_encode(normalized.as_bytes(), FILE_URL_PATH_ENCODE_SET).to_string()
+    };
+
+    let osc = format!("\u{1b}]7;file://{host}{encoded_path}\u{1b}\\");
+    Ok(with_tmux_passthrough(&osc, tmux_passthrough_enabled()))
+}
+
+#[derive(Debug, Default)]
+struct EscapeSequenceWeztermCommandRunner;
+
+impl WeztermCommandRunner for EscapeSequenceWeztermCommandRunner {
     fn run_tab_title(&self, title: &TabTitle) -> std::io::Result<ExitStatus> {
-        Command::new("wezterm")
-            .args(["cli", "set-tab-title", title.as_str()])
-            .status()
+        let sequence = build_tab_title_sequence(title);
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(sequence.as_bytes())?;
+        stdout.flush()?;
+        Ok(successful_exit_status())
     }
 
     fn run_working_dir(&self, cwd: &str) -> std::io::Result<ExitStatus> {
-        Command::new("wezterm")
-            .args(["set-working-directory", cwd])
-            .status()
+        let sequence = build_working_dir_sequence(cwd)?;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(sequence.as_bytes())?;
+        stdout.flush()?;
+        Ok(successful_exit_status())
     }
 }
 
@@ -283,7 +569,7 @@ impl WeztermDispatcher {
             WeztermRuntimeMode::DegradedPolling
         };
         let shared = Arc::new(WeztermDispatcherShared::new(wakeup, initial_mode));
-        let runner: Arc<dyn WeztermCommandRunner> = Arc::new(SystemWeztermCommandRunner);
+        let runner: Arc<dyn WeztermCommandRunner> = Arc::new(EscapeSequenceWeztermCommandRunner);
 
         let (sender, receiver) = mpsc::sync_channel(WEZTERM_WORKER_QUEUE_CAPACITY);
         let worker_shared = Arc::clone(&shared);
@@ -302,7 +588,7 @@ impl WeztermDispatcher {
         Self { sender, shared }
     }
 
-    fn dispatch(&self, command: WeztermCommand) -> std::io::Result<()> {
+    fn dispatch(&self, command: WeztermWorkItem) -> std::result::Result<(), WeztermDispatchError> {
         self.shared.record_requested();
 
         match self.sender.try_send(command) {
@@ -310,19 +596,13 @@ impl WeztermDispatcher {
                 self.shared.record_enqueued();
                 Ok(())
             }
-            Err(TrySendError::Full(_)) => {
+            Err(TrySendError::Full(command)) => {
                 self.shared.record_enqueue_failure();
-                Err(Error::new(
-                    ErrorKind::WouldBlock,
-                    "wezterm worker queue is full",
-                ))
+                Err(WeztermDispatchError::QueueFull(command))
             }
-            Err(TrySendError::Disconnected(_)) => {
+            Err(TrySendError::Disconnected(command)) => {
                 self.shared.record_enqueue_failure();
-                Err(Error::new(
-                    ErrorKind::BrokenPipe,
-                    "wezterm worker channel disconnected",
-                ))
+                Err(WeztermDispatchError::WorkerDisconnected(command))
             }
         }
     }
@@ -342,15 +622,44 @@ impl WeztermDispatcher {
     fn snapshot(&self) -> WeztermSyncSnapshot {
         self.shared.snapshot()
     }
+
+    fn has_pending_results(&self) -> bool {
+        self.shared.has_completed_results()
+    }
+
+    fn request_async_drain(&self) {
+        self.shared.request_async_wakeup();
+    }
 }
 
 fn run_wezterm_worker(
-    receiver: mpsc::Receiver<WeztermCommand>,
+    receiver: mpsc::Receiver<WeztermWorkItem>,
     shared: Arc<WeztermDispatcherShared>,
     runner: Arc<dyn WeztermCommandRunner>,
 ) {
-    while let Ok(command) = receiver.recv() {
-        shared.on_worker_result(run_wezterm_command(command, runner.as_ref()));
+    while let Ok(work_item) = receiver.recv() {
+        run_wezterm_work_item(work_item, runner.as_ref(), &shared);
+    }
+}
+
+fn run_wezterm_work_item(
+    work_item: WeztermWorkItem,
+    runner: &dyn WeztermCommandRunner,
+    shared: &WeztermDispatcherShared,
+) {
+    match work_item {
+        WeztermWorkItem::Single(command) => {
+            shared.on_worker_result(run_wezterm_command(command, runner));
+        }
+        WeztermWorkItem::Batch(WeztermCommandBatch { first, second }) => {
+            if let Some(second) = second {
+                let first_result = run_wezterm_command(first, runner);
+                let second_result = run_wezterm_command(second, runner);
+                shared.on_worker_results([first_result, second_result]);
+            } else {
+                shared.on_worker_result(run_wezterm_command(first, runner));
+            }
+        }
     }
 }
 
@@ -370,26 +679,6 @@ impl WeztermContext {
     }
 }
 
-fn wezterm_cli_available_at_startup() -> bool {
-    match Command::new("wezterm").arg("--version").status() {
-        Ok(status) if status.success() => true,
-        Ok(status) => {
-            notify::warn(
-                WEZTERM_LOG_CONTEXT,
-                &format!("wezterm --version exited with status {status}; disabling integration"),
-            );
-            false
-        }
-        Err(err) => {
-            notify::warn(
-                WEZTERM_LOG_CONTEXT,
-                &format!("wezterm command unavailable at startup: {err}; disabling integration"),
-            );
-            false
-        }
-    }
-}
-
 fn wezterm_state_lock() -> nvim_oxi_utils::state::StateGuard<'static, WeztermState> {
     WEZTERM_STATE.lock_recover(|state| {
         notify::warn(
@@ -400,6 +689,23 @@ fn wezterm_state_lock() -> nvim_oxi_utils::state::StateGuard<'static, WeztermSta
     })
 }
 
+fn with_sync_gate<R, F>(f: F) -> R
+where
+    F: FnOnce(&mut WeztermSyncGate) -> R,
+{
+    match WEZTERM_SYNC_GATE.lock() {
+        Ok(mut gate) => f(&mut gate),
+        Err(poisoned) => {
+            let mut gate = poisoned.into_inner();
+            f(&mut gate)
+        }
+    }
+}
+
+fn should_coalesce_sync(now: Instant) -> bool {
+    with_sync_gate(|gate| gate.should_coalesce(now, WEZTERM_SYNC_POLICY.autocmd_debounce_window))
+}
+
 fn warn_cli_unavailable(state: &mut WeztermState, err: &std::io::Error) {
     if !state.take_warn_cli_unavailable() {
         return;
@@ -408,15 +714,21 @@ fn warn_cli_unavailable(state: &mut WeztermState, err: &std::io::Error) {
     notify::warn(WEZTERM_LOG_CONTEXT, &message);
 }
 
-fn warn_title_failed(state: &mut WeztermState, message: &str) {
+fn warn_title_failed<F>(state: &mut WeztermState, message: F)
+where
+    F: FnOnce() -> String,
+{
     if state.take_warn_title_failed() {
-        notify::warn(WEZTERM_LOG_CONTEXT, message);
+        notify::warn(WEZTERM_LOG_CONTEXT, &message());
     }
 }
 
-fn warn_cwd_failed(state: &mut WeztermState, message: &str) {
+fn warn_cwd_failed<F>(state: &mut WeztermState, message: F)
+where
+    F: FnOnce() -> String,
+{
     if state.take_warn_cwd_failed() {
-        notify::warn(WEZTERM_LOG_CONTEXT, message);
+        notify::warn(WEZTERM_LOG_CONTEXT, &message());
     }
 }
 
@@ -480,7 +792,7 @@ fn on_wezterm_tab_title_result(
             if exit_status.success() {
                 WeztermCompletion::Success
             } else {
-                warn_title_failed(&mut state, &format_cli_failure(exit_status));
+                warn_title_failed(&mut state, || format_cli_failure(exit_status));
                 WeztermCompletion::Failed
             }
         }
@@ -489,7 +801,7 @@ fn on_wezterm_tab_title_result(
                 warn_cli_unavailable(&mut state, &err);
                 WeztermCompletion::Unavailable
             } else {
-                warn_title_failed(&mut state, &format!("wezterm cli failed: {err}"));
+                warn_title_failed(&mut state, || format!("wezterm cli failed: {err}"));
                 WeztermCompletion::Failed
             }
         }
@@ -509,7 +821,7 @@ fn on_wezterm_working_dir_result(
             if exit_status.success() {
                 WeztermCompletion::Success
             } else {
-                warn_cwd_failed(&mut state, &format_set_working_dir_failure(exit_status));
+                warn_cwd_failed(&mut state, || format_set_working_dir_failure(exit_status));
                 WeztermCompletion::Failed
             }
         }
@@ -518,10 +830,9 @@ fn on_wezterm_working_dir_result(
                 warn_cli_unavailable(&mut state, &err);
                 WeztermCompletion::Unavailable
             } else {
-                warn_cwd_failed(
-                    &mut state,
-                    &format!("wezterm set-working-directory failed: {err}"),
-                );
+                warn_cwd_failed(&mut state, || {
+                    format!("wezterm set-working-directory failed: {err}")
+                });
                 WeztermCompletion::Failed
             }
         }
@@ -546,11 +857,31 @@ fn on_wezterm_command_completion(result: WeztermCommandResult) {
     }
 }
 
-fn start_wezterm_update(command: WeztermCommand) {
-    let command_for_error = command.clone();
-    if let Err(err) = WEZTERM_DISPATCHER.dispatch(command) {
-        on_wezterm_command_completion(command_error_result(command_for_error, err));
+fn on_wezterm_dispatch_error(work_item: WeztermWorkItem, err: std::io::Error) {
+    let err_kind = err.kind();
+    let err_message = err.to_string();
+    if err_kind == ErrorKind::WouldBlock {
+        WEZTERM_DISPATCHER.mark_coalesced();
     }
+    work_item.for_each_command(|command| {
+        let error = Error::new(err_kind, err_message.clone());
+        on_wezterm_command_completion(command_error_result(command, error));
+    });
+}
+
+fn start_wezterm_work_item(work_item: WeztermWorkItem) {
+    if let Err(err) = WEZTERM_DISPATCHER.dispatch(work_item) {
+        let (work_item, err) = err.into_parts();
+        on_wezterm_dispatch_error(work_item, err);
+    }
+}
+
+fn start_wezterm_update(command: WeztermCommand) {
+    start_wezterm_work_item(WeztermWorkItem::from_command(command));
+}
+
+fn start_wezterm_batch(batch: WeztermCommandBatch) {
+    start_wezterm_work_item(WeztermWorkItem::from_batch(batch));
 }
 
 fn drain_wezterm_completions() -> Result<AutocmdAction> {
@@ -561,17 +892,27 @@ fn drain_wezterm_completions() -> Result<AutocmdAction> {
         );
     }
 
-    while let Some(result) = WEZTERM_DISPATCHER.pop_result() {
+    let completion_drain_batch_size = WEZTERM_SYNC_POLICY.completion_drain_batch_size.get();
+    let mut drained = 0usize;
+    while drained < completion_drain_batch_size {
+        let Some(result) = WEZTERM_DISPATCHER.pop_result() else {
+            break;
+        };
         on_wezterm_command_completion(result);
+        drained += 1;
+    }
+
+    if drained == completion_drain_batch_size && WEZTERM_DISPATCHER.has_pending_results() {
+        WEZTERM_DISPATCHER.request_async_drain();
     }
 
     Ok(AutocmdAction::Keep)
 }
 
-fn update_wezterm_tab_title(context: &WeztermContext) -> Result<AutocmdAction> {
+fn next_wezterm_tab_title_command(context: &WeztermContext) -> Result<Option<WeztermCommand>> {
     let root = current_buf_project_root()?;
     let Some(title) = derive_tab_title(root, context.home.as_deref()) else {
-        return Ok(AutocmdAction::Keep);
+        return Ok(None);
     };
 
     let next_command = {
@@ -581,15 +922,12 @@ fn update_wezterm_tab_title(context: &WeztermContext) -> Result<AutocmdAction> {
     if next_command.is_none() {
         WEZTERM_DISPATCHER.mark_coalesced();
     }
-    if let Some(next_command) = next_command {
-        start_wezterm_update(next_command);
-    }
-    Ok(AutocmdAction::Keep)
+    Ok(next_command)
 }
 
-fn update_wezterm_working_dir() -> Result<AutocmdAction> {
+fn next_wezterm_working_dir_command() -> Result<Option<WeztermCommand>> {
     let Some(cwd) = current_window_cwd()? else {
-        return Ok(AutocmdAction::Keep);
+        return Ok(None);
     };
 
     let next_command = {
@@ -601,10 +939,7 @@ fn update_wezterm_working_dir() -> Result<AutocmdAction> {
     if next_command.is_none() {
         WEZTERM_DISPATCHER.mark_coalesced();
     }
-    if let Some(next_command) = next_command {
-        start_wezterm_update(next_command);
-    }
-    Ok(AutocmdAction::Keep)
+    Ok(next_command)
 }
 
 fn should_skip_sync_for_current_buffer() -> Result<bool> {
@@ -621,7 +956,19 @@ fn buftype_requires_wezterm_sync(buftype: &str) -> bool {
     matches!(buftype, "" | "acwrite")
 }
 
-fn sync_wezterm_state() -> Result<AutocmdAction> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeztermSyncTrigger {
+    Autocmd,
+    Manual,
+}
+
+impl WeztermSyncTrigger {
+    const fn should_debounce(self) -> bool {
+        matches!(self, Self::Autocmd)
+    }
+}
+
+fn sync_wezterm_state_for(trigger: WeztermSyncTrigger) -> Result<AutocmdAction> {
     let Some(context) = WeztermContext::detect() else {
         return Ok(AutocmdAction::Keep);
     };
@@ -629,9 +976,25 @@ fn sync_wezterm_state() -> Result<AutocmdAction> {
     if should_skip_sync_for_current_buffer()? {
         return Ok(AutocmdAction::Keep);
     }
-    update_wezterm_tab_title(&context)?;
-    update_wezterm_working_dir()?;
+    if trigger.should_debounce() && should_coalesce_sync(Instant::now()) {
+        WEZTERM_DISPATCHER.mark_coalesced();
+        return Ok(AutocmdAction::Keep);
+    }
+
+    let title_command = next_wezterm_tab_title_command(&context)?;
+    let cwd_command = next_wezterm_working_dir_command()?;
+    if let Some(batch) = WeztermCommandBatch::from_optional(title_command, cwd_command) {
+        start_wezterm_batch(batch);
+    }
     Ok(AutocmdAction::Keep)
+}
+
+fn sync_wezterm_state() -> Result<AutocmdAction> {
+    sync_wezterm_state_for(WeztermSyncTrigger::Autocmd)
+}
+
+fn sync_wezterm_state_now() -> Result<AutocmdAction> {
+    sync_wezterm_state_for(WeztermSyncTrigger::Manual)
 }
 
 fn show_wezterm_sync_stats() -> Result<AutocmdAction> {
@@ -660,7 +1023,7 @@ fn setup_wezterm_commands() -> Result<()> {
     api::create_user_command(
         "WeztermSyncNow",
         |_args: CommandArgs| {
-            let _ = crate::run_autocmd("wezterm_sync_now", sync_wezterm_state);
+            let _ = crate::run_autocmd("wezterm_sync_now", sync_wezterm_state_now);
         },
         &sync_now_opts,
     )?;
@@ -670,9 +1033,6 @@ fn setup_wezterm_commands() -> Result<()> {
 
 pub fn setup_wezterm_autocmd() -> Result<()> {
     if WeztermContext::detect().is_none() {
-        return Ok(());
-    }
-    if !wezterm_cli_available_at_startup() {
         return Ok(());
     }
 
@@ -810,10 +1170,14 @@ mod tests {
 
         let first_title = title("first")?;
         sender
-            .send(WeztermCommand::SetTabTitle(first_title.clone()))
+            .send(WeztermWorkItem::from_command(WeztermCommand::SetTabTitle(
+                first_title.clone(),
+            )))
             .map_err(|_| "failed to send title command")?;
         sender
-            .send(WeztermCommand::SetWorkingDir("/tmp".to_string()))
+            .send(WeztermWorkItem::from_command(
+                WeztermCommand::SetWorkingDir("/tmp".to_string()),
+            ))
             .map_err(|_| "failed to send cwd command")?;
         drop(sender);
 
@@ -866,15 +1230,24 @@ mod tests {
         let dispatcher = WeztermDispatcher { sender, shared };
 
         dispatcher
-            .dispatch(WeztermCommand::SetWorkingDir("/tmp".to_string()))
+            .dispatch(WeztermWorkItem::from_command(
+                WeztermCommand::SetWorkingDir("/tmp".to_string()),
+            ))
             .map_err(|_| "expected first dispatch to enqueue")?;
 
-        let second = dispatcher.dispatch(WeztermCommand::SetWorkingDir("/var".to_string()));
+        let second = dispatcher.dispatch(WeztermWorkItem::from_command(
+            WeztermCommand::SetWorkingDir("/var".to_string()),
+        ));
         let err = match second {
             Ok(()) => return Err("expected queue backpressure"),
             Err(err) => err,
         };
-        assert_eq!(err.kind(), ErrorKind::WouldBlock);
+        let (command, io_err) = err.into_parts();
+        assert_eq!(
+            command,
+            WeztermWorkItem::from_command(WeztermCommand::SetWorkingDir("/var".to_string()))
+        );
+        assert_eq!(io_err.kind(), ErrorKind::WouldBlock);
 
         let snapshot = dispatcher.snapshot();
         assert_eq!(snapshot.stats.requested, 2);
@@ -889,7 +1262,10 @@ mod tests {
         shared.record_requested();
         shared.record_enqueued();
         shared.record_coalesced();
-        shared.record_executed();
+        shared.on_worker_result(WeztermCommandResult::WorkingDir {
+            cwd: "/tmp".to_string(),
+            status: Ok(exit_status_from_code(0)),
+        });
         shared.record_wakeup_failure();
         shared.record_enqueue_failure();
 
@@ -913,5 +1289,58 @@ mod tests {
         assert!(!super::buftype_requires_wezterm_sync("terminal"));
         assert!(!super::buftype_requires_wezterm_sync("nofile"));
         assert!(!super::buftype_requires_wezterm_sync("prompt"));
+    }
+
+    #[test]
+    fn sync_gate_coalesces_requests_within_window() {
+        let start = Instant::now();
+        let mut gate = WeztermSyncGate::new();
+        let debounce_window = WEZTERM_SYNC_POLICY.autocmd_debounce_window;
+        assert!(!gate.should_coalesce(start, debounce_window));
+        assert!(gate.should_coalesce(start + Duration::from_millis(10), debounce_window));
+        assert!(!gate.should_coalesce(start + debounce_window, debounce_window));
+    }
+
+    #[test]
+    fn sync_policy_rejects_zero_drain_batch_size() {
+        assert!(WeztermSyncPolicy::try_new(0, Duration::from_millis(1)).is_none());
+    }
+
+    #[test]
+    fn command_batch_preserves_input_order() -> TestResult {
+        let tab = title("batched")?;
+        let first = WeztermCommand::SetTabTitle(tab.clone());
+        let second = WeztermCommand::SetWorkingDir("/tmp".to_string());
+        let Some(batch) =
+            WeztermCommandBatch::from_optional(Some(first.clone()), Some(second.clone()))
+        else {
+            return Err("expected batch");
+        };
+        let mut seen = Vec::new();
+        batch.for_each(|command| seen.push(command));
+        assert_eq!(seen, vec![first, second]);
+        Ok(())
+    }
+
+    #[test]
+    fn with_tmux_passthrough_noop_when_disabled() {
+        let osc = "\u{1b}]1;tab-title\u{1b}\\";
+        assert_eq!(super::with_tmux_passthrough(osc, false), osc);
+    }
+
+    #[test]
+    fn with_tmux_passthrough_wraps_when_enabled() {
+        let osc = "\u{1b}]1;tab-title\u{1b}\\";
+        let wrapped = super::with_tmux_passthrough(osc, true);
+        assert!(wrapped.starts_with("\u{1b}Ptmux;"));
+        assert!(wrapped.ends_with(osc));
+    }
+
+    #[test]
+    fn working_dir_sequence_contains_osc7_payload() -> TestResult {
+        let sequence = super::build_working_dir_sequence("/tmp")
+            .map_err(|_| "expected valid OSC7 sequence")?;
+        assert!(sequence.contains("]7;file://"));
+        Ok(())
     }
 }

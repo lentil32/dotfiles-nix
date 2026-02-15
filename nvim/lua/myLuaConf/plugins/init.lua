@@ -43,7 +43,7 @@ require("lze").load({
         -- Avoid auto-triggers (g/z/[...]) and ModeChanged popups in x/o modes.
         -- Keep which-key focused on leader/localleader which is what we use it for.
         triggers = {
-          { "<leader>", mode = { "n", "x" } },
+          { "<leader>",      mode = { "n", "x" } },
           { "<localleader>", mode = { "n", "x" } },
         },
         spec = keymaps.list(),
@@ -56,7 +56,7 @@ require("lze").load({
     ft = "org",
     on_require = { "orgmode" },
     keys = {
-      { "<leader>aoa", require("myLuaConf.org").action("agenda.prompt"), desc = "Agenda" },
+      { "<leader>aoa", require("myLuaConf.org").action("agenda.prompt"),  desc = "Agenda" },
       { "<leader>aoc", require("myLuaConf.org").action("capture.prompt"), desc = "Capture" },
     },
     after = function()
@@ -174,6 +174,7 @@ require("lze").load({
         smear_terminal_mode = true,
         filetypes_disabled = {
           "snacks_picker_preview",
+          "sidekick_terminal"
         },
       })
     end,

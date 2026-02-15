@@ -15,3 +15,5 @@ nvim-utils = { path = "../../libs/nvim-utils" }
 nvim-oxi-utils = { path = "../../libs/nvim-oxi-utils" }
 support = { path = "../../libs/support" }
 serde = { version = "1.0", features = ["derive"] }
+hostname = "0.4"
+percent-encoding = "2.3"
