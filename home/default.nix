@@ -18,6 +18,7 @@ in
     ./alacritty.nix
     ./docker.nix
     ./git.nix
+    ./ghostty.nix
     ./neovim.nix
     ./python.nix
     ./ssh.nix
