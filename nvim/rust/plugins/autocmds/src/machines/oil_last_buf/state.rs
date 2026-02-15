@@ -1,75 +1,18 @@
 use std::collections::HashMap;
 
 use nvim_oxi_utils::handles::{BufHandle, WinHandle};
-use nvim_oxi_utils::state_machine::{NoCommand, Transition};
 
-pub type OilMap = HashMap<WinHandle, BufHandle>;
+#[cfg(test)]
+use super::events::{OilLastBufEffect, OilLastBufEvent};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OilLastBufEvent {
-    OilBufEntered { win: WinHandle, buf: BufHandle },
-    WinClosed { win: WinHandle },
-    BufWiped { buf: BufHandle },
-    InvalidateIfMapped { win: WinHandle, expected: BufHandle },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OilLastBufEffect {
-    MappingUpdated { win: WinHandle, buf: BufHandle },
-    MappingClearedForWin { win: WinHandle },
-    MappingsClearedForBuf { buf: BufHandle },
-}
-
-pub type OilLastBufTransition = Transition<OilLastBufEffect, NoCommand>;
+pub(super) type OilMap = HashMap<WinHandle, BufHandle>;
 
 #[derive(Debug, Default, Clone)]
 pub struct OilLastBufState {
-    by_win: OilMap,
+    pub(super) by_win: OilMap,
 }
 
 impl OilLastBufState {
-    pub fn reduce(&mut self, event: OilLastBufEvent) -> OilLastBufTransition {
-        match event {
-            OilLastBufEvent::OilBufEntered { win, buf } => {
-                if self.by_win.get(&win).copied() == Some(buf) {
-                    return OilLastBufTransition::default();
-                }
-                let _ = self.by_win.insert(win, buf);
-                OilLastBufTransition::with_effect(OilLastBufEffect::MappingUpdated { win, buf })
-            }
-            OilLastBufEvent::WinClosed { win } => {
-                if self.by_win.remove(&win).is_some() {
-                    OilLastBufTransition::with_effect(OilLastBufEffect::MappingClearedForWin {
-                        win,
-                    })
-                } else {
-                    OilLastBufTransition::default()
-                }
-            }
-            OilLastBufEvent::BufWiped { buf } => {
-                let before = self.by_win.len();
-                self.by_win.retain(|_, mapped| *mapped != buf);
-                if self.by_win.len() != before {
-                    OilLastBufTransition::with_effect(OilLastBufEffect::MappingsClearedForBuf {
-                        buf,
-                    })
-                } else {
-                    OilLastBufTransition::default()
-                }
-            }
-            OilLastBufEvent::InvalidateIfMapped { win, expected } => {
-                if self.by_win.get(&win).copied() == Some(expected) {
-                    let _ = self.by_win.remove(&win);
-                    OilLastBufTransition::with_effect(OilLastBufEffect::MappingClearedForWin {
-                        win,
-                    })
-                } else {
-                    OilLastBufTransition::default()
-                }
-            }
-        }
-    }
-
     #[cfg(test)]
     pub fn reconcile<FW, FB>(&mut self, is_win_valid: FW, is_buf_valid: FB) -> bool
     where

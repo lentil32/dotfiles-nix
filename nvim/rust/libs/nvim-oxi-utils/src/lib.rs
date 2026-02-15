@@ -453,7 +453,7 @@ pub mod dict {
 
 #[cfg(test)]
 mod tests {
-    use super::handles::{BufHandle, WinHandle};
+    use super::handles::{BufHandle, WinHandle, buffer_from_i64, window_from_i64};
 
     #[test]
     fn buf_handle_rejects_non_positive() {
@@ -470,22 +470,20 @@ mod tests {
     }
 
     #[test]
-    fn buf_handle_roundtrip_i32_max() {
-        let value = i64::from(i32::MAX);
-        let handle = BufHandle::try_from_i64(value);
-        assert!(handle.is_some(), "expected valid buf handle");
-        if let Some(handle) = handle {
-            assert_eq!(handle.raw(), value);
-        }
+    fn buf_handle_rejects_overflow_i32_max_plus_one() {
+        let overflow = i64::from(i32::MAX) + 1;
+        assert!(BufHandle::try_from_i64(overflow).is_none());
+        assert!(BufHandle::try_from_i64(i64::MAX).is_none());
+        assert!(buffer_from_i64(overflow).is_none());
+        assert!(buffer_from_i64(i64::MAX).is_none());
     }
 
     #[test]
-    fn win_handle_roundtrip_i32_max() {
-        let value = i64::from(i32::MAX);
-        let handle = WinHandle::try_from_i64(value);
-        assert!(handle.is_some(), "expected valid win handle");
-        if let Some(handle) = handle {
-            assert_eq!(handle.raw(), value);
-        }
+    fn win_handle_rejects_overflow_i32_max_plus_one() {
+        let overflow = i64::from(i32::MAX) + 1;
+        assert!(WinHandle::try_from_i64(overflow).is_none());
+        assert!(WinHandle::try_from_i64(i64::MAX).is_none());
+        assert!(window_from_i64(overflow).is_none());
+        assert!(window_from_i64(i64::MAX).is_none());
     }
 }

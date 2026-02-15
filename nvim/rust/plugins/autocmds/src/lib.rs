@@ -1,6 +1,8 @@
 mod integrations;
+mod machines;
 mod types;
 
+use machines::oil_last_buf::{OilLastBufEvent, OilLastBufState};
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{CmdOpts, CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
 use nvim_oxi::api::types::{AutocmdCallbackArgs, CmdInfos};
@@ -14,7 +16,7 @@ use nvim_oxi_utils::{
 };
 use std::path::Path;
 use std::sync::LazyLock;
-use types::{AutocmdAction, OilAction, OilActionsPostArgs, OilLastBufEvent, OilLastBufState};
+use types::{AutocmdAction, OilAction, OilActionsPostArgs};
 
 use nvim_utils::path::{has_uri_scheme, normalize_path, path_is_dir, strip_known_prefixes};
 

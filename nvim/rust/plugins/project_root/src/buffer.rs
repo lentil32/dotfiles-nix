@@ -244,9 +244,16 @@ mod tests {
     use nvim_utils::path::normalize_path;
 
     #[test]
-    fn normalized_path_key_is_stable_for_same_path() {
-        let path = Path::new("/tmp/workspace");
-        assert_eq!(normalized_path_key(path), normalized_path_key(path));
+    fn normalized_path_key_is_equal_for_equivalent_normalized_paths()
+    -> std::result::Result<(), &'static str> {
+        let left = normalize_path("/tmp/workspace/./repo").ok_or("expected normalized path")?;
+        let right = normalize_path("/tmp/workspace/repo").ok_or("expected normalized path")?;
+        assert_eq!(
+            left, right,
+            "test setup requires equivalent normalized paths"
+        );
+        assert_eq!(normalized_path_key(&left), normalized_path_key(&right));
+        Ok(())
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, TrySendError};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 
-use super::wezterm_core::{
+use crate::machines::wezterm::{
     WeztermCommand, WeztermCompletion, WeztermEvent, WeztermState, derive_tab_title,
     format_cli_failure, format_set_working_dir_failure,
 };
