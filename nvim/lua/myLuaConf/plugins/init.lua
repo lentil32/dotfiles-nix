@@ -1,13 +1,18 @@
 local colorscheme = require("myLuaConf.colorscheme")
 local keymaps = require("myLuaConf.keymaps")
+---@module "rs_plugin_util"
 local plugin_util = require("rs_plugin_util")
 local project = require("myLuaConf.project")
 local snacks = require("myLuaConf.snacks")
+---@module "lze"
+local lze = require("lze")
 colorscheme.apply()
 snacks.setup()
 project.setup()
 require("myLuaConf.oil").setup()
-require("rs_autocmds").setup()
+---@module "rs_autocmds"
+local rs_autocmds = require("rs_autocmds")
+rs_autocmds.setup()
 keymaps.setup()
 
 local function should_enable_smear_cursor()
@@ -31,23 +36,26 @@ local function sidekick_in_project_root(fn)
   end
 end
 
-require("lze").load({
+lze.load({
   {
     "which-key.nvim",
     for_cat = "general",
     event = "DeferredUIEnter",
     after = function()
+      ---@module "which-key"
       local wk = require("which-key")
-      wk.setup({
+      local triggers = {
+        { "<leader>",      mode = { "n", "x" } },
+        { "<localleader>", mode = { "n", "x" } },
+      }
+      local opts = {
         delay = 300,
         -- Avoid auto-triggers (g/z/[...]) and ModeChanged popups in x/o modes.
         -- Keep which-key focused on leader/localleader which is what we use it for.
-        triggers = {
-          { "<leader>",      mode = { "n", "x" } },
-          { "<localleader>", mode = { "n", "x" } },
-        },
+        triggers = triggers,
         spec = keymaps.list(),
-      })
+      }
+      wk.setup(opts --[[@as wk.Opts]])
     end,
   },
   {
@@ -143,7 +151,9 @@ require("lze").load({
       },
     },
     after = function()
-      require("sidekick").setup({
+      ---@module "sidekick"
+      local sidekick = require("sidekick")
+      local sidekick_opts = {
         cli = {
           tools = {
             codex = {
@@ -157,7 +167,8 @@ require("lze").load({
             },
           },
         },
-      })
+      }
+      sidekick.setup(sidekick_opts --[[@as sidekick.Config]])
     end,
   },
   -- {

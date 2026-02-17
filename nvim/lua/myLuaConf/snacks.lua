@@ -1,6 +1,6 @@
 local oil = require("myLuaConf.oil")
 local org = require("myLuaConf.org")
-local preview = require("myLuaConf.plugins.snacks_preview")
+local snacks_preview = require("myLuaConf.plugins.snacks_preview")
 
 local M = {}
 
@@ -9,16 +9,18 @@ local function snacks()
 end
 
 local function reset_preview_state()
-  local ok, preview = pcall(require, "rs_snacks_preview")
-  if not ok or not preview then
+  ---@module "rs_snacks_preview"
+  local ok, loaded_preview = pcall(require, "rs_snacks_preview")
+  if not ok or type(loaded_preview) ~= "table" then
     return
   end
-  if preview.reset_state then
-    preview.reset_state()
-  end
+  ---@type rs_snacks_preview
+  local preview = loaded_preview
+  preview.reset_state()
 end
 
 local function project_confirm_winlocal(picker, item)
+  local Snacks = snacks()
   picker:close()
   if not item then
     return
@@ -42,7 +44,17 @@ local function project_confirm_winlocal(picker, item)
         Snacks.picker.files({ cwd = dir })
       end
     end, 100)
-    vim.cmd(session.action:sub(2))
+    local action = session.action
+    if type(action) == "string" then
+      if action:sub(1, 1) == ":" then
+        vim.cmd(action:sub(2))
+      else
+        local keys = vim.api.nvim_replace_termcodes(action, true, true, true)
+        vim.api.nvim_feedkeys(keys, "tm", true)
+      end
+    else
+      Snacks.picker.files({ cwd = dir })
+    end
   else
     Snacks.picker.files({ cwd = dir })
   end
@@ -56,6 +68,7 @@ local function opts()
       easing = "outQuad",
       fps = 120,
     },
+    ---@type table<string, snacks.win.Config>
     styles = {
       dashboard = {
         -- Avoid double BufDelete/BufWipeout callbacks in snacks.nvim.
@@ -145,11 +158,11 @@ local function opts()
         files = {
           cmd = "rg",
           hidden = true,
-          preview = preview.picker_preview,
+          preview = snacks_preview.picker_preview,
         },
-        grep = { preview = preview.picker_preview },
-        grep_buffers = { preview = preview.picker_preview },
-        recent = { preview = preview.picker_preview },
+        grep = { preview = snacks_preview.picker_preview },
+        grep_buffers = { preview = snacks_preview.picker_preview },
+        recent = { preview = snacks_preview.picker_preview },
         projects = {
           patterns = { ".git", "package.json", "Cargo.toml", "flake.nix", "Makefile" },
           confirm = project_confirm_winlocal,

@@ -1,13 +1,33 @@
+---@module "which-key"
 local oil = require("myLuaConf.oil")
+---@module "rs_plugin_util"
 local plugin_util = require("rs_plugin_util")
 local project = require("myLuaConf.project")
+---@module "rs_readline"
 local readline = require("rs_readline")
+---@module "rs_text"
 local text = require("rs_text")
 
 local M = {}
 
 local function snacks()
   return require("snacks")
+end
+
+---@param value unknown
+---@return integer|nil
+local function as_integer(value)
+  if type(value) ~= "number" then
+    return nil
+  end
+  if value ~= value or value == math.huge or value == -math.huge then
+    return nil
+  end
+  if value % 1 ~= 0 then
+    return nil
+  end
+  ---@cast value integer
+  return value
 end
 
 local function git_init()
@@ -20,8 +40,10 @@ local function git_init()
 end
 
 local function reload_nixcats()
-  if vim.fn.exists(":NixCatsReload") == 2 then
+  local ok = pcall(function()
     vim.cmd("NixCatsReload")
+  end)
+  if ok then
     return
   end
   vim.notify("NixCatsReload command unavailable", vim.log.levels.WARN)
@@ -30,7 +52,7 @@ end
 function M.setup()
   local Snacks = snacks()
 
-  if plugin_util.get_var(nil, "neovide") then
+  if plugin_util.get_var(nil, "neovide", false) == true then
     Snacks.keymap.set("n", "<D-s>", "<cmd>w<CR>", { desc = "Save" })
     Snacks.keymap.set("v", "<D-c>", '"+y', { desc = "Copy" })
     Snacks.keymap.set("n", "<D-v>", '"+P', { desc = "Paste" })
@@ -38,7 +60,8 @@ function M.setup()
     Snacks.keymap.set("c", "<D-v>", "<C-R>+", { desc = "Paste" })
     Snacks.keymap.set("i", "<D-v>", '<ESC>l"+Pli', { desc = "Paste" })
     Snacks.keymap.set("t", "<D-v>", function()
-      local chan = tonumber(plugin_util.get_var(nil, "terminal_job_id"))
+      local raw_chan = plugin_util.get_var(nil, "terminal_job_id", 0)
+      local chan = as_integer(raw_chan)
       if chan and chan > 0 then
         vim.fn.chansend(chan, vim.fn.getreg("+"))
       end
@@ -83,13 +106,18 @@ function M.setup()
   Snacks.keymap.set("i", "<M-d>", readline.kill_word, { desc = "Kill word" })
 end
 
+---@return wk.Spec
 function M.list()
   local Snacks = snacks()
   local picker = Snacks.picker
   local bufdelete = Snacks.bufdelete
   local function run_shell(cwd)
     local dir = cwd or vim.fn.getcwd()
-    Snacks.input.input({ prompt = "Shell command" }, function(value)
+    Snacks.input.input({
+      prompt = "Shell command",
+      expand = true,
+      icon_hl = "SnacksInputIcon",
+    }, function(value)
       local cmd = vim.trim(value or "")
       if cmd == "" then
         return
@@ -106,6 +134,7 @@ function M.list()
       })
     end)
   end
+  ---@type wk.Spec
   local keymaps = {}
   local function add(list)
     vim.list_extend(keymaps, list)
@@ -353,10 +382,11 @@ function M.list()
         end
         bufdelete.delete({
           filter = function(buf)
-            if not vim.api.nvim_buf_is_loaded(buf) then
+            local bufnr = as_integer(buf)
+            if not bufnr or not vim.api.nvim_buf_is_loaded(bufnr) then
               return false
             end
-            local name = vim.api.nvim_buf_get_name(buf)
+            local name = vim.api.nvim_buf_get_name(bufnr)
             return name ~= "" and name:find(cwd, 1, true) ~= nil
           end,
         })
@@ -544,14 +574,14 @@ function M.list()
     {
       "<leader>en",
       function()
-        vim.diagnostic.goto_next()
+        vim.diagnostic.jump({ count = 1 })
       end,
       desc = "Next",
     },
     {
       "<leader>ep",
       function()
-        vim.diagnostic.goto_prev()
+        vim.diagnostic.jump({ count = -1 })
       end,
       desc = "Previous",
     },

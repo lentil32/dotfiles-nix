@@ -9,5 +9,10 @@
     "globalsRegex": [
       "^vim\\..*"
     ]
+  },
+  "workspace": {
+    "library": [
+      "./nvim/lua/myLuaConf/types"
+    ]
   }
 }

@@ -1,7 +1,15 @@
 local Snacks = require("snacks")
+---@module "rs_plugin_util"
 local plugin_util = require("rs_plugin_util")
 
 local M = {}
+
+---@return Options
+local function hop_opts()
+  ---@type Options
+  local opts = vim.deepcopy(require("hop.defaults"))
+  return opts
+end
 
 function M.oil_winbar()
   return plugin_util.oil_winbar()
@@ -23,10 +31,10 @@ function M.setup()
       ["."] = "actions.toggle_hidden",
       ["<S-CR>"] = { "actions.select", opts = { vertical = true, split = "belowright" } },
       ["gs"] = function()
-        require("hop").hint_words()
+        require("hop").hint_words(hop_opts())
       end,
       ["<localleader>c"] = function()
-        require("oil").save()
+        require("oil").save(nil)
       end,
       ["<localleader>k"] = function()
         require("oil").discard_all_changes()
@@ -58,22 +66,36 @@ function M.oil_select_other_window()
 end
 
 function M.dashboard_recent_files_with_oil(opts)
+  ---@param self snacks.dashboard.Class
   return function(self)
-    local items = Snacks.dashboard.sections.recent_files(opts or {})(self)
+    local section = Snacks.dashboard.sections.recent_files(opts or {})(self)
+    ---@type snacks.dashboard.Item[]
+    local items = {}
+    if type(section) == "table" then
+      if vim.islist(section) then
+        ---@cast section snacks.dashboard.Item[]
+        items = section
+      else
+        ---@cast section snacks.dashboard.Item
+        items = { section }
+      end
+    end
     for _, item in ipairs(items) do
       local path = item.file
       item.action = function()
         M.open_oil(path)
       end
     end
-    local section = {}
+    ---@type snacks.dashboard.Item[]
+    local section_items = {}
     if opts and opts.padding then
-      section.padding = opts.padding
+      ---@diagnostic disable-next-line: inject-field
+      section_items.padding = opts.padding
     end
     for _, item in ipairs(items) do
-      table.insert(section, item)
+      table.insert(section_items, item)
     end
-    return section
+    return section_items
   end
 end
 

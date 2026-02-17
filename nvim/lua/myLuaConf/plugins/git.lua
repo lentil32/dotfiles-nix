@@ -10,7 +10,13 @@ return {
     after = function()
       require("neogit").setup({
         kind = "auto",
-        integrations = { diffview = true, snacks = true },
+        integrations = {
+          diffview = false,
+          fzf_lua = false,
+          mini_pick = false,
+          snacks = true,
+          telescope = false,
+        },
         graph_style = "unicode",
         disable_insert_on_commit = true,
         disable_signs = true,
@@ -93,7 +99,10 @@ return {
     for_cat = "git",
     event = "BufReadPost",
     after = function()
-      require("gitsigns").setup({})
+      ---@class GitsignsModule
+      ---@field setup fun(config?: table)
+      local gitsigns = require("gitsigns") ---@type GitsignsModule
+      gitsigns.setup({})
     end,
   },
   {

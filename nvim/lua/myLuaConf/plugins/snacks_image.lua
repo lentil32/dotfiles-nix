@@ -1,3 +1,4 @@
+---@module "snacks"
 ---@param _ string
 ---@param type snacks.image.Type
 ---@return boolean
@@ -5,24 +6,19 @@ local function conceal_math(_, type)
   return type == "math"
 end
 
----@return snacks.image.args
+---@return (number|string)[]
 local function mermaid_args()
   local theme = vim.o.background == "light" and "neutral" or "dark"
   return { "-i", "{src}", "-o", "{file}", "-b", "transparent", "-t", theme, "-s", "{scale}" }
 end
 
-local convert = {
-  magick = {
-    default = { "{src}[0]", "-scale", "1920x1080>" },
-    vector = { "-density", 192, "{src}[{page}]" },
-    math = { "-density", 192, "{src}[{page}]", "-trim" },
-    pdf = { "-density", 192, "{src}[{page}]", "-background", "white", "-alpha", "remove", "-trim" },
-  },
+---@type table<string, snacks.image.args>
+local magick = {
+  default = { "{src}[0]", "-scale", "1920x1080>" },
+  vector = { "-density", 192, "{src}[{page}]" },
+  math = { "-density", 192, "{src}[{page}]", "-trim" },
+  pdf = { "-density", 192, "{src}[{page}]", "-background", "white", "-alpha", "remove", "-trim" },
 }
-
-if not vim.g.neovide then
-  convert.mermaid = mermaid_args
-end
 
 ---@type snacks.image.Config
 local image_opts = {
@@ -78,7 +74,11 @@ local image_opts = {
     chart = "󰄧 ",
     image = " ",
   },
-  convert = convert,
+  convert = ({
+    notify = false,
+    mermaid = mermaid_args,
+    magick = magick,
+  }),
   math = {
     enabled = true,
     typst = {

@@ -39,6 +39,18 @@ require("lze").load({
       require("lazydev").setup({
         library = {
           { words = { "nixCats" }, path = nixCats.nixCatsPath .. "/lua" },
+          {
+            path = nixCats.nixCatsPath .. "/lua/myLuaConf/types",
+            mods = {
+              "rs_project_root",
+              "rs_plugin_util",
+              "rs_readline",
+              "rs_text",
+              "rs_autocmds",
+              "rs_snacks_preview",
+              "rs_smear_cursor",
+            },
+          },
         },
       })
     end,

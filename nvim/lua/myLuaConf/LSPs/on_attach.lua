@@ -1,3 +1,4 @@
+---@module "rs_plugin_util"
 local plugin_util = require("rs_plugin_util")
 
 return function(_, bufnr)
