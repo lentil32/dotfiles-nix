@@ -1,7 +1,9 @@
-.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc fmt check clean help
+.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc fmt check check-lua clean help
 
 hostname := $(shell hostname)
 user := $(shell whoami)
+emmylua_config := .emmyrc.json
+emmylua_workspace := nvim/lua/myLuaConf
 
 ############################################################################
 #
@@ -55,7 +57,11 @@ fmt:
 	nix fmt
 
 check:
+	$(MAKE) check-lua
 	nix flake check
+
+check-lua:
+	emmylua_check -c $(emmylua_config) $(emmylua_workspace)
 
 clean:
 	rm -rf result
@@ -69,5 +75,6 @@ help:
 	@echo "deploy-flake - Update flake.lock and rebuild"
 	@echo "gc           - Full garbage collection"
 	@echo "fmt          - Format Nix files"
-	@echo "check        - Run flake checks"
+	@echo "check        - Run EmmyLua and flake checks"
+	@echo "check-lua    - Run EmmyLua checks"
 	@echo "clean        - Remove result symlink"
