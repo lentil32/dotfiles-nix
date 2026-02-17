@@ -160,25 +160,25 @@ require("lze").load({
       })
     end,
   },
-  {
-    "rs-smear-cursor",
-    for_cat = "general",
-    event = "DeferredUIEnter",
-    -- Already available via startupPlugins; no packadd needed.
-    load = function(_) end,
-    after = function()
-      if not should_enable_smear_cursor() then
-        return
-      end
-      require("rs_smear_cursor").setup({
-        smear_terminal_mode = true,
-        filetypes_disabled = {
-          "snacks_picker_preview",
-          "sidekick_terminal"
-        },
-      })
-    end,
-  },
+  -- {
+  --   "rs-smear-cursor",
+  --   for_cat = "general",
+  --   event = "DeferredUIEnter",
+  --   -- Already available via startupPlugins; no packadd needed.
+  --   load = function(_) end,
+  --   after = function()
+  --     if not should_enable_smear_cursor() then
+  --       return
+  --     end
+  --     require("rs_smear_cursor").setup({
+  --       smear_terminal_mode = true,
+  --       filetypes_disabled = {
+  --         "snacks_picker_preview",
+  --         "sidekick_terminal"
+  --       },
+  --     })
+  --   end,
+  -- },
   {
     "nvim-autopairs",
     for_cat = "general",
