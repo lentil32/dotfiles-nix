@@ -3,7 +3,7 @@
 .claude/
 
 target/
-/.tmp/
+.tmp/
 /nvim/artifacts/
 
 # SOPS plaintext artifacts (encrypted secrets are safe to commit)

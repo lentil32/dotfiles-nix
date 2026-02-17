@@ -4,6 +4,18 @@ let
   hyper = "ctrl-alt-cmd-shift";
   terminalAppId = "com.github.wez.wezterm";
   terminalAppName = "WezTerm";
+  workspaces = {
+    term = "term";
+    code = "code";
+    web = "web";
+    comms = "comms";
+    docs = "docs";
+    side = "side";
+    misc = "misc";
+    notes = "notes";
+    media = "media";
+    social = "social";
+  };
 in
 {
   services.aerospace = {
@@ -68,50 +80,54 @@ in
       };
 
       workspace-to-monitor-force-assignment = {
-        "2" = "main";
-        "6" = "secondary";
+        "${workspaces.code}" = "main";
+        "${workspaces.side}" = "secondary";
       };
 
       on-window-detected = [
         {
           "if".app-id = "com.anthropic.claudefordesktop";
-          run = "move-node-to-workspace 3";
+          run = "move-node-to-workspace ${workspaces.web}";
         }
         {
           "if".app-id = "com.openai.chat";
-          run = "move-node-to-workspace 3";
+          run = "move-node-to-workspace ${workspaces.web}";
         }
         {
           "if".app-id = "company.thebrowser.Browser";
-          run = "move-node-to-workspace 3"; # mnemonics W - Web browser
+          run = "move-node-to-workspace ${workspaces.web}";
+        }
+        {
+          "if".app-id = "app.zen-browser.zen";
+          run = "move-node-to-workspace ${workspaces.web}";
         }
         {
           "if".app-id = "com.linear";
-          run = "move-node-to-workspace 4";
+          run = "move-node-to-workspace ${workspaces.comms}";
         }
         {
           "if".app-id = "com.tinyspeck.slackmacgap";
-          run = "move-node-to-workspace 4";
+          run = "move-node-to-workspace ${workspaces.comms}";
         }
         {
           "if".app-id = "com.neovide.neovide";
-          run = "move-node-to-workspace 2";
+          run = "move-node-to-workspace ${workspaces.code}";
         }
         {
           "if".app-id = "com.spotify.client";
-          run = "move-node-to-workspace 9"; # mnemonics M - Media
+          run = "move-node-to-workspace ${workspaces.media}";
         }
         {
           "if".app-id = "com.github.th-ch.youtube-music";
-          run = "move-node-to-workspace 9"; # mnemonics M - Media
+          run = "move-node-to-workspace ${workspaces.media}";
         }
         {
           "if".app-id = "com.vanejung.elpy";
-          run = "move-node-to-workspace 9"; # mnemonics M - Media
+          run = "move-node-to-workspace ${workspaces.media}";
         }
         {
           "if".app-id = "com.hnc.Discord";
-          run = "move-node-to-workspace 10"; # mnemonics S - Social Network
+          run = "move-node-to-workspace ${workspaces.social}";
         }
         {
           "if".app-id = terminalAppId;
@@ -174,27 +190,27 @@ in
         # `focus parent`/`focus child` not supported (won't implement)
         # ${meh}-a = 'focus parent'
 
-        "${meh}-1" = "workspace 1";
-        "${meh}-2" = "workspace 2";
-        "${meh}-3" = "workspace 3";
-        "${meh}-4" = "workspace 4";
-        "${meh}-5" = "workspace 5";
-        "${meh}-6" = "workspace 6";
-        "${meh}-7" = "workspace 7";
-        "${meh}-8" = "workspace 8";
-        "${meh}-9" = "workspace 9";
-        "${meh}-0" = "workspace 10";
+        "${meh}-1" = "workspace ${workspaces.term}";
+        "${meh}-2" = "workspace ${workspaces.code}";
+        "${meh}-3" = "workspace ${workspaces.web}";
+        "${meh}-4" = "workspace ${workspaces.comms}";
+        "${meh}-5" = "workspace ${workspaces.docs}";
+        "${meh}-6" = "workspace ${workspaces.side}";
+        "${meh}-7" = "workspace ${workspaces.misc}";
+        "${meh}-8" = "workspace ${workspaces.notes}";
+        "${meh}-9" = "workspace ${workspaces.media}";
+        "${meh}-0" = "workspace ${workspaces.social}";
 
-        "${hyper}-1" = "move-node-to-workspace 1";
-        "${hyper}-2" = "move-node-to-workspace 2";
-        "${hyper}-3" = "move-node-to-workspace 3";
-        "${hyper}-4" = "move-node-to-workspace 4";
-        "${hyper}-5" = "move-node-to-workspace 5";
-        "${hyper}-6" = "move-node-to-workspace 6";
-        "${hyper}-7" = "move-node-to-workspace 7";
-        "${hyper}-8" = "move-node-to-workspace 8";
-        "${hyper}-9" = "move-node-to-workspace 9";
-        "${hyper}-0" = "move-node-to-workspace 10";
+        "${hyper}-1" = "move-node-to-workspace ${workspaces.term}";
+        "${hyper}-2" = "move-node-to-workspace ${workspaces.code}";
+        "${hyper}-3" = "move-node-to-workspace ${workspaces.web}";
+        "${hyper}-4" = "move-node-to-workspace ${workspaces.comms}";
+        "${hyper}-5" = "move-node-to-workspace ${workspaces.docs}";
+        "${hyper}-6" = "move-node-to-workspace ${workspaces.side}";
+        "${hyper}-7" = "move-node-to-workspace ${workspaces.misc}";
+        "${hyper}-8" = "move-node-to-workspace ${workspaces.notes}";
+        "${hyper}-9" = "move-node-to-workspace ${workspaces.media}";
+        "${hyper}-0" = "move-node-to-workspace ${workspaces.social}";
 
         "${hyper}-c" = "reload-config";
 
@@ -215,7 +231,11 @@ in
       # open programs
       mode.programs.binding = {
         a = [
-          "exec-and-forget open -a Anki"
+          "exec-and-forget open -na \"Arc\""
+          "mode main"
+        ];
+        b = [
+          "exec-and-forget open -na \"Zen Browser\""
           "mode main"
         ];
         c = [

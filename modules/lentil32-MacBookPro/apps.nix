@@ -18,6 +18,7 @@ let
     { cask = "firefox"; }
     { cask = "firefox@developer-edition"; }
     { cask = "google-chrome"; }
+    { cask = "zen"; }
 
     # Productivity
     { cask = "hammerspoon"; }
