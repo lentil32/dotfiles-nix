@@ -204,6 +204,7 @@ pub(crate) fn build_render_frame(
         cterm_bg: state.config.cterm_bg,
         color_at_cursor: state.color_at_cursor().map(str::to_owned),
         hide_target_hack: state.config.hide_target_hack,
+        max_kept_windows: state.config.max_kept_windows,
         never_draw_over_target: state.config.never_draw_over_target,
         legacy_computing_symbols_support: state.config.legacy_computing_symbols_support,
         legacy_computing_symbols_support_vertical_bars: state

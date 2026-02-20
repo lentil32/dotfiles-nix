@@ -2,7 +2,7 @@ local uv = vim.uv or vim.loop
 
 -- Headless Neovim perf harness.
 -- Usage: run via scripts/run_perf_window_switch.sh and override parameters with:
--- `SMEAR_WINDOWS`, `SMEAR_STRESS_ITERATIONS`, `SMEAR_STRESS_ROUNDS`,
+-- `SMEAR_WINDOWS`, `SMEAR_LINE_COUNT`, `SMEAR_STRESS_ITERATIONS`, `SMEAR_STRESS_ROUNDS`,
 -- `SMEAR_BETWEEN_BUFFERS`, `SMEAR_MAX_RECOVERY_RATIO`, `SMEAR_MAX_STRESS_RATIO`,
 -- `SMEAR_SETTLE_WAIT_MS`,
 -- `SMEAR_DRAIN_EVERY`, `SMEAR_KEYS_PER_SWITCH`, `SMEAR_DELAY_EVENT_TO_SMEAR`,
@@ -257,6 +257,7 @@ local function main()
   local keys_per_switch = getenv_non_negative_integer("SMEAR_KEYS_PER_SWITCH", 0)
   local delay_event_to_smear = getenv_non_negative_number("SMEAR_DELAY_EVENT_TO_SMEAR", 1)
   local delay_after_key = getenv_non_negative_number("SMEAR_DELAY_AFTER_KEY", 5)
+  local workload_line_count = getenv_positive_integer("SMEAR_LINE_COUNT", 2000)
 
   smear.setup({
     logging_level = 0,
@@ -268,7 +269,7 @@ local function main()
     time_interval = 16,
   })
 
-  local workload_buffer = create_workload_buffer(2000)
+  local workload_buffer = create_workload_buffer(workload_line_count)
   local windows = create_split_windows(workload_buffer, windows_count)
   if #windows < 2 then
     error("need at least 2 windows for this harness")
@@ -276,8 +277,9 @@ local function main()
 
   print(
     string.format(
-      "PERF_CONFIG windows=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d settle_wait_ms=%.0f smear_between_buffers=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d keys_per_switch=%d delay_event_to_smear=%.3f delay_after_key=%.3f",
+      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d settle_wait_ms=%.0f smear_between_buffers=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d keys_per_switch=%d delay_event_to_smear=%.3f delay_after_key=%.3f",
       #windows,
+      workload_line_count,
       warmup_iterations,
       baseline_iterations,
       stress_iterations,

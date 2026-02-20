@@ -190,6 +190,7 @@ struct RawRuntimeOptions {
     vertical_bar_cursor_insert_mode: RawOptionObject,
     horizontal_bar_cursor_replace_mode: RawOptionObject,
     hide_target_hack: RawOptionObject,
+    max_kept_windows: RawOptionObject,
     windows_zindex: RawOptionObject,
     filetypes_disabled: RawOptionObject,
     logging_level: RawOptionObject,
@@ -279,6 +280,7 @@ impl RawRuntimeOptions {
                 "horizontal_bar_cursor_replace_mode",
             ),
             hide_target_hack: raw_option(opts, "hide_target_hack"),
+            max_kept_windows: raw_option(opts, "max_kept_windows"),
             windows_zindex: raw_option(opts, "windows_zindex"),
             filetypes_disabled: raw_option(opts, "filetypes_disabled"),
             logging_level: raw_option(opts, "logging_level"),
@@ -425,6 +427,10 @@ impl RawRuntimeOptions {
                     self.hide_target_hack,
                     "hide_target_hack",
                     bool_from_object,
+                )?,
+                max_kept_windows: parse_optional_non_negative_usize(
+                    self.max_kept_windows,
+                    "max_kept_windows",
                 )?,
                 windows_zindex: parse_optional_non_negative_u32(
                     self.windows_zindex,

@@ -49,20 +49,56 @@ const CURSOR_COLOR_LUAEVAL_EXPR: &str = r##"(function()
     return nil
   end
 
-  local cursor = vim.api.nvim_win_get_cursor(0)
-  cursor[1] = cursor[1] - 1
+  local line = vim.fn.line(".")
+  local col = vim.fn.col(".")
 
-  if vim.b.ts_highlight then
-    local ts_hl_group
-    for _, capture in pairs(vim.treesitter.get_captures_at_pos(0, cursor[1], cursor[2])) do
-      ts_hl_group = "@" .. capture.capture .. "." .. capture.lang
+  -- Fast path: resolve the effective syntax group at the cursor position.
+  local syn_id = vim.fn.synID(line, col, 1)
+  if type(syn_id) == "number" and syn_id > 0 then
+    local trans_id = vim.fn.synIDtrans(syn_id)
+    local syn_color = vim.fn.synIDattr(trans_id, "fg#")
+    if type(syn_color) == "string" and syn_color ~= "" then
+      return syn_color
     end
-    if ts_hl_group then
-      return get_hl_color(ts_hl_group, "fg")
+
+    local syn_group = vim.fn.synIDattr(trans_id, "name")
+    if type(syn_group) == "string" and syn_group ~= "" then
+      local color = get_hl_color(syn_group, "fg")
+      if color then
+        return color
+      end
     end
   end
 
-  local extmarks = vim.api.nvim_buf_get_extmarks(0, -1, cursor, cursor, { details = true, overlap = true })
+  local cursor = { line - 1, col - 1 }
+
+  if vim.bo.buftype == "" and vim.b.ts_highlight then
+    local ok, captures = pcall(vim.treesitter.get_captures_at_pos, 0, cursor[1], cursor[2])
+    if ok and type(captures) == "table" then
+      local ts_hl_group
+      for _, capture in pairs(captures) do
+        ts_hl_group = "@" .. capture.capture .. "." .. capture.lang
+      end
+      if ts_hl_group then
+        local color = get_hl_color(ts_hl_group, "fg")
+        if color then
+          return color
+        end
+      end
+    end
+  end
+
+  if vim.bo.buftype ~= "" and vim.bo.buftype ~= "acwrite" then
+    return nil
+  end
+
+  local extmarks = vim.api.nvim_buf_get_extmarks(
+    0,
+    -1,
+    cursor,
+    cursor,
+    { details = true, overlap = true, limit = 32 }
+  )
   for _, extmark in ipairs(extmarks) do
     local details = extmark[4]
     local hl_group = details and details.hl_group
@@ -464,12 +500,16 @@ enum BufferEventPolicy {
 }
 
 impl BufferEventPolicy {
-    const THROTTLED_UI_DELAY_FLOOR_MS: u64 = 12;
+    const THROTTLED_UI_DELAY_FLOOR_MS: u64 = 24;
+    const LARGE_BUFFER_LINE_COUNT_THRESHOLD: i64 = 10_000;
 
-    fn from_buftype(buftype: &str) -> Self {
-        match buftype {
-            "" | "acwrite" => Self::Normal,
-            _ => Self::ThrottledUi,
+    fn from_buffer_metadata(buftype: &str, buflisted: bool, line_count: i64) -> Self {
+        let non_file_buffer = !matches!(buftype, "" | "acwrite");
+        let large_buffer = line_count >= Self::LARGE_BUFFER_LINE_COUNT_THRESHOLD;
+        if non_file_buffer || !buflisted || large_buffer {
+            Self::ThrottledUi
+        } else {
+            Self::Normal
         }
     }
 
@@ -489,7 +529,7 @@ impl BufferEventPolicy {
     }
 
     const fn should_prepaint_cursor(self) -> bool {
-        true
+        matches!(self, Self::Normal)
     }
 }
 
@@ -508,7 +548,16 @@ fn should_replace_external_timer_with_throttle(
 
 fn current_buffer_event_policy(buffer: &api::Buffer) -> Result<BufferEventPolicy> {
     let buftype = current_buffer_buftype(buffer)?;
-    Ok(BufferEventPolicy::from_buftype(&buftype))
+    let opts = OptionOpts::builder().buf(buffer.clone()).build();
+    let buflisted: bool = api::get_option_value("buflisted", &opts)?;
+    let line_count_usize = buffer.line_count()?;
+    let line_count = match i64::try_from(line_count_usize) {
+        Ok(value) => value,
+        Err(_) => i64::MAX,
+    };
+    Ok(BufferEventPolicy::from_buffer_metadata(
+        &buftype, buflisted, line_count,
+    ))
 }
 
 fn skip_current_buffer_events(buffer: &api::Buffer) -> Result<bool> {
@@ -1082,7 +1131,11 @@ fn on_cursor_event_impl(source: EventSource) -> Result<()> {
             }
         }
         RenderAction::ClearAll => {
-            clear_active_render_windows(namespace_id);
+            let max_kept_windows = {
+                let state = state_lock();
+                state.config.max_kept_windows
+            };
+            clear_active_render_windows(namespace_id, max_kept_windows);
             if mode == "c"
                 && let Err(err) = api::command("redraw")
             {
@@ -1694,6 +1747,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_options_patch_parse_rejects_negative_max_kept_windows() {
+        let mut opts = Dictionary::new();
+        opts.insert("max_kept_windows", -1_i64);
+
+        let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
+        assert!(
+            err.to_string().contains("max_kept_windows"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("non-negative integer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn runtime_options_patch_parse_accepts_integral_float_particle_max_num() {
         let mut opts = Dictionary::new();
         opts.insert("particle_max_num", 12.0_f64);
@@ -1738,13 +1807,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_options_patch_apply_sets_max_kept_windows() {
+        let mut state = RuntimeState::default();
+        let patch = RuntimeOptionsPatch {
+            runtime: RuntimeSwitchesPatch {
+                max_kept_windows: Some(24),
+                ..RuntimeSwitchesPatch::default()
+            },
+            ..RuntimeOptionsPatch::default()
+        };
+
+        patch.apply(&mut state);
+        assert_eq!(state.config.max_kept_windows, 24);
+    }
+
+    #[test]
     fn buffer_event_policy_classifies_normal_and_acwrite_as_normal() {
         assert_eq!(
-            super::BufferEventPolicy::from_buftype(""),
+            super::BufferEventPolicy::from_buffer_metadata("", true, 1),
             super::BufferEventPolicy::Normal
         );
         assert_eq!(
-            super::BufferEventPolicy::from_buftype("acwrite"),
+            super::BufferEventPolicy::from_buffer_metadata("acwrite", true, 4_000),
             super::BufferEventPolicy::Normal
         );
     }
@@ -1752,15 +1836,23 @@ mod tests {
     #[test]
     fn buffer_event_policy_throttles_ui_buffers_including_terminal() {
         assert_eq!(
-            super::BufferEventPolicy::from_buftype("nofile"),
+            super::BufferEventPolicy::from_buffer_metadata("nofile", true, 1),
             super::BufferEventPolicy::ThrottledUi
         );
         assert_eq!(
-            super::BufferEventPolicy::from_buftype("prompt"),
+            super::BufferEventPolicy::from_buffer_metadata("prompt", true, 1),
             super::BufferEventPolicy::ThrottledUi
         );
         assert_eq!(
-            super::BufferEventPolicy::from_buftype("terminal"),
+            super::BufferEventPolicy::from_buffer_metadata("terminal", true, 1),
+            super::BufferEventPolicy::ThrottledUi
+        );
+        assert_eq!(
+            super::BufferEventPolicy::from_buffer_metadata("", false, 1),
+            super::BufferEventPolicy::ThrottledUi
+        );
+        assert_eq!(
+            super::BufferEventPolicy::from_buffer_metadata("", true, 10_000),
             super::BufferEventPolicy::ThrottledUi
         );
     }
@@ -1769,9 +1861,9 @@ mod tests {
     fn throttled_ui_policy_enables_key_fallback_and_uses_throttle_floor() {
         let policy = super::BufferEventPolicy::ThrottledUi;
         assert!(policy.use_key_fallback());
-        assert_eq!(policy.settle_delay_floor_ms(), 12);
+        assert_eq!(policy.settle_delay_floor_ms(), 24);
         assert!(!policy.should_use_debounced_external_settle());
-        assert!(policy.should_prepaint_cursor());
+        assert!(!policy.should_prepaint_cursor());
     }
 
     #[test]
@@ -1787,6 +1879,7 @@ mod tests {
         assert_eq!(super::remaining_throttle_delay_ms(12, 4.0), 8);
         assert_eq!(super::remaining_throttle_delay_ms(12, 12.0), 0);
         assert_eq!(super::remaining_throttle_delay_ms(12, f64::INFINITY), 0);
+        assert_eq!(super::remaining_throttle_delay_ms(24, 10.0), 14);
     }
 
     #[test]

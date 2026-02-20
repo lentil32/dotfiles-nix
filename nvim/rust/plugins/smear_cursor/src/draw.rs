@@ -61,6 +61,7 @@ pub(crate) struct RenderFrame {
     pub(crate) cterm_bg: Option<u16>,
     pub(crate) color_at_cursor: Option<String>,
     pub(crate) hide_target_hack: bool,
+    pub(crate) max_kept_windows: usize,
     pub(crate) never_draw_over_target: bool,
     pub(crate) legacy_computing_symbols_support: bool,
     pub(crate) legacy_computing_symbols_support_vertical_bars: bool,
@@ -744,6 +745,10 @@ fn next_adaptive_budget(previous: AdaptiveBudgetState, frame_demand: usize) -> A
     }
 }
 
+fn effective_keep_budget(adaptive_budget: usize, max_kept_windows: usize) -> usize {
+    adaptive_budget.min(max_kept_windows)
+}
+
 fn lru_prune_indices(windows: &[CachedRenderWindow], keep_count: usize) -> Vec<usize> {
     let mut ordered: Vec<(usize, FrameEpoch)> = windows
         .iter()
@@ -766,7 +771,7 @@ fn lru_prune_indices(windows: &[CachedRenderWindow], keep_count: usize) -> Vec<u
     remove_indices
 }
 
-fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
+fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32, max_kept_windows: usize) {
     let hide_config = hide_window_config();
     for tab_windows in draw_state.tabs.values_mut() {
         let next_budget = next_adaptive_budget(
@@ -828,7 +833,8 @@ fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
             "cached render windows must be available after epoch rollover"
         );
 
-        let remove_indices = lru_prune_indices(&tab_windows.windows, tab_windows.cached_budget);
+        let keep_budget = effective_keep_budget(tab_windows.cached_budget, max_kept_windows);
+        let remove_indices = lru_prune_indices(&tab_windows.windows, keep_budget);
         if !remove_indices.is_empty() {
             // Match upstream Lua behavior: close extra windows with events
             // ignored to avoid incidental side effects.
@@ -857,9 +863,9 @@ fn purge_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
     close_orphan_render_windows(namespace_id);
 }
 
-pub(crate) fn clear_active_render_windows(namespace_id: u32) {
+pub(crate) fn clear_active_render_windows(namespace_id: u32, max_kept_windows: usize) {
     let mut draw_state = draw_state_lock();
-    clear_cached_windows(&mut draw_state, namespace_id);
+    clear_cached_windows(&mut draw_state, namespace_id, max_kept_windows);
 }
 
 pub(crate) fn purge_render_windows(namespace_id: u32) {
@@ -1495,7 +1501,8 @@ mod tests {
     use super::{
         ADAPTIVE_POOL_BUDGET_MARGIN, ADAPTIVE_POOL_EWMA_SCALE, ADAPTIVE_POOL_HARD_MAX_BUDGET,
         ADAPTIVE_POOL_MIN_BUDGET, AdaptiveBudgetState, CachedRenderWindow, CachedWindowLifecycle,
-        EpochRollover, FrameEpoch, WindowBufferHandle, lru_prune_indices, next_adaptive_budget,
+        EpochRollover, FrameEpoch, WindowBufferHandle, effective_keep_budget, lru_prune_indices,
+        next_adaptive_budget,
     };
 
     #[test]
@@ -1542,6 +1549,13 @@ mod tests {
 
         let next = next_adaptive_budget(previous, 10_000);
         assert_eq!(next.cached_budget, ADAPTIVE_POOL_HARD_MAX_BUDGET);
+    }
+
+    #[test]
+    fn keep_budget_respects_max_kept_windows_cap() {
+        assert_eq!(effective_keep_budget(120, 50), 50);
+        assert_eq!(effective_keep_budget(32, 50), 32);
+        assert_eq!(effective_keep_budget(16, 0), 0);
     }
 
     fn cached(window_id: i32, buffer_id: i32, last_used_epoch: u64) -> CachedRenderWindow {
@@ -2314,7 +2328,7 @@ pub(crate) fn draw_current(namespace_id: u32, frame: &RenderFrame) -> Result<()>
     let geometry = precompute_quad_geometry(&corners, frame);
     let (editor_max_row, editor_max_col) = editor_bounds()?;
     let mut draw_state = draw_state_lock();
-    clear_cached_windows(&mut draw_state, namespace_id);
+    clear_cached_windows(&mut draw_state, namespace_id, frame.max_kept_windows);
     if geometry.top > geometry.bottom || geometry.left > geometry.right {
         return Ok(());
     }

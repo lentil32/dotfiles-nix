@@ -16,6 +16,8 @@ rs_autocmds.setup()
 keymaps.setup()
 
 local function should_enable_smear_cursor()
+  --- smear cursor is Slow for now...
+  return false
   if plugin_util.get_var(nil, "neovide") then
     return false
   end
@@ -171,25 +173,22 @@ lze.load({
       sidekick.setup(sidekick_opts --[[@as sidekick.Config]])
     end,
   },
-  -- {
-  --   "rs-smear-cursor",
-  --   for_cat = "general",
-  --   event = "DeferredUIEnter",
-  --   -- Already available via startupPlugins; no packadd needed.
-  --   load = function(_) end,
-  --   after = function()
-  --     if not should_enable_smear_cursor() then
-  --       return
-  --     end
-  --     require("rs_smear_cursor").setup({
-  --       smear_terminal_mode = true,
-  --       filetypes_disabled = {
-  --         "snacks_picker_preview",
-  --         "sidekick_terminal"
-  --       },
-  --     })
-  --   end,
-  -- },
+  {
+    "rs-smear-cursor",
+    for_cat = "general",
+    event = "DeferredUIEnter",
+    -- Already available via startupPlugins; no packadd needed.
+    load = function(_) end,
+    after = function()
+      if not should_enable_smear_cursor() then
+        return
+      end
+      require("rs_smear_cursor").setup({
+        smear_terminal_mode = true,
+        filetypes_disabled = {},
+      })
+    end,
+  },
   {
     "nvim-autopairs",
     for_cat = "general",

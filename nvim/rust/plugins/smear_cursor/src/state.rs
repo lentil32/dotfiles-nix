@@ -89,6 +89,7 @@ pub(crate) struct RuntimeSwitchesPatch {
     pub(crate) vertical_bar_cursor_insert_mode: Option<bool>,
     pub(crate) horizontal_bar_cursor_replace_mode: Option<bool>,
     pub(crate) hide_target_hack: Option<bool>,
+    pub(crate) max_kept_windows: Option<usize>,
     pub(crate) windows_zindex: Option<u32>,
     pub(crate) filetypes_disabled: Option<Vec<String>>,
     pub(crate) logging_level: Option<i64>,
@@ -259,6 +260,7 @@ impl RuntimeSwitchesPatch {
             &mut self.horizontal_bar_cursor_replace_mode,
         );
         apply_value(&mut config.hide_target_hack, &mut self.hide_target_hack);
+        apply_value(&mut config.max_kept_windows, &mut self.max_kept_windows);
         apply_value(&mut config.windows_zindex, &mut self.windows_zindex);
         apply_value(&mut config.filetypes_disabled, &mut self.filetypes_disabled);
 
