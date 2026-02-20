@@ -16,16 +16,16 @@ rs_autocmds.setup()
 keymaps.setup()
 
 local function should_enable_smear_cursor()
-  --- smear cursor is Slow for now...
-  return false
-  -- if plugin_util.get_var(nil, "neovide") then
-  --   return false
-  -- end
-  -- local term_program = vim.env.TERM_PROGRAM
-  -- if term_program and term_program == "ghostty" then
-  --   return false
-  -- end
-  -- return true
+  -- smear cursor is Slow for now...
+  -- return false
+  if plugin_util.get_var(nil, "neovide") then
+    return false
+  end
+  local term_program = vim.env.TERM_PROGRAM
+  if term_program and term_program == "ghostty" then
+    return false
+  end
+  return true
 end
 
 local function sidekick_in_project_root(fn)

@@ -760,7 +760,7 @@ pub(super) fn apply_runtime_options(state: &mut RuntimeState, opts: &Dictionary)
     let patch = RuntimeOptionsPatch::parse(opts)?;
     let effects = state.apply_runtime_options_patch(patch);
     if let Some(logging_level) = effects.logging_level {
-        super::set_log_level(logging_level);
+        super::logging::set_log_level(logging_level);
     }
     Ok(())
 }

@@ -15,9 +15,12 @@ pub(super) struct EventLoopState {
     external_trigger_pending: bool,
     last_autocmd_event_ms: f64,
     last_external_dispatch_ms: f64,
+    callback_duration_ewma_ms: f64,
 }
 
 impl EventLoopState {
+    const CALLBACK_DURATION_EWMA_ALPHA: f64 = 0.25;
+
     pub(super) const fn new() -> Self {
         Self {
             animation_timer: None,
@@ -27,6 +30,7 @@ impl EventLoopState {
             external_trigger_pending: false,
             last_autocmd_event_ms: 0.0,
             last_external_dispatch_ms: 0.0,
+            callback_duration_ewma_ms: 0.0,
         }
     }
 
@@ -120,6 +124,28 @@ impl EventLoopState {
             (now_ms - last).max(0.0)
         }
     }
+
+    pub(super) fn record_cursor_callback_duration(&mut self, duration_ms: f64) {
+        if !duration_ms.is_finite() {
+            return;
+        }
+
+        let observed = duration_ms.max(0.0);
+        let previous = self.callback_duration_ewma_ms;
+        self.callback_duration_ewma_ms = if previous <= 0.0 {
+            observed
+        } else {
+            previous + Self::CALLBACK_DURATION_EWMA_ALPHA * (observed - previous)
+        };
+    }
+
+    pub(super) fn clear_cursor_callback_duration_estimate(&mut self) {
+        self.callback_duration_ewma_ms = 0.0;
+    }
+
+    pub(super) fn cursor_callback_duration_estimate_ms(&self) -> f64 {
+        self.callback_duration_ewma_ms.max(0.0)
+    }
 }
 
 thread_local! {
@@ -210,4 +236,16 @@ pub(super) fn clear_external_dispatch_timestamp() {
 
 pub(super) fn elapsed_ms_since_last_external_dispatch(now_ms: f64) -> f64 {
     read_event_loop_state(|state| state.elapsed_ms_since_last_external_dispatch(now_ms))
+}
+
+pub(super) fn record_cursor_callback_duration(duration_ms: f64) {
+    with_event_loop_state(|state| state.record_cursor_callback_duration(duration_ms));
+}
+
+pub(super) fn clear_cursor_callback_duration_estimate() {
+    with_event_loop_state(EventLoopState::clear_cursor_callback_duration_estimate);
+}
+
+pub(super) fn cursor_callback_duration_estimate_ms() -> f64 {
+    read_event_loop_state(EventLoopState::cursor_callback_duration_estimate_ms)
 }
