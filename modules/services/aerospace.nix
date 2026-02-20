@@ -5,16 +5,16 @@ let
   terminalAppId = "com.github.wez.wezterm";
   terminalAppName = "WezTerm";
   workspaces = {
-    term = "term";
-    code = "code";
-    web = "web";
-    comms = "comms";
-    docs = "docs";
-    side = "side";
-    misc = "misc";
-    notes = "notes";
-    media = "media";
-    social = "social";
+    term = "1-TERM";
+    code = "2-CODE";
+    web = "3-WEB_";
+    comms = "4-COMM";
+    docs = "5-DOCS";
+    side = "6-SIDE";
+    misc = "7-MISC";
+    notes = "8-NOTE";
+    media = "9-MEDI";
+    social = "0-SOCI";
   };
 in
 {
