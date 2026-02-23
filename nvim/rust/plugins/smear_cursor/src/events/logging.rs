@@ -4,6 +4,22 @@ use super::{
 };
 use nvim_oxi::{Array, Object, api};
 use std::sync::atomic::Ordering;
+use std::sync::{LazyLock, Mutex};
+use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    path::PathBuf,
+};
+
+static LOG_FILE_PATH: LazyLock<Option<PathBuf>> =
+    LazyLock::new(|| std::env::var_os("SMEAR_CURSOR_LOG_FILE").map(PathBuf::from));
+static LOG_FILE_HANDLE: LazyLock<Mutex<Option<File>>> = LazyLock::new(|| Mutex::new(None));
+static PERF_SLOW_CALLBACK_THRESHOLD_MS: LazyLock<Option<f64>> = LazyLock::new(|| {
+    std::env::var("SMEAR_CURSOR_PERF_SLOW_MS")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+});
 
 pub(super) fn set_log_level(level: i64) {
     let normalized = if level < 0 { 0 } else { level };
@@ -27,12 +43,48 @@ fn log_level_name(level: i64) -> &'static str {
     }
 }
 
+fn append_log_line(level_name: &str, message: &str) {
+    let Some(path) = LOG_FILE_PATH.as_ref() else {
+        return;
+    };
+    let mut file_guard = match LOG_FILE_HANDLE.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+
+    if file_guard.is_none() {
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => {
+                *file_guard = Some(file);
+            }
+            Err(err) => {
+                api::err_writeln(&format!(
+                    "[{LOG_SOURCE_NAME}] failed to open log file {}: {err}",
+                    path.display()
+                ));
+                return;
+            }
+        }
+    }
+
+    if let Some(file) = file_guard.as_mut()
+        && let Err(err) = writeln!(file, "[{LOG_SOURCE_NAME}][{level_name}] {message}")
+    {
+        api::err_writeln(&format!(
+            "[{LOG_SOURCE_NAME}] failed to write log file: {err}"
+        ));
+        *file_guard = None;
+    }
+}
+
 fn notify_log(level: i64, message: &str) {
     if !should_log(level) {
         return;
     }
 
-    let payload_message = format!("[{LOG_SOURCE_NAME}][{}] {message}", log_level_name(level));
+    let level_name = log_level_name(level);
+    append_log_line(level_name, message);
+    let payload_message = format!("[{LOG_SOURCE_NAME}][{level_name}] {message}");
     let payload = Array::from_iter([Object::from(payload_message), Object::from(level)]);
     let args = Array::from_iter([
         Object::from("vim.notify(_A[1], _A[2])"),
@@ -49,6 +101,26 @@ pub(super) fn warn(message: &str) {
 
 pub(super) fn debug(message: &str) {
     notify_log(LOG_LEVEL_DEBUG, message);
+}
+
+pub(super) fn log_slow_callback(
+    source: &str,
+    mode: &str,
+    callback_duration_ms: f64,
+    callback_duration_estimate_ms: f64,
+    details: &str,
+) {
+    let Some(threshold_ms) = *PERF_SLOW_CALLBACK_THRESHOLD_MS else {
+        return;
+    };
+    if callback_duration_ms < threshold_ms {
+        return;
+    }
+
+    let message = format!(
+        "slow-callback source={source} mode={mode} callback_ms={callback_duration_ms:.3} estimate_ms={callback_duration_estimate_ms:.3} {details}",
+    );
+    append_log_line("PERF", &message);
 }
 
 pub(super) fn ensure_hideable_guicursor() {

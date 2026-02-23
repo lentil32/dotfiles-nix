@@ -1,18 +1,17 @@
-use crate::lua::i64_from_object;
-use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::types::{Particle, Point};
 use nvim_oxi::Result;
 use nvim_oxi::api;
-use nvim_oxi::api::opts::{
-    GetHighlightOpts, OptionOpts, OptionScope, SetExtmarkOpts, SetHighlightOpts,
-};
-use nvim_oxi::api::types::{
-    ExtmarkVirtTextPosition, GetHlInfos, WindowConfig, WindowRelativeTo, WindowStyle,
-};
+use nvim_oxi::api::opts::{GetHighlightOpts, OptionOpts, OptionScope, SetHighlightOpts};
+use nvim_oxi::api::types::{GetHlInfos, WindowConfig, WindowRelativeTo, WindowStyle};
 use nvim_oxi::{Array, Dictionary, Object};
 use nvim_oxi_utils::handles;
+use nvim_utils::mode::is_insert_like_mode;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+
+mod render;
+
+pub(crate) use render::{draw_current, draw_target_hack_block};
 
 const EXTMARK_ID: u32 = 999;
 const DEFAULT_CURSOR_COLOR: u32 = 0x00D0_D0D0;
@@ -29,6 +28,7 @@ const ADAPTIVE_POOL_BUDGET_MARGIN: usize = 8;
 const ADAPTIVE_POOL_EWMA_SCALE: u64 = 1000;
 const ADAPTIVE_POOL_EWMA_PREV_WEIGHT: u64 = 7;
 const ADAPTIVE_POOL_EWMA_NEW_WEIGHT: u64 = 3;
+const HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES: usize = 16;
 
 const BOTTOM_BLOCKS: [&str; 9] = ["█", "▇", "▆", "▅", "▄", "▃", "▂", "▁", " "];
 const LEFT_BLOCKS: [&str; 9] = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
@@ -98,10 +98,29 @@ struct HighlightPaletteKey {
     cterm_bg: Option<u16>,
 }
 
+#[derive(Clone, Debug)]
+struct HighlightGroupNames {
+    normal: Arc<[String]>,
+    inverted: Arc<[String]>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct WindowBufferHandle {
     window_id: i32,
     buffer_id: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowPlacement {
+    row: i64,
+    col: i64,
+    zindex: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CachedWindowPayload {
+    character: String,
+    hl_group: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -117,8 +136,13 @@ impl FrameEpoch {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CachedWindowLifecycle {
-    Available { last_used_epoch: FrameEpoch },
-    InUse { epoch: FrameEpoch },
+    Available {
+        last_used_epoch: FrameEpoch,
+        visible: bool,
+    },
+    InUse {
+        epoch: FrameEpoch,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,18 +156,56 @@ enum EpochRollover {
 struct CachedRenderWindow {
     handles: WindowBufferHandle,
     lifecycle: CachedWindowLifecycle,
+    placement: Option<WindowPlacement>,
 }
 
 impl CachedRenderWindow {
-    fn new_in_use(handles: WindowBufferHandle, epoch: FrameEpoch) -> Self {
+    fn new_in_use(
+        handles: WindowBufferHandle,
+        epoch: FrameEpoch,
+        placement: WindowPlacement,
+    ) -> Self {
         Self {
             handles,
             lifecycle: CachedWindowLifecycle::InUse { epoch },
+            placement: Some(placement),
         }
     }
 
     fn is_available_for_reuse(self) -> bool {
         matches!(self.lifecycle, CachedWindowLifecycle::Available { .. })
+    }
+
+    fn should_hide(self) -> bool {
+        matches!(
+            self.lifecycle,
+            CachedWindowLifecycle::Available { visible: true, .. }
+        )
+    }
+
+    fn mark_hidden(&mut self) {
+        if let CachedWindowLifecycle::Available {
+            last_used_epoch,
+            visible: true,
+        } = self.lifecycle
+        {
+            self.lifecycle = CachedWindowLifecycle::Available {
+                last_used_epoch,
+                visible: false,
+            };
+        }
+    }
+
+    fn needs_reconfigure(self, placement: WindowPlacement) -> bool {
+        let is_visible = match self.lifecycle {
+            CachedWindowLifecycle::Available { visible, .. } => visible,
+            CachedWindowLifecycle::InUse { .. } => true,
+        };
+        !is_visible || self.placement != Some(placement)
+    }
+
+    fn set_placement(&mut self, placement: WindowPlacement) {
+        self.placement = Some(placement);
     }
 
     fn mark_in_use(&mut self, epoch: FrameEpoch) -> bool {
@@ -162,12 +224,14 @@ impl CachedRenderWindow {
             CachedWindowLifecycle::InUse { epoch } if epoch == previous_epoch => {
                 self.lifecycle = CachedWindowLifecycle::Available {
                     last_used_epoch: epoch,
+                    visible: true,
                 };
                 EpochRollover::ReleasedForReuse
             }
             CachedWindowLifecycle::InUse { epoch } => {
                 self.lifecycle = CachedWindowLifecycle::Available {
                     last_used_epoch: epoch,
+                    visible: true,
                 };
                 EpochRollover::RecoveredStaleInUse
             }
@@ -176,7 +240,9 @@ impl CachedRenderWindow {
 
     fn available_epoch(self) -> Option<FrameEpoch> {
         match self.lifecycle {
-            CachedWindowLifecycle::Available { last_used_epoch } => Some(last_used_epoch),
+            CachedWindowLifecycle::Available {
+                last_used_epoch, ..
+            } => Some(last_used_epoch),
             CachedWindowLifecycle::InUse { .. } => None,
         }
     }
@@ -187,7 +253,10 @@ struct TabWindows {
     current_epoch: FrameEpoch,
     frame_demand: usize,
     reuse_scan_index: usize,
+    in_use_indices: Vec<usize>,
+    visible_available_indices: Vec<usize>,
     windows: Vec<CachedRenderWindow>,
+    payload_by_window: HashMap<i32, CachedWindowPayload>,
     ewma_demand_milli: u64,
     cached_budget: usize,
 }
@@ -198,23 +267,66 @@ impl Default for TabWindows {
             current_epoch: FrameEpoch::ZERO,
             frame_demand: 0,
             reuse_scan_index: 0,
+            in_use_indices: Vec::new(),
+            visible_available_indices: Vec::new(),
             windows: Vec::new(),
+            payload_by_window: HashMap::new(),
             ewma_demand_milli: 0,
             cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
         }
     }
 }
 
-#[derive(Debug, Default)]
+impl TabWindows {
+    fn cached_payload_matches(&self, window_id: i32, character: &str, hl_group: &str) -> bool {
+        self.payload_by_window
+            .get(&window_id)
+            .is_some_and(|payload| payload.character == character && payload.hl_group == hl_group)
+    }
+
+    fn cache_payload(&mut self, window_id: i32, character: &str, hl_group: &str) {
+        if let Some(payload) = self.payload_by_window.get_mut(&window_id) {
+            payload.character.clear();
+            payload.character.push_str(character);
+            payload.hl_group.clear();
+            payload.hl_group.push_str(hl_group);
+            return;
+        }
+
+        self.payload_by_window.insert(
+            window_id,
+            CachedWindowPayload {
+                character: character.to_string(),
+                hl_group: hl_group.to_string(),
+            },
+        );
+    }
+
+    fn clear_payload(&mut self, window_id: i32) {
+        self.payload_by_window.remove(&window_id);
+    }
+}
+
+#[derive(Debug)]
 struct DrawState {
     tabs: HashMap<i32, TabWindows>,
     bulge_above: bool,
+}
+
+impl Default for DrawState {
+    fn default() -> Self {
+        Self {
+            tabs: HashMap::with_capacity(4),
+            bulge_above: false,
+        }
+    }
 }
 
 #[derive(Debug)]
 struct DrawContext {
     draw_state: Mutex<DrawState>,
     highlight_palette_cache: Mutex<Option<HighlightPaletteKey>>,
+    highlight_group_names_cache: Mutex<HashMap<u32, HighlightGroupNames>>,
 }
 
 impl DrawContext {
@@ -222,6 +334,9 @@ impl DrawContext {
         Self {
             draw_state: Mutex::new(DrawState::default()),
             highlight_palette_cache: Mutex::new(None),
+            highlight_group_names_cache: Mutex::new(HashMap::with_capacity(
+                HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES,
+            )),
         }
     }
 }
@@ -293,9 +408,27 @@ fn palette_cache_lock() -> std::sync::MutexGuard<'static, Option<HighlightPalett
     }
 }
 
+fn group_name_cache_lock() -> std::sync::MutexGuard<'static, HashMap<u32, HighlightGroupNames>> {
+    loop {
+        match DRAW_CONTEXT.highlight_group_names_cache.lock() {
+            Ok(guard) => return guard,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                guard.clear();
+                drop(guard);
+                DRAW_CONTEXT.highlight_group_names_cache.clear_poison();
+            }
+        }
+    }
+}
+
 pub(crate) fn clear_highlight_cache() {
     let mut cache = palette_cache_lock();
     *cache = None;
+    drop(cache);
+
+    let mut name_cache = group_name_cache_lock();
+    name_cache.clear();
 }
 
 fn hl_group_name(level: u32) -> String {
@@ -304,6 +437,31 @@ fn hl_group_name(level: u32) -> String {
 
 fn inverted_hl_group_name(level: u32) -> String {
     format!("SmearCursorInverted{level}")
+}
+
+fn highlight_group_names(color_levels: u32) -> HighlightGroupNames {
+    let levels = color_levels.max(1);
+    {
+        let cache = group_name_cache_lock();
+        if let Some(cached) = cache.get(&levels) {
+            return cached.clone();
+        }
+    }
+
+    let normal: Arc<[String]> = Arc::from((0..=levels).map(hl_group_name).collect::<Vec<String>>());
+    let inverted: Arc<[String]> = Arc::from(
+        (0..=levels)
+            .map(inverted_hl_group_name)
+            .collect::<Vec<String>>(),
+    );
+    let names = HighlightGroupNames { normal, inverted };
+
+    let mut cache = group_name_cache_lock();
+    if !cache.contains_key(&levels) && cache.len() >= HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(levels, names.clone());
+    names
 }
 
 fn rgb_to_hex(rgb: u32) -> String {
@@ -376,7 +534,7 @@ fn resolve_cursor_color_setting(setting: Option<&str>) -> Option<ResolvedCursorC
 }
 
 fn resolve_mode_cursor_color(frame: &RenderFrame) -> u32 {
-    let setting = if frame.mode == "i" {
+    let setting = if is_insert_like_mode(frame.mode.as_str()) {
         frame.cursor_color_insert_mode.as_deref()
     } else {
         frame.cursor_color.as_deref()
@@ -487,15 +645,28 @@ fn ensure_highlight_palette(frame: &RenderFrame) -> Result<()> {
         }
     }
 
+    let group_names = highlight_group_names(color_levels);
+
     for level in 1..=color_levels {
         let opacity = (f64::from(level) / f64::from(color_levels)).powf(1.0 / gamma);
         let blended = interpolate_color(interpolation_background, cursor_color, opacity);
         let blended_hex = rgb_to_hex(blended);
         let inverted_foreground = rgb_to_hex(normal_background.unwrap_or(transparent_fallback));
         let cterm_level_color = cterm_color_at_level(cterm_cursor_colors.as_deref(), level);
+        let level_index = usize::try_from(level).unwrap_or(0);
+        let hl_group = group_names
+            .normal
+            .get(level_index)
+            .map(String::as_str)
+            .unwrap_or("SmearCursor1");
+        let inverted_hl_group = group_names
+            .inverted
+            .get(level_index)
+            .map(String::as_str)
+            .unwrap_or("SmearCursorInverted1");
 
         set_highlight_group(
-            hl_group_name(level).as_str(),
+            hl_group,
             blended_hex.as_str(),
             "none",
             non_inverted_blend,
@@ -509,7 +680,7 @@ fn ensure_highlight_palette(frame: &RenderFrame) -> Result<()> {
                 .and_then(|colors| colors.first().copied())
         });
         set_highlight_group(
-            inverted_hl_group_name(level).as_str(),
+            inverted_hl_group,
             inverted_foreground.as_str(),
             blended_hex.as_str(),
             0,
@@ -632,6 +803,68 @@ fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {
     }
 }
 
+fn adjust_tracking_after_remove(tab_windows: &mut TabWindows, removed_index: usize) {
+    if tab_windows.reuse_scan_index > removed_index {
+        tab_windows.reuse_scan_index = tab_windows.reuse_scan_index.saturating_sub(1);
+    }
+
+    let mut write = 0;
+    for read in 0..tab_windows.in_use_indices.len() {
+        let index = tab_windows.in_use_indices[read];
+        if index == removed_index {
+            continue;
+        }
+        tab_windows.in_use_indices[write] = if index > removed_index {
+            index.saturating_sub(1)
+        } else {
+            index
+        };
+        write += 1;
+    }
+    tab_windows.in_use_indices.truncate(write);
+
+    let mut visible_write = 0;
+    for read in 0..tab_windows.visible_available_indices.len() {
+        let index = tab_windows.visible_available_indices[read];
+        if index == removed_index {
+            continue;
+        }
+        tab_windows.visible_available_indices[visible_write] = if index > removed_index {
+            index.saturating_sub(1)
+        } else {
+            index
+        };
+        visible_write += 1;
+    }
+    tab_windows
+        .visible_available_indices
+        .truncate(visible_write);
+}
+
+fn remove_cached_window_at(tab_windows: &mut TabWindows, namespace_id: u32, remove_index: usize) {
+    let cached = tab_windows.windows.remove(remove_index);
+    adjust_tracking_after_remove(tab_windows, remove_index);
+    tab_windows.clear_payload(cached.handles.window_id);
+    close_cached_window(namespace_id, cached.handles);
+}
+
+fn rollover_in_use_windows(tab_windows: &mut TabWindows, previous_epoch: FrameEpoch) {
+    let in_use_indices = std::mem::take(&mut tab_windows.in_use_indices);
+    let mut visible_available_indices = Vec::with_capacity(in_use_indices.len());
+    for index in in_use_indices {
+        if let Some(cached) = tab_windows.windows.get_mut(index) {
+            let rollover = cached.rollover_to_next_epoch(previous_epoch);
+            if matches!(
+                rollover,
+                EpochRollover::ReleasedForReuse | EpochRollover::RecoveredStaleInUse
+            ) {
+                visible_available_indices.push(index);
+            }
+        }
+    }
+    tab_windows.visible_available_indices = visible_available_indices;
+}
+
 fn get_or_create_window(
     draw_state: &mut DrawState,
     namespace_id: u32,
@@ -639,7 +872,8 @@ fn get_or_create_window(
     row: i64,
     col: i64,
     zindex: u32,
-) -> Result<(api::Window, api::Buffer)> {
+) -> Result<(i32, api::Buffer)> {
+    let requested_placement = WindowPlacement { row, col, zindex };
     let tab_windows = draw_state.tabs.entry(tab_handle).or_default();
     while tab_windows.reuse_scan_index < tab_windows.windows.len() {
         let index = tab_windows.reuse_scan_index;
@@ -651,23 +885,26 @@ fn get_or_create_window(
         }
 
         let maybe_window = window_from_handle_i32(cached.handles.window_id);
-        let maybe_buffer = buffer_from_handle_i32(cached.handles.buffer_id);
+        if let Some(mut window) = maybe_window {
+            if cached.needs_reconfigure(requested_placement) {
+                let config = float_window_config(row, col, zindex);
+                if window.set_config(&config).is_err() {
+                    remove_cached_window_at(tab_windows, namespace_id, index);
+                    continue;
+                }
+            }
 
-        if let (Some(mut window), Some(buffer)) = (maybe_window, maybe_buffer) {
-            let config = float_window_config(row, col, zindex);
-            if window.set_config(&config).is_ok()
+            if let Some(buffer) = buffer_from_handle_i32(cached.handles.buffer_id)
                 && tab_windows.windows[index].mark_in_use(tab_windows.current_epoch)
             {
+                tab_windows.windows[index].set_placement(requested_placement);
                 tab_windows.frame_demand = tab_windows.frame_demand.saturating_add(1);
-                return Ok((window, buffer));
+                tab_windows.in_use_indices.push(index);
+                return Ok((cached.handles.window_id, buffer));
             }
         }
 
-        close_cached_window(namespace_id, cached.handles);
-        tab_windows.windows.remove(index);
-        if tab_windows.reuse_scan_index > 0 {
-            tab_windows.reuse_scan_index -= 1;
-        }
+        remove_cached_window_at(tab_windows, namespace_id, index);
     }
 
     // Match upstream Lua behavior: avoid triggering unrelated autocmds while
@@ -687,11 +924,15 @@ fn get_or_create_window(
     tab_windows.windows.push(CachedRenderWindow::new_in_use(
         handles,
         tab_windows.current_epoch,
+        requested_placement,
     ));
+    tab_windows
+        .in_use_indices
+        .push(tab_windows.windows.len().saturating_sub(1));
     tab_windows.frame_demand = tab_windows.frame_demand.saturating_add(1);
     tab_windows.reuse_scan_index = tab_windows.windows.len();
 
-    Ok((window, buffer))
+    Ok((handles.window_id, buffer))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -760,19 +1001,19 @@ fn lru_prune_indices(windows: &[CachedRenderWindow], keep_count: usize) -> Vec<u
     }
 
     let remove_count = ordered.len().saturating_sub(keep_count);
-    ordered.sort_by(|lhs, rhs| lhs.1.cmp(&rhs.1).then(lhs.0.cmp(&rhs.0)));
-
-    let mut remove_indices: Vec<usize> = ordered
-        .into_iter()
-        .take(remove_count)
-        .map(|(index, _)| index)
-        .collect();
+    let mut remove_indices: Vec<usize> = if remove_count == ordered.len() {
+        ordered.into_iter().map(|(index, _)| index).collect()
+    } else {
+        let (remove_slice, _, _) = ordered.select_nth_unstable_by(remove_count, |lhs, rhs| {
+            lhs.1.cmp(&rhs.1).then(lhs.0.cmp(&rhs.0))
+        });
+        remove_slice.iter().map(|(index, _)| *index).collect()
+    };
     remove_indices.sort_unstable();
     remove_indices
 }
 
 fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32, max_kept_windows: usize) {
-    let hide_config = hide_window_config();
     for tab_windows in draw_state.tabs.values_mut() {
         let next_budget = next_adaptive_budget(
             AdaptiveBudgetState {
@@ -787,44 +1028,12 @@ fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32, max_kept_
         tab_windows.current_epoch = tab_windows.current_epoch.next();
         tab_windows.frame_demand = 0;
         tab_windows.reuse_scan_index = 0;
+        rollover_in_use_windows(tab_windows, previous_epoch);
 
-        let mut index = 0;
-        while index < tab_windows.windows.len() {
-            let handles = tab_windows.windows[index].handles;
-            let maybe_window = window_from_handle_i32(handles.window_id);
-            let maybe_buffer = buffer_from_handle_i32(handles.buffer_id);
-
-            if maybe_window.is_none() || maybe_buffer.is_none() {
-                close_cached_window(namespace_id, handles);
-                tab_windows.windows.remove(index);
-                continue;
-            }
-
-            let rollover = tab_windows.windows[index].rollover_to_next_epoch(previous_epoch);
-            if matches!(
-                rollover,
-                EpochRollover::ReleasedForReuse | EpochRollover::RecoveredStaleInUse
-            ) {
-                if let Some(mut buffer) = maybe_buffer {
-                    clear_render_namespace(
-                        &mut buffer,
-                        namespace_id,
-                        "clear reused render namespace",
-                    );
-                }
-
-                if let Some(mut window) = maybe_window
-                    && window.set_config(&hide_config).is_err()
-                {
-                    close_cached_window(namespace_id, handles);
-                    tab_windows.windows.remove(index);
-                    continue;
-                }
-            }
-
-            index += 1;
-        }
-
+        debug_assert!(
+            tab_windows.in_use_indices.is_empty(),
+            "in-use index set must be empty after rollover"
+        );
         debug_assert!(
             tab_windows
                 .windows
@@ -834,15 +1043,51 @@ fn clear_cached_windows(draw_state: &mut DrawState, namespace_id: u32, max_kept_
         );
 
         let keep_budget = effective_keep_budget(tab_windows.cached_budget, max_kept_windows);
-        let remove_indices = lru_prune_indices(&tab_windows.windows, keep_budget);
-        if !remove_indices.is_empty() {
+        if tab_windows.windows.len() > keep_budget {
+            let remove_indices = lru_prune_indices(&tab_windows.windows, keep_budget);
+            if remove_indices.is_empty() {
+                continue;
+            }
             // Match upstream Lua behavior: close extra windows with events
             // ignored to avoid incidental side effects.
             let _event_ignore = EventIgnoreGuard::set_all();
             for remove_index in remove_indices.into_iter().rev() {
-                let cached = tab_windows.windows.remove(remove_index);
-                close_cached_window(namespace_id, cached.handles);
+                remove_cached_window_at(tab_windows, namespace_id, remove_index);
             }
+        }
+    }
+}
+
+fn hide_available_windows(draw_state: &mut DrawState, namespace_id: u32) {
+    let hide_config = hide_window_config();
+    for tab_windows in draw_state.tabs.values_mut() {
+        let mut hide_indices = std::mem::take(&mut tab_windows.visible_available_indices);
+        if hide_indices.is_empty() {
+            continue;
+        }
+        hide_indices.sort_unstable();
+        hide_indices.dedup();
+
+        for index in hide_indices.into_iter().rev() {
+            if index >= tab_windows.windows.len() {
+                continue;
+            }
+            if !tab_windows.windows[index].should_hide() {
+                continue;
+            }
+
+            let handles = tab_windows.windows[index].handles;
+            let Some(mut window) = window_from_handle_i32(handles.window_id) else {
+                remove_cached_window_at(tab_windows, namespace_id, index);
+                continue;
+            };
+
+            if window.set_config(&hide_config).is_err() {
+                remove_cached_window_at(tab_windows, namespace_id, index);
+                continue;
+            }
+
+            tab_windows.windows[index].mark_hidden();
         }
     }
 }
@@ -866,6 +1111,7 @@ fn purge_cached_windows(draw_state: &mut DrawState, namespace_id: u32) {
 pub(crate) fn clear_active_render_windows(namespace_id: u32, max_kept_windows: usize) {
     let mut draw_state = draw_state_lock();
     clear_cached_windows(&mut draw_state, namespace_id, max_kept_windows);
+    hide_available_windows(&mut draw_state, namespace_id);
 }
 
 pub(crate) fn purge_render_windows(namespace_id: u32) {
@@ -884,1671 +1130,4 @@ pub(crate) fn clear_all_namespaces(namespace_id: u32) {
             clear_buffer_namespace(&mut buffer, namespace_id);
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EdgeType {
-    Top,
-    Bottom,
-    Left,
-    Right,
-    LeftDiagonal,
-    RightDiagonal,
-    None,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BlockCharacterSet {
-    Bottom,
-    Left,
-    Top,
-    Right,
-    VerticalBars,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PartialBlockProperties {
-    character_index: i64,
-    character_set: BlockCharacterSet,
-    level: u32,
-    inverted: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-struct EdgeIntersections {
-    centerlines: HashMap<i64, f64>,
-    edges: HashMap<i64, [f64; 2]>,
-    fractions: HashMap<i64, [f64; 2]>,
-}
-
-#[derive(Clone, Debug)]
-struct QuadGeometry {
-    top: i64,
-    bottom: i64,
-    left: i64,
-    right: i64,
-    slopes: [f64; 4],
-    angles: [f64; 4],
-    edge_types: [EdgeType; 4],
-    intersections: [EdgeIntersections; 4],
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct CellIntersections {
-    top: Option<f64>,
-    bottom: Option<f64>,
-    left: Option<f64>,
-    right: Option<f64>,
-    diagonal: Option<f64>,
-}
-
-const DIAGONAL_SLOPES: [f64; 10] = [
-    -2.0,
-    -4.0 / 3.0,
-    -1.0,
-    -2.0 / 3.0,
-    -1.0 / 3.0,
-    1.0 / 3.0,
-    2.0 / 3.0,
-    1.0,
-    4.0 / 3.0,
-    2.0,
-];
-
-const LEFT_DIAGONAL_NEG_2: &[(f64, &str)] = &[(-1.0 / 4.0, "🭛"), (1.0 / 4.0, "🭟")];
-const LEFT_DIAGONAL_NEG_4_3: &[(f64, &str)] = &[(-3.0 / 8.0, "🭙"), (3.0 / 8.0, "🭟")];
-const LEFT_DIAGONAL_NEG_1: &[(f64, &str)] = &[(0.0, "◤")];
-const LEFT_DIAGONAL_NEG_2_3: &[(f64, &str)] = &[
-    (-3.0 / 4.0, "🭗"),
-    (-1.0 / 4.0, "🭚"),
-    (1.0 / 4.0, "🭠"),
-    (3.0 / 4.0, "🭝"),
-];
-const LEFT_DIAGONAL_NEG_1_3: &[(f64, &str)] = &[(-1.0, "🭘"), (0.0, "🭜"), (1.0, "🭞")];
-const LEFT_DIAGONAL_POS_1_3: &[(f64, &str)] = &[(-1.0, "🬽"), (0.0, "🭑"), (1.0, "🭍")];
-const LEFT_DIAGONAL_POS_2_3: &[(f64, &str)] = &[
-    (-3.0 / 4.0, "🬼"),
-    (-1.0 / 4.0, "🬿"),
-    (1.0 / 4.0, "🭏"),
-    (3.0 / 4.0, "🭌"),
-];
-const LEFT_DIAGONAL_POS_1: &[(f64, &str)] = &[(0.0, "◣")];
-const LEFT_DIAGONAL_POS_4_3: &[(f64, &str)] = &[(-3.0 / 8.0, "🬾"), (3.0 / 8.0, "🭎")];
-const LEFT_DIAGONAL_POS_2: &[(f64, &str)] = &[(-1.0 / 4.0, "🭀"), (1.0 / 4.0, "🭐")];
-
-const RIGHT_DIAGONAL_NEG_2: &[(f64, &str)] = &[(-1.0 / 4.0, "🭅"), (1.0 / 4.0, "🭋")];
-const RIGHT_DIAGONAL_NEG_4_3: &[(f64, &str)] = &[(-3.0 / 8.0, "🭃"), (3.0 / 8.0, "🭉")];
-const RIGHT_DIAGONAL_NEG_1: &[(f64, &str)] = &[(0.0, "◢")];
-const RIGHT_DIAGONAL_NEG_2_3: &[(f64, &str)] = &[
-    (-3.0 / 4.0, "🭁"),
-    (-1.0 / 4.0, "🭄"),
-    (1.0 / 4.0, "🭊"),
-    (3.0 / 4.0, "🭇"),
-];
-const RIGHT_DIAGONAL_NEG_1_3: &[(f64, &str)] = &[(-1.0, "🭂"), (0.0, "🭆"), (1.0, "🭈")];
-const RIGHT_DIAGONAL_POS_1_3: &[(f64, &str)] = &[(-1.0, "🭓"), (0.0, "🭧"), (1.0, "🭣")];
-const RIGHT_DIAGONAL_POS_2_3: &[(f64, &str)] = &[
-    (-3.0 / 4.0, "🭒"),
-    (-1.0 / 4.0, "🭕"),
-    (1.0 / 4.0, "🭥"),
-    (3.0 / 4.0, "🭢"),
-];
-const RIGHT_DIAGONAL_POS_1: &[(f64, &str)] = &[(0.0, "◥")];
-const RIGHT_DIAGONAL_POS_4_3: &[(f64, &str)] = &[(-3.0 / 8.0, "🭔"), (3.0 / 8.0, "🭤")];
-const RIGHT_DIAGONAL_POS_2: &[(f64, &str)] = &[(-1.0 / 4.0, "🭖"), (1.0 / 4.0, "🭦")];
-
-fn frac01(value: f64) -> f64 {
-    value.rem_euclid(1.0)
-}
-
-fn round_lua(value: f64) -> i64 {
-    (value + 0.5).floor() as i64
-}
-
-fn level_from_shade(shade: f64, color_levels: u32) -> u32 {
-    if !shade.is_finite() || color_levels == 0 {
-        return 0;
-    }
-
-    let rounded = round_lua(shade * f64::from(color_levels));
-    if rounded <= 0 {
-        0
-    } else {
-        let clamped = rounded.min(i64::from(color_levels));
-        u32::try_from(clamped).unwrap_or(0)
-    }
-}
-
-fn block_characters(character_set: BlockCharacterSet) -> &'static [&'static str] {
-    match character_set {
-        BlockCharacterSet::Bottom => &BOTTOM_BLOCKS,
-        BlockCharacterSet::Left => &LEFT_BLOCKS,
-        BlockCharacterSet::Top => &TOP_BLOCKS,
-        BlockCharacterSet::Right => &RIGHT_BLOCKS,
-        BlockCharacterSet::VerticalBars => &VERTICAL_BARS,
-    }
-}
-
-fn ensure_clockwise(corners: &[Point; 4]) -> [Point; 4] {
-    let cross = (corners[1].row - corners[0].row) * (corners[3].col - corners[0].col)
-        - (corners[1].col - corners[0].col) * (corners[3].row - corners[0].row);
-
-    if cross > 0.0 {
-        [corners[2], corners[1], corners[0], corners[3]]
-    } else {
-        *corners
-    }
-}
-
-fn precompute_intersections_horizontal(
-    corners: &[Point; 4],
-    geometry: &mut QuadGeometry,
-    edge_index: usize,
-) {
-    let slope = geometry.slopes[edge_index];
-    let corner = corners[edge_index];
-    let intersections = &mut geometry.intersections[edge_index];
-
-    for col in geometry.left..=geometry.right {
-        let centerline = corner.row + ((col as f64 + 0.5) - corner.col) * slope;
-        intersections.centerlines.insert(col, centerline);
-        intersections
-            .fractions
-            .insert(col, [centerline - 0.25 * slope, centerline + 0.25 * slope]);
-    }
-}
-
-fn precompute_intersections_vertical(
-    corners: &[Point; 4],
-    geometry: &mut QuadGeometry,
-    edge_index: usize,
-) {
-    let slope = geometry.slopes[edge_index];
-    let corner = corners[edge_index];
-    let intersections = &mut geometry.intersections[edge_index];
-
-    for row in geometry.top..=geometry.bottom {
-        let centerline = corner.col + ((row as f64 + 0.5) - corner.row) / slope;
-        intersections.centerlines.insert(row, centerline);
-        intersections
-            .fractions
-            .insert(row, [centerline - 0.25 / slope, centerline + 0.25 / slope]);
-    }
-}
-
-fn precompute_intersections_diagonal(
-    corners: &[Point; 4],
-    geometry: &mut QuadGeometry,
-    edge_index: usize,
-    frame: &RenderFrame,
-) {
-    let slope = geometry.slopes[edge_index];
-    let edge_type = geometry.edge_types[edge_index];
-    let corner = corners[edge_index];
-    let intersections = &mut geometry.intersections[edge_index];
-
-    for row in geometry.top..=geometry.bottom {
-        let centerline = corner.col + ((row as f64 + 0.5) - corner.row) / slope;
-        intersections.centerlines.insert(row, centerline);
-
-        let (shift_1, shift_2) = if edge_type == EdgeType::LeftDiagonal {
-            (-0.5, 0.5)
-        } else {
-            (0.5, -0.5)
-        };
-
-        intersections.edges.insert(
-            row,
-            [
-                centerline + shift_1 / slope.abs(),
-                centerline + shift_2 / slope.abs(),
-            ],
-        );
-        intersections
-            .fractions
-            .insert(row, [centerline - 0.25 / slope, centerline + 0.25 / slope]);
-    }
-
-    let mut min_angle_difference = f64::INFINITY;
-    let mut closest_slope = None;
-    for block_slope in DIAGONAL_SLOPES {
-        let angle_difference =
-            ((BLOCK_ASPECT_RATIO * block_slope).atan() - geometry.angles[edge_index]).abs();
-        if angle_difference < min_angle_difference {
-            min_angle_difference = angle_difference;
-            closest_slope = Some(block_slope);
-        }
-    }
-
-    if let Some(slope) = closest_slope
-        && min_angle_difference <= frame.max_angle_difference_diagonal
-    {
-        geometry.slopes[edge_index] = slope;
-    }
-}
-
-fn precompute_quad_geometry(corners: &[Point; 4], frame: &RenderFrame) -> QuadGeometry {
-    let top = corners
-        .iter()
-        .fold(f64::INFINITY, |acc, corner| acc.min(corner.row))
-        .floor() as i64;
-    let bottom = corners
-        .iter()
-        .fold(f64::NEG_INFINITY, |acc, corner| acc.max(corner.row))
-        .ceil() as i64
-        - 1;
-    let left = corners
-        .iter()
-        .fold(f64::INFINITY, |acc, corner| acc.min(corner.col))
-        .floor() as i64;
-    let right = corners
-        .iter()
-        .fold(f64::NEG_INFINITY, |acc, corner| acc.max(corner.col))
-        .ceil() as i64
-        - 1;
-
-    let mut slopes = [0.0; 4];
-    let mut angles = [0.0; 4];
-    let mut edge_types = [EdgeType::None; 4];
-
-    for edge_index in 0..4 {
-        let next_index = (edge_index + 1) % 4;
-        let edge_row = corners[next_index].row - corners[edge_index].row;
-        let edge_col = corners[next_index].col - corners[edge_index].col;
-        let slope = edge_row / edge_col;
-        slopes[edge_index] = slope;
-        angles[edge_index] = (BLOCK_ASPECT_RATIO * slope).atan();
-
-        let abs_slope = slope.abs();
-        edge_types[edge_index] = if abs_slope.is_nan() {
-            EdgeType::None
-        } else if abs_slope <= frame.max_slope_horizontal {
-            if edge_col > 0.0 {
-                EdgeType::Top
-            } else {
-                EdgeType::Bottom
-            }
-        } else if abs_slope >= frame.min_slope_vertical {
-            if edge_row > 0.0 {
-                EdgeType::Right
-            } else {
-                EdgeType::Left
-            }
-        } else if edge_row > 0.0 {
-            EdgeType::RightDiagonal
-        } else {
-            EdgeType::LeftDiagonal
-        };
-    }
-
-    let mut geometry = QuadGeometry {
-        top,
-        bottom,
-        left,
-        right,
-        slopes,
-        angles,
-        edge_types,
-        intersections: std::array::from_fn(|_| EdgeIntersections::default()),
-    };
-
-    for edge_index in 0..4 {
-        match geometry.edge_types[edge_index] {
-            EdgeType::Top | EdgeType::Bottom => {
-                precompute_intersections_horizontal(corners, &mut geometry, edge_index)
-            }
-            EdgeType::Left | EdgeType::Right => {
-                precompute_intersections_vertical(corners, &mut geometry, edge_index)
-            }
-            EdgeType::LeftDiagonal | EdgeType::RightDiagonal => {
-                precompute_intersections_diagonal(corners, &mut geometry, edge_index, frame)
-            }
-            EdgeType::None => {}
-        }
-    }
-
-    geometry
-}
-
-fn get_edge_cell_intersection(
-    edge_index: usize,
-    row: i64,
-    col: i64,
-    geometry: &QuadGeometry,
-    low: bool,
-) -> f64 {
-    let intersections = &geometry.intersections[edge_index];
-    match geometry.edge_types[edge_index] {
-        EdgeType::Top => intersections
-            .centerlines
-            .get(&col)
-            .map_or(0.0, |centerline| centerline - row as f64),
-        EdgeType::Bottom => intersections
-            .centerlines
-            .get(&col)
-            .map_or(0.0, |centerline| row as f64 + 1.0 - centerline),
-        EdgeType::Left => intersections
-            .centerlines
-            .get(&row)
-            .map_or(0.0, |centerline| centerline - col as f64),
-        EdgeType::Right => intersections
-            .centerlines
-            .get(&row)
-            .map_or(0.0, |centerline| col as f64 + 1.0 - centerline),
-        EdgeType::LeftDiagonal => intersections
-            .edges
-            .get(&row)
-            .map_or(0.0, |edges| edges[if low { 0 } else { 1 }] - col as f64),
-        EdgeType::RightDiagonal => intersections.edges.get(&row).map_or(0.0, |edges| {
-            col as f64 + 1.0 - edges[if low { 0 } else { 1 }]
-        }),
-        EdgeType::None => 0.0,
-    }
-}
-
-fn update_matrix_with_top_edge(
-    edge_index: usize,
-    fraction_index: usize,
-    row: i64,
-    col: i64,
-    geometry: &QuadGeometry,
-    matrix: &mut [[f64; 2]; 2],
-) {
-    let Some(fractions) = geometry.intersections[edge_index].fractions.get(&col) else {
-        return;
-    };
-
-    let row_float = 2.0 * (fractions[fraction_index] - row as f64);
-    let matrix_index = row_float.floor() as i64 + 1;
-
-    let upper = (matrix_index - 1).min(2);
-    if upper >= 1 {
-        for index in 1..=upper {
-            matrix[(index - 1) as usize][fraction_index] = 0.0;
-        }
-    }
-
-    if matrix_index == 1 || matrix_index == 2 {
-        let shade = 1.0 - row_float.rem_euclid(1.0);
-        matrix[(matrix_index - 1) as usize][fraction_index] *= shade;
-    }
-}
-
-fn update_matrix_with_bottom_edge(
-    edge_index: usize,
-    fraction_index: usize,
-    row: i64,
-    col: i64,
-    geometry: &QuadGeometry,
-    matrix: &mut [[f64; 2]; 2],
-) {
-    let Some(fractions) = geometry.intersections[edge_index].fractions.get(&col) else {
-        return;
-    };
-
-    let row_float = 2.0 * (fractions[fraction_index] - row as f64);
-    let matrix_index = row_float.floor() as i64 + 1;
-
-    let start = (matrix_index + 1).max(1);
-    if start <= 2 {
-        for index in start..=2 {
-            matrix[(index - 1) as usize][fraction_index] = 0.0;
-        }
-    }
-
-    if matrix_index == 1 || matrix_index == 2 {
-        let shade = row_float.rem_euclid(1.0);
-        matrix[(matrix_index - 1) as usize][fraction_index] *= shade;
-    }
-}
-
-fn update_matrix_with_left_edge(
-    edge_index: usize,
-    fraction_index: usize,
-    row: i64,
-    col: i64,
-    geometry: &QuadGeometry,
-    matrix: &mut [[f64; 2]; 2],
-) {
-    let Some(fractions) = geometry.intersections[edge_index].fractions.get(&row) else {
-        return;
-    };
-
-    let col_float = 2.0 * (fractions[fraction_index] - col as f64);
-    let matrix_index = col_float.floor() as i64 + 1;
-
-    let upper = (matrix_index - 1).min(2);
-    if upper >= 1 {
-        for index in 1..=upper {
-            matrix[fraction_index][(index - 1) as usize] = 0.0;
-        }
-    }
-
-    if matrix_index == 1 || matrix_index == 2 {
-        let shade = 1.0 - col_float.rem_euclid(1.0);
-        matrix[fraction_index][(matrix_index - 1) as usize] *= shade;
-    }
-}
-
-fn update_matrix_with_right_edge(
-    edge_index: usize,
-    fraction_index: usize,
-    row: i64,
-    col: i64,
-    geometry: &QuadGeometry,
-    matrix: &mut [[f64; 2]; 2],
-) {
-    let Some(fractions) = geometry.intersections[edge_index].fractions.get(&row) else {
-        return;
-    };
-
-    let col_float = 2.0 * (fractions[fraction_index] - col as f64);
-    let matrix_index = col_float.floor() as i64 + 1;
-
-    let start = (matrix_index + 1).max(1);
-    if start <= 2 {
-        for index in start..=2 {
-            matrix[fraction_index][(index - 1) as usize] = 0.0;
-        }
-    }
-
-    if matrix_index == 1 || matrix_index == 2 {
-        let shade = col_float.rem_euclid(1.0);
-        matrix[fraction_index][(matrix_index - 1) as usize] *= shade;
-    }
-}
-
-fn update_matrix_with_edge(
-    edge_index: usize,
-    fraction_index: usize,
-    row: i64,
-    col: i64,
-    geometry: &QuadGeometry,
-    matrix: &mut [[f64; 2]; 2],
-) {
-    match geometry.edge_types[edge_index] {
-        EdgeType::Top => {
-            update_matrix_with_top_edge(edge_index, fraction_index, row, col, geometry, matrix)
-        }
-        EdgeType::Bottom => {
-            update_matrix_with_bottom_edge(edge_index, fraction_index, row, col, geometry, matrix)
-        }
-        EdgeType::Left | EdgeType::LeftDiagonal => {
-            update_matrix_with_left_edge(edge_index, fraction_index, row, col, geometry, matrix)
-        }
-        EdgeType::Right | EdgeType::RightDiagonal => {
-            update_matrix_with_right_edge(edge_index, fraction_index, row, col, geometry, matrix)
-        }
-        EdgeType::None => {}
-    }
-}
-
-fn diagonal_blocks_for_slope(
-    edge_type: EdgeType,
-    slope: f64,
-) -> Option<&'static [(f64, &'static str)]> {
-    let slope_matches = |expected: f64| (slope - expected).abs() <= 1.0e-9;
-
-    match edge_type {
-        EdgeType::LeftDiagonal => {
-            if slope_matches(-2.0) {
-                Some(RIGHT_DIAGONAL_NEG_2)
-            } else if slope_matches(-4.0 / 3.0) {
-                Some(RIGHT_DIAGONAL_NEG_4_3)
-            } else if slope_matches(-1.0) {
-                Some(RIGHT_DIAGONAL_NEG_1)
-            } else if slope_matches(-2.0 / 3.0) {
-                Some(RIGHT_DIAGONAL_NEG_2_3)
-            } else if slope_matches(-1.0 / 3.0) {
-                Some(RIGHT_DIAGONAL_NEG_1_3)
-            } else if slope_matches(1.0 / 3.0) {
-                Some(RIGHT_DIAGONAL_POS_1_3)
-            } else if slope_matches(2.0 / 3.0) {
-                Some(RIGHT_DIAGONAL_POS_2_3)
-            } else if slope_matches(1.0) {
-                Some(RIGHT_DIAGONAL_POS_1)
-            } else if slope_matches(4.0 / 3.0) {
-                Some(RIGHT_DIAGONAL_POS_4_3)
-            } else if slope_matches(2.0) {
-                Some(RIGHT_DIAGONAL_POS_2)
-            } else {
-                None
-            }
-        }
-        EdgeType::RightDiagonal => {
-            if slope_matches(-2.0) {
-                Some(LEFT_DIAGONAL_NEG_2)
-            } else if slope_matches(-4.0 / 3.0) {
-                Some(LEFT_DIAGONAL_NEG_4_3)
-            } else if slope_matches(-1.0) {
-                Some(LEFT_DIAGONAL_NEG_1)
-            } else if slope_matches(-2.0 / 3.0) {
-                Some(LEFT_DIAGONAL_NEG_2_3)
-            } else if slope_matches(-1.0 / 3.0) {
-                Some(LEFT_DIAGONAL_NEG_1_3)
-            } else if slope_matches(1.0 / 3.0) {
-                Some(LEFT_DIAGONAL_POS_1_3)
-            } else if slope_matches(2.0 / 3.0) {
-                Some(LEFT_DIAGONAL_POS_2_3)
-            } else if slope_matches(1.0) {
-                Some(LEFT_DIAGONAL_POS_1)
-            } else if slope_matches(4.0 / 3.0) {
-                Some(LEFT_DIAGONAL_POS_4_3)
-            } else if slope_matches(2.0) {
-                Some(LEFT_DIAGONAL_POS_2)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn compute_gradient_shade(row_center: f64, col_center: f64, frame: &RenderFrame) -> f64 {
-    let Some(gradient) = frame.gradient else {
-        return 1.0;
-    };
-
-    let dy = row_center - gradient.origin.row;
-    let dx = col_center - gradient.origin.col;
-    let projection =
-        (dy * gradient.direction_scaled.row + dx * gradient.direction_scaled.col).clamp(0.0, 1.0);
-    (1.0 - projection).powf(frame.gradient_exponent)
-}
-
-fn editor_bounds() -> Result<(i64, i64)> {
-    let opts = OptionOpts::builder().build();
-    let lines: i64 = api::get_option_value("lines", &opts)?;
-    let cmdheight: i64 = api::get_option_value("cmdheight", &opts)?;
-    let columns: i64 = api::get_option_value("columns", &opts)?;
-    let max_row = (lines - cmdheight).max(1);
-    let max_col = columns.max(1);
-    Ok((max_row, max_col))
-}
-
-fn draw_character(
-    draw_state: &mut DrawState,
-    namespace_id: u32,
-    row: i64,
-    col: i64,
-    character: &str,
-    hl_group: &str,
-    zindex: u32,
-    max_row: i64,
-    max_col: i64,
-) -> Result<()> {
-    if row < 1 || row > max_row || col < 1 || col > max_col {
-        return Ok(());
-    }
-
-    let tab_handle = api::get_current_tabpage().handle();
-    let (_, mut buffer) =
-        get_or_create_window(draw_state, namespace_id, tab_handle, row, col, zindex)?;
-
-    let extmark_opts = SetExtmarkOpts::builder()
-        .id(EXTMARK_ID)
-        .virt_text([(character, hl_group)])
-        .virt_text_pos(ExtmarkVirtTextPosition::Overlay)
-        .virt_text_win_col(0)
-        .build();
-
-    buffer.set_extmark(namespace_id, 0, 0, &extmark_opts)?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        ADAPTIVE_POOL_BUDGET_MARGIN, ADAPTIVE_POOL_EWMA_SCALE, ADAPTIVE_POOL_HARD_MAX_BUDGET,
-        ADAPTIVE_POOL_MIN_BUDGET, AdaptiveBudgetState, CachedRenderWindow, CachedWindowLifecycle,
-        EpochRollover, FrameEpoch, WindowBufferHandle, effective_keep_budget, lru_prune_indices,
-        next_adaptive_budget,
-    };
-
-    #[test]
-    fn adaptive_budget_has_floor_when_idle() {
-        let previous = AdaptiveBudgetState {
-            ewma_demand_milli: 0,
-            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
-        };
-
-        let next = next_adaptive_budget(previous, 0);
-        assert_eq!(next.cached_budget, ADAPTIVE_POOL_MIN_BUDGET);
-        assert_eq!(next.ewma_demand_milli, 0);
-    }
-
-    #[test]
-    fn adaptive_budget_grows_with_demand() {
-        let previous = AdaptiveBudgetState {
-            ewma_demand_milli: 0,
-            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
-        };
-
-        let next = next_adaptive_budget(previous, 120);
-        assert_eq!(next.ewma_demand_milli, 120_u64 * ADAPTIVE_POOL_EWMA_SCALE);
-        assert_eq!(next.cached_budget, 120 + ADAPTIVE_POOL_BUDGET_MARGIN);
-    }
-
-    #[test]
-    fn adaptive_budget_shrinks_gradually() {
-        let previous = AdaptiveBudgetState {
-            ewma_demand_milli: 120_u64 * ADAPTIVE_POOL_EWMA_SCALE,
-            cached_budget: 120,
-        };
-
-        let next = next_adaptive_budget(previous, 0);
-        assert_eq!(next.cached_budget, 112);
-    }
-
-    #[test]
-    fn adaptive_budget_honors_hard_max() {
-        let previous = AdaptiveBudgetState {
-            ewma_demand_milli: 0,
-            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
-        };
-
-        let next = next_adaptive_budget(previous, 10_000);
-        assert_eq!(next.cached_budget, ADAPTIVE_POOL_HARD_MAX_BUDGET);
-    }
-
-    #[test]
-    fn keep_budget_respects_max_kept_windows_cap() {
-        assert_eq!(effective_keep_budget(120, 50), 50);
-        assert_eq!(effective_keep_budget(32, 50), 32);
-        assert_eq!(effective_keep_budget(16, 0), 0);
-    }
-
-    fn cached(window_id: i32, buffer_id: i32, last_used_epoch: u64) -> CachedRenderWindow {
-        CachedRenderWindow {
-            handles: WindowBufferHandle {
-                window_id,
-                buffer_id,
-            },
-            lifecycle: CachedWindowLifecycle::Available {
-                last_used_epoch: FrameEpoch(last_used_epoch),
-            },
-        }
-    }
-
-    #[test]
-    fn rollover_releases_in_use_window_from_previous_epoch() {
-        let handles = WindowBufferHandle {
-            window_id: 10,
-            buffer_id: 11,
-        };
-        let mut cached = CachedRenderWindow::new_in_use(handles, FrameEpoch(9));
-        assert_eq!(
-            cached.rollover_to_next_epoch(FrameEpoch(9)),
-            EpochRollover::ReleasedForReuse
-        );
-        assert_eq!(cached.available_epoch(), Some(FrameEpoch(9)));
-        assert!(cached.is_available_for_reuse());
-    }
-
-    #[test]
-    fn rollover_recovers_stale_in_use_window() {
-        let handles = WindowBufferHandle {
-            window_id: 20,
-            buffer_id: 21,
-        };
-        let mut cached = CachedRenderWindow::new_in_use(handles, FrameEpoch(3));
-        assert_eq!(
-            cached.rollover_to_next_epoch(FrameEpoch(5)),
-            EpochRollover::RecoveredStaleInUse
-        );
-        assert_eq!(cached.available_epoch(), Some(FrameEpoch(3)));
-        assert!(cached.is_available_for_reuse());
-    }
-
-    #[test]
-    fn lru_prune_indices_empty_when_budget_sufficient() {
-        let windows = vec![cached(1, 10, 7), cached(2, 20, 8)];
-        assert!(lru_prune_indices(&windows, 2).is_empty());
-        assert!(lru_prune_indices(&windows, 3).is_empty());
-    }
-
-    #[test]
-    fn lru_prune_indices_removes_oldest_epochs_deterministically() {
-        let windows = vec![
-            cached(1, 10, 9),
-            CachedRenderWindow::new_in_use(
-                WindowBufferHandle {
-                    window_id: 90,
-                    buffer_id: 99,
-                },
-                FrameEpoch(9),
-            ),
-            cached(2, 20, 1),
-            cached(3, 30, 4),
-            cached(4, 40, 1),
-            cached(5, 50, 7),
-        ];
-
-        // Keep three newest reusable epochs; in-use windows are excluded from LRU pruning.
-        assert_eq!(lru_prune_indices(&windows, 3), vec![2, 4]);
-    }
-}
-
-fn draw_partial_block(
-    draw_state: &mut DrawState,
-    namespace_id: u32,
-    row: i64,
-    col: i64,
-    properties: PartialBlockProperties,
-    hl_groups: &[String],
-    inverted_hl_groups: &[String],
-    windows_zindex: u32,
-    max_row: i64,
-    max_col: i64,
-) -> Result<()> {
-    let characters = block_characters(properties.character_set);
-    let Ok(character_index) = usize::try_from(properties.character_index) else {
-        return Ok(());
-    };
-    let Some(character) = characters.get(character_index).copied() else {
-        return Ok(());
-    };
-
-    let level_index = usize::try_from(properties.level)
-        .unwrap_or(0)
-        .min((hl_groups.len().saturating_sub(1)).min(inverted_hl_groups.len().saturating_sub(1)));
-    if level_index == 0 {
-        return Ok(());
-    }
-
-    let hl_group = if properties.inverted {
-        inverted_hl_groups[level_index].as_str()
-    } else {
-        hl_groups[level_index].as_str()
-    };
-
-    draw_character(
-        draw_state,
-        namespace_id,
-        row,
-        col,
-        character,
-        hl_group,
-        windows_zindex,
-        max_row,
-        max_col,
-    )
-}
-
-fn get_top_block_properties(
-    micro_shift: f64,
-    thickness: f64,
-    shade: f64,
-    frame: &RenderFrame,
-) -> Option<PartialBlockProperties> {
-    let character_index = micro_shift.ceil() as i64;
-    if character_index == 0 {
-        return None;
-    }
-
-    let character_thickness = character_index as f64 / 8.0;
-    let adjusted_shade = shade * thickness / character_thickness;
-    let level = level_from_shade(adjusted_shade, frame.color_levels);
-    if level == 0 {
-        return None;
-    }
-
-    if frame.legacy_computing_symbols_support {
-        Some(PartialBlockProperties {
-            character_index,
-            character_set: BlockCharacterSet::Top,
-            level,
-            inverted: false,
-        })
-    } else {
-        Some(PartialBlockProperties {
-            character_index,
-            character_set: BlockCharacterSet::Bottom,
-            level,
-            inverted: true,
-        })
-    }
-}
-
-fn get_bottom_block_properties(
-    micro_shift: f64,
-    thickness: f64,
-    shade: f64,
-    frame: &RenderFrame,
-) -> Option<PartialBlockProperties> {
-    let character_index = micro_shift.floor() as i64;
-    if character_index == 8 {
-        return None;
-    }
-
-    let character_thickness = 1.0 - character_index as f64 / 8.0;
-    let adjusted_shade = shade * thickness / character_thickness;
-    let level = level_from_shade(adjusted_shade, frame.color_levels);
-    if level == 0 {
-        return None;
-    }
-
-    Some(PartialBlockProperties {
-        character_index,
-        character_set: BlockCharacterSet::Bottom,
-        level,
-        inverted: false,
-    })
-}
-
-fn get_vertical_bar_properties(
-    micro_shift: f64,
-    thickness: f64,
-    shade: f64,
-    frame: &RenderFrame,
-) -> Option<PartialBlockProperties> {
-    let character_index = micro_shift.floor() as i64;
-    if !(0..8).contains(&character_index) {
-        return None;
-    }
-
-    let character_thickness = 1.0 / 8.0;
-    let adjusted_shade = (shade * thickness / character_thickness).min(1.0);
-    let level = level_from_shade(adjusted_shade, frame.color_levels);
-    if level == 0 {
-        return None;
-    }
-
-    Some(PartialBlockProperties {
-        character_index,
-        character_set: BlockCharacterSet::VerticalBars,
-        level,
-        inverted: false,
-    })
-}
-
-fn get_left_block_properties(
-    micro_shift: f64,
-    thickness: f64,
-    shade: f64,
-    frame: &RenderFrame,
-) -> Option<PartialBlockProperties> {
-    let character_index = micro_shift.ceil() as i64;
-    if character_index == 0 {
-        return None;
-    }
-
-    let character_thickness = character_index as f64 / 8.0;
-    let adjusted_shade = shade * thickness / character_thickness;
-    let level = level_from_shade(adjusted_shade, frame.color_levels);
-    if level == 0 {
-        return None;
-    }
-
-    Some(PartialBlockProperties {
-        character_index,
-        character_set: BlockCharacterSet::Left,
-        level,
-        inverted: false,
-    })
-}
-
-fn get_right_block_properties(
-    micro_shift: f64,
-    thickness: f64,
-    shade: f64,
-    frame: &RenderFrame,
-) -> Option<PartialBlockProperties> {
-    let character_index = micro_shift.floor() as i64;
-    if character_index == 8 {
-        return None;
-    }
-
-    let character_thickness = 1.0 - character_index as f64 / 8.0;
-    let adjusted_shade = shade * thickness / character_thickness;
-    let level = level_from_shade(adjusted_shade, frame.color_levels);
-    if level == 0 {
-        return None;
-    }
-
-    if frame.legacy_computing_symbols_support {
-        Some(PartialBlockProperties {
-            character_index,
-            character_set: BlockCharacterSet::Right,
-            level,
-            inverted: false,
-        })
-    } else {
-        Some(PartialBlockProperties {
-            character_index,
-            character_set: BlockCharacterSet::Left,
-            level,
-            inverted: true,
-        })
-    }
-}
-
-struct DrawResources<'a> {
-    draw_state: &'a mut DrawState,
-    hl_groups: &'a [String],
-    inverted_hl_groups: &'a [String],
-    max_row: i64,
-    max_col: i64,
-    windows_zindex: u32,
-    particle_zindex: u32,
-}
-
-fn draw_vertically_shifted_sub_block(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
-    frame: &RenderFrame,
-    bulge_above: bool,
-    row_top: f64,
-    row_bottom: f64,
-    col: i64,
-    shade: f64,
-) -> Result<bool> {
-    if row_top >= row_bottom {
-        return Ok(false);
-    }
-
-    let row = row_top.floor() as i64;
-    let center = frac01((row_top + row_bottom) / 2.0);
-    let thickness = row_bottom - row_top;
-    let gap_top = frac01(row_top);
-    let gap_bottom = frac01(1.0 - row_bottom);
-
-    let properties = if gap_top.max(gap_bottom) / 2.0 < gap_top.min(gap_bottom) {
-        if bulge_above {
-            let micro_shift = frac01(row_bottom) * 8.0;
-            get_top_block_properties(micro_shift, thickness, shade, frame)
-        } else {
-            let micro_shift = frac01(row_top) * 8.0;
-            get_bottom_block_properties(micro_shift, thickness, shade, frame)
-        }
-    } else if center < 0.5 {
-        get_top_block_properties(center * 16.0, thickness, shade, frame)
-    } else {
-        get_bottom_block_properties(center * 16.0 - 8.0, thickness, shade, frame)
-    };
-
-    let Some(properties) = properties else {
-        return Ok(false);
-    };
-
-    draw_partial_block(
-        resources.draw_state,
-        namespace_id,
-        row,
-        col,
-        properties,
-        resources.hl_groups,
-        resources.inverted_hl_groups,
-        resources.windows_zindex,
-        resources.max_row,
-        resources.max_col,
-    )?;
-    Ok(true)
-}
-
-fn draw_horizontally_shifted_sub_block(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
-    frame: &RenderFrame,
-    bulge_above: bool,
-    row: i64,
-    col_left: f64,
-    col_right: f64,
-    shade: f64,
-) -> Result<bool> {
-    if col_left >= col_right {
-        return Ok(false);
-    }
-
-    let col = col_left.floor() as i64;
-    let center = frac01((col_left + col_right) / 2.0);
-    let thickness = col_right - col_left;
-    let gap_left = frac01(col_left);
-    let gap_right = frac01(1.0 - col_right);
-
-    let properties = if (frame.legacy_computing_symbols_support
-        || frame.legacy_computing_symbols_support_vertical_bars)
-        && thickness <= 1.5 / 8.0
-    {
-        get_vertical_bar_properties(center * 8.0, thickness, shade, frame)
-    } else if gap_left.max(gap_right) / 2.0 < gap_left.min(gap_right) {
-        if bulge_above {
-            get_left_block_properties(frac01(col_right) * 8.0, thickness, shade, frame)
-        } else {
-            get_right_block_properties(frac01(col_left) * 8.0, thickness, shade, frame)
-        }
-    } else if center < 0.5 {
-        get_left_block_properties(center * 16.0, thickness, shade, frame)
-    } else {
-        get_right_block_properties(center * 16.0 - 8.0, thickness, shade, frame)
-    };
-
-    let Some(properties) = properties else {
-        return Ok(false);
-    };
-
-    draw_partial_block(
-        resources.draw_state,
-        namespace_id,
-        row,
-        col,
-        properties,
-        resources.hl_groups,
-        resources.inverted_hl_groups,
-        resources.windows_zindex,
-        resources.max_row,
-        resources.max_col,
-    )?;
-    Ok(true)
-}
-
-fn draw_diagonal_block(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
-    frame: &RenderFrame,
-    geometry: &QuadGeometry,
-    edge_index: usize,
-    row: i64,
-    col: i64,
-    shade: f64,
-) -> Result<bool> {
-    let edge_type = geometry.edge_types[edge_index];
-    let slope = geometry.slopes[edge_index];
-    let Some(candidates) = diagonal_blocks_for_slope(edge_type, slope) else {
-        return Ok(false);
-    };
-
-    let Some(centerline) = geometry.intersections[edge_index]
-        .centerlines
-        .get(&row)
-        .copied()
-    else {
-        return Ok(false);
-    };
-
-    let mut min_offset = f64::INFINITY;
-    let mut matching_character = None;
-    for (shift, character) in candidates.iter().copied() {
-        let offset = (centerline - col as f64 - 0.5 - shift).abs();
-        if offset < min_offset {
-            min_offset = offset;
-            matching_character = Some(character);
-        }
-    }
-
-    let Some(character) = matching_character else {
-        return Ok(false);
-    };
-    if min_offset > frame.max_offset_diagonal {
-        return Ok(false);
-    }
-
-    let adjusted_shade = if frame.vertical_bar {
-        shade / 8.0
-    } else {
-        shade
-    };
-    let level = level_from_shade(adjusted_shade, frame.color_levels);
-    if level == 0 {
-        return Ok(false);
-    }
-
-    let level_index = usize::try_from(level)
-        .unwrap_or(0)
-        .min(resources.hl_groups.len().saturating_sub(1));
-    if level_index == 0 {
-        return Ok(false);
-    }
-    let hl_group = resources.hl_groups[level_index].as_str();
-
-    draw_character(
-        resources.draw_state,
-        namespace_id,
-        row,
-        col,
-        character,
-        hl_group,
-        resources.windows_zindex,
-        resources.max_row,
-        resources.max_col,
-    )?;
-
-    Ok(true)
-}
-
-fn draw_matrix_character(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
-    frame: &RenderFrame,
-    row: i64,
-    col: i64,
-    matrix: [[f64; 2]; 2],
-    shade: f64,
-) -> Result<bool> {
-    let max_matrix_coverage = matrix
-        .iter()
-        .flat_map(|row_values| row_values.iter())
-        .copied()
-        .fold(0.0_f64, f64::max);
-
-    let matrix_pixel_threshold = if frame.vertical_bar {
-        frame.matrix_pixel_threshold_vertical_bar
-    } else {
-        frame.matrix_pixel_threshold
-    };
-
-    if max_matrix_coverage < matrix_pixel_threshold {
-        return Ok(false);
-    }
-
-    let threshold = max_matrix_coverage * frame.matrix_pixel_min_factor;
-    let bit_1 = usize::from(matrix[0][0] > threshold);
-    let bit_2 = usize::from(matrix[0][1] > threshold);
-    let bit_3 = usize::from(matrix[1][0] > threshold);
-    let bit_4 = usize::from(matrix[1][1] > threshold);
-    let index = bit_1 + bit_2 * 2 + bit_3 * 4 + bit_4 * 8;
-    if index == 0 {
-        return Ok(false);
-    }
-
-    let matrix_shade = matrix[0][0] + matrix[0][1] + matrix[1][0] + matrix[1][1];
-    let max_matrix_shade = bit_1 + bit_2 + bit_3 + bit_4;
-    if max_matrix_shade == 0 {
-        return Ok(false);
-    }
-
-    let level = level_from_shade(
-        shade * matrix_shade / max_matrix_shade as f64,
-        frame.color_levels,
-    );
-    if level == 0 {
-        return Ok(false);
-    }
-
-    let level_index = usize::try_from(level)
-        .unwrap_or(0)
-        .min(resources.hl_groups.len().saturating_sub(1));
-    if level_index == 0 {
-        return Ok(false);
-    }
-    let hl_group = resources.hl_groups[level_index].as_str();
-
-    draw_character(
-        resources.draw_state,
-        namespace_id,
-        row,
-        col,
-        MATRIX_CHARACTERS[index],
-        hl_group,
-        resources.windows_zindex,
-        resources.max_row,
-        resources.max_col,
-    )?;
-    Ok(true)
-}
-
-fn draw_braille_character(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
-    row: i64,
-    col: i64,
-    cell: &[[f64; 2]; 4],
-    hl_group: &str,
-    zindex: u32,
-) -> Result<bool> {
-    let braille_index = usize::from(cell[0][0] > 0.0)
-        + usize::from(cell[1][0] > 0.0) * 2
-        + usize::from(cell[2][0] > 0.0) * 4
-        + usize::from(cell[0][1] > 0.0) * 8
-        + usize::from(cell[1][1] > 0.0) * 16
-        + usize::from(cell[2][1] > 0.0) * 32
-        + usize::from(cell[3][0] > 0.0) * 64
-        + usize::from(cell[3][1] > 0.0) * 128;
-
-    if braille_index == 0 {
-        return Ok(false);
-    }
-
-    let Some(character) = char::from_u32((BRAILLE_CODE_MIN as usize + braille_index) as u32) else {
-        return Ok(false);
-    };
-    let character_text = character.to_string();
-
-    draw_character(
-        resources.draw_state,
-        namespace_id,
-        row,
-        col,
-        &character_text,
-        hl_group,
-        zindex,
-        resources.max_row,
-        resources.max_col,
-    )?;
-
-    Ok(true)
-}
-
-fn draw_octant_character(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
-    row: i64,
-    col: i64,
-    cell: &[[f64; 2]; 4],
-    hl_group: &str,
-    zindex: u32,
-) -> Result<bool> {
-    let octant_index = usize::from(cell[0][0] > 0.0)
-        + usize::from(cell[0][1] > 0.0) * 2
-        + usize::from(cell[1][0] > 0.0) * 4
-        + usize::from(cell[1][1] > 0.0) * 8
-        + usize::from(cell[2][0] > 0.0) * 16
-        + usize::from(cell[2][1] > 0.0) * 32
-        + usize::from(cell[3][0] > 0.0) * 64
-        + usize::from(cell[3][1] > 0.0) * 128;
-
-    if octant_index == 0 {
-        return Ok(false);
-    }
-
-    let Some(character) = OCTANT_CHARACTERS.get(octant_index - 1).copied() else {
-        return Ok(false);
-    };
-
-    draw_character(
-        resources.draw_state,
-        namespace_id,
-        row,
-        col,
-        character,
-        hl_group,
-        zindex,
-        resources.max_row,
-        resources.max_col,
-    )?;
-
-    Ok(true)
-}
-
-fn draw_particles(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
-    frame: &RenderFrame,
-    target_row: i64,
-    target_col: i64,
-) -> Result<()> {
-    if frame.particles.is_empty() {
-        return Ok(());
-    }
-
-    let lifetime_switch_octant_braille = if frame.legacy_computing_symbols_support {
-        frame.particle_max_lifetime * frame.particle_switch_octant_braille
-    } else {
-        f64::INFINITY
-    };
-
-    let mut cells: HashMap<(i64, i64), [[f64; 2]; 4]> = HashMap::new();
-    for particle in &frame.particles {
-        let row = particle.position.row.floor() as i64;
-        let col = particle.position.col.floor() as i64;
-        let sub_row = round_lua(4.0 * frac01(particle.position.row) + 0.5).clamp(1, 4);
-        let sub_col = round_lua(2.0 * frac01(particle.position.col) + 0.5).clamp(1, 2);
-
-        let cell = cells.entry((row, col)).or_insert([[0.0; 2]; 4]);
-        cell[(sub_row - 1) as usize][(sub_col - 1) as usize] += particle.lifetime;
-    }
-
-    for ((row, col), cell) in cells {
-        if row == target_row && col == target_col {
-            continue;
-        }
-        if row < 1 || row > resources.max_row || col < 1 || col > resources.max_col {
-            continue;
-        }
-
-        if !frame.particles_over_text {
-            let args = Array::from_iter([Object::from(row), Object::from(col)]);
-            let bg_char_code = match api::call_function("screenchar", args) {
-                Ok(value) => match i64_from_object("screenchar", value) {
-                    Ok(parsed) => parsed,
-                    Err(_) => continue,
-                },
-                Err(_) => continue,
-            };
-
-            let is_space = bg_char_code == 32;
-            let is_braille = (BRAILLE_CODE_MIN..=BRAILLE_CODE_MAX).contains(&bg_char_code);
-            let is_octant = (OCTANT_CODE_MIN..=OCTANT_CODE_MAX).contains(&bg_char_code);
-            if !is_space && !is_braille && !is_octant {
-                continue;
-            }
-        }
-
-        let num_dots = cell
-            .iter()
-            .flat_map(|row_values| row_values.iter())
-            .filter(|value| **value > 0.0)
-            .count();
-        if num_dots == 0 {
-            continue;
-        }
-
-        let lifetime_sum = cell
-            .iter()
-            .flat_map(|row_values| row_values.iter())
-            .copied()
-            .sum::<f64>();
-        let lifetime_average = lifetime_sum / num_dots as f64;
-
-        let shade = if lifetime_average > lifetime_switch_octant_braille {
-            let denominator = frame.particle_max_lifetime - lifetime_switch_octant_braille;
-            if denominator <= 0.0 {
-                1.0
-            } else {
-                ((lifetime_average - lifetime_switch_octant_braille) / denominator).clamp(0.0, 1.0)
-            }
-        } else {
-            let denominator = frame
-                .particle_max_lifetime
-                .min(lifetime_switch_octant_braille)
-                .max(1.0e-9);
-            (lifetime_average / denominator).clamp(0.0, 1.0)
-        };
-
-        let level = level_from_shade(shade, frame.color_levels);
-        if level == 0 {
-            continue;
-        }
-
-        let level_index = usize::try_from(level)
-            .unwrap_or(0)
-            .min(resources.hl_groups.len().saturating_sub(1));
-        if level_index == 0 {
-            continue;
-        }
-        let hl_group = resources.hl_groups[level_index].as_str();
-
-        if lifetime_average > lifetime_switch_octant_braille {
-            draw_octant_character(
-                resources,
-                namespace_id,
-                row,
-                col,
-                &cell,
-                hl_group,
-                resources.particle_zindex,
-            )?;
-        } else {
-            draw_braille_character(
-                resources,
-                namespace_id,
-                row,
-                col,
-                &cell,
-                hl_group,
-                resources.particle_zindex,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn draw_target_hack_block(namespace_id: u32, frame: &RenderFrame) -> Result<()> {
-    if namespace_id == 0 || !frame.hide_target_hack || frame.vertical_bar {
-        return Ok(());
-    }
-
-    ensure_highlight_palette(frame)?;
-    let (editor_max_row, editor_max_col) = editor_bounds()?;
-    let mut draw_state = draw_state_lock();
-    let level = frame.color_levels.max(1);
-    let hl_group = hl_group_name(level);
-    draw_character(
-        &mut draw_state,
-        namespace_id,
-        frame.target.row.round() as i64,
-        frame.target.col.round() as i64,
-        "█",
-        hl_group.as_str(),
-        frame.windows_zindex,
-        editor_max_row,
-        editor_max_col,
-    )
-}
-
-pub(crate) fn draw_current(namespace_id: u32, frame: &RenderFrame) -> Result<()> {
-    if namespace_id == 0 {
-        return Ok(());
-    }
-
-    ensure_highlight_palette(frame)?;
-
-    let corners = ensure_clockwise(&frame.corners);
-    let geometry = precompute_quad_geometry(&corners, frame);
-    let (editor_max_row, editor_max_col) = editor_bounds()?;
-    let mut draw_state = draw_state_lock();
-    clear_cached_windows(&mut draw_state, namespace_id, frame.max_kept_windows);
-    if geometry.top > geometry.bottom || geometry.left > geometry.right {
-        return Ok(());
-    }
-
-    draw_state.bulge_above = !draw_state.bulge_above;
-    let bulge_above = draw_state.bulge_above;
-
-    let target_row = frame.target.row.round() as i64;
-    let target_col = frame.target.col.round() as i64;
-    let color_levels = frame.color_levels.max(1);
-    let hl_groups: Vec<String> = (0..=color_levels).map(hl_group_name).collect();
-    let inverted_hl_groups: Vec<String> = (0..=color_levels).map(inverted_hl_group_name).collect();
-    let min_shade_no_diagonal = if frame.vertical_bar {
-        frame.min_shade_no_diagonal_vertical_bar
-    } else {
-        frame.min_shade_no_diagonal
-    };
-
-    {
-        let mut resources = DrawResources {
-            draw_state: &mut draw_state,
-            hl_groups: &hl_groups,
-            inverted_hl_groups: &inverted_hl_groups,
-            max_row: editor_max_row,
-            max_col: editor_max_col,
-            windows_zindex: frame.windows_zindex,
-            particle_zindex: frame.windows_zindex.saturating_sub(PARTICLE_ZINDEX_OFFSET),
-        };
-
-        draw_particles(&mut resources, namespace_id, frame, target_row, target_col)?;
-
-        for row in geometry.top..=geometry.bottom {
-            for col in geometry.left..=geometry.right {
-                if frame.never_draw_over_target
-                    && !frame.vertical_bar
-                    && row == target_row
-                    && col == target_col
-                {
-                    continue;
-                }
-
-                let mut intersections = CellIntersections::default();
-                let mut single_diagonal = true;
-                let mut diagonal_edge_index = None;
-                let mut skip_cell = false;
-
-                for edge_index in 0..4 {
-                    let intersection =
-                        get_edge_cell_intersection(edge_index, row, col, &geometry, false);
-                    match geometry.edge_types[edge_index] {
-                        EdgeType::LeftDiagonal | EdgeType::RightDiagonal => {
-                            let intersection_low =
-                                get_edge_cell_intersection(edge_index, row, col, &geometry, true);
-                            if intersection_low >= 1.0 {
-                                skip_cell = true;
-                                break;
-                            }
-
-                            if intersection > min_shade_no_diagonal
-                                && intersections.diagonal.is_some()
-                            {
-                                single_diagonal = false;
-                            }
-
-                            if intersection > 0.0
-                                && intersections
-                                    .diagonal
-                                    .is_none_or(|current| intersection > current)
-                            {
-                                intersections.diagonal = Some(intersection);
-                                diagonal_edge_index = Some(edge_index);
-                            }
-                        }
-                        edge_type => {
-                            if intersection >= 1.0 {
-                                skip_cell = true;
-                                break;
-                            }
-                            if intersection > min_shade_no_diagonal {
-                                single_diagonal = false;
-                            }
-
-                            if intersection > 0.0 {
-                                let current = match edge_type {
-                                    EdgeType::Top => &mut intersections.top,
-                                    EdgeType::Bottom => &mut intersections.bottom,
-                                    EdgeType::Left => &mut intersections.left,
-                                    EdgeType::Right => &mut intersections.right,
-                                    EdgeType::None => continue,
-                                    EdgeType::LeftDiagonal | EdgeType::RightDiagonal => continue,
-                                };
-                                if current.is_none_or(|existing| intersection > existing) {
-                                    *current = Some(intersection);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if skip_cell {
-                    continue;
-                }
-
-                if intersections
-                    .diagonal
-                    .is_none_or(|diagonal| diagonal < 1.0 - frame.max_shade_no_matrix)
-                {
-                    let top_intersection = intersections.top.unwrap_or(0.0).max(0.0);
-                    let bottom_intersection = intersections.bottom.unwrap_or(0.0).max(0.0);
-                    let left_intersection = intersections.left.unwrap_or(0.0).max(0.0);
-                    let right_intersection = intersections.right.unwrap_or(0.0).max(0.0);
-
-                    let mut is_vertically_shifted =
-                        intersections.top.is_some() || intersections.bottom.is_some();
-                    let vertical_shade = 1.0 - top_intersection - bottom_intersection;
-                    let mut is_horizontally_shifted =
-                        intersections.left.is_some() || intersections.right.is_some();
-                    let horizontal_shade = 1.0 - left_intersection - right_intersection;
-
-                    if is_vertically_shifted && is_horizontally_shifted {
-                        if vertical_shade < frame.max_shade_no_matrix
-                            && horizontal_shade < frame.max_shade_no_matrix
-                        {
-                            is_vertically_shifted = false;
-                            is_horizontally_shifted = false;
-                        } else if 2.0 * (1.0 - vertical_shade) > (1.0 - horizontal_shade) {
-                            is_horizontally_shifted = false;
-                        } else {
-                            is_vertically_shifted = false;
-                        }
-                    }
-
-                    if is_vertically_shifted {
-                        let shade = horizontal_shade
-                            * compute_gradient_shade(row as f64 + 0.5, col as f64 + 0.5, frame);
-                        draw_vertically_shifted_sub_block(
-                            &mut resources,
-                            namespace_id,
-                            frame,
-                            bulge_above,
-                            row as f64 + top_intersection,
-                            row as f64 + 1.0 - bottom_intersection,
-                            col,
-                            shade,
-                        )?;
-                        continue;
-                    }
-
-                    if is_horizontally_shifted {
-                        if 1.0 - right_intersection <= 1.0 / 8.0
-                            && row == target_row
-                            && (col == target_col || col == target_col + 1)
-                        {
-                            continue;
-                        }
-
-                        let shade = vertical_shade
-                            * compute_gradient_shade(row as f64 + 0.5, col as f64 + 0.5, frame);
-                        draw_horizontally_shifted_sub_block(
-                            &mut resources,
-                            namespace_id,
-                            frame,
-                            bulge_above,
-                            row,
-                            col as f64 + left_intersection,
-                            col as f64 + 1.0 - right_intersection,
-                            shade,
-                        )?;
-                        continue;
-                    }
-                }
-
-                let gradient_shade =
-                    compute_gradient_shade(row as f64 + 0.5, col as f64 + 0.5, frame);
-                if single_diagonal
-                    && frame.use_diagonal_blocks
-                    && frame.legacy_computing_symbols_support
-                    && diagonal_edge_index.is_some()
-                {
-                    let has_drawn = draw_diagonal_block(
-                        &mut resources,
-                        namespace_id,
-                        frame,
-                        &geometry,
-                        diagonal_edge_index.unwrap_or(0),
-                        row,
-                        col,
-                        gradient_shade,
-                    )?;
-                    if has_drawn {
-                        continue;
-                    }
-                }
-
-                let mut matrix = [[1.0_f64; 2]; 2];
-                for edge_index in 0..4 {
-                    for fraction_index in 0..2 {
-                        update_matrix_with_edge(
-                            edge_index,
-                            fraction_index,
-                            row,
-                            col,
-                            &geometry,
-                            &mut matrix,
-                        );
-                    }
-                }
-
-                draw_matrix_character(
-                    &mut resources,
-                    namespace_id,
-                    frame,
-                    row,
-                    col,
-                    matrix,
-                    gradient_shade,
-                )?;
-            }
-        }
-    }
-
-    Ok(())
 }

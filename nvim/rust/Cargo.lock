@@ -697,6 +697,7 @@ name = "rs_readline"
 version = "0.1.0"
 dependencies = [
  "nvim-oxi",
+ "nvim-utils",
 ]
 
 [[package]]
@@ -705,6 +706,7 @@ version = "0.1.0"
 dependencies = [
  "nvim-oxi",
  "nvim-oxi-utils",
+ "nvim-utils",
  "proptest",
  "serde",
 ]
@@ -725,6 +727,7 @@ name = "rs_text"
 version = "0.1.0"
 dependencies = [
  "nvim-oxi",
+ "nvim-utils",
 ]
 
 [[package]]

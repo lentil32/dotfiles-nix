@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+pub mod mode;
+
 pub mod path {
     use super::{Component, Path, PathBuf, fs};
 

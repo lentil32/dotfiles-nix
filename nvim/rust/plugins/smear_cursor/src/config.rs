@@ -1,4 +1,7 @@
 use crate::types::BASE_TIME_INTERVAL;
+use nvim_utils::mode::{
+    is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeConfig {
@@ -84,17 +87,21 @@ pub(crate) struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub(crate) fn mode_allowed(&self, mode: &str) -> bool {
-        match mode {
-            "i" => self.smear_insert_mode,
-            "R" => self.smear_replace_mode,
-            "t" => self.smear_terminal_mode,
-            "c" => self.smear_to_cmd,
-            _ => true,
+        if is_insert_like_mode(mode) {
+            self.smear_insert_mode
+        } else if is_replace_like_mode(mode) {
+            self.smear_replace_mode
+        } else if is_terminal_like_mode(mode) {
+            self.smear_terminal_mode
+        } else if is_cmdline_mode(mode) {
+            self.smear_to_cmd
+        } else {
+            true
         }
     }
 
     pub(crate) fn cursor_is_vertical_bar(&self, mode: &str) -> bool {
-        if mode == "i" {
+        if is_insert_like_mode(mode) {
             self.vertical_bar_cursor_insert_mode
         } else {
             self.vertical_bar_cursor
@@ -102,7 +109,7 @@ impl RuntimeConfig {
     }
 
     pub(crate) fn cursor_is_horizontal_bar(&self, mode: &str) -> bool {
-        mode == "R" && self.horizontal_bar_cursor_replace_mode
+        is_replace_like_mode(mode) && self.horizontal_bar_cursor_replace_mode
     }
 
     pub(crate) fn requires_cursor_color_sampling(&self) -> bool {
@@ -144,7 +151,7 @@ impl Default for RuntimeConfig {
             smear_terminal_mode: false,
             smear_to_cmd: true,
             hide_target_hack: false,
-            max_kept_windows: 50,
+            max_kept_windows: 256,
             windows_zindex: 300,
             filetypes_disabled: Vec::new(),
             logging_level: 2,
@@ -193,5 +200,53 @@ impl Default for RuntimeConfig {
             matrix_pixel_threshold_vertical_bar: 0.25,
             matrix_pixel_min_factor: 0.5,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeConfig;
+
+    #[test]
+    fn mode_allowed_respects_composite_modes() {
+        let mut config = RuntimeConfig {
+            smear_insert_mode: false,
+            smear_replace_mode: false,
+            smear_terminal_mode: false,
+            smear_to_cmd: false,
+            ..RuntimeConfig::default()
+        };
+
+        assert!(!config.mode_allowed("ic"));
+        assert!(!config.mode_allowed("Rc"));
+        assert!(!config.mode_allowed("cv"));
+        assert!(!config.mode_allowed("nt"));
+        assert!(!config.mode_allowed("ntT"));
+        assert!(config.mode_allowed("n"));
+
+        config.smear_insert_mode = true;
+        config.smear_replace_mode = true;
+        config.smear_terminal_mode = true;
+        config.smear_to_cmd = true;
+        assert!(config.mode_allowed("ic"));
+        assert!(config.mode_allowed("Rc"));
+        assert!(config.mode_allowed("cv"));
+        assert!(config.mode_allowed("nt"));
+        assert!(config.mode_allowed("ntT"));
+    }
+
+    #[test]
+    fn cursor_shape_helpers_use_mode_families() {
+        let config = RuntimeConfig {
+            vertical_bar_cursor: false,
+            vertical_bar_cursor_insert_mode: true,
+            horizontal_bar_cursor_replace_mode: true,
+            ..RuntimeConfig::default()
+        };
+
+        assert!(config.cursor_is_vertical_bar("ic"));
+        assert!(!config.cursor_is_vertical_bar("n"));
+        assert!(config.cursor_is_horizontal_bar("Rc"));
+        assert!(!config.cursor_is_horizontal_bar("n"));
     }
 }

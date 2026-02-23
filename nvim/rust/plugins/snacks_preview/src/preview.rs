@@ -15,9 +15,9 @@ use crate::bridge::{
     snacks_doc_find, snacks_has_doc_preview, snacks_open_preview,
 };
 use crate::reducer::{
-    PreviewCommand, PreviewEffect, PreviewEvent, PreviewTransition, RestoreNamePlan,
+    PreviewCommand, PreviewEffect, PreviewEvent, PreviewToken, PreviewTransition, RestoreNamePlan,
 };
-use crate::state::{buf_key, context};
+use crate::state::{buf_key, context, win_key};
 
 fn report_panic(label: &str, info: &guard::PanicInfo) {
     notify::error(LOG_CONTEXT, &format!("{label} panic: {}", info.render()));
@@ -113,6 +113,26 @@ fn close_doc_preview(buf_handle: BufHandle) -> bool {
     true
 }
 
+fn close_doc_preview_by_token(buf_handle: BufHandle, token: PreviewToken) -> bool {
+    let transition = context().apply_event(PreviewEvent::CloseByToken { token });
+    if transition.is_empty() {
+        return false;
+    }
+    let command = execute_transition(buf_handle, transition);
+    log_unexpected_command("close_by_token", command.as_ref());
+    true
+}
+
+fn close_doc_preview_for_window(buf_handle: BufHandle, win_handle: WinHandle) -> bool {
+    let Some(win) = win_key(win_handle) else {
+        return false;
+    };
+    let Some(token) = context().token_for_win(win) else {
+        return false;
+    };
+    close_doc_preview_by_token(buf_handle, token)
+}
+
 fn close_preview_or_delete_group(buf_handle: BufHandle, group: u32) {
     if !close_doc_preview(buf_handle)
         && let Err(err) = api::del_augroup_by_id(group)
@@ -139,7 +159,7 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
 
     let ft = filetype_for_path(path)?;
     if !is_doc_preview_filetype(&ft) {
-        let _ = close_doc_preview(buf_handle);
+        let _ = close_doc_preview_for_window(buf_handle, win_handle);
         return Ok(());
     }
 
@@ -149,7 +169,7 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
         notify::warn(LOG_CONTEXT, &format!("set filetype failed: {err}"));
     }
 
-    let _ = close_doc_preview(buf_handle);
+    let _ = close_doc_preview_for_window(buf_handle, win_handle);
 
     if !snacks_has_doc_preview() {
         return Ok(());
@@ -208,8 +228,12 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
     let Some(key) = buf_key(buf_handle) else {
         return Ok(());
     };
+    let Some(win) = win_key(win_handle) else {
+        return Ok(());
+    };
     let transition = context().apply_event(PreviewEvent::Register {
         key,
+        win,
         group,
         restore_name_plan,
     });

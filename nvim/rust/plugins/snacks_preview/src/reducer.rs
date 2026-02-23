@@ -1,5 +1,5 @@
+use nvim_oxi_utils::indexed_registry::{EvictionReason, IndexedRegistry, IndexedValue};
 use nvim_oxi_utils::state_machine::{Machine, Transition};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufKey(i64);
@@ -23,12 +23,32 @@ impl PreviewToken {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WinKey(i64);
+
+impl WinKey {
+    pub const fn try_new(raw: i64) -> Option<Self> {
+        if raw > 0 { Some(Self(raw)) } else { None }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DocPreviewState {
     pub token: PreviewToken,
+    pub win: WinKey,
     pub group: Option<u32>,
     pub cleanup: Option<i64>,
     pub restore_name_plan: Option<RestoreNamePlan>,
+}
+
+impl IndexedValue<WinKey, PreviewToken> for DocPreviewState {
+    fn index_one(&self) -> WinKey {
+        self.win
+    }
+
+    fn index_two(&self) -> PreviewToken {
+        self.token
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,8 +82,12 @@ pub enum PreviewEvent {
     Close {
         key: BufKey,
     },
+    CloseByToken {
+        token: PreviewToken,
+    },
     Register {
         key: BufKey,
+        win: WinKey,
         group: u32,
         restore_name_plan: Option<RestoreNamePlan>,
     },
@@ -81,40 +105,56 @@ pub enum PreviewEvent {
 #[derive(Debug, Default)]
 pub struct PreviewRegistry {
     next_token: i64,
-    previews: HashMap<BufKey, DocPreviewState>,
+    previews: IndexedRegistry<BufKey, DocPreviewState, WinKey, PreviewToken>,
 }
 
 impl PreviewRegistry {
-    pub const fn next_token(&mut self) -> PreviewToken {
-        self.next_token = if self.next_token == i64::MAX {
-            1
-        } else {
-            self.next_token + 1
-        };
-        PreviewToken(self.next_token)
+    pub fn next_token(&mut self) -> PreviewToken {
+        loop {
+            self.next_token = if self.next_token == i64::MAX {
+                1
+            } else {
+                self.next_token + 1
+            };
+            let candidate = PreviewToken(self.next_token);
+            if !self.previews.contains_index_two(candidate) {
+                return candidate;
+            }
+        }
     }
 
     pub fn is_token_current(&self, key: BufKey, token: PreviewToken) -> bool {
         self.previews
-            .get(&key)
+            .get(key)
             .is_some_and(|entry| entry.token == token)
+    }
+
+    pub fn token_for_win(&self, win: WinKey) -> Option<PreviewToken> {
+        self.previews
+            .get_by_index_one(win)
+            .map(|(_, entry)| entry.token)
     }
 
     #[cfg(test)]
     pub fn insert_preview(&mut self, key: BufKey, state: DocPreviewState) {
-        self.previews.insert(key, state);
+        let _ = self.previews.insert_replacing(key, state);
     }
 
     pub fn get_preview(&self, key: BufKey) -> Option<&DocPreviewState> {
-        self.previews.get(&key)
+        self.previews.get(key)
     }
 
     pub fn get_preview_mut(&mut self, key: BufKey) -> Option<&mut DocPreviewState> {
-        self.previews.get_mut(&key)
+        self.previews.get_mut(key)
     }
 
+    #[cfg(test)]
     pub fn take_preview(&mut self, key: BufKey) -> Option<DocPreviewState> {
-        self.previews.remove(&key)
+        self.previews.take_by_key(key)
+    }
+
+    fn remove_preview_by_key(&mut self, key: BufKey) -> Option<DocPreviewState> {
+        self.previews.take_by_key(key)
     }
 
     fn close_effects(state: &DocPreviewState) -> Vec<PreviewEffect> {
@@ -147,26 +187,55 @@ impl PreviewRegistry {
     pub fn reduce(&mut self, event: PreviewEvent) -> PreviewTransition {
         match event {
             PreviewEvent::Close { key } => self
-                .take_preview(key)
+                .remove_preview_by_key(key)
                 .map(|old| Self::close_effects(&old))
+                .map_or_else(PreviewTransition::default, PreviewTransition::with_effects),
+            PreviewEvent::CloseByToken { token } => self
+                .previews
+                .take_by_index_two(token)
+                .map(|(_, old)| Self::close_effects(&old))
                 .map_or_else(PreviewTransition::default, PreviewTransition::with_effects),
             PreviewEvent::Register {
                 key,
+                win,
                 group,
                 restore_name_plan,
             } => {
+                let mut effects = Vec::new();
+                if let Some(old) = self.remove_preview_by_key(key) {
+                    effects.extend(Self::replace_effects(&old, group));
+                }
+                if let Some((old_key, old)) = self.previews.take_by_index_one(win)
+                    && old_key != key
+                {
+                    effects.extend(Self::close_effects(&old));
+                }
                 let token = self.next_token();
-                let replaced = self.previews.insert(
+                let unexpected_evicted = self.previews.insert_replacing(
                     key,
                     DocPreviewState {
                         token,
+                        win,
                         group: Some(group),
                         cleanup: None,
                         restore_name_plan,
                     },
                 );
-                let effects =
-                    replaced.map_or_else(Vec::new, |old| Self::replace_effects(&old, group));
+                for evicted in unexpected_evicted.into_evicted() {
+                    match evicted.reason {
+                        EvictionReason::Key
+                        | EvictionReason::KeyAndIndexOne
+                        | EvictionReason::KeyAndIndexTwo
+                        | EvictionReason::KeyAndIndexOneAndIndexTwo => {
+                            effects.extend(Self::replace_effects(&evicted.value, group));
+                        }
+                        EvictionReason::IndexOne
+                        | EvictionReason::IndexTwo
+                        | EvictionReason::IndexOneAndIndexTwo => {
+                            effects.extend(Self::close_effects(&evicted.value));
+                        }
+                    }
+                }
                 let mut transition = PreviewTransition::with_effects(effects);
                 transition.set_command(PreviewCommand::RequestDocFind(token));
                 transition
@@ -223,10 +292,25 @@ mod tests {
         PreviewToken::try_new(raw).ok_or("expected valid token")
     }
 
+    fn win(raw: i64) -> Result<WinKey, &'static str> {
+        WinKey::try_new(raw).ok_or("expected valid win key")
+    }
+
     fn assert_registry_invariants(registry: &PreviewRegistry) {
         assert!(registry.next_token >= 0);
-        for state in registry.previews.values() {
+        assert_eq!(
+            registry.previews.len(),
+            registry.previews.iter_index_one().count()
+        );
+        assert_eq!(
+            registry.previews.len(),
+            registry.previews.iter_index_two().count()
+        );
+
+        for (key, state) in registry.previews.iter() {
             assert!(state.token.raw() > 0);
+            assert_eq!(registry.previews.key_by_index_one(state.win), Some(*key));
+            assert_eq!(registry.previews.key_by_index_two(state.token), Some(*key));
             if let Some(cleanup_id) = state.cleanup {
                 assert!(cleanup_id > 0);
             }
@@ -235,6 +319,22 @@ mod tests {
                 assert!(!plan.preview_name.is_empty());
                 assert_ne!(plan.name, plan.preview_name);
             }
+        }
+
+        for (win, key) in registry.previews.iter_index_one() {
+            let state = registry
+                .previews
+                .get(*key)
+                .expect("win index must map to existing buffer state");
+            assert_eq!(state.win, *win);
+        }
+
+        for (token, key) in registry.previews.iter_index_two() {
+            let state = registry
+                .previews
+                .get(*key)
+                .expect("token index must map to existing buffer state");
+            assert_eq!(state.token, *token);
         }
     }
 
@@ -254,6 +354,7 @@ mod tests {
             key,
             DocPreviewState {
                 token: first_token,
+                win: win(1)?,
                 group: None,
                 cleanup: None,
                 restore_name_plan: None,
@@ -272,6 +373,7 @@ mod tests {
             key,
             DocPreviewState {
                 token: token(9)?,
+                win: win(1)?,
                 group: Some(17),
                 cleanup: Some(23),
                 restore_name_plan: Some(RestoreNamePlan {
@@ -304,6 +406,7 @@ mod tests {
 
         let transition = registry.reduce(PreviewEvent::Register {
             key,
+            win: win(3)?,
             group: 11,
             restore_name_plan: Some(RestoreNamePlan {
                 name: "n".to_string(),
@@ -326,6 +429,7 @@ mod tests {
         let key = BufKey::try_new(5).ok_or("expected valid key")?;
         let _ = registry.reduce(PreviewEvent::Register {
             key,
+            win: win(3)?,
             group: 1,
             restore_name_plan: Some(RestoreNamePlan {
                 name: "n".to_string(),
@@ -357,6 +461,7 @@ mod tests {
         let key = BufKey::try_new(6).ok_or("expected valid key")?;
         let _ = registry.reduce(PreviewEvent::Register {
             key,
+            win: win(3)?,
             group: 1,
             restore_name_plan: Some(RestoreNamePlan {
                 name: "n".to_string(),
@@ -387,6 +492,122 @@ mod tests {
     }
 
     #[test]
+    fn close_by_token_closes_cleanup_even_when_key_differs() -> Result<(), &'static str> {
+        let mut registry = PreviewRegistry::default();
+        let key = key(14)?;
+        registry.insert_preview(
+            key,
+            DocPreviewState {
+                token: token(5)?,
+                win: win(7)?,
+                group: Some(33),
+                cleanup: Some(44),
+                restore_name_plan: Some(RestoreNamePlan {
+                    name: "doc".to_string(),
+                    preview_name: "doc.preview".to_string(),
+                }),
+            },
+        );
+
+        let transition = registry.reduce(PreviewEvent::CloseByToken { token: token(5)? });
+
+        assert_eq!(
+            transition.effects,
+            vec![
+                PreviewEffect::RestoreName(RestoreNamePlan {
+                    name: "doc".to_string(),
+                    preview_name: "doc.preview".to_string(),
+                }),
+                PreviewEffect::DeleteAugroup(33),
+                PreviewEffect::CloseCleanup(44),
+            ]
+        );
+        assert_eq!(transition.command, None);
+        assert!(registry.get_preview(key).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn close_by_token_missing_preview_is_noop() -> Result<(), &'static str> {
+        let mut registry = PreviewRegistry::default();
+        let transition = registry.reduce(PreviewEvent::CloseByToken { token: token(1)? });
+        assert!(transition.effects.is_empty());
+        assert_eq!(transition.command, None);
+        Ok(())
+    }
+
+    #[test]
+    fn token_for_win_tracks_latest_token() -> Result<(), &'static str> {
+        let mut registry = PreviewRegistry::default();
+        let key_a = key(15)?;
+        let key_b = key(16)?;
+        let _ = registry.reduce(PreviewEvent::Register {
+            key: key_a,
+            win: win(9)?,
+            group: 1,
+            restore_name_plan: None,
+        });
+        let _ = registry.reduce(PreviewEvent::Register {
+            key: key_b,
+            win: win(9)?,
+            group: 2,
+            restore_name_plan: None,
+        });
+        assert_eq!(registry.token_for_win(win(9)?), Some(token(2)?));
+        Ok(())
+    }
+
+    #[test]
+    fn register_same_window_replaces_prior_owner() -> Result<(), &'static str> {
+        let mut registry = PreviewRegistry::default();
+        let key_a = key(17)?;
+        let key_b = key(18)?;
+        let shared_win = win(10)?;
+        registry.insert_preview(
+            key_a,
+            DocPreviewState {
+                token: token(7)?,
+                win: shared_win,
+                group: Some(41),
+                cleanup: Some(42),
+                restore_name_plan: Some(RestoreNamePlan {
+                    name: "old".to_string(),
+                    preview_name: "old.preview".to_string(),
+                }),
+            },
+        );
+
+        let transition = registry.reduce(PreviewEvent::Register {
+            key: key_b,
+            win: shared_win,
+            group: 43,
+            restore_name_plan: Some(RestoreNamePlan {
+                name: "new".to_string(),
+                preview_name: "new.preview".to_string(),
+            }),
+        });
+
+        assert_eq!(
+            transition.effects,
+            vec![
+                PreviewEffect::RestoreName(RestoreNamePlan {
+                    name: "old".to_string(),
+                    preview_name: "old.preview".to_string(),
+                }),
+                PreviewEffect::DeleteAugroup(41),
+                PreviewEffect::CloseCleanup(42),
+            ]
+        );
+        assert_eq!(
+            transition.command,
+            Some(PreviewCommand::RequestDocFind(token(1)?))
+        );
+        assert!(registry.get_preview(key_a).is_none());
+        assert_eq!(registry.token_for_win(shared_win), Some(token(1)?));
+        Ok(())
+    }
+
+    #[test]
     fn register_replaces_existing_preview_and_cleans_prior_resources() -> Result<(), &'static str> {
         let mut registry = PreviewRegistry::default();
         let key = BufKey::try_new(8).ok_or("expected valid key")?;
@@ -394,6 +615,7 @@ mod tests {
             key,
             DocPreviewState {
                 token: token(1)?,
+                win: win(4)?,
                 group: Some(70),
                 cleanup: Some(80),
                 restore_name_plan: Some(RestoreNamePlan {
@@ -405,6 +627,7 @@ mod tests {
 
         let transition = registry.reduce(PreviewEvent::Register {
             key,
+            win: win(5)?,
             group: 71,
             restore_name_plan: Some(RestoreNamePlan {
                 name: "new".to_string(),
@@ -442,6 +665,7 @@ mod tests {
             key,
             DocPreviewState {
                 token: token(1)?,
+                win: win(4)?,
                 group: Some(70),
                 cleanup: Some(80),
                 restore_name_plan: None,
@@ -450,6 +674,7 @@ mod tests {
 
         let transition = registry.reduce(PreviewEvent::Register {
             key,
+            win: win(4)?,
             group: 70,
             restore_name_plan: None,
         });
@@ -470,6 +695,7 @@ mod tests {
             key,
             DocPreviewState {
                 token: token(33)?,
+                win: win(4)?,
                 group: Some(1),
                 cleanup: None,
                 restore_name_plan: None,
@@ -493,6 +719,7 @@ mod tests {
 
         let first = registry.reduce(PreviewEvent::Register {
             key,
+            win: win(1)?,
             group: 2,
             restore_name_plan: Some(RestoreNamePlan {
                 name: "old".to_string(),
@@ -506,6 +733,7 @@ mod tests {
 
         let second = registry.reduce(PreviewEvent::Register {
             key,
+            win: win(1)?,
             group: 3,
             restore_name_plan: Some(RestoreNamePlan {
                 name: "new".to_string(),
@@ -590,6 +818,7 @@ mod tests {
         let transition = match step {
             Step::Register => registry.reduce(PreviewEvent::Register {
                 key,
+                win: win(1)?,
                 group: 7,
                 restore_name_plan: Some(RestoreNamePlan {
                     name: "name".to_string(),
@@ -644,6 +873,160 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone, Copy)]
+    enum MultiStep {
+        RegisterAOnWin1,
+        RegisterBOnWin2,
+        RegisterBOnWin1,
+        CloseAByKey,
+        CloseBByKey,
+        CloseWin1ByToken,
+        CloseWin2ByToken,
+        DocFindCurrentA,
+        DocFindCurrentB,
+        CleanupStaleA,
+        CleanupStaleB,
+    }
+
+    impl MultiStep {
+        const ALL: [Self; 11] = [
+            Self::RegisterAOnWin1,
+            Self::RegisterBOnWin2,
+            Self::RegisterBOnWin1,
+            Self::CloseAByKey,
+            Self::CloseBByKey,
+            Self::CloseWin1ByToken,
+            Self::CloseWin2ByToken,
+            Self::DocFindCurrentA,
+            Self::DocFindCurrentB,
+            Self::CleanupStaleA,
+            Self::CleanupStaleB,
+        ];
+    }
+
+    fn apply_multi_step(
+        registry: &mut PreviewRegistry,
+        step: MultiStep,
+        next_cleanup_id: &mut i64,
+    ) -> Result<(), &'static str> {
+        let key_a = key(21)?;
+        let key_b = key(22)?;
+        let win_1 = win(31)?;
+        let win_2 = win(32)?;
+        let stale_token = token(99_999)?;
+        let transition = match step {
+            MultiStep::RegisterAOnWin1 => registry.reduce(PreviewEvent::Register {
+                key: key_a,
+                win: win_1,
+                group: 1,
+                restore_name_plan: Some(RestoreNamePlan {
+                    name: "a".to_string(),
+                    preview_name: "a.preview".to_string(),
+                }),
+            }),
+            MultiStep::RegisterBOnWin2 => registry.reduce(PreviewEvent::Register {
+                key: key_b,
+                win: win_2,
+                group: 2,
+                restore_name_plan: Some(RestoreNamePlan {
+                    name: "b".to_string(),
+                    preview_name: "b.preview".to_string(),
+                }),
+            }),
+            MultiStep::RegisterBOnWin1 => registry.reduce(PreviewEvent::Register {
+                key: key_b,
+                win: win_1,
+                group: 3,
+                restore_name_plan: Some(RestoreNamePlan {
+                    name: "b2".to_string(),
+                    preview_name: "b2.preview".to_string(),
+                }),
+            }),
+            MultiStep::CloseAByKey => registry.reduce(PreviewEvent::Close { key: key_a }),
+            MultiStep::CloseBByKey => registry.reduce(PreviewEvent::Close { key: key_b }),
+            MultiStep::CloseWin1ByToken => {
+                let Some(current) = registry.token_for_win(win_1) else {
+                    return Ok(());
+                };
+                registry.reduce(PreviewEvent::CloseByToken { token: current })
+            }
+            MultiStep::CloseWin2ByToken => {
+                let Some(current) = registry.token_for_win(win_2) else {
+                    return Ok(());
+                };
+                registry.reduce(PreviewEvent::CloseByToken { token: current })
+            }
+            MultiStep::DocFindCurrentA => {
+                let Some(current) = current_token(registry, key_a) else {
+                    return Ok(());
+                };
+                registry.reduce(PreviewEvent::DocFindArrived {
+                    key: key_a,
+                    token: current,
+                })
+            }
+            MultiStep::DocFindCurrentB => {
+                let Some(current) = current_token(registry, key_b) else {
+                    return Ok(());
+                };
+                registry.reduce(PreviewEvent::DocFindArrived {
+                    key: key_b,
+                    token: current,
+                })
+            }
+            MultiStep::CleanupStaleA => {
+                let cleanup_id = *next_cleanup_id;
+                *next_cleanup_id += 1;
+                registry.reduce(PreviewEvent::CleanupOpened {
+                    key: key_a,
+                    token: stale_token,
+                    cleanup_id,
+                })
+            }
+            MultiStep::CleanupStaleB => {
+                let cleanup_id = *next_cleanup_id;
+                *next_cleanup_id += 1;
+                registry.reduce(PreviewEvent::CleanupOpened {
+                    key: key_b,
+                    token: stale_token,
+                    cleanup_id,
+                })
+            }
+        };
+
+        for effect in transition.effects {
+            if let PreviewEffect::CloseCleanup(cleanup_id) = effect {
+                assert!(cleanup_id > 0);
+            }
+        }
+        if let Some(PreviewCommand::RequestDocFind(token)) = transition.command {
+            assert!(token.raw() > 0);
+        }
+        assert_registry_invariants(registry);
+        Ok(())
+    }
+
+    fn run_multi_window_sequences(
+        sequence: &mut Vec<MultiStep>,
+        remaining: usize,
+    ) -> Result<(), &'static str> {
+        if remaining == 0 {
+            let mut registry = PreviewRegistry::default();
+            assert_registry_invariants(&registry);
+            let mut next_cleanup_id = 1;
+            for step in sequence {
+                apply_multi_step(&mut registry, *step, &mut next_cleanup_id)?;
+            }
+            return Ok(());
+        }
+        for step in MultiStep::ALL {
+            sequence.push(step);
+            run_multi_window_sequences(sequence, remaining - 1)?;
+            let _ = sequence.pop();
+        }
+        Ok(())
+    }
+
     fn run_sequences(
         sequence: &mut Vec<Step>,
         remaining: usize,
@@ -670,6 +1053,12 @@ mod tests {
     fn reduce_preserves_invariants_over_bounded_sequences() -> Result<(), &'static str> {
         let key = key(13)?;
         run_sequences(&mut Vec::new(), 4, key)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reduce_preserves_invariants_over_multi_window_sequences() -> Result<(), &'static str> {
+        run_multi_window_sequences(&mut Vec::new(), 4)?;
         Ok(())
     }
 }

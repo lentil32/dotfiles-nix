@@ -3,17 +3,17 @@ use super::cursor::{
     update_tracked_cursor_color,
 };
 use super::geometry::{current_cursor_snapshot, frame_reaches_target_cell, maybe_scroll_shift};
-use super::logging::{debug, hide_real_cursor, unhide_real_cursor, warn};
+use super::logging::{debug, hide_real_cursor, log_slow_callback, unhide_real_cursor, warn};
 use super::policy::{
     BufferEventPolicy, current_buffer_event_policy, remaining_throttle_delay_ms,
     skip_current_buffer_events,
 };
 use super::runtime::{
     clear_animation_timer, clear_external_event_timer, clear_external_trigger_pending,
-    clear_key_event_timer, elapsed_ms_since_last_autocmd_event,
-    elapsed_ms_since_last_external_dispatch, is_enabled, mark_external_trigger_pending_if_idle,
-    note_autocmd_event_now, note_external_dispatch_now, now_ms, record_cursor_callback_duration,
-    seed_from_clock, state_lock,
+    clear_key_event_timer, cursor_callback_duration_estimate_ms,
+    elapsed_ms_since_last_autocmd_event, elapsed_ms_since_last_external_dispatch, is_enabled,
+    mark_external_trigger_pending_if_idle, note_autocmd_event_now, note_external_dispatch_now,
+    now_ms, record_cursor_callback_duration, seed_from_clock, state_lock,
 };
 use super::timers::{
     apply_render_cleanup_action, ensure_namespace_id, schedule_animation_tick,
@@ -30,6 +30,37 @@ use crate::state::CursorLocation;
 use crate::types::Point;
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::{Result, api, schedule};
+use nvim_utils::mode::is_cmdline_mode;
+
+fn render_action_perf_details(render_action: &RenderAction) -> String {
+    match render_action {
+        RenderAction::Draw(frame) => {
+            let (min_row, max_row) = frame
+                .corners
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), point| {
+                    (min.min(point.row), max.max(point.row))
+                });
+            let (min_col, max_col) = frame
+                .corners
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), point| {
+                    (min.min(point.col), max.max(point.col))
+                });
+            let height_cells = (max_row.ceil() - min_row.floor()).max(0.0) as i64;
+            let width_cells = (max_col.ceil() - min_col.floor()).max(0.0) as i64;
+            let area_cells = height_cells.saturating_mul(width_cells);
+            format!(
+                "action=draw area_cells={area_cells} height_cells={height_cells} width_cells={width_cells} particles={} vertical_bar={} max_kept_windows={}",
+                frame.particles.len(),
+                frame.vertical_bar,
+                frame.max_kept_windows
+            )
+        }
+        RenderAction::ClearAll => "action=clear_all".to_string(),
+        RenderAction::Noop => "action=noop".to_string(),
+    }
+}
 
 pub(super) fn on_cursor_event_impl(source: EventSource) -> Result<()> {
     let mode = mode_string();
@@ -125,6 +156,8 @@ pub(super) fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         notify_delay_disabled,
         command,
     } = transition;
+    let perf_render_details = render_action_perf_details(&render_decision.render_action);
+    let perf_cleanup_details = format!("cleanup={:?}", render_decision.render_cleanup_action);
 
     if notify_delay_disabled
         && let Err(err) = api::command(
@@ -140,6 +173,18 @@ pub(super) fn on_cursor_event_impl(source: EventSource) -> Result<()> {
 
     let callback_duration_ms = (now_ms() - event_now_ms).max(0.0);
     record_cursor_callback_duration(callback_duration_ms);
+    let callback_duration_estimate_ms = cursor_callback_duration_estimate_ms();
+    let source_name = match source {
+        EventSource::AnimationTick => "animation_tick",
+        EventSource::External => "external",
+    };
+    log_slow_callback(
+        source_name,
+        &mode,
+        callback_duration_ms,
+        callback_duration_estimate_ms,
+        &format!("{perf_render_details} {perf_cleanup_details}"),
+    );
     let should_schedule = match source {
         EventSource::AnimationTick => true,
         EventSource::External => command.is_some(),
@@ -203,7 +248,7 @@ pub(super) fn on_external_event_trigger() -> Result<()> {
             external_settle_delay_ms(state.config.delay_event_to_smear),
         )
     };
-    if mode == "c" && !smear_to_cmd {
+    if is_cmdline_mode(&mode) && !smear_to_cmd {
         clear_external_event_timer();
         let mut state = state_lock();
         state.clear_pending_external_event();
@@ -341,17 +386,18 @@ fn replace_real_cursor_from_event(only_hide_real_cursor: bool) -> Result<()> {
 }
 
 fn apply_render_action(namespace_id: u32, mode: &str, render_action: RenderAction) -> Result<()> {
+    let cmdline_mode = is_cmdline_mode(mode);
     match render_action {
         RenderAction::Draw(frame) => {
-            let redraw_cmd = mode == "c" && smear_outside_cmd_row(&frame.corners)?;
+            let redraw_cmd = cmdline_mode && smear_outside_cmd_row(&frame.corners)?;
             draw_current(namespace_id, &frame)?;
             if redraw_cmd && let Err(err) = api::command("redraw") {
                 debug(&format!("redraw after draw failed: {err}"));
             }
 
             let should_unhide_while_animating =
-                mode == "c" || (frame.never_draw_over_target && frame_reaches_target_cell(&frame));
-            if mode != "c" && !should_unhide_while_animating && frame.hide_target_hack {
+                cmdline_mode || (frame.never_draw_over_target && frame_reaches_target_cell(&frame));
+            if !cmdline_mode && !should_unhide_while_animating && frame.hide_target_hack {
                 draw_target_hack_block(namespace_id, &frame)?;
             }
             let mut state = state_lock();
@@ -362,7 +408,7 @@ fn apply_render_action(namespace_id: u32, mode: &str, render_action: RenderActio
                     }
                     state.set_cursor_hidden(false);
                 }
-            } else if !state.is_cursor_hidden() && mode != "c" {
+            } else if !state.is_cursor_hidden() && !cmdline_mode {
                 if !state.config.hide_target_hack {
                     hide_real_cursor();
                 }
@@ -375,9 +421,7 @@ fn apply_render_action(namespace_id: u32, mode: &str, render_action: RenderActio
                 state.config.max_kept_windows
             };
             clear_active_render_windows(namespace_id, max_kept_windows);
-            if mode == "c"
-                && let Err(err) = api::command("redraw")
-            {
+            if cmdline_mode && let Err(err) = api::command("redraw") {
                 debug(&format!("redraw after clear failed: {err}"));
             }
             let mut state = state_lock();

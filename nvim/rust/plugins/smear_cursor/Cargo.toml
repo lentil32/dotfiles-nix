@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 nvim-oxi = { version = "0.6", features = ["neovim-0-11", "libuv"] }
 nvim-oxi-utils = { path = "../../libs/nvim-oxi-utils" }
+nvim-utils = { path = "../../libs/nvim-utils" }
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]

@@ -6,6 +6,7 @@ use crate::types::Point;
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Array, Dictionary, Object, Result, String as NvimString, api};
+use nvim_utils::mode::is_cmdline_mode;
 
 pub(super) fn mode_string() -> String {
     api::get_mode().mode.to_string_lossy().into_owned()
@@ -78,7 +79,7 @@ pub(super) fn cursor_position_for_mode(
     mode: &str,
     smear_to_cmd: bool,
 ) -> Result<Option<(f64, f64)>> {
-    if mode == "c" {
+    if is_cmdline_mode(mode) {
         if !smear_to_cmd {
             return Ok(None);
         }

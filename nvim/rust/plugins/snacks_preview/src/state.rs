@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::reducer::{BufKey, PreviewEvent, PreviewRegistry, PreviewToken, PreviewTransition};
+use crate::reducer::{
+    BufKey, PreviewEvent, PreviewRegistry, PreviewToken, PreviewTransition, WinKey,
+};
 use nvim_oxi::mlua;
-use nvim_oxi_utils::handles::BufHandle;
+use nvim_oxi_utils::handles::{BufHandle, WinHandle};
 use nvim_oxi_utils::notify;
 use nvim_oxi_utils::state::{StateCell, StateGuard};
 
@@ -72,6 +74,11 @@ impl PreviewContext {
         state.registry.is_token_current(key, token)
     }
 
+    pub fn token_for_win(&self, win: WinKey) -> Option<PreviewToken> {
+        let state = self.state_lock();
+        state.registry.token_for_win(win)
+    }
+
     pub fn apply_event(&self, event: PreviewEvent) -> PreviewTransition {
         let mut state = self.state_lock();
         state.registry.reduce(event)
@@ -107,4 +114,8 @@ pub fn context() -> &'static PreviewContext {
 
 pub const fn buf_key(buf_handle: BufHandle) -> Option<BufKey> {
     BufKey::try_new(buf_handle.raw())
+}
+
+pub const fn win_key(win_handle: WinHandle) -> Option<WinKey> {
+    WinKey::try_new(win_handle.raw())
 }

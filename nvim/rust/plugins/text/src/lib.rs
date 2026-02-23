@@ -6,6 +6,7 @@ use crate::core::{Column, LineRange, SortDirection, TextRangeError};
 use nvim_oxi::api;
 use nvim_oxi::api::Buffer;
 use nvim_oxi::{Dictionary, Function, Result};
+use nvim_utils::mode::is_visual_like_mode;
 
 fn text_error_to_nvim(err: TextRangeError) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(err.to_string()).into()
@@ -34,7 +35,7 @@ fn line_index_to_i64(line: usize) -> Result<i64> {
 
 fn is_visual_mode() -> bool {
     let mode = api::get_mode();
-    matches!(mode.mode.as_bytes().first(), Some(b'v' | b'V' | b'\x16'))
+    is_visual_like_mode(&mode.mode.to_string_lossy())
 }
 
 fn visual_line_range(buf: &Buffer) -> Result<Option<(i64, i64)>> {

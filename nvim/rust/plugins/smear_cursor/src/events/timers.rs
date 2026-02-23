@@ -19,6 +19,7 @@ use crate::state::CursorSnapshot;
 use nvim_oxi::api::opts::CreateAugroupOpts;
 use nvim_oxi::libuv::TimerHandle;
 use nvim_oxi::{Result, api, schedule};
+use nvim_utils::mode::is_cmdline_mode;
 use std::time::Duration;
 
 fn on_animation_tick() -> Result<()> {
@@ -39,7 +40,7 @@ pub(super) fn decide_external_settle_action(
     expected_snapshot: Option<&CursorSnapshot>,
     current_snapshot: Option<&CursorSnapshot>,
 ) -> ExternalSettleAction {
-    if mode == "c" && !smear_to_cmd {
+    if is_cmdline_mode(mode) && !smear_to_cmd {
         return ExternalSettleAction::ClearPending;
     }
 
@@ -68,11 +69,12 @@ fn on_external_settle_tick() -> Result<()> {
             state.pending_external_event_cloned(),
         )
     };
-    let current_snapshot = if expected_snapshot.is_some() && (mode != "c" || smear_to_cmd) {
-        current_cursor_snapshot(smear_to_cmd)?
-    } else {
-        None
-    };
+    let current_snapshot =
+        if expected_snapshot.is_some() && (!is_cmdline_mode(&mode) || smear_to_cmd) {
+            current_cursor_snapshot(smear_to_cmd)?
+        } else {
+            None
+        };
     let action = decide_external_settle_action(
         &mode,
         smear_to_cmd,

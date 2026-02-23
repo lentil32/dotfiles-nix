@@ -3,6 +3,9 @@ use crate::config::RuntimeConfig;
 use crate::draw::{GradientInfo, RenderFrame};
 use crate::state::{CursorLocation, CursorShape, RuntimeState};
 use crate::types::{BASE_TIME_INTERVAL, EPSILON, Particle, Point, StepInput};
+use nvim_utils::mode::{
+    is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CursorEventContext {
@@ -309,13 +312,13 @@ fn should_jump_to_target(
 }
 
 fn external_mode_ignores_cursor(config: &RuntimeConfig, mode: &str) -> bool {
-    mode == "c" && !config.smear_to_cmd
+    is_cmdline_mode(mode) && !config.smear_to_cmd
 }
 
 fn external_mode_requires_jump(config: &RuntimeConfig, mode: &str) -> bool {
-    (mode == "i" && !config.smear_insert_mode)
-        || (mode == "R" && !config.smear_replace_mode)
-        || (mode == "t" && !config.smear_terminal_mode)
+    (is_insert_like_mode(mode) && !config.smear_insert_mode)
+        || (is_replace_like_mode(mode) && !config.smear_replace_mode)
+        || (is_terminal_like_mode(mode) && !config.smear_terminal_mode)
 }
 
 pub(crate) fn reduce_cursor_event(

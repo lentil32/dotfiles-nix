@@ -1,5 +1,6 @@
 use crate::config::RuntimeConfig;
 use crate::types::{BASE_TIME_INTERVAL, EPSILON, Particle, Point, Rng32, StepInput, StepOutput};
+use nvim_utils::mode::is_insert_like_mode;
 
 fn speed_correction(time_interval: f64) -> f64 {
     time_interval / BASE_TIME_INTERVAL
@@ -8,10 +9,6 @@ fn speed_correction(time_interval: f64) -> f64 {
 fn velocity_conservation_factor(damping: f64, time_interval: f64) -> f64 {
     let one_minus_damping = (1.0 - damping).clamp(EPSILON, 1.0);
     (one_minus_damping.ln() * speed_correction(time_interval)).exp()
-}
-
-fn is_insert_like_mode(mode: &str) -> bool {
-    mode == "i"
 }
 
 pub(crate) fn center(corners: &[Point; 4]) -> Point {
@@ -517,23 +514,6 @@ pub(crate) fn simulate_step(input: StepInput) -> StepOutput {
 mod tests {
     use super::*;
     use crate::types::{DEFAULT_RNG_STATE, StepInput};
-    use std::time::Instant;
-
-    fn set_rect(corners: &mut [Point; 4], row: f64, col: f64) {
-        corners[0] = Point { row, col };
-        corners[1] = Point {
-            row,
-            col: col + 1.0,
-        };
-        corners[2] = Point {
-            row: row + 1.0,
-            col: col + 1.0,
-        };
-        corners[3] = Point {
-            row: row + 1.0,
-            col,
-        };
-    }
 
     fn make_input() -> StepInput {
         StepInput {
@@ -610,92 +590,5 @@ mod tests {
         let output_b = simulate_step(input_b);
         assert_eq!(output_a.rng_state, output_b.rng_state);
         assert_eq!(output_a.particles.len(), output_b.particles.len());
-    }
-
-    fn run_benchmark(iterations: usize, particles_enabled: bool) -> f64 {
-        let base = make_input();
-        let mut current_corners = base.current_corners;
-        set_rect(&mut current_corners, 12.0, 20.0);
-        let mut target_corners = base.target_corners;
-        set_rect(&mut target_corners, 12.0, 20.0);
-        let mut velocity_corners = base.velocity_corners;
-        let mut particles: Vec<Particle> = Vec::new();
-        let mut previous_center = center(&current_corners);
-        let mut rng_state = 1337_u32;
-
-        let motion_period = 120.0;
-        let start = Instant::now();
-        for step in 1..=iterations {
-            let t = (step as f64 % motion_period) / motion_period;
-            let row = 12.0 + (2.0 * std::f64::consts::PI * t).sin() * 2.0;
-            let col = 20.0 + (step as f64 % 180.0) / 3.0;
-            set_rect(&mut target_corners, row, col);
-
-            let input = StepInput {
-                mode: base.mode.clone(),
-                time_interval: base.time_interval,
-                config_time_interval: base.config_time_interval,
-                current_corners,
-                target_corners,
-                velocity_corners,
-                stiffnesses: base.stiffnesses,
-                max_length: base.max_length,
-                max_length_insert_mode: base.max_length_insert_mode,
-                damping: base.damping,
-                damping_insert_mode: base.damping_insert_mode,
-                delay_disable: base.delay_disable,
-                particles,
-                previous_center,
-                particle_damping: base.particle_damping,
-                particles_enabled,
-                particle_gravity: base.particle_gravity,
-                particle_random_velocity: base.particle_random_velocity,
-                particle_max_num: base.particle_max_num,
-                particle_spread: base.particle_spread,
-                particles_per_second: base.particles_per_second,
-                particles_per_length: base.particles_per_length,
-                particle_max_initial_velocity: base.particle_max_initial_velocity,
-                particle_velocity_from_cursor: base.particle_velocity_from_cursor,
-                particle_max_lifetime: base.particle_max_lifetime,
-                particle_lifetime_distribution_exponent: base
-                    .particle_lifetime_distribution_exponent,
-                min_distance_emit_particles: base.min_distance_emit_particles,
-                vertical_bar: base.vertical_bar,
-                horizontal_bar: base.horizontal_bar,
-                block_aspect_ratio: base.block_aspect_ratio,
-                rng_state,
-            };
-
-            let output = simulate_step(input);
-            current_corners = output.current_corners;
-            velocity_corners = output.velocity_corners;
-            particles = output.particles;
-            previous_center = output.previous_center;
-            rng_state = output.rng_state;
-        }
-
-        start.elapsed().as_secs_f64() * 1000.0
-    }
-
-    #[test]
-    fn benchmark_no_particles() {
-        let iterations = 12_000;
-        let elapsed_ms = run_benchmark(iterations, false);
-        let avg_us = elapsed_ms * 1000.0 / iterations as f64;
-        println!(
-            "RUST_BENCH_NO_PARTICLES iterations={iterations} elapsed_ms={elapsed_ms:.3} avg_us_per_step={avg_us:.3}"
-        );
-        assert!(elapsed_ms.is_finite());
-    }
-
-    #[test]
-    fn benchmark_with_particles() {
-        let iterations = 12_000;
-        let elapsed_ms = run_benchmark(iterations, true);
-        let avg_us = elapsed_ms * 1000.0 / iterations as f64;
-        println!(
-            "RUST_BENCH_WITH_PARTICLES iterations={iterations} elapsed_ms={elapsed_ms:.3} avg_us_per_step={avg_us:.3}"
-        );
-        assert!(elapsed_ms.is_finite());
     }
 }

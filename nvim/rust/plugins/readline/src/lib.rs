@@ -3,10 +3,11 @@ mod core;
 use crate::core::{InsertAction, transpose_chars};
 use nvim_oxi::api;
 use nvim_oxi::{Dictionary, Function, Result, String as NvimString};
+use nvim_utils::mode::is_insert_like_mode;
 
 fn is_insert_mode() -> bool {
     let mode = api::get_mode();
-    matches!(mode.mode.as_bytes().first(), Some(b'i'))
+    is_insert_like_mode(&mode.mode.to_string_lossy())
 }
 
 fn feedkeys(keys: &str) {

@@ -2,6 +2,7 @@
 
 pub mod decode;
 mod error;
+pub mod indexed_registry;
 
 pub use error::{Error, Result};
 
