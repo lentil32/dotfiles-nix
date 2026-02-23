@@ -1,15 +1,8 @@
-use super::super::{
-    BRAILLE_CODE_MAX, BRAILLE_CODE_MIN, OCTANT_CODE_MAX, OCTANT_CODE_MIN, RenderFrame,
-};
-use super::DrawResources;
-use crate::lua::i64_from_object;
-use nvim_oxi::Result;
-use nvim_oxi::api;
-use nvim_oxi::{Array, Object};
-use std::collections::HashMap;
-
+use super::PlanResources;
 use super::cell_draw::{draw_braille_character, draw_octant_character};
 use super::geometry::{frac01, level_from_shade, round_lua};
+use crate::types::RenderFrame;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ParticleCellAggregate {
@@ -45,42 +38,20 @@ impl ParticleCellAggregate {
     }
 }
 
-fn screen_char_code(row: i64, col: i64) -> Option<i64> {
-    let args = Array::from_iter([Object::from(row), Object::from(col)]);
-    let value = api::call_function("screenchar", args).ok()?;
-    i64_from_object("screenchar", value).ok()
-}
-
-fn particle_can_draw_at(row: i64, col: i64) -> bool {
-    let Some(bg_char_code) = screen_char_code(row, col) else {
-        return false;
-    };
-
-    let is_space = bg_char_code == 32;
-    let is_braille = (BRAILLE_CODE_MIN..=BRAILLE_CODE_MAX).contains(&bg_char_code);
-    let is_octant = (OCTANT_CODE_MIN..=OCTANT_CODE_MAX).contains(&bg_char_code);
-    is_space || is_braille || is_octant
-}
-
 pub(super) fn draw_particles(
-    resources: &mut DrawResources<'_>,
-    namespace_id: u32,
+    resources: &mut PlanResources<'_>,
     frame: &RenderFrame,
     target_row: i64,
     target_col: i64,
-) -> Result<()> {
+) {
     if frame.particles.is_empty() {
-        return Ok(());
+        return;
     }
 
-    let lifetime_switch_octant_braille = if frame.legacy_computing_symbols_support {
-        frame.particle_max_lifetime * frame.particle_switch_octant_braille
-    } else {
-        f64::INFINITY
-    };
+    let lifetime_switch_octant_braille = f64::INFINITY;
+    let requires_background_probe = !frame.particles_over_text;
 
-    let mut cells: HashMap<(i64, i64), ParticleCellAggregate> =
-        HashMap::with_capacity(frame.particles.len());
+    let mut cells: BTreeMap<(i64, i64), ParticleCellAggregate> = BTreeMap::new();
     for particle in &frame.particles {
         let row = particle.position.row.floor() as i64;
         let col = particle.position.col.floor() as i64;
@@ -97,9 +68,6 @@ pub(super) fn draw_particles(
 
     for ((row, col), aggregate) in cells {
         if row == target_row && col == target_col {
-            continue;
-        }
-        if row < 1 || row > resources.max_row || col < 1 || col > resources.max_col {
             continue;
         }
 
@@ -127,40 +95,26 @@ pub(super) fn draw_particles(
             continue;
         }
 
-        let level_index = usize::try_from(level)
-            .unwrap_or(0)
-            .min(resources.hl_groups.len().saturating_sub(1));
-        if level_index == 0 {
-            continue;
-        }
-        let hl_group = resources.hl_groups[level_index].as_str();
-
-        if !frame.particles_over_text && !particle_can_draw_at(row, col) {
-            continue;
-        }
-
         if lifetime_average > lifetime_switch_octant_braille {
             draw_octant_character(
                 resources,
-                namespace_id,
                 row,
                 col,
                 &aggregate.cell,
-                hl_group,
+                level,
                 resources.particle_zindex,
-            )?;
+                requires_background_probe,
+            );
         } else {
             draw_braille_character(
                 resources,
-                namespace_id,
                 row,
                 col,
                 &aggregate.cell,
-                hl_group,
+                level,
                 resources.particle_zindex,
-            )?;
+                requires_background_probe,
+            );
         }
     }
-
-    Ok(())
 }

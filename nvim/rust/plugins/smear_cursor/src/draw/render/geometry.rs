@@ -1,5 +1,5 @@
-use super::super::{BLOCK_ASPECT_RATIO, RenderFrame};
-use crate::types::Point;
+use super::super::BLOCK_ASPECT_RATIO;
+use crate::types::{Point, RenderFrame};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

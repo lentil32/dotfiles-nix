@@ -121,7 +121,7 @@ pub(crate) fn setup(opts: Dictionary) -> Result<()> {
     let enabled = {
         let mut state = state_lock();
         state.set_namespace_id(namespace_id);
-        // Upstream Lua setup defaults enabled=true when omitted.
+        // Setup defaults to enabled=true when the option is omitted.
         if !has_enabled_option {
             state.set_enabled(true);
         }

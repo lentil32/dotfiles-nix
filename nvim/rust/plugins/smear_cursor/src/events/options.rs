@@ -239,8 +239,6 @@ struct RawRuntimeOptions {
     volume_reduction_exponent: RawOptionObject,
     minimum_volume_factor: RawOptionObject,
     never_draw_over_target: RawOptionObject,
-    legacy_computing_symbols_support: RawOptionObject,
-    legacy_computing_symbols_support_vertical_bars: RawOptionObject,
     use_diagonal_blocks: RawOptionObject,
     max_slope_horizontal: RawOptionObject,
     min_slope_vertical: RawOptionObject,
@@ -335,11 +333,6 @@ impl RawRuntimeOptions {
             volume_reduction_exponent: raw_option(opts, "volume_reduction_exponent"),
             minimum_volume_factor: raw_option(opts, "minimum_volume_factor"),
             never_draw_over_target: raw_option(opts, "never_draw_over_target"),
-            legacy_computing_symbols_support: raw_option(opts, "legacy_computing_symbols_support"),
-            legacy_computing_symbols_support_vertical_bars: raw_option(
-                opts,
-                "legacy_computing_symbols_support_vertical_bars",
-            ),
             use_diagonal_blocks: raw_option(opts, "use_diagonal_blocks"),
             max_slope_horizontal: raw_option(opts, "max_slope_horizontal"),
             min_slope_vertical: raw_option(opts, "min_slope_vertical"),
@@ -671,16 +664,6 @@ impl RawRuntimeOptions {
                 never_draw_over_target: parse_optional_with(
                     self.never_draw_over_target,
                     "never_draw_over_target",
-                    bool_from_object,
-                )?,
-                legacy_computing_symbols_support: parse_optional_with(
-                    self.legacy_computing_symbols_support,
-                    "legacy_computing_symbols_support",
-                    bool_from_object,
-                )?,
-                legacy_computing_symbols_support_vertical_bars: parse_optional_with(
-                    self.legacy_computing_symbols_support_vertical_bars,
-                    "legacy_computing_symbols_support_vertical_bars",
                     bool_from_object,
                 )?,
                 use_diagonal_blocks: parse_optional_with(

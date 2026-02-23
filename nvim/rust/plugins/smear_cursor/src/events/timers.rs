@@ -22,8 +22,51 @@ use nvim_oxi::{Result, api, schedule};
 use nvim_utils::mode::is_cmdline_mode;
 use std::time::Duration;
 
+// Timer scheduling uses one shared primitive so all timers follow the same clear/schedule policy.
+
 fn on_animation_tick() -> Result<()> {
     handlers::on_cursor_event_impl(EventSource::AnimationTick)
+}
+
+fn schedule_once(
+    delay_ms: u64,
+    tick: impl FnOnce() + 'static,
+    on_scheduled: impl FnOnce(TimerHandle),
+    schedule_error_context: &str,
+) {
+    let timeout = Duration::from_millis(delay_ms);
+    match TimerHandle::once(timeout, move || {
+        schedule(move |_| {
+            tick();
+        });
+    }) {
+        Ok(handle) => on_scheduled(handle),
+        Err(err) => {
+            warn(&format!(
+                "failed to schedule {schedule_error_context}: {err}"
+            ));
+        }
+    }
+}
+
+fn schedule_external_timer(
+    delay_ms: u64,
+    kind: ExternalEventTimerKind,
+    tick: impl FnOnce() -> Result<()> + 'static,
+    tick_error_context: &'static str,
+    schedule_error_context: &'static str,
+) {
+    schedule_once(
+        delay_ms,
+        move || {
+            clear_external_event_timer();
+            if let Err(err) = tick() {
+                warn(&format!("{tick_error_context}: {err}"));
+            }
+        },
+        |handle| set_external_event_timer(handle, kind),
+        schedule_error_context,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,22 +154,17 @@ pub(super) fn schedule_animation_tick(delay_ms: u64) {
         return;
     }
 
-    let timeout = Duration::from_millis(delay_ms);
-    match TimerHandle::once(timeout, || {
-        schedule(|_| {
+    schedule_once(
+        delay_ms,
+        || {
             clear_animation_timer();
             if let Err(err) = on_animation_tick() {
                 warn(&format!("animation tick failed: {err}"));
             }
-        });
-    }) {
-        Ok(handle) => {
-            set_animation_timer(handle);
-        }
-        Err(err) => {
-            warn(&format!("failed to schedule animation tick: {err}"));
-        }
-    }
+        },
+        set_animation_timer,
+        "animation tick",
+    );
 }
 
 pub(super) fn schedule_external_throttle_timer(delay_ms: u64) {
@@ -138,43 +176,24 @@ pub(super) fn schedule_external_throttle_timer(delay_ms: u64) {
         clear_external_event_timer();
     }
 
-    let timeout = Duration::from_millis(delay_ms);
-    match TimerHandle::once(timeout, || {
-        schedule(|_| {
-            clear_external_event_timer();
-            if let Err(err) = handlers::on_external_event_trigger() {
-                warn(&format!("external throttle tick failed: {err}"));
-            }
-        });
-    }) {
-        Ok(handle) => {
-            set_external_event_timer(handle, ExternalEventTimerKind::Throttle);
-        }
-        Err(err) => {
-            warn(&format!("failed to schedule external throttle tick: {err}"));
-        }
-    }
+    schedule_external_timer(
+        delay_ms,
+        ExternalEventTimerKind::Throttle,
+        handlers::on_external_event_trigger,
+        "external throttle tick failed",
+        "external throttle tick",
+    );
 }
 
 pub(super) fn schedule_external_event_timer(delay_ms: u64) {
     clear_external_event_timer();
-
-    let timeout = Duration::from_millis(delay_ms);
-    match TimerHandle::once(timeout, || {
-        schedule(|_| {
-            clear_external_event_timer();
-            if let Err(err) = on_external_settle_tick() {
-                warn(&format!("external settle tick failed: {err}"));
-            }
-        });
-    }) {
-        Ok(handle) => {
-            set_external_event_timer(handle, ExternalEventTimerKind::Settle);
-        }
-        Err(err) => {
-            warn(&format!("failed to schedule external settle tick: {err}"));
-        }
-    }
+    schedule_external_timer(
+        delay_ms,
+        ExternalEventTimerKind::Settle,
+        on_external_settle_tick,
+        "external settle tick failed",
+        "external settle tick",
+    );
 }
 
 pub(super) fn schedule_key_event_timer(delay_ms: u64) {
@@ -185,20 +204,15 @@ pub(super) fn schedule_key_event_timer(delay_ms: u64) {
         return;
     }
 
-    let timeout = Duration::from_millis(delay_ms);
-    match TimerHandle::once(timeout, || {
-        schedule(|_| {
+    schedule_once(
+        delay_ms,
+        || {
             clear_key_event_timer();
             handlers::schedule_external_event_trigger();
-        });
-    }) {
-        Ok(handle) => {
-            set_key_event_timer(handle);
-        }
-        Err(err) => {
-            warn(&format!("failed to schedule key-event tick: {err}"));
-        }
-    }
+        },
+        set_key_event_timer,
+        "key-event tick",
+    );
 }
 
 pub(super) fn render_cleanup_delay_ms(config: &RuntimeConfig) -> u64 {
@@ -211,24 +225,19 @@ fn schedule_render_cleanup_timer(namespace_id: u32, delay_ms: u64) {
     let generation = bump_render_cleanup_generation();
     clear_render_cleanup_timer();
 
-    let timeout = Duration::from_millis(delay_ms);
-    match TimerHandle::once(timeout, move || {
-        schedule(move |_| {
+    schedule_once(
+        delay_ms,
+        move || {
             clear_render_cleanup_timer();
 
             if current_render_cleanup_generation() != generation {
                 return;
             }
             purge_render_windows(namespace_id);
-        });
-    }) {
-        Ok(handle) => {
-            set_render_cleanup_timer(handle);
-        }
-        Err(err) => {
-            warn(&format!("failed to schedule render cleanup: {err}"));
-        }
-    }
+        },
+        set_render_cleanup_timer,
+        "render cleanup",
+    );
 }
 
 fn schedule_render_cleanup(namespace_id: u32) {

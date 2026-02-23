@@ -25,6 +25,50 @@ pub(crate) struct Particle {
     pub(crate) lifetime: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GradientInfo {
+    pub(crate) origin: Point,
+    pub(crate) direction_scaled: Point,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RenderFrame {
+    pub(crate) mode: String,
+    pub(crate) corners: [Point; 4],
+    pub(crate) target: Point,
+    pub(crate) target_corners: [Point; 4],
+    pub(crate) vertical_bar: bool,
+    pub(crate) particles: Vec<Particle>,
+    pub(crate) cursor_color: Option<String>,
+    pub(crate) cursor_color_insert_mode: Option<String>,
+    pub(crate) normal_bg: Option<String>,
+    pub(crate) transparent_bg_fallback_color: String,
+    pub(crate) cterm_cursor_colors: Option<Vec<u16>>,
+    pub(crate) cterm_bg: Option<u16>,
+    pub(crate) color_at_cursor: Option<String>,
+    pub(crate) hide_target_hack: bool,
+    pub(crate) max_kept_windows: usize,
+    pub(crate) never_draw_over_target: bool,
+    pub(crate) use_diagonal_blocks: bool,
+    pub(crate) max_slope_horizontal: f64,
+    pub(crate) min_slope_vertical: f64,
+    pub(crate) max_angle_difference_diagonal: f64,
+    pub(crate) max_offset_diagonal: f64,
+    pub(crate) min_shade_no_diagonal: f64,
+    pub(crate) min_shade_no_diagonal_vertical_bar: f64,
+    pub(crate) max_shade_no_matrix: f64,
+    pub(crate) particle_max_lifetime: f64,
+    pub(crate) particles_over_text: bool,
+    pub(crate) color_levels: u32,
+    pub(crate) gamma: f64,
+    pub(crate) gradient_exponent: f64,
+    pub(crate) matrix_pixel_threshold: f64,
+    pub(crate) matrix_pixel_threshold_vertical_bar: f64,
+    pub(crate) matrix_pixel_min_factor: f64,
+    pub(crate) windows_zindex: u32,
+    pub(crate) gradient: Option<GradientInfo>,
+}
+
 #[derive(Debug)]
 pub(crate) struct StepInput {
     pub(crate) mode: String,

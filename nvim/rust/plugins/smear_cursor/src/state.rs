@@ -158,8 +158,6 @@ pub(crate) struct ParticleOptionsPatch {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct RenderingOptionsPatch {
     pub(crate) never_draw_over_target: Option<bool>,
-    pub(crate) legacy_computing_symbols_support: Option<bool>,
-    pub(crate) legacy_computing_symbols_support_vertical_bars: Option<bool>,
     pub(crate) use_diagonal_blocks: Option<bool>,
     pub(crate) max_slope_horizontal: Option<f64>,
     pub(crate) min_slope_vertical: Option<f64>,
@@ -426,14 +424,6 @@ impl RenderingOptionsPatch {
         apply_value(
             &mut config.never_draw_over_target,
             &mut self.never_draw_over_target,
-        );
-        apply_value(
-            &mut config.legacy_computing_symbols_support,
-            &mut self.legacy_computing_symbols_support,
-        );
-        apply_value(
-            &mut config.legacy_computing_symbols_support_vertical_bars,
-            &mut self.legacy_computing_symbols_support_vertical_bars,
         );
         apply_value(
             &mut config.use_diagonal_blocks,

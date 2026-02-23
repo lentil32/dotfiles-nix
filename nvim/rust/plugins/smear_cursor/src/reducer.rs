@@ -1,8 +1,9 @@
 use crate::animation::{compute_stiffnesses, corners_for_render, reached_target, simulate_step};
 use crate::config::RuntimeConfig;
-use crate::draw::{GradientInfo, RenderFrame};
 use crate::state::{CursorLocation, CursorShape, RuntimeState};
-use crate::types::{BASE_TIME_INTERVAL, EPSILON, Particle, Point, StepInput};
+use crate::types::{
+    BASE_TIME_INTERVAL, EPSILON, GradientInfo, Particle, Point, RenderFrame, StepInput,
+};
 use nvim_utils::mode::{
     is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
 };
@@ -60,6 +61,23 @@ pub(crate) struct CursorTransition {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum CursorCommand {
     StepIntervalMs(f64),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AnimationScheduleAction {
+    None,
+    Clear,
+    Schedule { delay_ms: u64 },
+}
+
+// Post-reducer runtime timing transition derived from state + callback metrics.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AnimationScheduleInput {
+    pub(crate) source: EventSource,
+    pub(crate) command: Option<CursorCommand>,
+    pub(crate) callback_duration_ms: f64,
+    pub(crate) callback_duration_estimate_ms: f64,
+    pub(crate) animation_delay_floor_ms: u64,
 }
 
 impl CursorTransition {
@@ -209,10 +227,6 @@ pub(crate) fn build_render_frame(
         hide_target_hack: state.config.hide_target_hack,
         max_kept_windows: state.config.max_kept_windows,
         never_draw_over_target: state.config.never_draw_over_target,
-        legacy_computing_symbols_support: state.config.legacy_computing_symbols_support,
-        legacy_computing_symbols_support_vertical_bars: state
-            .config
-            .legacy_computing_symbols_support_vertical_bars,
         use_diagonal_blocks: state.config.use_diagonal_blocks,
         max_slope_horizontal: state.config.max_slope_horizontal,
         min_slope_vertical: state.config.min_slope_vertical,
@@ -222,7 +236,6 @@ pub(crate) fn build_render_frame(
         min_shade_no_diagonal_vertical_bar: state.config.min_shade_no_diagonal_vertical_bar,
         max_shade_no_matrix: state.config.max_shade_no_matrix,
         particle_max_lifetime: state.config.particle_max_lifetime,
-        particle_switch_octant_braille: state.config.particle_switch_octant_braille,
         particles_over_text: state.config.particles_over_text,
         color_levels: state.config.color_levels,
         gamma: state.config.gamma,
@@ -374,8 +387,7 @@ pub(crate) fn reduce_cursor_event(
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             if external_mode_requires_jump(&state.config, mode) {
-                // Match upstream Lua behavior: jump updates position/target but does not
-                // force-stop an in-flight animation loop or clear velocity state.
+                // Mode-forced jumps update position/target but preserve in-flight motion.
                 state.jump_preserving_motion(target_position, cursor_shape, event.cursor_location);
                 return CursorTransitions::clear_all()
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
@@ -453,7 +465,7 @@ pub(crate) fn reduce_cursor_event(
 
     let should_advance = match source {
         EventSource::AnimationTick => state.is_animating(),
-        // Match upstream behavior: target updates do not advance physics while already animating.
+        // Target updates do not advance physics while already animating.
         // The first transition after a jump starts animation immediately.
         EventSource::External => just_started,
     };
@@ -566,6 +578,61 @@ pub(crate) fn as_delay_ms(value: f64) -> u64 {
         u64::MAX
     } else {
         clamped as u64
+    }
+}
+
+fn step_interval_ms(command: Option<CursorCommand>, fallback: f64) -> f64 {
+    match command {
+        Some(CursorCommand::StepIntervalMs(value)) => value,
+        None => fallback,
+    }
+}
+
+pub(crate) fn stabilized_callback_duration_ms(
+    callback_duration_ms: f64,
+    callback_duration_estimate_ms: f64,
+) -> f64 {
+    let observed = if callback_duration_ms.is_finite() {
+        callback_duration_ms.max(0.0)
+    } else {
+        0.0
+    };
+    let estimated = if callback_duration_estimate_ms.is_finite() {
+        callback_duration_estimate_ms.max(0.0)
+    } else {
+        0.0
+    };
+    if estimated <= 0.0 {
+        return observed;
+    }
+
+    // Suppress one-off spikes so timer cadence stays stable under callback jitter.
+    let outlier_capped = observed.min(estimated * 2.0 + BASE_TIME_INTERVAL);
+    0.5 * outlier_capped + 0.5 * estimated
+}
+
+pub(crate) fn decide_animation_schedule(
+    state: &mut RuntimeState,
+    input: AnimationScheduleInput,
+) -> AnimationScheduleAction {
+    let should_schedule = match input.source {
+        EventSource::AnimationTick => true,
+        EventSource::External => input.command.is_some(),
+    };
+    if should_schedule && state.is_enabled() && state.is_animating() && !state.is_delay_disabled() {
+        let step_interval_ms = step_interval_ms(input.command, state.config.time_interval);
+        let callback_duration_ms = stabilized_callback_duration_ms(
+            input.callback_duration_ms,
+            input.callback_duration_estimate_ms,
+        );
+        let delay_ms = next_animation_delay_ms(state, step_interval_ms, callback_duration_ms)
+            .max(input.animation_delay_floor_ms);
+        return AnimationScheduleAction::Schedule { delay_ms };
+    }
+
+    match input.source {
+        EventSource::AnimationTick => AnimationScheduleAction::Clear,
+        EventSource::External => AnimationScheduleAction::None,
     }
 }
 

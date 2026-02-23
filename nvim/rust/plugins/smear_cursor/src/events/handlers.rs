@@ -21,16 +21,80 @@ use super::timers::{
 };
 use crate::draw::{
     clear_active_render_windows, clear_highlight_cache, draw_current, draw_target_hack_block,
+    notify_delay_disabled_warning, redraw,
 };
 use crate::reducer::{
-    CursorCommand, CursorEventContext, EventSource, RenderAction, as_delay_ms, build_render_frame,
-    external_settle_delay_ms, next_animation_delay_ms, reduce_cursor_event,
+    AnimationScheduleAction, AnimationScheduleInput, CursorEventContext, EventSource, RenderAction,
+    as_delay_ms, build_render_frame, decide_animation_schedule, external_settle_delay_ms,
+    reduce_cursor_event,
 };
-use crate::state::CursorLocation;
+use crate::state::{CursorLocation, CursorSnapshot};
 use crate::types::Point;
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::{Result, api, schedule};
 use nvim_utils::mode::is_cmdline_mode;
+
+// Event handlers are orchestration-only: pure decision helpers compute explicit actions,
+// then small apply functions execute runtime side effects.
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RenderExecutionMetrics {
+    ops_planned: usize,
+    ops_applied: usize,
+    windows_created: usize,
+    windows_reused: usize,
+    reuse_failed_missing_window: usize,
+    reuse_failed_reconfigure: usize,
+    reuse_failed_missing_buffer: usize,
+    windows_pruned: usize,
+    windows_recovered: usize,
+}
+
+impl RenderExecutionMetrics {
+    fn merge_apply_metrics(
+        &mut self,
+        planned_ops: usize,
+        applied_ops: usize,
+        created_windows: usize,
+        reused_windows: usize,
+        reuse_failed_missing_window: usize,
+        reuse_failed_reconfigure: usize,
+        reuse_failed_missing_buffer: usize,
+        pruned_windows: usize,
+        recovered_windows: usize,
+    ) {
+        self.ops_planned = self.ops_planned.saturating_add(planned_ops);
+        self.ops_applied = self.ops_applied.saturating_add(applied_ops);
+        self.windows_created = self.windows_created.saturating_add(created_windows);
+        self.windows_reused = self.windows_reused.saturating_add(reused_windows);
+        self.reuse_failed_missing_window = self
+            .reuse_failed_missing_window
+            .saturating_add(reuse_failed_missing_window);
+        self.reuse_failed_reconfigure = self
+            .reuse_failed_reconfigure
+            .saturating_add(reuse_failed_reconfigure);
+        self.reuse_failed_missing_buffer = self
+            .reuse_failed_missing_buffer
+            .saturating_add(reuse_failed_missing_buffer);
+        self.windows_pruned = self.windows_pruned.saturating_add(pruned_windows);
+        self.windows_recovered = self.windows_recovered.saturating_add(recovered_windows);
+    }
+
+    fn to_perf_details(self) -> String {
+        format!(
+            "ops_planned={} ops_applied={} windows_created={} windows_reused={} reuse_failed_missing_window={} reuse_failed_reconfigure={} reuse_failed_missing_buffer={} windows_pruned={} windows_recovered={}",
+            self.ops_planned,
+            self.ops_applied,
+            self.windows_created,
+            self.windows_reused,
+            self.reuse_failed_missing_window,
+            self.reuse_failed_reconfigure,
+            self.reuse_failed_missing_buffer,
+            self.windows_pruned,
+            self.windows_recovered
+        )
+    }
+}
 
 fn render_action_perf_details(render_action: &RenderAction) -> String {
     match render_action {
@@ -59,6 +123,115 @@ fn render_action_perf_details(render_action: &RenderAction) -> String {
         }
         RenderAction::ClearAll => "action=clear_all".to_string(),
         RenderAction::Noop => "action=noop".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ExternalTriggerAction {
+    ClearPending {
+        clear_timer: bool,
+    },
+    DispatchNow,
+    ScheduleSettle {
+        delay_ms: u64,
+        snapshot: CursorSnapshot,
+    },
+    ScheduleThrottle {
+        delay_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum KeyEventAction {
+    None,
+    TriggerExternal,
+    ScheduleKeyTimer { delay_ms: u64 },
+}
+
+fn decide_external_trigger_action(
+    policy: BufferEventPolicy,
+    mode: &str,
+    smear_to_cmd: bool,
+    settle_delay_ms: u64,
+    snapshot: Option<CursorSnapshot>,
+    elapsed_since_external_dispatch_ms: f64,
+) -> ExternalTriggerAction {
+    if !policy.should_use_debounced_external_settle() {
+        let throttle_interval_ms = policy.settle_delay_floor_ms();
+        let remaining_delay_ms =
+            remaining_throttle_delay_ms(throttle_interval_ms, elapsed_since_external_dispatch_ms);
+        if remaining_delay_ms == 0 {
+            return ExternalTriggerAction::DispatchNow;
+        }
+        return ExternalTriggerAction::ScheduleThrottle {
+            delay_ms: remaining_delay_ms,
+        };
+    }
+
+    if is_cmdline_mode(mode) && !smear_to_cmd {
+        return ExternalTriggerAction::ClearPending { clear_timer: true };
+    }
+
+    match snapshot {
+        Some(snapshot) => ExternalTriggerAction::ScheduleSettle {
+            delay_ms: settle_delay_ms,
+            snapshot,
+        },
+        None => ExternalTriggerAction::ClearPending { clear_timer: false },
+    }
+}
+
+fn apply_external_trigger_action(action: ExternalTriggerAction) -> Result<()> {
+    match action {
+        ExternalTriggerAction::ClearPending { clear_timer } => {
+            if clear_timer {
+                clear_external_event_timer();
+            }
+            let mut state = state_lock();
+            state.clear_pending_external_event();
+            Ok(())
+        }
+        ExternalTriggerAction::DispatchNow => {
+            on_cursor_event_impl(EventSource::External)?;
+            note_external_dispatch_now();
+            Ok(())
+        }
+        ExternalTriggerAction::ScheduleSettle { delay_ms, snapshot } => {
+            let mut state = state_lock();
+            state.set_pending_external_event(Some(snapshot));
+            drop(state);
+            schedule_external_event_timer(delay_ms);
+            Ok(())
+        }
+        ExternalTriggerAction::ScheduleThrottle { delay_ms } => {
+            schedule_external_throttle_timer(delay_ms);
+            Ok(())
+        }
+    }
+}
+
+fn apply_animation_schedule(action: AnimationScheduleAction) {
+    match action {
+        AnimationScheduleAction::None => {}
+        AnimationScheduleAction::Clear => clear_animation_timer(),
+        AnimationScheduleAction::Schedule { delay_ms } => schedule_animation_tick(delay_ms),
+    }
+}
+
+fn decide_key_event_action(
+    policy: BufferEventPolicy,
+    key_delay_ms: u64,
+    delay_after_key_ms: f64,
+    elapsed_since_last_autocmd_ms: f64,
+) -> KeyEventAction {
+    if !policy.use_key_fallback() || elapsed_since_last_autocmd_ms <= delay_after_key_ms {
+        return KeyEventAction::None;
+    }
+    if !policy.should_use_debounced_external_settle() {
+        return KeyEventAction::TriggerExternal;
+    }
+    KeyEventAction::ScheduleKeyTimer {
+        delay_ms: key_delay_ms,
     }
 }
 
@@ -102,8 +275,7 @@ pub(super) fn on_cursor_event_impl(source: EventSource) -> Result<()> {
     };
 
     let Some((cursor_row, cursor_col)) = maybe_cursor_position else {
-        // Match upstream behavior: ignore transient cursor-position misses instead of
-        // clearing the current smear state.
+        // Ignore transient cursor-position misses instead of clearing active smear state.
         return Ok(());
     };
 
@@ -159,15 +331,12 @@ pub(super) fn on_cursor_event_impl(source: EventSource) -> Result<()> {
     let perf_render_details = render_action_perf_details(&render_decision.render_action);
     let perf_cleanup_details = format!("cleanup={:?}", render_decision.render_cleanup_action);
 
-    if notify_delay_disabled
-        && let Err(err) = api::command(
-            "lua vim.notify(\"Smear cursor disabled in the current buffer due to high delay.\")",
-        )
-    {
+    if notify_delay_disabled && let Err(err) = notify_delay_disabled_warning() {
         warn(&format!("delay-disabled notify failed: {err}"));
     }
 
-    apply_render_action(namespace_id, &mode, render_decision.render_action)?;
+    let execution_metrics =
+        apply_render_action(namespace_id, &mode, render_decision.render_action)?;
 
     apply_render_cleanup_action(namespace_id, render_decision.render_cleanup_action);
 
@@ -183,38 +352,25 @@ pub(super) fn on_cursor_event_impl(source: EventSource) -> Result<()> {
         &mode,
         callback_duration_ms,
         callback_duration_estimate_ms,
-        &format!("{perf_render_details} {perf_cleanup_details}"),
+        &format!(
+            "{perf_render_details} {perf_cleanup_details} {}",
+            execution_metrics.to_perf_details()
+        ),
     );
-    let should_schedule = match source {
-        EventSource::AnimationTick => true,
-        EventSource::External => command.is_some(),
-    };
-    let maybe_delay = {
+    let animation_schedule_action = {
         let mut state = state_lock();
-        if should_schedule
-            && state.is_enabled()
-            && state.is_animating()
-            && !state.is_delay_disabled()
-        {
-            let step_interval_ms = command
-                .map(|value| match value {
-                    CursorCommand::StepIntervalMs(step_interval_ms) => step_interval_ms,
-                })
-                .unwrap_or(state.config.time_interval);
-            Some(next_animation_delay_ms(
-                &mut state,
-                step_interval_ms,
+        decide_animation_schedule(
+            &mut state,
+            AnimationScheduleInput {
+                source,
+                command,
                 callback_duration_ms,
-            ))
-        } else {
-            None
-        }
+                callback_duration_estimate_ms,
+                animation_delay_floor_ms,
+            },
+        )
     };
-    match (maybe_delay, source) {
-        (Some(delay), _) => schedule_animation_tick(delay.max(animation_delay_floor_ms)),
-        (None, EventSource::AnimationTick) => clear_animation_timer(),
-        (None, EventSource::External) => {}
-    }
+    apply_animation_schedule(animation_schedule_action);
 
     Ok(())
 }
@@ -236,55 +392,31 @@ pub(super) fn on_external_event_trigger() -> Result<()> {
         state.clear_pending_external_event();
         return Ok(());
     }
-    if !policy.should_use_debounced_external_settle() {
-        return on_throttled_ui_external_event_trigger(policy);
-    }
-
     let mode = mode_string();
-    let (smear_to_cmd, delay_ms) = {
+    let (smear_to_cmd, settle_delay_ms) = {
         let state = state_lock();
         (
             state.config.smear_to_cmd,
             external_settle_delay_ms(state.config.delay_event_to_smear),
         )
     };
-    if is_cmdline_mode(&mode) && !smear_to_cmd {
-        clear_external_event_timer();
-        let mut state = state_lock();
-        state.clear_pending_external_event();
-        return Ok(());
-    }
-
-    let snapshot = current_cursor_snapshot(smear_to_cmd)?;
-    let Some(snapshot) = snapshot else {
-        {
-            let mut state = state_lock();
-            state.clear_pending_external_event();
-        }
-        return Ok(());
-    };
-
+    let snapshot = if policy.should_use_debounced_external_settle()
+        && (!is_cmdline_mode(&mode) || smear_to_cmd)
     {
-        let mut state = state_lock();
-        state.set_pending_external_event(Some(snapshot));
-    }
-    schedule_external_event_timer(delay_ms);
-    Ok(())
-}
-
-fn on_throttled_ui_external_event_trigger(policy: BufferEventPolicy) -> Result<()> {
-    let throttle_interval_ms = policy.settle_delay_floor_ms();
-    let elapsed_ms = elapsed_ms_since_last_external_dispatch(now_ms());
-    let remaining_delay_ms = remaining_throttle_delay_ms(throttle_interval_ms, elapsed_ms);
-
-    if remaining_delay_ms == 0 {
-        on_cursor_event_impl(EventSource::External)?;
-        note_external_dispatch_now();
-        return Ok(());
-    }
-
-    schedule_external_throttle_timer(remaining_delay_ms);
-    Ok(())
+        current_cursor_snapshot(smear_to_cmd)?
+    } else {
+        None
+    };
+    let elapsed_since_external_dispatch_ms = elapsed_ms_since_last_external_dispatch(now_ms());
+    let action = decide_external_trigger_action(
+        policy,
+        &mode,
+        smear_to_cmd,
+        settle_delay_ms,
+        snapshot,
+        elapsed_since_external_dispatch_ms,
+    );
+    apply_external_trigger_action(action)
 }
 
 pub(super) fn schedule_external_event_trigger() {
@@ -313,9 +445,7 @@ pub(crate) fn on_key_event() -> Result<()> {
     if skip_current_buffer_events(&buffer)? {
         return Ok(());
     }
-    if !policy.use_key_fallback() {
-        return Ok(());
-    }
+
     let now = now_ms();
     let (key_delay_ms, delay_after_key_ms) = {
         let state = state_lock();
@@ -324,14 +454,19 @@ pub(crate) fn on_key_event() -> Result<()> {
             state.config.delay_after_key.max(0.0),
         )
     };
-    if elapsed_ms_since_last_autocmd_event(now) <= delay_after_key_ms {
-        return Ok(());
+    let elapsed_since_last_autocmd_ms = elapsed_ms_since_last_autocmd_event(now);
+    let action = decide_key_event_action(
+        policy,
+        key_delay_ms,
+        delay_after_key_ms,
+        elapsed_since_last_autocmd_ms,
+    );
+    match action {
+        KeyEventAction::None => {}
+        KeyEventAction::TriggerExternal => schedule_external_event_trigger(),
+        KeyEventAction::ScheduleKeyTimer { delay_ms } => schedule_key_event_timer(delay_ms),
     }
-    if !policy.should_use_debounced_external_settle() {
-        schedule_external_event_trigger();
-        return Ok(());
-    }
-    schedule_key_event_timer(key_delay_ms);
+
     Ok(())
 }
 
@@ -379,26 +514,53 @@ fn replace_real_cursor_from_event(only_hide_real_cursor: bool) -> Result<()> {
     };
 
     if let Some(frame) = maybe_frame {
-        draw_current(namespace_id, &frame)?;
+        let _ = draw_current(namespace_id, &frame)?;
     }
 
     Ok(())
 }
 
-fn apply_render_action(namespace_id: u32, mode: &str, render_action: RenderAction) -> Result<()> {
+fn apply_render_action(
+    namespace_id: u32,
+    mode: &str,
+    render_action: RenderAction,
+) -> Result<RenderExecutionMetrics> {
     let cmdline_mode = is_cmdline_mode(mode);
+    let mut metrics = RenderExecutionMetrics::default();
     match render_action {
         RenderAction::Draw(frame) => {
             let redraw_cmd = cmdline_mode && smear_outside_cmd_row(&frame.corners)?;
-            draw_current(namespace_id, &frame)?;
-            if redraw_cmd && let Err(err) = api::command("redraw") {
+            let draw_metrics = draw_current(namespace_id, &frame)?;
+            metrics.merge_apply_metrics(
+                draw_metrics.planned_ops,
+                draw_metrics.applied_ops,
+                draw_metrics.created_windows,
+                draw_metrics.reused_windows,
+                draw_metrics.reuse_failed_missing_window,
+                draw_metrics.reuse_failed_reconfigure,
+                draw_metrics.reuse_failed_missing_buffer,
+                draw_metrics.pruned_windows,
+                draw_metrics.recovered_windows,
+            );
+            if redraw_cmd && let Err(err) = redraw() {
                 debug(&format!("redraw after draw failed: {err}"));
             }
 
             let should_unhide_while_animating =
                 cmdline_mode || (frame.never_draw_over_target && frame_reaches_target_cell(&frame));
             if !cmdline_mode && !should_unhide_while_animating && frame.hide_target_hack {
-                draw_target_hack_block(namespace_id, &frame)?;
+                let target_metrics = draw_target_hack_block(namespace_id, &frame)?;
+                metrics.merge_apply_metrics(
+                    target_metrics.planned_ops,
+                    target_metrics.applied_ops,
+                    target_metrics.created_windows,
+                    target_metrics.reused_windows,
+                    target_metrics.reuse_failed_missing_window,
+                    target_metrics.reuse_failed_reconfigure,
+                    target_metrics.reuse_failed_missing_buffer,
+                    target_metrics.pruned_windows,
+                    target_metrics.recovered_windows,
+                );
             }
             let mut state = state_lock();
             if should_unhide_while_animating {
@@ -421,7 +583,7 @@ fn apply_render_action(namespace_id: u32, mode: &str, render_action: RenderActio
                 state.config.max_kept_windows
             };
             clear_active_render_windows(namespace_id, max_kept_windows);
-            if cmdline_mode && let Err(err) = api::command("redraw") {
+            if cmdline_mode && let Err(err) = redraw() {
                 debug(&format!("redraw after clear failed: {err}"));
             }
             let mut state = state_lock();
@@ -435,7 +597,7 @@ fn apply_render_action(namespace_id: u32, mode: &str, render_action: RenderActio
         RenderAction::Noop => {}
     }
 
-    Ok(())
+    Ok(metrics)
 }
 
 pub(super) fn on_cursor_event(args: AutocmdCallbackArgs) -> bool {

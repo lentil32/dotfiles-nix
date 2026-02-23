@@ -1,8 +1,7 @@
 use super::cursor::{cursor_position_for_mode, mode_string, smear_outside_cmd_row};
-use crate::draw::RenderFrame;
 use crate::reducer::ScrollShift;
 use crate::state::{CursorLocation, CursorSnapshot};
-use crate::types::{EPSILON, Point};
+use crate::types::{EPSILON, Point, RenderFrame};
 use nvim_oxi::api::opts::WinTextHeightOpts;
 use nvim_oxi::{Result, api};
 
