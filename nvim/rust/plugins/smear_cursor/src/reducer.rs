@@ -45,10 +45,52 @@ pub(crate) enum RenderCleanupAction {
     Invalidate,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RenderAllocationPolicy {
+    ReuseOnly,
+    BootstrapIfPoolEmpty,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) enum CursorVisibilityEffect {
+    #[default]
+    Keep,
+    Hide,
+    Show,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) struct RenderSideEffects {
+    pub(crate) redraw_after_draw_if_cmdline: bool,
+    pub(crate) redraw_after_clear_if_cmdline: bool,
+    pub(crate) draw_target_hack_after_draw: bool,
+    pub(crate) cursor_visibility: CursorVisibilityEffect,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CleanupDirective {
+    KeepWarm,
+    SoftClear { max_kept_windows: usize },
+    HardPurge,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CleanupPolicyInput {
+    pub(crate) idle_ms: u64,
+    pub(crate) soft_cleanup_delay_ms: u64,
+    pub(crate) hard_cleanup_delay_ms: u64,
+    pub(crate) pool_total_windows: usize,
+    pub(crate) recent_frame_demand: usize,
+    pub(crate) max_kept_windows: usize,
+    pub(crate) callback_duration_estimate_ms: f64,
+}
+
 #[derive(Debug)]
 pub(crate) struct RenderDecision {
     pub(crate) render_action: RenderAction,
     pub(crate) render_cleanup_action: RenderCleanupAction,
+    pub(crate) render_allocation_policy: RenderAllocationPolicy,
+    pub(crate) render_side_effects: RenderSideEffects,
 }
 
 #[derive(Debug)]
@@ -67,7 +109,7 @@ pub(crate) enum CursorCommand {
 pub(crate) enum AnimationScheduleAction {
     None,
     Clear,
-    Schedule { delay_ms: u64 },
+    Schedule { delay_ms: u64, generation: u64 },
 }
 
 // Post-reducer runtime timing transition derived from state + callback metrics.
@@ -78,14 +120,23 @@ pub(crate) struct AnimationScheduleInput {
     pub(crate) callback_duration_ms: f64,
     pub(crate) callback_duration_estimate_ms: f64,
     pub(crate) animation_delay_floor_ms: u64,
+    pub(crate) render_generation: u64,
+    pub(crate) in_cmdline_mode: bool,
 }
 
 impl CursorTransition {
-    fn with_render_action(render_action: RenderAction) -> Self {
+    fn with_render_action(
+        mode: &str,
+        render_action: RenderAction,
+        render_allocation_policy: RenderAllocationPolicy,
+    ) -> Self {
+        let render_side_effects = render_side_effects_for_action(mode, &render_action);
         Self {
             render_decision: RenderDecision {
                 render_action,
                 render_cleanup_action: RenderCleanupAction::None,
+                render_allocation_policy,
+                render_side_effects,
             },
             notify_delay_disabled: false,
             command: None,
@@ -113,25 +164,131 @@ impl CursorTransition {
 struct CursorTransitions;
 
 impl CursorTransitions {
-    fn clear_all() -> CursorTransition {
-        CursorTransition::with_render_action(RenderAction::ClearAll)
+    fn clear_all(mode: &str) -> CursorTransition {
+        CursorTransition::with_render_action(
+            mode,
+            RenderAction::ClearAll,
+            RenderAllocationPolicy::ReuseOnly,
+        )
     }
 
-    fn draw(frame: RenderFrame, step_interval_ms: Option<f64>) -> CursorTransition {
-        let transition = CursorTransition::with_render_action(RenderAction::Draw(Box::new(frame)));
+    fn draw(
+        mode: &str,
+        frame: RenderFrame,
+        step_interval_ms: Option<f64>,
+        render_allocation_policy: RenderAllocationPolicy,
+    ) -> CursorTransition {
+        let render_action = RenderAction::Draw(Box::new(frame));
+        let transition =
+            CursorTransition::with_render_action(mode, render_action, render_allocation_policy);
         match step_interval_ms {
             Some(value) => transition.with_command(CursorCommand::StepIntervalMs(value)),
             None => transition,
         }
     }
 
-    fn noop() -> CursorTransition {
-        CursorTransition::with_render_action(RenderAction::Noop)
+    fn noop(mode: &str) -> CursorTransition {
+        CursorTransition::with_render_action(
+            mode,
+            RenderAction::Noop,
+            RenderAllocationPolicy::ReuseOnly,
+        )
     }
 
-    fn noop_with_step(step_interval_ms: f64) -> CursorTransition {
-        CursorTransition::with_render_action(RenderAction::Noop)
-            .with_command(CursorCommand::StepIntervalMs(step_interval_ms))
+    fn noop_with_step(mode: &str, step_interval_ms: f64) -> CursorTransition {
+        CursorTransition::with_render_action(
+            mode,
+            RenderAction::Noop,
+            RenderAllocationPolicy::ReuseOnly,
+        )
+        .with_command(CursorCommand::StepIntervalMs(step_interval_ms))
+    }
+}
+
+fn point_inside_target_bounds(
+    point: Point,
+    target_min_row: f64,
+    target_max_row: f64,
+    target_min_col: f64,
+    target_max_col: f64,
+) -> bool {
+    point.row >= target_min_row
+        && point.row <= target_max_row
+        && point.col >= target_min_col
+        && point.col <= target_max_col
+}
+
+fn frame_center(corners: &[Point; 4]) -> Point {
+    let mut row = 0.0_f64;
+    let mut col = 0.0_f64;
+    for point in corners {
+        row += point.row;
+        col += point.col;
+    }
+    Point {
+        row: row / 4.0,
+        col: col / 4.0,
+    }
+}
+
+fn frame_reaches_target_cell(frame: &RenderFrame) -> bool {
+    let target_min_row = frame.target_corners[0].row;
+    let target_max_row = frame.target_corners[2].row;
+    let target_min_col = frame.target_corners[0].col;
+    let target_max_col = frame.target_corners[2].col;
+    let center = frame_center(&frame.corners);
+    if point_inside_target_bounds(
+        center,
+        target_min_row,
+        target_max_row,
+        target_min_col,
+        target_max_col,
+    ) {
+        return true;
+    }
+
+    frame.corners.iter().copied().any(|point| {
+        point_inside_target_bounds(
+            point,
+            target_min_row,
+            target_max_row,
+            target_min_col,
+            target_max_col,
+        )
+    })
+}
+
+fn render_side_effects_for_action(mode: &str, render_action: &RenderAction) -> RenderSideEffects {
+    match render_action {
+        RenderAction::Draw(frame) => {
+            let cmdline_mode = is_cmdline_mode(mode);
+            let should_show_cursor =
+                cmdline_mode || (frame.never_draw_over_target && frame_reaches_target_cell(frame));
+
+            RenderSideEffects {
+                // Cmdline rendering is event-driven and does not require forced redraws
+                // for each animation frame.
+                redraw_after_draw_if_cmdline: false,
+                redraw_after_clear_if_cmdline: false,
+                draw_target_hack_after_draw: !cmdline_mode
+                    && !should_show_cursor
+                    && frame.hide_target_hack,
+                cursor_visibility: if should_show_cursor {
+                    CursorVisibilityEffect::Show
+                } else if !cmdline_mode {
+                    CursorVisibilityEffect::Hide
+                } else {
+                    CursorVisibilityEffect::Keep
+                },
+            }
+        }
+        RenderAction::ClearAll => RenderSideEffects {
+            redraw_after_draw_if_cmdline: false,
+            redraw_after_clear_if_cmdline: is_cmdline_mode(mode),
+            draw_target_hack_after_draw: false,
+            cursor_visibility: CursorVisibilityEffect::Show,
+        },
+        RenderAction::Noop => RenderSideEffects::default(),
     }
 }
 
@@ -343,19 +500,19 @@ pub(crate) fn reduce_cursor_event(
     if !state.is_enabled() {
         state.stop_animation();
         reset_animation_timing(state);
-        return CursorTransitions::clear_all()
+        return CursorTransitions::clear_all(mode)
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
 
     if state.is_delay_disabled() {
         match source {
             EventSource::External => {
-                return CursorTransitions::noop()
+                return CursorTransitions::noop(mode)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             EventSource::AnimationTick if !state.is_animating() => {
                 reset_animation_timing(state);
-                return CursorTransitions::clear_all()
+                return CursorTransitions::clear_all(mode)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             EventSource::AnimationTick => {}
@@ -383,13 +540,13 @@ pub(crate) fn reduce_cursor_event(
     match source {
         EventSource::External => {
             if external_mode_ignores_cursor(&state.config, mode) {
-                return CursorTransitions::noop()
+                return CursorTransitions::noop(mode)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             if external_mode_requires_jump(&state.config, mode) {
                 // Mode-forced jumps update position/target but preserve in-flight motion.
                 state.jump_preserving_motion(target_position, cursor_shape, event.cursor_location);
-                return CursorTransitions::clear_all()
+                return CursorTransitions::clear_all(mode)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
         }
@@ -411,13 +568,18 @@ pub(crate) fn reduce_cursor_event(
             vertical_bar,
             None,
         );
-        return CursorTransitions::draw(frame, None)
-            .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        return CursorTransitions::draw(
+            mode,
+            frame,
+            None,
+            RenderAllocationPolicy::BootstrapIfPoolEmpty,
+        )
+        .with_render_cleanup_action(RenderCleanupAction::Schedule);
     }
 
     match source {
         EventSource::AnimationTick if !state.is_animating() => {
-            return CursorTransitions::noop();
+            return CursorTransitions::noop(mode);
         }
         EventSource::AnimationTick | EventSource::External => {}
     }
@@ -438,7 +600,7 @@ pub(crate) fn reduce_cursor_event(
                 target_position.col,
             ) {
                 state.jump_and_stop_animation(target_position, cursor_shape, event.cursor_location);
-                return CursorTransitions::clear_all()
+                return CursorTransitions::clear_all(mode)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             state.set_target(target_position, cursor_shape);
@@ -467,7 +629,9 @@ pub(crate) fn reduce_cursor_event(
         EventSource::AnimationTick => state.is_animating(),
         // Target updates do not advance physics while already animating.
         // The first transition after a jump starts animation immediately.
-        EventSource::External => just_started,
+        // Cmdline uses event-driven progression, so each external event advances
+        // while animation remains active.
+        EventSource::External => just_started || (is_cmdline_mode(mode) && state.is_animating()),
     };
 
     if should_advance {
@@ -517,13 +681,13 @@ pub(crate) fn reduce_cursor_event(
             state.settle_at_target();
             state.stop_animation();
             reset_animation_timing(state);
-            return CursorTransitions::clear_all()
+            return CursorTransitions::clear_all(mode)
                 .with_delay_notification(notify_delay_disabled)
                 .with_render_cleanup_action(RenderCleanupAction::Schedule);
         }
 
-        if state.lag_ms() > EPSILON {
-            return CursorTransitions::noop_with_step(step_interval)
+        if !is_cmdline_mode(mode) && state.lag_ms() > EPSILON {
+            return CursorTransitions::noop_with_step(mode, step_interval)
                 .with_delay_notification(notify_delay_disabled)
                 .with_render_cleanup_action(RenderCleanupAction::Invalidate);
         }
@@ -539,15 +703,19 @@ pub(crate) fn reduce_cursor_event(
             vertical_bar,
             Some(step_indexes),
         );
-        return CursorTransitions::draw(frame, Some(step_interval))
-            .with_delay_notification(notify_delay_disabled)
-            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+        return CursorTransitions::draw(
+            mode,
+            frame,
+            Some(step_interval),
+            RenderAllocationPolicy::ReuseOnly,
+        )
+        .with_delay_notification(notify_delay_disabled)
+        .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
 
     match source {
-        EventSource::External => {
-            CursorTransitions::noop().with_render_cleanup_action(RenderCleanupAction::Invalidate)
-        }
+        EventSource::External => CursorTransitions::noop(mode)
+            .with_render_cleanup_action(RenderCleanupAction::Invalidate),
         EventSource::AnimationTick => {
             let current_corners = state.current_corners();
             let target_corners = state.target_corners();
@@ -562,7 +730,7 @@ pub(crate) fn reduce_cursor_event(
                 vertical_bar,
                 gradient_indexes,
             );
-            CursorTransitions::draw(frame, None)
+            CursorTransitions::draw(mode, frame, None, RenderAllocationPolicy::ReuseOnly)
                 .with_render_cleanup_action(RenderCleanupAction::None)
         }
     }
@@ -579,6 +747,30 @@ pub(crate) fn as_delay_ms(value: f64) -> u64 {
     } else {
         clamped as u64
     }
+}
+
+pub(crate) fn decide_cleanup_directive(input: CleanupPolicyInput) -> CleanupDirective {
+    if input.pool_total_windows == 0 {
+        return CleanupDirective::KeepWarm;
+    }
+
+    let callback_penalty_ms = as_delay_ms(input.callback_duration_estimate_ms * 2.0);
+    let demand_penalty_ms = u64::try_from(input.recent_frame_demand).unwrap_or(u64::MAX) / 4;
+    let keep_warm_until_ms = input
+        .soft_cleanup_delay_ms
+        .saturating_add(callback_penalty_ms)
+        .saturating_add(demand_penalty_ms);
+    if input.idle_ms < keep_warm_until_ms {
+        return CleanupDirective::KeepWarm;
+    }
+
+    if input.idle_ms < input.hard_cleanup_delay_ms {
+        return CleanupDirective::SoftClear {
+            max_kept_windows: input.max_kept_windows,
+        };
+    }
+
+    CleanupDirective::HardPurge
 }
 
 fn step_interval_ms(command: Option<CursorCommand>, fallback: f64) -> f64 {
@@ -615,6 +807,13 @@ pub(crate) fn decide_animation_schedule(
     state: &mut RuntimeState,
     input: AnimationScheduleInput,
 ) -> AnimationScheduleAction {
+    if input.in_cmdline_mode {
+        return match input.source {
+            EventSource::AnimationTick => AnimationScheduleAction::Clear,
+            EventSource::External => AnimationScheduleAction::None,
+        };
+    }
+
     let should_schedule = match input.source {
         EventSource::AnimationTick => true,
         EventSource::External => input.command.is_some(),
@@ -627,7 +826,10 @@ pub(crate) fn decide_animation_schedule(
         );
         let delay_ms = next_animation_delay_ms(state, step_interval_ms, callback_duration_ms)
             .max(input.animation_delay_floor_ms);
-        return AnimationScheduleAction::Schedule { delay_ms };
+        return AnimationScheduleAction::Schedule {
+            delay_ms,
+            generation: input.render_generation,
+        };
     }
 
     match input.source {
@@ -663,8 +865,10 @@ pub(crate) fn external_settle_delay_ms(delay_event_to_smear: f64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CursorEventContext, CursorTransition, EventSource, RenderAction, RenderCleanupAction,
-        reduce_cursor_event,
+        AnimationScheduleAction, AnimationScheduleInput, CleanupDirective, CleanupPolicyInput,
+        CursorEventContext, CursorTransition, CursorVisibilityEffect, EventSource, RenderAction,
+        RenderAllocationPolicy, RenderCleanupAction, RenderSideEffects, decide_animation_schedule,
+        decide_cleanup_directive, reduce_cursor_event,
     };
     use crate::state::{CursorLocation, RuntimeState};
     use proptest::collection::vec;
@@ -676,6 +880,14 @@ mod tests {
 
     fn render_cleanup_action(transition: &CursorTransition) -> RenderCleanupAction {
         transition.render_decision.render_cleanup_action
+    }
+
+    fn render_allocation_policy(transition: &CursorTransition) -> RenderAllocationPolicy {
+        transition.render_decision.render_allocation_policy
+    }
+
+    fn render_side_effects(transition: &CursorTransition) -> RenderSideEffects {
+        transition.render_decision.render_side_effects
     }
 
     fn event(row: f64, col: f64) -> CursorEventContext {
@@ -708,6 +920,67 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_policy_keeps_pool_warm_before_soft_threshold() {
+        let directive = decide_cleanup_directive(CleanupPolicyInput {
+            idle_ms: 200,
+            soft_cleanup_delay_ms: 200,
+            hard_cleanup_delay_ms: 3_000,
+            pool_total_windows: 24,
+            recent_frame_demand: 20,
+            max_kept_windows: 256,
+            callback_duration_estimate_ms: 4.0,
+        });
+        assert_eq!(directive, CleanupDirective::KeepWarm);
+    }
+
+    #[test]
+    fn cleanup_policy_soft_clears_mid_idle() {
+        let directive = decide_cleanup_directive(CleanupPolicyInput {
+            idle_ms: 800,
+            soft_cleanup_delay_ms: 200,
+            hard_cleanup_delay_ms: 3_000,
+            pool_total_windows: 24,
+            recent_frame_demand: 20,
+            max_kept_windows: 64,
+            callback_duration_estimate_ms: 2.0,
+        });
+        assert_eq!(
+            directive,
+            CleanupDirective::SoftClear {
+                max_kept_windows: 64
+            }
+        );
+    }
+
+    #[test]
+    fn cleanup_policy_hard_purges_after_long_idle() {
+        let directive = decide_cleanup_directive(CleanupPolicyInput {
+            idle_ms: 3_100,
+            soft_cleanup_delay_ms: 200,
+            hard_cleanup_delay_ms: 3_000,
+            pool_total_windows: 24,
+            recent_frame_demand: 20,
+            max_kept_windows: 64,
+            callback_duration_estimate_ms: 2.0,
+        });
+        assert_eq!(directive, CleanupDirective::HardPurge);
+    }
+
+    #[test]
+    fn cleanup_policy_noop_when_pool_empty() {
+        let directive = decide_cleanup_directive(CleanupPolicyInput {
+            idle_ms: 10_000,
+            soft_cleanup_delay_ms: 200,
+            hard_cleanup_delay_ms: 3_000,
+            pool_total_windows: 0,
+            recent_frame_demand: 0,
+            max_kept_windows: 64,
+            callback_duration_estimate_ms: 10.0,
+        });
+        assert_eq!(directive, CleanupDirective::KeepWarm);
+    }
+
+    #[test]
     fn disabled_state_reduces_to_clear_all() {
         let mut state = RuntimeState::default();
         state.set_enabled(false);
@@ -731,8 +1004,42 @@ mod tests {
             render_cleanup_action(&effects),
             RenderCleanupAction::Schedule
         );
+        assert_eq!(
+            render_allocation_policy(&effects),
+            RenderAllocationPolicy::BootstrapIfPoolEmpty
+        );
         assert!(state.is_initialized());
         assert!(!state.is_animating());
+    }
+
+    #[test]
+    fn draw_effects_hide_cursor_in_normal_mode() {
+        let mut state = RuntimeState::default();
+        let effects = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
+
+        let side_effects = render_side_effects(&effects);
+        assert_eq!(side_effects.cursor_visibility, CursorVisibilityEffect::Hide);
+        assert!(!side_effects.redraw_after_draw_if_cmdline);
+    }
+
+    #[test]
+    fn clear_effects_show_cursor_and_redraw_in_cmdline_mode() {
+        let mut state = RuntimeState::default();
+        state.set_enabled(false);
+
+        let effects = reduce_cursor_event(&mut state, "c", event(3.0, 8.0), EventSource::External);
+        let side_effects = render_side_effects(&effects);
+        assert_eq!(side_effects.cursor_visibility, CursorVisibilityEffect::Show);
+        assert!(side_effects.redraw_after_clear_if_cmdline);
+    }
+
+    #[test]
+    fn draw_effects_skip_redraw_in_cmdline_mode() {
+        let mut state = RuntimeState::default();
+        state.config.smear_to_cmd = true;
+        let effects = reduce_cursor_event(&mut state, "c", event(5.0, 6.0), EventSource::External);
+        let side_effects = render_side_effects(&effects);
+        assert!(!side_effects.redraw_after_draw_if_cmdline);
     }
 
     #[test]
@@ -766,6 +1073,10 @@ mod tests {
         assert_eq!(
             render_cleanup_action(&effects),
             RenderCleanupAction::Invalidate
+        );
+        assert_eq!(
+            render_allocation_policy(&effects),
+            RenderAllocationPolicy::ReuseOnly
         );
     }
 
@@ -827,6 +1138,77 @@ mod tests {
             now_ms += 16.0;
         }
         assert!(observed_draw, "expected repeated switches to produce draws");
+    }
+
+    #[test]
+    fn cmdline_external_events_continue_animation_without_ticks() {
+        let mut state = RuntimeState::default();
+        state.config.smear_to_cmd = true;
+
+        let _ = reduce_cursor_event(&mut state, "c", event(5.0, 6.0), EventSource::External);
+        let _ = reduce_cursor_event(
+            &mut state,
+            "c",
+            CursorEventContext {
+                row: 5.0,
+                col: 12.0,
+                now_ms: 116.0,
+                seed: 11,
+                cursor_location: CursorLocation::new(10, 20, 1, 1),
+                scroll_shift: None,
+            },
+            EventSource::External,
+        );
+        let effects = reduce_cursor_event(
+            &mut state,
+            "c",
+            CursorEventContext {
+                row: 5.0,
+                col: 16.0,
+                now_ms: 132.0,
+                seed: 12,
+                cursor_location: CursorLocation::new(10, 20, 1, 1),
+                scroll_shift: None,
+            },
+            EventSource::External,
+        );
+
+        assert!(matches!(render_action(&effects), RenderAction::Draw(_)));
+        assert!(state.is_animating());
+    }
+
+    #[test]
+    fn animation_schedule_skips_ticks_in_cmdline_mode() {
+        let mut state = RuntimeState::default();
+        state.start_animation();
+
+        let external_action = decide_animation_schedule(
+            &mut state,
+            AnimationScheduleInput {
+                source: EventSource::External,
+                command: Some(super::CursorCommand::StepIntervalMs(16.0)),
+                callback_duration_ms: 1.0,
+                callback_duration_estimate_ms: 1.0,
+                animation_delay_floor_ms: 0,
+                render_generation: 7,
+                in_cmdline_mode: true,
+            },
+        );
+        assert_eq!(external_action, AnimationScheduleAction::None);
+
+        let tick_action = decide_animation_schedule(
+            &mut state,
+            AnimationScheduleInput {
+                source: EventSource::AnimationTick,
+                command: None,
+                callback_duration_ms: 1.0,
+                callback_duration_estimate_ms: 1.0,
+                animation_delay_floor_ms: 0,
+                render_generation: 7,
+                in_cmdline_mode: true,
+            },
+        );
+        assert_eq!(tick_action, AnimationScheduleAction::Clear);
     }
 
     proptest! {

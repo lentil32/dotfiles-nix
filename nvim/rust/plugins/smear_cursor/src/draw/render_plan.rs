@@ -20,10 +20,25 @@ use geometry::{
 };
 use particles::draw_particles;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum HighlightRef {
     Normal(u32),
     Inverted(u32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum Glyph {
+    Static(&'static str),
+}
+
+impl Glyph {
+    pub(crate) const BLOCK: Self = Self::Static("█");
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Static(value) => value,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,7 +46,7 @@ pub(crate) struct CellOp {
     pub(crate) row: i64,
     pub(crate) col: i64,
     pub(crate) zindex: u32,
-    pub(crate) character: String,
+    pub(crate) glyph: Glyph,
     pub(crate) highlight: HighlightRef,
 }
 
@@ -114,7 +129,7 @@ impl PlanBuilder {
         row: i64,
         col: i64,
         zindex: u32,
-        character: &str,
+        glyph: Glyph,
         highlight: HighlightRef,
     ) -> bool {
         if !self.in_bounds(row, col) {
@@ -124,7 +139,7 @@ impl PlanBuilder {
             row,
             col,
             zindex,
-            character: character.to_string(),
+            glyph,
             highlight,
         });
         true
@@ -135,7 +150,7 @@ impl PlanBuilder {
         row: i64,
         col: i64,
         zindex: u32,
-        character: String,
+        glyph: Glyph,
         highlight: HighlightRef,
         requires_background_probe: bool,
     ) -> bool {
@@ -147,7 +162,7 @@ impl PlanBuilder {
                 row,
                 col,
                 zindex,
-                character,
+                glyph,
                 highlight,
             },
             requires_background_probe,

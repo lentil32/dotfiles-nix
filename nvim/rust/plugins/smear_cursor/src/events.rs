@@ -28,6 +28,8 @@ const LOG_LEVEL_INFO: i64 = 2;
 const LOG_LEVEL_ERROR: i64 = 4;
 const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
 const MIN_RENDER_CLEANUP_DELAY_MS: u64 = 200;
+const MIN_RENDER_HARD_PURGE_DELAY_MS: u64 = 3_000;
+const RENDER_HARD_PURGE_DELAY_MULTIPLIER: u64 = 8;
 const CURSOR_COLOR_LUAEVAL_EXPR: &str = r##"(function()
   local function get_hl_color(group, attr)
     local hl = vim.api.nvim_get_hl(0, { name = group, link = false })
@@ -117,10 +119,27 @@ impl RenderCleanupGeneration {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RenderGeneration {
+    value: u64,
+}
+
+impl RenderGeneration {
+    fn bump(&mut self) -> u64 {
+        self.value = self.value.wrapping_add(1);
+        self.value
+    }
+
+    const fn current(self) -> u64 {
+        self.value
+    }
+}
+
 #[derive(Debug, Default)]
 struct EngineState {
     runtime: RuntimeState,
     render_cleanup_generation: RenderCleanupGeneration,
+    render_generation: RenderGeneration,
 }
 
 impl EngineState {
@@ -130,6 +149,14 @@ impl EngineState {
 
     const fn current_render_cleanup_generation(&self) -> u64 {
         self.render_cleanup_generation.current()
+    }
+
+    fn bump_render_generation(&mut self) -> u64 {
+        self.render_generation.bump()
+    }
+
+    const fn current_render_generation(&self) -> u64 {
+        self.render_generation.current()
     }
 }
 

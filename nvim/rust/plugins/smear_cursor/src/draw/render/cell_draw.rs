@@ -1,8 +1,18 @@
 use super::super::{BOTTOM_BLOCKS, BRAILLE_CODE_MIN, LEFT_BLOCKS, MATRIX_CHARACTERS};
 use super::geometry::{QuadGeometry, diagonal_blocks_for_slope, frac01, level_from_shade};
-use super::{HighlightRef, PlanResources};
+use super::{Glyph, HighlightRef, PlanResources};
 use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::types::RenderFrame;
+use std::sync::LazyLock;
+
+static BRAILLE_GLYPHS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    (1_u32..=255_u32)
+        .filter_map(|index| {
+            char::from_u32((BRAILLE_CODE_MIN as u32).saturating_add(index))
+                .map(|character| Box::leak(character.to_string().into_boxed_str()) as &'static str)
+        })
+        .collect()
+});
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlockCharacterSet {
@@ -45,9 +55,13 @@ fn draw_partial_block(
         HighlightRef::Normal(properties.level)
     };
 
-    resources
-        .builder
-        .push_cell(row, col, resources.windows_zindex, character, highlight)
+    resources.builder.push_cell(
+        row,
+        col,
+        resources.windows_zindex,
+        Glyph::Static(character),
+        highlight,
+    )
 }
 
 fn get_top_block_properties(
@@ -286,7 +300,7 @@ pub(super) fn draw_diagonal_block(
         row,
         col,
         resources.windows_zindex,
-        character,
+        Glyph::Static(character),
         HighlightRef::Normal(level),
     )
 }
@@ -343,7 +357,7 @@ pub(super) fn draw_matrix_character(
         row,
         col,
         resources.windows_zindex,
-        MATRIX_CHARACTERS[index],
+        Glyph::Static(MATRIX_CHARACTERS[index]),
         HighlightRef::Normal(level),
     )
 }
@@ -370,7 +384,7 @@ pub(super) fn draw_braille_character(
         return false;
     }
 
-    let Some(character) = char::from_u32((BRAILLE_CODE_MIN as usize + braille_index) as u32) else {
+    let Some(character) = BRAILLE_GLYPHS.get(braille_index.saturating_sub(1)).copied() else {
         return false;
     };
 
@@ -378,7 +392,7 @@ pub(super) fn draw_braille_character(
         row,
         col,
         zindex,
-        character.to_string(),
+        Glyph::Static(character),
         HighlightRef::Normal(level),
         requires_background_probe,
     )
@@ -414,7 +428,7 @@ pub(super) fn draw_octant_character(
         row,
         col,
         zindex,
-        character.to_string(),
+        Glyph::Static(character),
         HighlightRef::Normal(level),
         requires_background_probe,
     )

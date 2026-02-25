@@ -1,8 +1,7 @@
-use super::cursor::{current_buffer_buftype, current_buffer_filetype};
+use super::cursor::current_buffer_filetype;
 use super::event_loop::ExternalEventTimerKind;
-use super::runtime::{cursor_callback_duration_estimate_ms, state_lock};
+use super::runtime::state_lock;
 use crate::reducer::as_delay_ms;
-use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::{Result, api};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +10,7 @@ pub(super) enum BufferEventPolicy {
 }
 
 impl BufferEventPolicy {
+    #[cfg(test)]
     pub(super) fn from_buffer_metadata(
         _buftype: &str,
         _buflisted: bool,
@@ -51,22 +51,9 @@ pub(super) fn should_replace_external_timer_with_throttle(
     matches!(existing_kind, Some(ExternalEventTimerKind::Settle))
 }
 
-pub(super) fn current_buffer_event_policy(buffer: &api::Buffer) -> Result<BufferEventPolicy> {
-    let buftype = current_buffer_buftype(buffer)?;
-    let opts = OptionOpts::builder().buf(buffer.clone()).build();
-    let buflisted: bool = api::get_option_value("buflisted", &opts)?;
-    let line_count_usize = buffer.line_count()?;
-    let line_count = match i64::try_from(line_count_usize) {
-        Ok(value) => value,
-        Err(_) => i64::MAX,
-    };
-    let callback_duration_estimate_ms = cursor_callback_duration_estimate_ms();
-    Ok(BufferEventPolicy::from_buffer_metadata(
-        &buftype,
-        buflisted,
-        line_count,
-        callback_duration_estimate_ms,
-    ))
+pub(super) fn current_buffer_event_policy(_buffer: &api::Buffer) -> Result<BufferEventPolicy> {
+    // Policy variants are currently static; avoid per-callback metadata probes in the hot path.
+    Ok(BufferEventPolicy::Normal)
 }
 
 pub(super) fn skip_current_buffer_events(buffer: &api::Buffer) -> Result<bool> {

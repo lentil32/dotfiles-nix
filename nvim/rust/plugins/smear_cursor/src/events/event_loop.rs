@@ -8,11 +8,13 @@ pub(super) enum ExternalEventTimerKind {
 }
 
 pub(super) struct EventLoopState {
-    animation_timer: Option<TimerHandle>,
+    animation_timer: Option<(TimerHandle, u64)>,
     external_event_timer: Option<(TimerHandle, ExternalEventTimerKind)>,
     key_event_timer: Option<TimerHandle>,
     render_cleanup_timer: Option<TimerHandle>,
     external_trigger_pending: bool,
+    external_trigger_dirty: bool,
+    cmdline_redraw_pending: bool,
     last_autocmd_event_ms: f64,
     last_external_dispatch_ms: f64,
     callback_duration_ewma_ms: f64,
@@ -28,6 +30,8 @@ impl EventLoopState {
             key_event_timer: None,
             render_cleanup_timer: None,
             external_trigger_pending: false,
+            external_trigger_dirty: false,
+            cmdline_redraw_pending: false,
             last_autocmd_event_ms: 0.0,
             last_external_dispatch_ms: 0.0,
             callback_duration_ewma_ms: 0.0,
@@ -38,12 +42,18 @@ impl EventLoopState {
         self.animation_timer.is_some()
     }
 
+    pub(super) fn animation_timer_generation(&self) -> Option<u64> {
+        self.animation_timer
+            .as_ref()
+            .map(|(_, generation)| *generation)
+    }
+
     pub(super) fn clear_animation_timer(&mut self) {
         let _ = self.animation_timer.take();
     }
 
-    pub(super) fn set_animation_timer(&mut self, handle: TimerHandle) {
-        self.animation_timer = Some(handle);
+    pub(super) fn set_animation_timer(&mut self, handle: TimerHandle, generation: u64) {
+        self.animation_timer = Some((handle, generation));
     }
 
     pub(super) fn clear_external_event_timer(&mut self) {
@@ -80,15 +90,41 @@ impl EventLoopState {
 
     pub(super) fn clear_external_trigger_pending(&mut self) {
         self.external_trigger_pending = false;
+        self.external_trigger_dirty = false;
     }
 
     pub(super) fn mark_external_trigger_pending_if_idle(&mut self) -> bool {
         if self.external_trigger_pending {
+            self.external_trigger_dirty = true;
             false
         } else {
             self.external_trigger_pending = true;
+            self.external_trigger_dirty = false;
             true
         }
+    }
+
+    pub(super) fn complete_external_trigger_dispatch(&mut self) -> bool {
+        if self.external_trigger_dirty {
+            self.external_trigger_dirty = false;
+            true
+        } else {
+            self.external_trigger_pending = false;
+            false
+        }
+    }
+
+    pub(super) fn mark_cmdline_redraw_pending_if_idle(&mut self) -> bool {
+        if self.cmdline_redraw_pending {
+            false
+        } else {
+            self.cmdline_redraw_pending = true;
+            true
+        }
+    }
+
+    pub(super) fn clear_cmdline_redraw_pending(&mut self) {
+        self.cmdline_redraw_pending = false;
     }
 
     pub(super) fn note_autocmd_event(&mut self, now_ms: f64) {
@@ -170,12 +206,16 @@ pub(super) fn clear_animation_timer() {
     with_event_loop_state(EventLoopState::clear_animation_timer);
 }
 
-pub(super) fn set_animation_timer(handle: TimerHandle) {
-    with_event_loop_state(|state| state.set_animation_timer(handle));
+pub(super) fn set_animation_timer(handle: TimerHandle, generation: u64) {
+    with_event_loop_state(|state| state.set_animation_timer(handle, generation));
 }
 
 pub(super) fn is_animation_timer_scheduled() -> bool {
     read_event_loop_state(EventLoopState::is_animation_timer_scheduled)
+}
+
+pub(super) fn animation_timer_generation() -> Option<u64> {
+    read_event_loop_state(EventLoopState::animation_timer_generation)
 }
 
 pub(super) fn clear_external_event_timer() {
@@ -212,6 +252,18 @@ pub(super) fn clear_external_trigger_pending() {
 
 pub(super) fn mark_external_trigger_pending_if_idle() -> bool {
     with_event_loop_state(EventLoopState::mark_external_trigger_pending_if_idle)
+}
+
+pub(super) fn complete_external_trigger_dispatch() -> bool {
+    with_event_loop_state(EventLoopState::complete_external_trigger_dispatch)
+}
+
+pub(super) fn mark_cmdline_redraw_pending_if_idle() -> bool {
+    with_event_loop_state(EventLoopState::mark_cmdline_redraw_pending_if_idle)
+}
+
+pub(super) fn clear_cmdline_redraw_pending() {
+    with_event_loop_state(EventLoopState::clear_cmdline_redraw_pending);
 }
 
 pub(super) fn note_autocmd_event(now_ms: f64) {

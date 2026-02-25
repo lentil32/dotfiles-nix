@@ -18,6 +18,47 @@ impl Point {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ScreenCell {
+    row: i64,
+    col: i64,
+}
+
+impl ScreenCell {
+    pub(crate) fn new(row: i64, col: i64) -> Option<Self> {
+        if row < 1 || col < 1 {
+            return None;
+        }
+        Some(Self { row, col })
+    }
+
+    pub(crate) fn from_rounded_point(point: Point) -> Option<Self> {
+        if !point.row.is_finite() || !point.col.is_finite() {
+            return None;
+        }
+
+        let rounded_row = point.row.round();
+        let rounded_col = point.col.round();
+        if rounded_row < 1.0
+            || rounded_col < 1.0
+            || rounded_row > i64::MAX as f64
+            || rounded_col > i64::MAX as f64
+        {
+            return None;
+        }
+
+        Self::new(rounded_row as i64, rounded_col as i64)
+    }
+
+    pub(crate) const fn row(self) -> i64 {
+        self.row
+    }
+
+    pub(crate) const fn col(self) -> i64 {
+        self.col
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Particle {
     pub(crate) position: Point,
@@ -145,5 +186,42 @@ impl Rng32 {
 
     pub(crate) fn state(self) -> u32 {
         self.state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Point, ScreenCell};
+
+    #[test]
+    fn screen_cell_validates_one_indexed_cells() {
+        assert_eq!(ScreenCell::new(1, 1), Some(ScreenCell { row: 1, col: 1 }));
+        assert_eq!(ScreenCell::new(0, 1), None);
+        assert_eq!(ScreenCell::new(1, 0), None);
+    }
+
+    #[test]
+    fn screen_cell_from_point_rounds_and_rejects_non_finite_values() {
+        assert_eq!(
+            ScreenCell::from_rounded_point(Point {
+                row: 12.6,
+                col: 9.4
+            }),
+            Some(ScreenCell { row: 13, col: 9 })
+        );
+        assert_eq!(
+            ScreenCell::from_rounded_point(Point {
+                row: f64::NAN,
+                col: 3.0
+            }),
+            None
+        );
+        assert_eq!(
+            ScreenCell::from_rounded_point(Point {
+                row: 3.0,
+                col: -1.0
+            }),
+            None
+        );
     }
 }

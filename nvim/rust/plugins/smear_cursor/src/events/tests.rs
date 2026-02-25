@@ -21,8 +21,11 @@ fn cursor_snapshot(mode: &str, row: f64, col: f64) -> crate::state::CursorSnapsh
 }
 
 mod cleanup_tests {
-    use super::super::timers::render_cleanup_delay_ms;
-    use super::super::{EngineState, MIN_RENDER_CLEANUP_DELAY_MS, RenderCleanupGeneration};
+    use super::super::timers::{render_cleanup_delay_ms, render_hard_cleanup_delay_ms};
+    use super::super::{
+        EngineState, MIN_RENDER_CLEANUP_DELAY_MS, MIN_RENDER_HARD_PURGE_DELAY_MS,
+        RENDER_HARD_PURGE_DELAY_MULTIPLIER, RenderCleanupGeneration, RenderGeneration,
+    };
     use crate::config::RuntimeConfig;
 
     #[test]
@@ -53,6 +56,36 @@ mod cleanup_tests {
     }
 
     #[test]
+    fn hard_cleanup_delay_scales_with_soft_delay() {
+        let config = RuntimeConfig {
+            time_interval: 160.0,
+            delay_event_to_smear: 40.0,
+            delay_after_key: 20.0,
+            ..RuntimeConfig::default()
+        };
+
+        assert_eq!(
+            render_hard_cleanup_delay_ms(&config),
+            (220 * RENDER_HARD_PURGE_DELAY_MULTIPLIER).max(MIN_RENDER_HARD_PURGE_DELAY_MS)
+        );
+    }
+
+    #[test]
+    fn hard_cleanup_delay_has_independent_floor() {
+        let config = RuntimeConfig {
+            time_interval: 0.0,
+            delay_event_to_smear: 0.0,
+            delay_after_key: 0.0,
+            ..RuntimeConfig::default()
+        };
+
+        assert_eq!(
+            render_hard_cleanup_delay_ms(&config),
+            MIN_RENDER_HARD_PURGE_DELAY_MS
+        );
+    }
+
+    #[test]
     fn cleanup_generation_bumps_and_wraps() {
         let mut generation = RenderCleanupGeneration::default();
         assert_eq!(generation.current(), 0);
@@ -72,6 +105,27 @@ mod cleanup_tests {
         assert_eq!(state.bump_render_cleanup_generation(), 2);
         assert_eq!(state.current_render_cleanup_generation(), 2);
     }
+
+    #[test]
+    fn render_generation_bumps_and_wraps() {
+        let mut generation = RenderGeneration::default();
+        assert_eq!(generation.current(), 0);
+        assert_eq!(generation.bump(), 1);
+        assert_eq!(generation.current(), 1);
+
+        generation = RenderGeneration { value: u64::MAX };
+        assert_eq!(generation.bump(), 0);
+        assert_eq!(generation.current(), 0);
+    }
+
+    #[test]
+    fn engine_state_exposes_render_generation_transitions() {
+        let mut state = EngineState::default();
+        assert_eq!(state.current_render_generation(), 0);
+        assert_eq!(state.bump_render_generation(), 1);
+        assert_eq!(state.bump_render_generation(), 2);
+        assert_eq!(state.current_render_generation(), 2);
+    }
 }
 
 mod event_loop_tests {
@@ -84,6 +138,28 @@ mod event_loop_tests {
         assert!(!state.mark_external_trigger_pending_if_idle());
         state.clear_external_trigger_pending();
         assert!(state.mark_external_trigger_pending_if_idle());
+    }
+
+    #[test]
+    fn event_loop_state_coalesces_reentrant_external_triggers() {
+        let mut state = EventLoopState::new();
+        assert!(state.mark_external_trigger_pending_if_idle());
+        assert!(!state.mark_external_trigger_pending_if_idle());
+
+        // A re-entrant trigger while dispatch is pending should request one extra drain pass.
+        assert!(state.complete_external_trigger_dispatch());
+        // After the extra pass, pending should clear.
+        assert!(!state.complete_external_trigger_dispatch());
+        assert!(state.mark_external_trigger_pending_if_idle());
+    }
+
+    #[test]
+    fn event_loop_state_coalesces_cmdline_redraw_requests() {
+        let mut state = EventLoopState::new();
+        assert!(state.mark_cmdline_redraw_pending_if_idle());
+        assert!(!state.mark_cmdline_redraw_pending_if_idle());
+        state.clear_cmdline_redraw_pending();
+        assert!(state.mark_cmdline_redraw_pending_if_idle());
     }
 
     #[test]
@@ -405,5 +481,95 @@ mod external_settle_tests {
         let expected = cursor_snapshot("n", 10.0, 2.0);
         let action = decide_external_settle_action("n", true, Some(&expected), None);
         assert_eq!(action, ExternalSettleAction::ClearPending);
+    }
+}
+
+mod handler_decision_tests {
+    use super::super::handlers::{
+        ExternalTriggerAction, KeyEventAction, decide_external_trigger_action,
+        decide_key_event_action, should_bump_render_generation,
+    };
+    use super::super::policy::BufferEventPolicy;
+    use super::cursor_snapshot;
+    use crate::reducer::EventSource;
+
+    #[test]
+    fn external_trigger_clears_pending_in_cmdline_when_smear_to_cmd_disabled() {
+        let action = decide_external_trigger_action(
+            BufferEventPolicy::Normal,
+            "c",
+            false,
+            25,
+            Some(cursor_snapshot("c", 2.0, 3.0)),
+            0.0,
+        );
+        assert_eq!(
+            action,
+            ExternalTriggerAction::ClearPending { clear_timer: true }
+        );
+    }
+
+    #[test]
+    fn external_trigger_schedules_settle_when_snapshot_exists() {
+        let snapshot = cursor_snapshot("n", 5.0, 8.0);
+        let action = decide_external_trigger_action(
+            BufferEventPolicy::Normal,
+            "n",
+            true,
+            40,
+            Some(snapshot.clone()),
+            0.0,
+        );
+        assert_eq!(
+            action,
+            ExternalTriggerAction::ScheduleSettle {
+                delay_ms: 40,
+                snapshot,
+            }
+        );
+    }
+
+    #[test]
+    fn external_trigger_clears_pending_without_snapshot() {
+        let action =
+            decide_external_trigger_action(BufferEventPolicy::Normal, "n", true, 33, None, 0.0);
+        assert_eq!(
+            action,
+            ExternalTriggerAction::ClearPending { clear_timer: false }
+        );
+    }
+
+    #[test]
+    fn key_event_noops_when_autocmd_is_recent() {
+        let action = decide_key_event_action(BufferEventPolicy::Normal, 17, 30.0, 5.0);
+        assert_eq!(action, KeyEventAction::None);
+    }
+
+    #[test]
+    fn key_event_schedules_key_timer_when_autocmd_is_stale() {
+        let action = decide_key_event_action(BufferEventPolicy::Normal, 17, 15.0, 60.0);
+        assert_eq!(action, KeyEventAction::ScheduleKeyTimer { delay_ms: 17 });
+    }
+
+    #[test]
+    fn render_generation_bumps_for_external_event_when_idle() {
+        assert!(should_bump_render_generation(EventSource::External, false));
+    }
+
+    #[test]
+    fn render_generation_does_not_bump_for_external_event_while_animating() {
+        assert!(!should_bump_render_generation(EventSource::External, true));
+    }
+
+    #[test]
+    fn render_generation_never_bumps_for_animation_tick() {
+        assert!(!should_bump_render_generation(
+            EventSource::AnimationTick,
+            false
+        ));
+        assert!(!should_bump_render_generation(
+            EventSource::AnimationTick,
+            true
+        ));
     }
 }

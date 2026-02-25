@@ -1,62 +1,9 @@
 use super::cursor::{cursor_position_for_mode, mode_string, smear_outside_cmd_row};
 use crate::reducer::ScrollShift;
 use crate::state::{CursorLocation, CursorSnapshot};
-use crate::types::{EPSILON, Point, RenderFrame};
+use crate::types::{EPSILON, Point};
 use nvim_oxi::api::opts::WinTextHeightOpts;
 use nvim_oxi::{Result, api};
-
-fn point_inside_target_bounds(
-    point: Point,
-    target_min_row: f64,
-    target_max_row: f64,
-    target_min_col: f64,
-    target_max_col: f64,
-) -> bool {
-    point.row >= target_min_row
-        && point.row <= target_max_row
-        && point.col >= target_min_col
-        && point.col <= target_max_col
-}
-
-fn frame_center(corners: &[Point; 4]) -> Point {
-    let mut row = 0.0_f64;
-    let mut col = 0.0_f64;
-    for point in corners {
-        row += point.row;
-        col += point.col;
-    }
-    Point {
-        row: row / 4.0,
-        col: col / 4.0,
-    }
-}
-
-pub(super) fn frame_reaches_target_cell(frame: &RenderFrame) -> bool {
-    let target_min_row = frame.target_corners[0].row;
-    let target_max_row = frame.target_corners[2].row;
-    let target_min_col = frame.target_corners[0].col;
-    let target_max_col = frame.target_corners[2].col;
-    let center = frame_center(&frame.corners);
-    if point_inside_target_bounds(
-        center,
-        target_min_row,
-        target_max_row,
-        target_min_col,
-        target_max_col,
-    ) {
-        return true;
-    }
-
-    frame.corners.iter().copied().any(|point| {
-        point_inside_target_bounds(
-            point,
-            target_min_row,
-            target_max_row,
-            target_min_col,
-            target_max_col,
-        )
-    })
-}
 
 fn line_index_1_to_0(row: i64) -> usize {
     let clamped = row.max(1).saturating_sub(1);

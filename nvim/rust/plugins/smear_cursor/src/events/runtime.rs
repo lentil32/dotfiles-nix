@@ -11,12 +11,16 @@ pub(super) fn clear_animation_timer() {
     event_loop::clear_animation_timer();
 }
 
-pub(super) fn set_animation_timer(handle: TimerHandle) {
-    event_loop::set_animation_timer(handle);
+pub(super) fn set_animation_timer(handle: TimerHandle, generation: u64) {
+    event_loop::set_animation_timer(handle, generation);
 }
 
 pub(super) fn is_animation_timer_scheduled() -> bool {
     event_loop::is_animation_timer_scheduled()
+}
+
+pub(super) fn animation_timer_generation() -> Option<u64> {
+    event_loop::animation_timer_generation()
 }
 
 pub(super) fn clear_external_event_timer() {
@@ -57,6 +61,16 @@ pub(super) fn current_render_cleanup_generation() -> u64 {
     state.current_render_cleanup_generation()
 }
 
+pub(super) fn bump_render_generation() -> u64 {
+    let mut state = engine_lock();
+    state.bump_render_generation()
+}
+
+pub(super) fn current_render_generation() -> u64 {
+    let state = engine_lock();
+    state.current_render_generation()
+}
+
 pub(super) fn invalidate_render_cleanup() {
     bump_render_cleanup_generation();
     clear_render_cleanup_timer();
@@ -66,8 +80,20 @@ pub(super) fn clear_external_trigger_pending() {
     event_loop::clear_external_trigger_pending();
 }
 
+pub(super) fn clear_cmdline_redraw_pending() {
+    event_loop::clear_cmdline_redraw_pending();
+}
+
 pub(super) fn mark_external_trigger_pending_if_idle() -> bool {
     event_loop::mark_external_trigger_pending_if_idle()
+}
+
+pub(super) fn complete_external_trigger_dispatch() -> bool {
+    event_loop::complete_external_trigger_dispatch()
+}
+
+pub(super) fn mark_cmdline_redraw_pending_if_idle() -> bool {
+    event_loop::mark_cmdline_redraw_pending_if_idle()
 }
 
 pub(super) fn note_autocmd_event_now() {
@@ -111,10 +137,12 @@ pub(super) fn reset_transient_event_state() {
     clear_external_event_timer();
     clear_key_event_timer();
     clear_external_trigger_pending();
+    clear_cmdline_redraw_pending();
     clear_autocmd_event_timestamp();
     clear_external_dispatch_timestamp();
     clear_cursor_callback_duration_estimate();
     invalidate_render_cleanup();
+    let _ = bump_render_generation();
 }
 
 pub(super) fn reset_transient_event_state_without_generation_bump() {
@@ -122,6 +150,7 @@ pub(super) fn reset_transient_event_state_without_generation_bump() {
     clear_external_event_timer();
     clear_key_event_timer();
     clear_external_trigger_pending();
+    clear_cmdline_redraw_pending();
     clear_autocmd_event_timestamp();
     clear_external_dispatch_timestamp();
     clear_cursor_callback_duration_estimate();

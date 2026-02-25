@@ -203,6 +203,14 @@ fn apply_optional_value<T>(target: &mut Option<T>, patch: &mut Option<OptionalCh
     }
 }
 
+macro_rules! apply_config_fields {
+    ($config:expr, $patch:expr, [$($field:ident),+ $(,)?]) => {
+        $(
+            apply_value(&mut $config.$field, &mut $patch.$field);
+        )+
+    };
+}
+
 impl RuntimeOptionsPatch {
     pub(crate) fn apply(mut self, state: &mut RuntimeState) -> RuntimeOptionsEffects {
         let mut effects = RuntimeOptionsEffects::default();
@@ -229,38 +237,29 @@ impl RuntimeSwitchesPatch {
         }
 
         let config = &mut state.config;
-        apply_value(&mut config.time_interval, &mut self.time_interval);
         if let Some(change) = self.delay_disable.take() {
             apply_optional_change(&mut config.delay_disable, change);
         }
-        apply_value(
-            &mut config.delay_event_to_smear,
-            &mut self.delay_event_to_smear,
+        apply_config_fields!(
+            config,
+            self,
+            [
+                time_interval,
+                delay_event_to_smear,
+                delay_after_key,
+                smear_to_cmd,
+                smear_insert_mode,
+                smear_replace_mode,
+                smear_terminal_mode,
+                vertical_bar_cursor,
+                vertical_bar_cursor_insert_mode,
+                horizontal_bar_cursor_replace_mode,
+                hide_target_hack,
+                max_kept_windows,
+                windows_zindex,
+                filetypes_disabled,
+            ]
         );
-        apply_value(&mut config.delay_after_key, &mut self.delay_after_key);
-        apply_value(&mut config.smear_to_cmd, &mut self.smear_to_cmd);
-        apply_value(&mut config.smear_insert_mode, &mut self.smear_insert_mode);
-        apply_value(&mut config.smear_replace_mode, &mut self.smear_replace_mode);
-        apply_value(
-            &mut config.smear_terminal_mode,
-            &mut self.smear_terminal_mode,
-        );
-        apply_value(
-            &mut config.vertical_bar_cursor,
-            &mut self.vertical_bar_cursor,
-        );
-        apply_value(
-            &mut config.vertical_bar_cursor_insert_mode,
-            &mut self.vertical_bar_cursor_insert_mode,
-        );
-        apply_value(
-            &mut config.horizontal_bar_cursor_replace_mode,
-            &mut self.horizontal_bar_cursor_replace_mode,
-        );
-        apply_value(&mut config.hide_target_hack, &mut self.hide_target_hack);
-        apply_value(&mut config.max_kept_windows, &mut self.max_kept_windows);
-        apply_value(&mut config.windows_zindex, &mut self.windows_zindex);
-        apply_value(&mut config.filetypes_disabled, &mut self.filetypes_disabled);
 
         if let Some(value) = self.logging_level.take() {
             config.logging_level = value;
@@ -296,178 +295,97 @@ impl ColorOptionsPatch {
 
 impl SmearBehaviorPatch {
     fn apply(&mut self, config: &mut RuntimeConfig) {
-        apply_value(
-            &mut config.smear_between_buffers,
-            &mut self.smear_between_buffers,
-        );
-        apply_value(
-            &mut config.smear_between_neighbor_lines,
-            &mut self.smear_between_neighbor_lines,
-        );
-        apply_value(
-            &mut config.min_horizontal_distance_smear,
-            &mut self.min_horizontal_distance_smear,
-        );
-        apply_value(
-            &mut config.min_vertical_distance_smear,
-            &mut self.min_vertical_distance_smear,
-        );
-        apply_value(&mut config.smear_horizontally, &mut self.smear_horizontally);
-        apply_value(&mut config.smear_vertically, &mut self.smear_vertically);
-        apply_value(&mut config.smear_diagonally, &mut self.smear_diagonally);
-        apply_value(
-            &mut config.scroll_buffer_space,
-            &mut self.scroll_buffer_space,
+        apply_config_fields!(
+            config,
+            self,
+            [
+                smear_between_buffers,
+                smear_between_neighbor_lines,
+                min_horizontal_distance_smear,
+                min_vertical_distance_smear,
+                smear_horizontally,
+                smear_vertically,
+                smear_diagonally,
+                scroll_buffer_space,
+            ]
         );
     }
 }
 
 impl MotionOptionsPatch {
     fn apply(&mut self, config: &mut RuntimeConfig) {
-        apply_value(&mut config.stiffness, &mut self.stiffness);
-        apply_value(&mut config.trailing_stiffness, &mut self.trailing_stiffness);
-        apply_value(&mut config.trailing_exponent, &mut self.trailing_exponent);
-        apply_value(
-            &mut config.stiffness_insert_mode,
-            &mut self.stiffness_insert_mode,
-        );
-        apply_value(
-            &mut config.trailing_stiffness_insert_mode,
-            &mut self.trailing_stiffness_insert_mode,
-        );
-        apply_value(
-            &mut config.trailing_exponent_insert_mode,
-            &mut self.trailing_exponent_insert_mode,
-        );
-        apply_value(&mut config.anticipation, &mut self.anticipation);
-        apply_value(&mut config.damping, &mut self.damping);
-        apply_value(
-            &mut config.damping_insert_mode,
-            &mut self.damping_insert_mode,
-        );
-        apply_value(
-            &mut config.distance_stop_animating,
-            &mut self.distance_stop_animating,
-        );
-        apply_value(
-            &mut config.distance_stop_animating_vertical_bar,
-            &mut self.distance_stop_animating_vertical_bar,
-        );
-        apply_value(&mut config.max_length, &mut self.max_length);
-        apply_value(
-            &mut config.max_length_insert_mode,
-            &mut self.max_length_insert_mode,
+        apply_config_fields!(
+            config,
+            self,
+            [
+                stiffness,
+                trailing_stiffness,
+                trailing_exponent,
+                stiffness_insert_mode,
+                trailing_stiffness_insert_mode,
+                trailing_exponent_insert_mode,
+                anticipation,
+                damping,
+                damping_insert_mode,
+                distance_stop_animating,
+                distance_stop_animating_vertical_bar,
+                max_length,
+                max_length_insert_mode,
+            ]
         );
     }
 }
 
 impl ParticleOptionsPatch {
     fn apply(&mut self, config: &mut RuntimeConfig) {
-        apply_value(&mut config.particles_enabled, &mut self.particles_enabled);
-        apply_value(&mut config.particle_max_num, &mut self.particle_max_num);
-        apply_value(&mut config.particle_spread, &mut self.particle_spread);
-        apply_value(
-            &mut config.particles_per_second,
-            &mut self.particles_per_second,
-        );
-        apply_value(
-            &mut config.particles_per_length,
-            &mut self.particles_per_length,
-        );
-        apply_value(
-            &mut config.particle_max_lifetime,
-            &mut self.particle_max_lifetime,
-        );
-        apply_value(
-            &mut config.particle_lifetime_distribution_exponent,
-            &mut self.particle_lifetime_distribution_exponent,
-        );
-        apply_value(
-            &mut config.particle_max_initial_velocity,
-            &mut self.particle_max_initial_velocity,
-        );
-        apply_value(
-            &mut config.particle_velocity_from_cursor,
-            &mut self.particle_velocity_from_cursor,
-        );
-        apply_value(
-            &mut config.particle_random_velocity,
-            &mut self.particle_random_velocity,
-        );
-        apply_value(&mut config.particle_damping, &mut self.particle_damping);
-        apply_value(&mut config.particle_gravity, &mut self.particle_gravity);
-        apply_value(
-            &mut config.min_distance_emit_particles,
-            &mut self.min_distance_emit_particles,
-        );
-        apply_value(
-            &mut config.particle_switch_octant_braille,
-            &mut self.particle_switch_octant_braille,
-        );
-        apply_value(
-            &mut config.particles_over_text,
-            &mut self.particles_over_text,
-        );
-        apply_value(
-            &mut config.volume_reduction_exponent,
-            &mut self.volume_reduction_exponent,
-        );
-        apply_value(
-            &mut config.minimum_volume_factor,
-            &mut self.minimum_volume_factor,
+        apply_config_fields!(
+            config,
+            self,
+            [
+                particles_enabled,
+                particle_max_num,
+                particle_spread,
+                particles_per_second,
+                particles_per_length,
+                particle_max_lifetime,
+                particle_lifetime_distribution_exponent,
+                particle_max_initial_velocity,
+                particle_velocity_from_cursor,
+                particle_random_velocity,
+                particle_damping,
+                particle_gravity,
+                min_distance_emit_particles,
+                particle_switch_octant_braille,
+                particles_over_text,
+                volume_reduction_exponent,
+                minimum_volume_factor,
+            ]
         );
     }
 }
 
 impl RenderingOptionsPatch {
     fn apply(&mut self, config: &mut RuntimeConfig) {
-        apply_value(
-            &mut config.never_draw_over_target,
-            &mut self.never_draw_over_target,
-        );
-        apply_value(
-            &mut config.use_diagonal_blocks,
-            &mut self.use_diagonal_blocks,
-        );
-        apply_value(
-            &mut config.max_slope_horizontal,
-            &mut self.max_slope_horizontal,
-        );
-        apply_value(&mut config.min_slope_vertical, &mut self.min_slope_vertical);
-        apply_value(
-            &mut config.max_angle_difference_diagonal,
-            &mut self.max_angle_difference_diagonal,
-        );
-        apply_value(
-            &mut config.max_offset_diagonal,
-            &mut self.max_offset_diagonal,
-        );
-        apply_value(
-            &mut config.min_shade_no_diagonal,
-            &mut self.min_shade_no_diagonal,
-        );
-        apply_value(
-            &mut config.min_shade_no_diagonal_vertical_bar,
-            &mut self.min_shade_no_diagonal_vertical_bar,
-        );
-        apply_value(
-            &mut config.max_shade_no_matrix,
-            &mut self.max_shade_no_matrix,
-        );
-        apply_value(&mut config.color_levels, &mut self.color_levels);
-        apply_value(&mut config.gamma, &mut self.gamma);
-        apply_value(&mut config.gradient_exponent, &mut self.gradient_exponent);
-        apply_value(
-            &mut config.matrix_pixel_threshold,
-            &mut self.matrix_pixel_threshold,
-        );
-        apply_value(
-            &mut config.matrix_pixel_threshold_vertical_bar,
-            &mut self.matrix_pixel_threshold_vertical_bar,
-        );
-        apply_value(
-            &mut config.matrix_pixel_min_factor,
-            &mut self.matrix_pixel_min_factor,
+        apply_config_fields!(
+            config,
+            self,
+            [
+                never_draw_over_target,
+                use_diagonal_blocks,
+                max_slope_horizontal,
+                min_slope_vertical,
+                max_angle_difference_diagonal,
+                max_offset_diagonal,
+                min_shade_no_diagonal,
+                min_shade_no_diagonal_vertical_bar,
+                max_shade_no_matrix,
+                color_levels,
+                gamma,
+                gradient_exponent,
+                matrix_pixel_threshold,
+                matrix_pixel_threshold_vertical_bar,
+                matrix_pixel_min_factor,
+            ]
         );
     }
 }
@@ -534,10 +452,6 @@ impl CursorTracking {
     fn tracked_location(self) -> Option<CursorLocation> {
         self.location
     }
-
-    fn clear(&mut self) {
-        self.location = None;
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -552,26 +466,51 @@ impl AnimationTiming {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TransientRuntimeState {
+    target_position: Point,
+    timing: AnimationTiming,
+    buffer_state: BufferState,
+    tracking: CursorTracking,
+    cursor_visibility: CursorVisibility,
+    pending_external_event: Option<CursorSnapshot>,
+    color_at_cursor: Option<String>,
+}
+
+impl Default for TransientRuntimeState {
+    fn default() -> Self {
+        Self {
+            target_position: Point::ZERO,
+            timing: AnimationTiming::default(),
+            buffer_state: BufferState::Active,
+            tracking: CursorTracking::default(),
+            cursor_visibility: CursorVisibility::Visible,
+            pending_external_event: None,
+            color_at_cursor: None,
+        }
+    }
+}
+
+impl TransientRuntimeState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct RuntimeState {
     pub(crate) config: RuntimeConfig,
     plugin_state: PluginState,
     animation_state: AnimationState,
-    buffer_state: BufferState,
     namespace_id: Option<u32>,
     current_corners: [Point; 4],
     target_corners: [Point; 4],
-    target_position: Point,
     velocity_corners: [Point; 4],
     stiffnesses: [f64; 4],
     particles: Vec<Particle>,
     previous_center: Point,
     rng_state: u32,
-    timing: AnimationTiming,
-    tracking: CursorTracking,
-    cursor_visibility: CursorVisibility,
-    pending_external_event: Option<CursorSnapshot>,
-    color_at_cursor: Option<String>,
+    transient: TransientRuntimeState,
 }
 
 impl RuntimeState {
@@ -625,7 +564,7 @@ impl RuntimeState {
     }
 
     pub(crate) fn target_position(&self) -> Point {
-        self.target_position
+        self.transient.target_position
     }
 
     pub(crate) fn velocity_corners(&self) -> [Point; 4] {
@@ -657,15 +596,15 @@ impl RuntimeState {
     }
 
     pub(crate) fn color_at_cursor(&self) -> Option<&str> {
-        self.color_at_cursor.as_deref()
+        self.transient.color_at_cursor.as_deref()
     }
 
     pub(crate) fn set_color_at_cursor(&mut self, color: Option<String>) {
-        self.color_at_cursor = color;
+        self.transient.color_at_cursor = color;
     }
 
     pub(crate) fn clear_color_at_cursor(&mut self) {
-        self.color_at_cursor = None;
+        self.transient.color_at_cursor = None;
     }
 
     pub(crate) fn start_animation(&mut self) {
@@ -689,31 +628,31 @@ impl RuntimeState {
     }
 
     pub(crate) fn last_tick_ms(&self) -> Option<f64> {
-        self.timing.last_tick_ms
+        self.transient.timing.last_tick_ms
     }
 
     pub(crate) fn set_last_tick_ms(&mut self, value: Option<f64>) {
-        self.timing.last_tick_ms = value;
+        self.transient.timing.last_tick_ms = value;
     }
 
     pub(crate) fn lag_ms(&self) -> f64 {
-        self.timing.lag_ms
+        self.transient.timing.lag_ms
     }
 
     pub(crate) fn set_lag_ms(&mut self, value: f64) {
-        self.timing.lag_ms = value;
+        self.transient.timing.lag_ms = value;
     }
 
     pub(crate) fn reset_animation_timing(&mut self) {
-        self.timing.reset();
+        self.transient.timing.reset();
     }
 
     pub(crate) fn is_delay_disabled(&self) -> bool {
-        matches!(self.buffer_state, BufferState::DelayDisabled)
+        matches!(self.transient.buffer_state, BufferState::DelayDisabled)
     }
 
     pub(crate) fn set_delay_disabled(&mut self, disabled: bool) {
-        self.buffer_state = if disabled {
+        self.transient.buffer_state = if disabled {
             BufferState::DelayDisabled
         } else {
             BufferState::Active
@@ -721,23 +660,19 @@ impl RuntimeState {
     }
 
     pub(crate) fn tracked_location(&self) -> Option<CursorLocation> {
-        self.tracking.tracked_location()
+        self.transient.tracking.tracked_location()
     }
 
     pub(crate) fn update_tracking(&mut self, location: CursorLocation) {
-        self.tracking.update(location);
-    }
-
-    pub(crate) fn clear_tracking(&mut self) {
-        self.tracking.clear();
+        self.transient.tracking.update(location);
     }
 
     pub(crate) fn is_cursor_hidden(&self) -> bool {
-        matches!(self.cursor_visibility, CursorVisibility::Hidden)
+        matches!(self.transient.cursor_visibility, CursorVisibility::Hidden)
     }
 
     pub(crate) fn set_cursor_hidden(&mut self, hidden: bool) {
-        self.cursor_visibility = if hidden {
+        self.transient.cursor_visibility = if hidden {
             CursorVisibility::Hidden
         } else {
             CursorVisibility::Visible
@@ -745,15 +680,15 @@ impl RuntimeState {
     }
 
     pub(crate) fn pending_external_event_cloned(&self) -> Option<CursorSnapshot> {
-        self.pending_external_event.clone()
+        self.transient.pending_external_event.clone()
     }
 
     pub(crate) fn set_pending_external_event(&mut self, snapshot: Option<CursorSnapshot>) {
-        self.pending_external_event = snapshot;
+        self.transient.pending_external_event = snapshot;
     }
 
     pub(crate) fn clear_pending_external_event(&mut self) {
-        self.pending_external_event = None;
+        self.transient.pending_external_event = None;
     }
 
     pub(crate) fn apply_scroll_shift(
@@ -793,12 +728,12 @@ impl RuntimeState {
         let corners = shape.corners(position);
         self.current_corners = corners;
         self.target_corners = corners;
-        self.target_position = position;
+        self.transient.target_position = position;
         self.previous_center = center(&self.current_corners);
     }
 
     pub(crate) fn set_target(&mut self, position: Point, shape: CursorShape) {
-        self.target_position = position;
+        self.transient.target_position = position;
         self.target_corners = shape.corners(position);
     }
 
@@ -876,13 +811,7 @@ impl RuntimeState {
     }
 
     pub(crate) fn reset_transient_state(&mut self) {
-        self.target_position = Point::ZERO;
-        self.reset_animation_timing();
-        self.set_delay_disabled(false);
-        self.clear_tracking();
-        self.set_cursor_hidden(false);
-        self.clear_pending_external_event();
-        self.clear_color_at_cursor();
+        self.transient.reset();
     }
 }
 
@@ -892,21 +821,15 @@ impl Default for RuntimeState {
             config: RuntimeConfig::default(),
             plugin_state: PluginState::Enabled,
             animation_state: AnimationState::Uninitialized,
-            buffer_state: BufferState::Active,
             namespace_id: None,
             current_corners: [Point::ZERO; 4],
             target_corners: [Point::ZERO; 4],
-            target_position: Point::ZERO,
             velocity_corners: [Point::ZERO; 4],
             stiffnesses: [0.6; 4],
             particles: Vec::new(),
             previous_center: Point::ZERO,
             rng_state: DEFAULT_RNG_STATE,
-            timing: AnimationTiming::default(),
-            tracking: CursorTracking::default(),
-            cursor_visibility: CursorVisibility::Visible,
-            pending_external_event: None,
-            color_at_cursor: None,
+            transient: TransientRuntimeState::default(),
         }
     }
 }
@@ -943,10 +866,8 @@ mod tests {
 
     #[test]
     fn transient_reset_clears_only_transient_fields() {
-        let mut state = RuntimeState {
-            target_position: Point { row: 4.0, col: 9.0 },
-            ..RuntimeState::default()
-        };
+        let mut state = RuntimeState::default();
+        state.set_target(Point { row: 4.0, col: 9.0 }, CursorShape::new(false, false));
         state.set_delay_disabled(true);
         state.update_tracking(CursorLocation::new(11, 22, 33, 44));
         state.set_cursor_hidden(true);
@@ -955,18 +876,18 @@ mod tests {
             row: 2.0,
             col: 3.0,
         }));
-        state.color_at_cursor = Some("#ffffff".to_string());
+        state.set_color_at_cursor(Some("#ffffff".to_string()));
         state.set_last_tick_ms(Some(99.0));
         state.set_lag_ms(17.0);
 
         state.reset_transient_state();
 
-        assert_eq!(state.target_position, Point::ZERO);
+        assert_eq!(state.target_position(), Point::ZERO);
         assert!(!state.is_delay_disabled());
         assert_eq!(state.tracked_location(), None);
         assert!(!state.is_cursor_hidden());
         assert_eq!(state.pending_external_event_cloned(), None);
-        assert_eq!(state.color_at_cursor, None);
+        assert_eq!(state.color_at_cursor(), None);
         assert_eq!(state.last_tick_ms(), None);
         assert_eq!(state.lag_ms(), 0.0);
     }
@@ -1002,7 +923,7 @@ mod tests {
         assert!(!state.is_animating());
         assert_eq!(state.current_corners, expected_corners);
         assert_eq!(state.target_corners, expected_corners);
-        assert_eq!(state.target_position, position);
+        assert_eq!(state.target_position(), position);
         assert_eq!(state.velocity_corners, [Point::ZERO; 4]);
         assert!(state.particles.is_empty());
         assert_eq!(state.rng_state, 123);

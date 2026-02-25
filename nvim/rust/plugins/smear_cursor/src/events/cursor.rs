@@ -98,10 +98,6 @@ pub(super) fn current_buffer_filetype(buffer: &api::Buffer) -> Result<String> {
     current_buffer_option_string(buffer, "filetype")
 }
 
-pub(super) fn current_buffer_buftype(buffer: &api::Buffer) -> Result<String> {
-    current_buffer_option_string(buffer, "buftype")
-}
-
 fn cursor_color_at_current_position() -> Result<Option<String>> {
     let args = Array::from_iter([Object::from(CURSOR_COLOR_LUAEVAL_EXPR)]);
     let value: Object = api::call_function("luaeval", args)?;

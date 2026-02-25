@@ -5,16 +5,23 @@ use super::handlers;
 use super::logging::warn;
 use super::policy::should_replace_external_timer_with_throttle;
 use super::runtime::{
-    bump_render_cleanup_generation, clear_animation_timer, clear_external_event_timer,
-    clear_key_event_timer, clear_render_cleanup_timer, current_render_cleanup_generation,
-    external_event_timer_kind, invalidate_render_cleanup, is_animation_timer_scheduled,
-    set_animation_timer, set_external_event_timer, set_key_event_timer, set_render_cleanup_timer,
-    state_lock,
+    animation_timer_generation, bump_render_cleanup_generation, clear_animation_timer,
+    clear_external_event_timer, clear_key_event_timer, clear_render_cleanup_timer,
+    current_render_cleanup_generation, current_render_generation,
+    cursor_callback_duration_estimate_ms, external_event_timer_kind, invalidate_render_cleanup,
+    is_animation_timer_scheduled, set_animation_timer, set_external_event_timer,
+    set_key_event_timer, set_render_cleanup_timer, state_lock,
 };
-use super::{AUTOCMD_GROUP_NAME, MIN_RENDER_CLEANUP_DELAY_MS};
+use super::{
+    AUTOCMD_GROUP_NAME, MIN_RENDER_CLEANUP_DELAY_MS, MIN_RENDER_HARD_PURGE_DELAY_MS,
+    RENDER_HARD_PURGE_DELAY_MULTIPLIER,
+};
 use crate::config::RuntimeConfig;
-use crate::draw::purge_render_windows;
-use crate::reducer::{EventSource, RenderCleanupAction, as_delay_ms, external_settle_delay_ms};
+use crate::draw::{clear_active_render_windows, global_pool_snapshot, purge_render_windows};
+use crate::reducer::{
+    CleanupDirective, CleanupPolicyInput, EventSource, RenderCleanupAction, as_delay_ms,
+    decide_cleanup_directive, external_settle_delay_ms,
+};
 use crate::state::CursorSnapshot;
 use nvim_oxi::api::opts::CreateAugroupOpts;
 use nvim_oxi::libuv::TimerHandle;
@@ -148,21 +155,27 @@ fn on_external_settle_tick() -> Result<()> {
     }
 }
 
-pub(super) fn schedule_animation_tick(delay_ms: u64) {
-    let already_scheduled = is_animation_timer_scheduled();
-    if already_scheduled {
+pub(super) fn schedule_animation_tick(delay_ms: u64, generation: u64) {
+    let existing_generation = animation_timer_generation();
+    if existing_generation == Some(generation) {
         return;
+    }
+    if is_animation_timer_scheduled() {
+        clear_animation_timer();
     }
 
     schedule_once(
         delay_ms,
-        || {
+        move || {
             clear_animation_timer();
+            if current_render_generation() != generation {
+                return;
+            }
             if let Err(err) = on_animation_tick() {
                 warn(&format!("animation tick failed: {err}"));
             }
         },
-        set_animation_timer,
+        |handle| set_animation_timer(handle, generation),
         "animation tick",
     );
 }
@@ -221,8 +234,31 @@ pub(super) fn render_cleanup_delay_ms(config: &RuntimeConfig) -> u64 {
     baseline.max(MIN_RENDER_CLEANUP_DELAY_MS)
 }
 
-fn schedule_render_cleanup_timer(namespace_id: u32, delay_ms: u64) {
-    let generation = bump_render_cleanup_generation();
+pub(super) fn render_hard_cleanup_delay_ms(config: &RuntimeConfig) -> u64 {
+    let soft_delay = render_cleanup_delay_ms(config);
+    let scaled = soft_delay.saturating_mul(RENDER_HARD_PURGE_DELAY_MULTIPLIER);
+    scaled.max(MIN_RENDER_HARD_PURGE_DELAY_MS)
+}
+
+fn apply_cleanup_directive(namespace_id: u32, directive: CleanupDirective) {
+    match directive {
+        CleanupDirective::KeepWarm => {}
+        CleanupDirective::SoftClear { max_kept_windows } => {
+            let _ = clear_active_render_windows(namespace_id, max_kept_windows);
+        }
+        CleanupDirective::HardPurge => purge_render_windows(namespace_id),
+    }
+}
+
+fn schedule_render_cleanup_timer(
+    namespace_id: u32,
+    generation: u64,
+    delay_ms: u64,
+    total_idle_ms: u64,
+    soft_delay_ms: u64,
+    hard_delay_ms: u64,
+    max_kept_windows: usize,
+) {
     clear_render_cleanup_timer();
 
     schedule_once(
@@ -233,7 +269,18 @@ fn schedule_render_cleanup_timer(namespace_id: u32, delay_ms: u64) {
             if current_render_cleanup_generation() != generation {
                 return;
             }
-            purge_render_windows(namespace_id);
+
+            let pool_snapshot = global_pool_snapshot();
+            let directive = decide_cleanup_directive(CleanupPolicyInput {
+                idle_ms: total_idle_ms,
+                soft_cleanup_delay_ms: soft_delay_ms,
+                hard_cleanup_delay_ms: hard_delay_ms,
+                pool_total_windows: pool_snapshot.total_windows,
+                recent_frame_demand: pool_snapshot.recent_frame_demand,
+                max_kept_windows,
+                callback_duration_estimate_ms: cursor_callback_duration_estimate_ms(),
+            });
+            apply_cleanup_directive(namespace_id, directive);
         },
         set_render_cleanup_timer,
         "render cleanup",
@@ -241,11 +288,24 @@ fn schedule_render_cleanup_timer(namespace_id: u32, delay_ms: u64) {
 }
 
 fn schedule_render_cleanup(namespace_id: u32) {
-    let delay_ms = {
+    let (soft_delay_ms, hard_delay_ms, max_kept_windows) = {
         let state = state_lock();
-        render_cleanup_delay_ms(&state.config)
+        (
+            render_cleanup_delay_ms(&state.config),
+            render_hard_cleanup_delay_ms(&state.config),
+            state.config.max_kept_windows,
+        )
     };
-    schedule_render_cleanup_timer(namespace_id, delay_ms);
+    let generation = bump_render_cleanup_generation();
+    schedule_render_cleanup_timer(
+        namespace_id,
+        generation,
+        hard_delay_ms,
+        hard_delay_ms,
+        soft_delay_ms,
+        hard_delay_ms,
+        max_kept_windows,
+    );
 }
 
 pub(super) fn apply_render_cleanup_action(namespace_id: u32, action: RenderCleanupAction) {

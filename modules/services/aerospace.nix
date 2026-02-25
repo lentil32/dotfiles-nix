@@ -14,7 +14,7 @@ let
     misc = "7-MISC";
     notes = "8-NOTE";
     media = "9-MEDI";
-    social = "0-SOCI";
+    social = "a-SOCI";
   };
 in
 {
