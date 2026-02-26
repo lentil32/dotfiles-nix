@@ -89,4 +89,3 @@ fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {
         log_draw_error("close cached render window", &err);
     }
 }
-

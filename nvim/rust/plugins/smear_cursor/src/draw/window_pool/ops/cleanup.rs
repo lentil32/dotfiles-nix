@@ -207,4 +207,3 @@ pub(crate) fn purge(tabs: &mut HashMap<i32, TabWindows>, namespace_id: u32) {
     tabs.clear();
     close_orphan_render_windows(namespace_id);
 }
-

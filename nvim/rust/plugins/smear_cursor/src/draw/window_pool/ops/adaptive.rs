@@ -160,4 +160,3 @@ fn lru_prune_indices(windows: &[CachedRenderWindow], keep_count: usize) -> Vec<u
     remove_indices.sort_unstable();
     remove_indices
 }
-

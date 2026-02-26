@@ -312,6 +312,10 @@ fn create_prepaint_overlay(
 }
 
 fn hide_prepaint_overlay(overlay: &mut PrepaintOverlay) -> bool {
+    if overlay.placement.is_none() {
+        return true;
+    }
+
     let Some(mut window) = handles::valid_window(i64::from(overlay.window_id)) else {
         return false;
     };

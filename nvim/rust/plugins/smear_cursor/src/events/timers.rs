@@ -78,7 +78,7 @@ fn schedule_external_timer(
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ExternalSettleAction {
-    None,
+    NoAction,
     ClearPending,
     DispatchExternal,
     Reschedule(CursorSnapshot),
@@ -95,7 +95,7 @@ pub(super) fn decide_external_settle_action(
     }
 
     let Some(expected_snapshot) = expected_snapshot else {
-        return ExternalSettleAction::None;
+        return ExternalSettleAction::NoAction;
     };
 
     let Some(current_snapshot) = current_snapshot else {
@@ -133,7 +133,7 @@ fn on_external_settle_tick() -> Result<()> {
     );
 
     match action {
-        ExternalSettleAction::None => Ok(()),
+        ExternalSettleAction::NoAction => Ok(()),
         ExternalSettleAction::ClearPending => {
             let mut state = state_lock();
             state.clear_pending_external_event();
@@ -310,7 +310,7 @@ fn schedule_render_cleanup(namespace_id: u32) {
 
 pub(super) fn apply_render_cleanup_action(namespace_id: u32, action: RenderCleanupAction) {
     match action {
-        RenderCleanupAction::None => {}
+        RenderCleanupAction::NoAction => {}
         RenderCleanupAction::Schedule => schedule_render_cleanup(namespace_id),
         RenderCleanupAction::Invalidate => invalidate_render_cleanup(),
     }
@@ -346,8 +346,8 @@ pub(super) fn ensure_namespace_id() -> u32 {
     let created = api::create_namespace("rs_smear_cursor");
     let mut state = state_lock();
     match state.namespace_id() {
-        Some(existing) => existing,
-        None => {
+        Option::Some(existing) => existing,
+        Option::None => {
             state.set_namespace_id(created);
             created
         }

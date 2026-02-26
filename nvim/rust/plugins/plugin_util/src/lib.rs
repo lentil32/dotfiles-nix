@@ -301,6 +301,17 @@ fn snacks_table(lua: &mlua::Lua) -> Option<mlua::Table> {
     lua::try_require_table(lua, "snacks")
 }
 
+fn snacks_dashboard() -> Result<()> {
+    let lua = lua::state();
+    let Some(snacks) = snacks_table(&lua) else {
+        return Ok(());
+    };
+    let Ok(dashboard) = snacks.get::<mlua::Function>("dashboard") else {
+        return Ok(());
+    };
+    dashboard.call::<()>(()).map_err(Into::into)
+}
+
 fn rs_autocmds_table(lua: &mlua::Lua) -> Option<mlua::Table> {
     lua::try_require_table(lua, "rs_autocmds")
 }
@@ -483,6 +494,45 @@ fn delete_current_buffer() -> Result<()> {
     snacks_bufdelete_delete(cur_buf_handle, false, false)
 }
 
+fn is_non_floating_window(win: &Window) -> bool {
+    match win.get_config() {
+        Ok(config) => config.relative.is_none(),
+        Err(err) => {
+            notify::warn(LOG_CONTEXT, &format!("win_get_config failed: {err}"));
+            false
+        }
+    }
+}
+
+fn count_non_floating_windows_in_current_tab() -> Result<usize> {
+    let tab = api::get_current_tabpage();
+    let wins = tab.list_wins()?;
+    Ok(wins.filter(|win| is_non_floating_window(win)).count())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseCurrentWindowOutcome {
+    Closed,
+    SkippedSingleNonFloatingWindow,
+}
+
+#[derive(Debug)]
+enum CloseCurrentWindowError {
+    CountNonFloatingWindows(nvim_oxi::Error),
+    CloseCommand(nvim_oxi::Error),
+}
+
+fn close_current_window_if_possible()
+-> std::result::Result<CloseCurrentWindowOutcome, CloseCurrentWindowError> {
+    let count = count_non_floating_windows_in_current_tab()
+        .map_err(CloseCurrentWindowError::CountNonFloatingWindows)?;
+    if count <= 1 {
+        return Ok(CloseCurrentWindowOutcome::SkippedSingleNonFloatingWindow);
+    }
+    run_cmd_noargs("close").map_err(CloseCurrentWindowError::CloseCommand)?;
+    Ok(CloseCurrentWindowOutcome::Closed)
+}
+
 fn kill_window_and_buffer() -> Result<()> {
     let buf = api::get_current_buf();
     let buf_handle = i64::from(buf.handle());
@@ -491,14 +541,32 @@ fn kill_window_and_buffer() -> Result<()> {
         return Ok(());
     }
 
-    if api::list_wins().count() > 1 {
-        run_cmd_noargs("close")?;
-    }
+    let should_open_dashboard = match close_current_window_if_possible() {
+        Ok(CloseCurrentWindowOutcome::Closed) => false,
+        Ok(CloseCurrentWindowOutcome::SkippedSingleNonFloatingWindow) => true,
+        Err(CloseCurrentWindowError::CountNonFloatingWindows(err)) => {
+            notify::warn(
+                LOG_CONTEXT,
+                &format!("counting non-floating windows failed: {err}"),
+            );
+            false
+        }
+        Err(CloseCurrentWindowError::CloseCommand(err)) => {
+            notify::warn(LOG_CONTEXT, &format!("close current window failed: {err}"));
+            false
+        }
+    };
 
     let buftype = buf_option_string(&buf, "buftype");
     let filetype = buf_option_string(&buf, "filetype");
     let is_terminal = buftype == "terminal" || filetype == "snacks_terminal";
-    snacks_bufdelete_delete(buf_handle, is_terminal, is_terminal)
+    snacks_bufdelete_delete(buf_handle, is_terminal, is_terminal)?;
+
+    if should_open_dashboard && let Err(err) = snacks_dashboard() {
+        notify::warn(LOG_CONTEXT, &format!("open snacks dashboard failed: {err}"));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

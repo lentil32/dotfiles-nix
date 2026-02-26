@@ -85,4 +85,3 @@ pub(crate) fn global_pool_snapshot(tabs: &HashMap<i32, TabWindows>) -> GlobalPoo
     }
     snapshot
 }
-

@@ -105,12 +105,15 @@ in
           "rs_snacks_preview"
           "rs_autocmds"
           "rs_smear_cursor"
+          "rs_theme_switcher"
         ];
         rustPluginList = map (crate: mkRustPlugin { inherit crate; }) rustPluginOrder;
         categoriesConfig = {
           general = {
             startupPlugins = [
               vim.monokai-pro-nvim
+              vim.kanagawa-nvim
+              vim.modus-themes-nvim
               vim.nvim-web-devicons
               vim.plenary-nvim
               vim.lze

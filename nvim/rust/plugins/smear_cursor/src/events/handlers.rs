@@ -184,7 +184,7 @@ pub(super) enum ExternalTriggerAction {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum KeyEventAction {
-    None,
+    NoAction,
     TriggerExternal,
     ScheduleKeyTimer { delay_ms: u64 },
 }
@@ -253,7 +253,7 @@ fn apply_external_trigger_action(action: ExternalTriggerAction) -> Result<()> {
 
 fn apply_animation_schedule(action: AnimationScheduleAction) {
     match action {
-        AnimationScheduleAction::None => {}
+        AnimationScheduleAction::NoAction => {}
         AnimationScheduleAction::Clear => clear_animation_timer(),
         AnimationScheduleAction::Schedule {
             delay_ms,
@@ -269,7 +269,7 @@ pub(super) fn decide_key_event_action(
     elapsed_since_last_autocmd_ms: f64,
 ) -> KeyEventAction {
     if !policy.use_key_fallback() || elapsed_since_last_autocmd_ms <= delay_after_key_ms {
-        return KeyEventAction::None;
+        return KeyEventAction::NoAction;
     }
     if !policy.should_use_debounced_external_settle() {
         return KeyEventAction::TriggerExternal;
@@ -564,7 +564,7 @@ pub(crate) fn on_key_event() -> Result<()> {
         elapsed_since_last_autocmd_ms,
     );
     match action {
-        KeyEventAction::None => {}
+        KeyEventAction::NoAction => {}
         KeyEventAction::TriggerExternal => schedule_external_event_trigger(),
         KeyEventAction::ScheduleKeyTimer { delay_ms } => schedule_key_event_timer(delay_ms),
     }

@@ -50,6 +50,7 @@ require("lze").load({
               "rs_autocmds",
               "rs_snacks_preview",
               "rs_smear_cursor",
+              "rs_theme_switcher",
             },
           },
         },

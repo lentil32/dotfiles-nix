@@ -40,7 +40,7 @@ pub(crate) enum RenderAction {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum RenderCleanupAction {
-    None,
+    NoAction,
     Schedule,
     Invalidate,
 }
@@ -107,7 +107,7 @@ pub(crate) enum CursorCommand {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum AnimationScheduleAction {
-    None,
+    NoAction,
     Clear,
     Schedule { delay_ms: u64, generation: u64 },
 }
@@ -134,7 +134,7 @@ impl CursorTransition {
         Self {
             render_decision: RenderDecision {
                 render_action,
-                render_cleanup_action: RenderCleanupAction::None,
+                render_cleanup_action: RenderCleanupAction::NoAction,
                 render_allocation_policy,
                 render_side_effects,
             },
@@ -731,7 +731,7 @@ pub(crate) fn reduce_cursor_event(
                 gradient_indexes,
             );
             CursorTransitions::draw(mode, frame, None, RenderAllocationPolicy::ReuseOnly)
-                .with_render_cleanup_action(RenderCleanupAction::None)
+                .with_render_cleanup_action(RenderCleanupAction::NoAction)
         }
     }
 }
@@ -810,7 +810,7 @@ pub(crate) fn decide_animation_schedule(
     if input.in_cmdline_mode {
         return match input.source {
             EventSource::AnimationTick => AnimationScheduleAction::Clear,
-            EventSource::External => AnimationScheduleAction::None,
+            EventSource::External => AnimationScheduleAction::NoAction,
         };
     }
 
@@ -834,7 +834,7 @@ pub(crate) fn decide_animation_schedule(
 
     match input.source {
         EventSource::AnimationTick => AnimationScheduleAction::Clear,
-        EventSource::External => AnimationScheduleAction::None,
+        EventSource::External => AnimationScheduleAction::NoAction,
     }
 }
 
@@ -1050,7 +1050,10 @@ mod tests {
         let effects =
             reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::AnimationTick);
         assert!(matches!(render_action(&effects), RenderAction::Noop));
-        assert_eq!(render_cleanup_action(&effects), RenderCleanupAction::None);
+        assert_eq!(
+            render_cleanup_action(&effects),
+            RenderCleanupAction::NoAction
+        );
     }
 
     #[test]
@@ -1194,7 +1197,7 @@ mod tests {
                 in_cmdline_mode: true,
             },
         );
-        assert_eq!(external_action, AnimationScheduleAction::None);
+        assert_eq!(external_action, AnimationScheduleAction::NoAction);
 
         let tick_action = decide_animation_schedule(
             &mut state,
@@ -1317,7 +1320,7 @@ mod tests {
                 prop_assert!(matches!(render_action(&effects), RenderAction::Noop));
                 prop_assert_eq!(
                     render_cleanup_action(&effects),
-                    RenderCleanupAction::None
+                    RenderCleanupAction::NoAction
                 );
                 prop_assert!(state.is_initialized());
                 prop_assert!(!state.is_animating());
@@ -1353,7 +1356,7 @@ mod tests {
                 if matches!(render_action(&effects), RenderAction::ClearAll) {
                     prop_assert_ne!(
                         render_cleanup_action(&effects),
-                        RenderCleanupAction::None
+                        RenderCleanupAction::NoAction
                     );
                 }
                 if source == EventSource::External
@@ -1361,7 +1364,7 @@ mod tests {
                 {
                     prop_assert_ne!(
                         render_cleanup_action(&effects),
-                        RenderCleanupAction::None
+                        RenderCleanupAction::NoAction
                     );
                 }
 

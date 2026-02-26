@@ -1,4 +1,5 @@
 ---@module "which-key"
+local colorscheme = require("myLuaConf.colorscheme")
 local oil = require("myLuaConf.oil")
 ---@module "rs_plugin_util"
 local plugin_util = require("rs_plugin_util")
@@ -656,6 +657,14 @@ function M.list()
     -- Applications
     { "<leader>a", group = "applications" },
     { "<leader>ao", group = "org" },
+  })
+
+  add({
+    -- Themes
+    { "<leader>T", group = "themes" },
+    { "<leader>Ts", colorscheme.open_switcher, desc = "Switcher" },
+    { "<leader>Tn", colorscheme.next_theme, desc = "Next" },
+    { "<leader>Tp", colorscheme.prev_theme, desc = "Previous" },
   })
 
   add({

@@ -457,7 +457,7 @@ mod external_settle_tests {
     #[test]
     fn external_settle_noops_without_pending_snapshot() {
         let action = decide_external_settle_action("n", true, None, None);
-        assert_eq!(action, ExternalSettleAction::None);
+        assert_eq!(action, ExternalSettleAction::NoAction);
     }
 
     #[test]
@@ -542,7 +542,7 @@ mod handler_decision_tests {
     #[test]
     fn key_event_noops_when_autocmd_is_recent() {
         let action = decide_key_event_action(BufferEventPolicy::Normal, 17, 30.0, 5.0);
-        assert_eq!(action, KeyEventAction::None);
+        assert_eq!(action, KeyEventAction::NoAction);
     }
 
     #[test]

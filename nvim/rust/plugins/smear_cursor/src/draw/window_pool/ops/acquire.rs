@@ -343,4 +343,3 @@ pub(crate) fn begin_frame(tabs: &mut HashMap<i32, TabWindows>) {
         begin_tab_frame(tab_windows, tab_windows.frame_demand);
     }
 }
-

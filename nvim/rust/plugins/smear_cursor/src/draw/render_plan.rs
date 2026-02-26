@@ -379,7 +379,7 @@ pub(crate) fn render_frame_to_plan(
                                     EdgeType::Bottom => &mut intersections.bottom,
                                     EdgeType::Left => &mut intersections.left,
                                     EdgeType::Right => &mut intersections.right,
-                                    EdgeType::None => continue,
+                                    EdgeType::NoEdge => continue,
                                     EdgeType::LeftDiagonal | EdgeType::RightDiagonal => continue,
                                 };
                                 if current.is_none_or(|existing| intersection > existing) {

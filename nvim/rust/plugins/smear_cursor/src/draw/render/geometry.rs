@@ -10,7 +10,7 @@ pub(super) enum EdgeType {
     Right,
     LeftDiagonal,
     RightDiagonal,
-    None,
+    NoEdge,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -256,7 +256,7 @@ pub(super) fn precompute_quad_geometry(corners: &[Point; 4], frame: &RenderFrame
 
     let mut slopes = [0.0; 4];
     let mut angles = [0.0; 4];
-    let mut edge_types = [EdgeType::None; 4];
+    let mut edge_types = [EdgeType::NoEdge; 4];
 
     for edge_index in 0..4 {
         let next_index = (edge_index + 1) % 4;
@@ -268,7 +268,7 @@ pub(super) fn precompute_quad_geometry(corners: &[Point; 4], frame: &RenderFrame
 
         let abs_slope = slope.abs();
         edge_types[edge_index] = if abs_slope.is_nan() {
-            EdgeType::None
+            EdgeType::NoEdge
         } else if abs_slope <= frame.max_slope_horizontal {
             if edge_col > 0.0 {
                 EdgeType::Top
@@ -300,7 +300,7 @@ pub(super) fn precompute_quad_geometry(corners: &[Point; 4], frame: &RenderFrame
         EdgeType::LeftDiagonal | EdgeType::RightDiagonal => {
             EdgeIntersections::with_capacities(row_span, row_span, row_span)
         }
-        EdgeType::None => EdgeIntersections::default(),
+        EdgeType::NoEdge => EdgeIntersections::default(),
     });
 
     let mut geometry = QuadGeometry {
@@ -325,7 +325,7 @@ pub(super) fn precompute_quad_geometry(corners: &[Point; 4], frame: &RenderFrame
             EdgeType::LeftDiagonal | EdgeType::RightDiagonal => {
                 precompute_intersections_diagonal(corners, &mut geometry, edge_index, frame)
             }
-            EdgeType::None => {}
+            EdgeType::NoEdge => {}
         }
     }
 
@@ -364,7 +364,7 @@ pub(super) fn get_edge_cell_intersection(
         EdgeType::RightDiagonal => intersections.edges.get(&row).map_or(0.0, |edges| {
             col as f64 + 1.0 - edges[if low { 0 } else { 1 }]
         }),
-        EdgeType::None => 0.0,
+        EdgeType::NoEdge => 0.0,
     }
 }
 
@@ -501,7 +501,7 @@ pub(super) fn update_matrix_with_edge(
         EdgeType::Right | EdgeType::RightDiagonal => {
             update_matrix_with_right_edge(edge_index, fraction_index, row, col, geometry, matrix)
         }
-        EdgeType::None => {}
+        EdgeType::NoEdge => {}
     }
 }
 
