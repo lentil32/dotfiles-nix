@@ -10,12 +10,7 @@ end
 
 local function reset_preview_state()
   ---@module "rs_snacks_preview"
-  local ok, loaded_preview = pcall(require, "rs_snacks_preview")
-  if not ok or type(loaded_preview) ~= "table" then
-    return
-  end
-  ---@type rs_snacks_preview
-  local preview = loaded_preview
+  local preview = require("rs_snacks_preview")
   preview.reset_state()
 end
 

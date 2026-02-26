@@ -65,10 +65,11 @@ return {
                 return vim.fn.nr2char(0xF4B8) .. " "
               end,
               style = function()
-                local ok, status = pcall(require, "sidekick.status")
-                if not ok then
+                if package.loaded["sidekick"] == nil and package.loaded["sidekick.status"] == nil then
                   return nil
                 end
+                ---@module "sidekick.status"
+                local status = require("sidekick.status")
                 local info = status.get()
                 if info then
                   if info.kind == "Error" then
@@ -82,8 +83,12 @@ return {
                 return nil
               end,
               hidden = function()
-                local ok, status = pcall(require, "sidekick.status")
-                return (not ok) or status.get() == nil
+                if package.loaded["sidekick"] == nil and package.loaded["sidekick.status"] == nil then
+                  return true
+                end
+                ---@module "sidekick.status"
+                local status = require("sidekick.status")
+                return status.get() == nil
               end,
             },
             "%=",
@@ -91,12 +96,18 @@ return {
               id = "overseer.status",
               timing = true,
               update = function()
-                local ok_constants, constants = pcall(require, "overseer.constants")
-                local ok_tasks, task_list = pcall(require, "overseer.task_list")
-                local ok_util, util = pcall(require, "overseer.util")
-                if not (ok_constants and ok_tasks and ok_util) then
+                if package.loaded["overseer"] == nil
+                    and package.loaded["overseer.constants"] == nil
+                    and package.loaded["overseer.task_list"] == nil
+                    and package.loaded["overseer.util"] == nil then
                   return ""
                 end
+                ---@module "overseer.constants"
+                local constants = require("overseer.constants")
+                ---@module "overseer.task_list"
+                local task_list = require("overseer.task_list")
+                ---@module "overseer.util"
+                local util = require("overseer.util")
 
                 local symbols = {
                   [constants.STATUS.FAILURE] = "󰅚 ",
@@ -143,8 +154,9 @@ return {
               id = "snacks.profiler",
               timing = true,
               update = function()
-                local ok, Snacks = pcall(require, "snacks")
-                if not ok or not Snacks.profiler or not Snacks.profiler.core then
+                ---@module "snacks"
+                local Snacks = require("snacks")
+                if not Snacks.profiler or not Snacks.profiler.core then
                   return ""
                 end
                 if not Snacks.profiler.core.running then

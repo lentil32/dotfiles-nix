@@ -60,11 +60,8 @@ function M.snacks_open_preview(args)
     return fail("invalid target window")
   end
 
-  local ok_win_module, win_module = pcall(require, "snacks.win")
-  local ok_image_module, image_module = pcall(require, "snacks.image")
-  if not ok_win_module or not ok_image_module then
-    return fail("snacks image preview API unavailable")
-  end
+  local win_module = require("snacks.win")
+  local image_module = require("snacks.image")
   if type(win_module) ~= "table" or type(image_module) ~= "table" then
     return fail("snacks image preview API unavailable")
   end

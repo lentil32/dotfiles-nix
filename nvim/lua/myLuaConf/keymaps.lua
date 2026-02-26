@@ -40,13 +40,11 @@ local function git_init()
 end
 
 local function reload_nixcats()
-  local ok = pcall(function()
-    vim.cmd("NixCatsReload")
-  end)
-  if ok then
+  if vim.fn.exists(":NixCatsReload") ~= 2 then
+    vim.notify("NixCatsReload command unavailable", vim.log.levels.WARN)
     return
   end
-  vim.notify("NixCatsReload command unavailable", vim.log.levels.WARN)
+  vim.cmd("NixCatsReload")
 end
 
 function M.setup()

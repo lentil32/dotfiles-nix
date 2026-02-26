@@ -110,7 +110,8 @@ in
         categoriesConfig = {
           general = {
             startupPlugins = [
-              vim.modus-themes-nvim
+              vim.monokai-pro-nvim
+              vim.nvim-web-devicons
               vim.plenary-nvim
               vim.lze
               vim.lzextras

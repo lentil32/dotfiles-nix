@@ -19,11 +19,11 @@ return {
         },
         graph_style = "unicode",
         disable_insert_on_commit = true,
-        disable_signs = true,
-        disable_context_highlighting = true,
-        filewatcher = {
-          enabled = false,
-        },
+        -- disable_signs = true,
+        -- disable_context_highlighting = true,
+        -- filewatcher = {
+        --   enabled = false,
+        -- },
         commit_editor = {
           kind = "tab",
           show_staged_diff = true,

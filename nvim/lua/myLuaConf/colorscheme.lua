@@ -1,9 +1,18 @@
 local M = {}
 
+---@module "monokai-pro"
+---@type MonokaiPro
+local monokai = require("monokai-pro")
+
 function M.apply()
-  if not pcall(vim.cmd.colorscheme, "modus_vivendi") then
-    vim.notify("Colorscheme modus_vivendi not found", vim.log.levels.WARN)
-  end
+  ---@type MonokaiPro.Config
+  local opts = {
+    devicons = true,
+    filter = "octagon",
+  }
+
+  monokai.setup(opts)
+  vim.cmd.colorscheme("monokai-pro")
 end
 
 return M

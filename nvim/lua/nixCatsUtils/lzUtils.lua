@@ -7,11 +7,9 @@ local function get_cat_enabled(cat, default)
     if type(_G.nixCats) == "function" then
       return _G.nixCats(cat) or false
     end
-    local ok, nc = pcall(require, "nixCats")
-    if ok and type(nc.get) == "function" then
-      return nc.get(cat) or false
-    end
-    return false
+    local nc = require("nixCats")
+    assert(type(nc.get) == "function", "nixCats.get unavailable")
+    return nc.get(cat) or false
   end
   return default
 end

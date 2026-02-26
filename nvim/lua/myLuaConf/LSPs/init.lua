@@ -38,6 +38,7 @@ require("lze").load({
     after = function()
       require("lazydev").setup({
         library = {
+          { path = "monokai-pro.nvim", mods = { "monokai-pro" } },
           { words = { "nixCats" }, path = nixCats.nixCatsPath .. "/lua" },
           {
             path = nixCats.nixCatsPath .. "/lua/myLuaConf/types",
