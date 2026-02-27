@@ -30,7 +30,11 @@
     };
     envExtra = ''
       setopt aliases
-      alias python=python3
+      # Prefer Nix-managed Python over Homebrew's python3 in /opt/homebrew/bin.
+      alias python3=python3.13
+      alias python=python3.13
+      alias pip="python3.13 -m pip"
+      alias pip3="python3.13 -m pip"
     '';
     initContent = ''
       # Ensure Emacs keybindings in ZLE
