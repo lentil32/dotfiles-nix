@@ -1,5 +1,22 @@
 { pkgs, ... }:
 let
+  appleSdk = pkgs.apple-sdk_26;
+  # Surprising but intentional: apple-sdk provides SDK/sysroot, not CLI build tools.
+  # Keep build essentials explicit so no-Xcode setups still have make/cc toolchain.
+  buildEssentials = with pkgs; [
+    gnumake
+    pkg-config
+    cmake
+    ninja
+    llvmPackages.clang
+    binutils
+    libiconv
+    autoconf
+    automake
+    libtool
+    m4
+  ];
+
   # Package format: { cask = "name"; } or { formulae = "name"; }
   # Optional: { desc = "description"; cask = "name"; }
   packages = [
@@ -147,8 +164,20 @@ in
     vim
     man-pages
     man-pages-posix
-  ];
-  environment.variables.EDITOR = "vim";
+    appleSdk
+    xcbuild
+  ] ++ buildEssentials;
+  environment.variables = {
+    EDITOR = "vim";
+
+    # Without this, nixpkgs xcrun cannot resolve the macOS SDK when Xcode/CLT is absent.
+    DEVELOPER_DIR = "${appleSdk}";
+    SDKROOT = appleSdk.sdkroot;
+
+    # Rust-specific global linker search path for crates that request -liconv.
+    CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS = "-Lnative=${pkgs.libiconv}/lib";
+    CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS = "-Lnative=${pkgs.libiconv}/lib";
+  };
 
   # Homebrew is managed by nix-homebrew (see flake.nix)
   # Taps are declared declaratively in flake.nix
@@ -163,7 +192,6 @@ in
 
     masApps = {
       WireGuard = 1451685025;
-      Xcode = 497799835;
     };
 
     inherit brews casks;

@@ -71,7 +71,6 @@ in
       "$BUNBIN"
       "${config.home.sessionVariables.PNPM_HOME}"
       "${homeDir}/.local/bin"
-      "${homeDir}/.cargo/bin"
     ];
 
   };
