@@ -101,6 +101,10 @@ let
       formulae = "nss";
     }
     {
+      desc = "Node package manager shims";
+      formulae = "corepack";
+    }
+    {
       desc = "Slack CLI for developing Slack App";
       cask = "slack-cli";
     }

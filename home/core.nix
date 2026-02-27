@@ -106,10 +106,8 @@ in
     # })
     bats # Bash automated testing
     cmake
-    corepack_latest # Node.js dependency bridge
     llvm
     mysql84
-    nodejs_24
     mermaid-cli
     opam
     turbo
