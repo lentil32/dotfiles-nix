@@ -10,26 +10,28 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd)"
+perf_lib="${script_dir}/lib/perf_env.sh"
+
+if [[ ! -f "${perf_lib}" ]]; then
+  echo "missing perf helper: ${perf_lib}" >&2
+  exit 1
+fi
+# shellcheck source=plugins/smear_cursor/scripts/lib/perf_env.sh
+source "${perf_lib}"
 
 cd "${repo_dir}"
 
-target_directory="$(
-  cargo metadata --format-version 1 --no-deps \
-    | tr -d '\n' \
-    | sed -E 's/.*"target_directory":"([^"]+)".*/\1/'
-)"
-
+if ! smear_export_runtime_paths "${repo_dir}" >/dev/null; then
+  echo "failed to resolve cargo target_directory" >&2
+  exit 1
+fi
+target_directory="${SMEAR_CURSOR_TARGET_DIRECTORY:-}"
 if [[ -z "${target_directory}" ]]; then
   echo "failed to resolve cargo target_directory" >&2
   exit 1
 fi
 
 cargo build --release
-
-export SMEAR_CURSOR_RTP="${SMEAR_CURSOR_RTP:-${repo_dir}}"
-if [[ -z "${SMEAR_CURSOR_CPATH:-}" ]]; then
-  export SMEAR_CURSOR_CPATH="${target_directory}/release/?.dylib;${target_directory}/release/lib?.dylib;${target_directory}/release/?.so;${target_directory}/release/lib?.so"
-fi
 
 nvim_bin="${NVIM_BIN:-nvim}"
 exec "${nvim_bin}" --headless -u NONE -c "luafile ${repo_dir}/scripts/perf_window_switch.lua"

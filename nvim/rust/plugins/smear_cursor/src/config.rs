@@ -1,27 +1,37 @@
-use crate::types::BASE_TIME_INTERVAL;
-use nvim_utils::mode::{
-    is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
-};
+use crate::types::{BASE_TIME_INTERVAL, StaticRenderConfig};
+#[cfg(test)]
+use nvim_utils::mode::{is_cmdline_mode, is_terminal_like_mode};
+use nvim_utils::mode::{is_insert_like_mode, is_replace_like_mode};
 
-#[derive(Clone, Debug)]
+pub(crate) const DEFAULT_ANIMATION_FPS: f64 = 144.0;
+pub(crate) const DEFAULT_BLOCK_ASPECT_RATIO: f64 = 2.0;
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuntimeConfig {
+    pub(crate) fps: f64,
     pub(crate) time_interval: f64,
-    pub(crate) delay_disable: Option<f64>,
+    pub(crate) simulation_hz: f64,
+    pub(crate) max_simulation_steps_per_frame: u32,
     pub(crate) delay_event_to_smear: f64,
     pub(crate) delay_after_key: f64,
-    pub(crate) stiffness: f64,
-    pub(crate) trailing_stiffness: f64,
-    pub(crate) trailing_exponent: f64,
-    pub(crate) stiffness_insert_mode: f64,
-    pub(crate) trailing_stiffness_insert_mode: f64,
-    pub(crate) trailing_exponent_insert_mode: f64,
     pub(crate) anticipation: f64,
-    pub(crate) damping: f64,
-    pub(crate) damping_insert_mode: f64,
+    pub(crate) head_response_ms: f64,
+    pub(crate) damping_ratio: f64,
+    pub(crate) tail_response_ms: f64,
     pub(crate) max_length: f64,
     pub(crate) max_length_insert_mode: f64,
-    pub(crate) distance_stop_animating: f64,
-    pub(crate) distance_stop_animating_vertical_bar: f64,
+    pub(crate) trail_duration_ms: f64,
+    pub(crate) trail_short_duration_ms: f64,
+    pub(crate) trail_size: f64,
+    pub(crate) trail_min_distance: f64,
+    pub(crate) trail_thickness: f64,
+    pub(crate) trail_thickness_x: f64,
+    pub(crate) tail_duration_ms: f64,
+    pub(crate) stop_distance_enter: f64,
+    pub(crate) stop_distance_exit: f64,
+    pub(crate) stop_velocity_enter: f64,
+    pub(crate) stop_hold_frames: u32,
+    pub(crate) smear_between_windows: bool,
     pub(crate) smear_between_buffers: bool,
     pub(crate) smear_between_neighbor_lines: bool,
     pub(crate) min_horizontal_distance_smear: f64,
@@ -33,8 +43,18 @@ pub(crate) struct RuntimeConfig {
     pub(crate) smear_insert_mode: bool,
     pub(crate) smear_replace_mode: bool,
     pub(crate) smear_terminal_mode: bool,
+    pub(crate) animate_in_insert_mode: bool,
+    pub(crate) animate_command_line: bool,
     pub(crate) smear_to_cmd: bool,
     pub(crate) hide_target_hack: bool,
+    pub(crate) jump_cues_enabled: bool,
+    pub(crate) jump_cue_min_display_distance: f64,
+    pub(crate) jump_cue_duration_ms: f64,
+    pub(crate) jump_cue_strength: f64,
+    pub(crate) jump_cue_max_chain: u8,
+    pub(crate) jump_intent_window_ms: f64,
+    pub(crate) cross_window_jump_bridges: bool,
+    pub(crate) cross_window_bridge_strength_scale: f64,
     pub(crate) max_kept_windows: usize,
     pub(crate) windows_zindex: u32,
     pub(crate) filetypes_disabled: Vec<String>,
@@ -64,26 +84,23 @@ pub(crate) struct RuntimeConfig {
     pub(crate) particle_switch_octant_braille: f64,
     pub(crate) particles_over_text: bool,
     pub(crate) block_aspect_ratio: f64,
-    pub(crate) volume_reduction_exponent: f64,
-    pub(crate) minimum_volume_factor: f64,
     pub(crate) never_draw_over_target: bool,
-    pub(crate) use_diagonal_blocks: bool,
-    pub(crate) max_slope_horizontal: f64,
-    pub(crate) min_slope_vertical: f64,
-    pub(crate) max_angle_difference_diagonal: f64,
-    pub(crate) max_offset_diagonal: f64,
-    pub(crate) min_shade_no_diagonal: f64,
-    pub(crate) min_shade_no_diagonal_vertical_bar: f64,
-    pub(crate) max_shade_no_matrix: f64,
     pub(crate) color_levels: u32,
     pub(crate) gamma: f64,
-    pub(crate) gradient_exponent: f64,
-    pub(crate) matrix_pixel_threshold: f64,
-    pub(crate) matrix_pixel_threshold_vertical_bar: f64,
-    pub(crate) matrix_pixel_min_factor: f64,
+    pub(crate) spatial_coherence_weight: f64,
+    pub(crate) temporal_stability_weight: f64,
+    pub(crate) top_k_per_cell: u8,
 }
 
 impl RuntimeConfig {
+    pub(crate) fn interval_ms_for_fps(fps: f64) -> f64 {
+        if !fps.is_finite() || fps <= 0.0 {
+            return BASE_TIME_INTERVAL;
+        }
+        (1000.0 / fps).max(1.0)
+    }
+
+    #[cfg(test)]
     pub(crate) fn mode_allowed(&self, mode: &str) -> bool {
         if is_insert_like_mode(mode) {
             self.smear_insert_mode
@@ -114,28 +131,47 @@ impl RuntimeConfig {
         self.cursor_color.as_deref() == Some("none")
             || self.cursor_color_insert_mode.as_deref() == Some("none")
     }
+
+    pub(crate) fn requires_background_sampling(&self) -> bool {
+        self.particles_enabled && !self.particles_over_text
+    }
+
+    pub(crate) fn simulation_step_interval_ms(&self) -> f64 {
+        Self::interval_ms_for_fps(self.simulation_hz)
+    }
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            time_interval: BASE_TIME_INTERVAL,
-            delay_disable: None,
-            delay_event_to_smear: 1.0,
-            delay_after_key: 5.0,
-            stiffness: 0.6,
-            trailing_stiffness: 0.45,
-            trailing_exponent: 3.0,
-            stiffness_insert_mode: 0.5,
-            trailing_stiffness_insert_mode: 0.5,
-            trailing_exponent_insert_mode: 1.0,
-            anticipation: 0.2,
-            damping: 0.85,
-            damping_insert_mode: 0.9,
-            max_length: 25.0,
-            max_length_insert_mode: 1.0,
-            distance_stop_animating: 0.1,
-            distance_stop_animating_vertical_bar: 0.875,
+            fps: DEFAULT_ANIMATION_FPS,
+            time_interval: Self::interval_ms_for_fps(DEFAULT_ANIMATION_FPS),
+            // Neovide slices animation dt at 1/120s; use the same baseline integration rate.
+            simulation_hz: 120.0,
+            max_simulation_steps_per_frame: 16,
+            delay_event_to_smear: 0.0,
+            delay_after_key: 0.0,
+            // Neovide does not inject a retarget anticipation impulse for cursor corners.
+            anticipation: 0.0,
+            head_response_ms: 110.0,
+            damping_ratio: 1.0,
+            tail_response_ms: 198.0,
+            // Match Neovide semantics: unbounded trail length by default.
+            max_length: 0.0,
+            max_length_insert_mode: 0.0,
+            trail_duration_ms: 150.0,
+            trail_short_duration_ms: 40.0,
+            trail_size: 1.0,
+            trail_min_distance: 0.0,
+            trail_thickness: 1.0,
+            trail_thickness_x: 1.0,
+            tail_duration_ms: 198.0,
+            // Keep lifecycle stop guards minimally invasive so spring geometry dominates.
+            stop_distance_enter: 0.02,
+            stop_distance_exit: 0.04,
+            stop_velocity_enter: 0.02,
+            stop_hold_frames: 1,
+            smear_between_windows: true,
             smear_between_buffers: true,
             smear_between_neighbor_lines: true,
             min_horizontal_distance_smear: 0.0,
@@ -145,11 +181,21 @@ impl Default for RuntimeConfig {
             smear_diagonally: true,
             scroll_buffer_space: true,
             smear_insert_mode: true,
-            smear_replace_mode: false,
-            smear_terminal_mode: false,
+            smear_replace_mode: true,
+            smear_terminal_mode: true,
+            animate_in_insert_mode: true,
+            animate_command_line: true,
             smear_to_cmd: true,
             hide_target_hack: false,
-            max_kept_windows: 256,
+            jump_cues_enabled: true,
+            jump_cue_min_display_distance: 16.0,
+            jump_cue_duration_ms: 84.0,
+            jump_cue_strength: 1.0,
+            jump_cue_max_chain: 3,
+            jump_intent_window_ms: 40.0,
+            cross_window_jump_bridges: true,
+            cross_window_bridge_strength_scale: 1.0,
+            max_kept_windows: 384,
             windows_zindex: 300,
             filetypes_disabled: Vec::new(),
             logging_level: 2,
@@ -177,24 +223,43 @@ impl Default for RuntimeConfig {
             min_distance_emit_particles: 1.5,
             particle_switch_octant_braille: 0.3,
             particles_over_text: false,
-            block_aspect_ratio: 2.0,
-            volume_reduction_exponent: 0.3,
-            minimum_volume_factor: 0.7,
+            block_aspect_ratio: DEFAULT_BLOCK_ASPECT_RATIO,
             never_draw_over_target: false,
-            use_diagonal_blocks: true,
-            max_slope_horizontal: (1.0 / 3.0) / 1.5,
-            min_slope_vertical: 2.0 * 1.5,
-            max_angle_difference_diagonal: std::f64::consts::PI / 16.0,
-            max_offset_diagonal: 0.2,
-            min_shade_no_diagonal: 0.2,
-            min_shade_no_diagonal_vertical_bar: 0.5,
-            max_shade_no_matrix: 0.75,
-            color_levels: 16,
+            color_levels: 128,
             gamma: 2.2,
-            gradient_exponent: 1.0,
-            matrix_pixel_threshold: 0.7,
-            matrix_pixel_threshold_vertical_bar: 0.25,
-            matrix_pixel_min_factor: 0.5,
+            spatial_coherence_weight: 1.0,
+            temporal_stability_weight: 0.12,
+            top_k_per_cell: 5,
+        }
+    }
+}
+
+impl From<&RuntimeConfig> for StaticRenderConfig {
+    fn from(config: &RuntimeConfig) -> Self {
+        Self {
+            cursor_color: config.cursor_color.clone(),
+            cursor_color_insert_mode: config.cursor_color_insert_mode.clone(),
+            normal_bg: config.normal_bg.clone(),
+            transparent_bg_fallback_color: config.transparent_bg_fallback_color.clone(),
+            cterm_cursor_colors: config.cterm_cursor_colors.clone(),
+            cterm_bg: config.cterm_bg,
+            hide_target_hack: config.hide_target_hack,
+            max_kept_windows: config.max_kept_windows,
+            never_draw_over_target: config.never_draw_over_target,
+            particle_max_lifetime: config.particle_max_lifetime,
+            particle_switch_octant_braille: config.particle_switch_octant_braille,
+            particles_over_text: config.particles_over_text,
+            color_levels: config.color_levels,
+            gamma: config.gamma,
+            block_aspect_ratio: config.block_aspect_ratio,
+            tail_duration_ms: config.tail_duration_ms.max(1.0),
+            simulation_hz: config.simulation_hz,
+            trail_thickness: config.trail_thickness,
+            trail_thickness_x: config.trail_thickness_x,
+            spatial_coherence_weight: config.spatial_coherence_weight,
+            temporal_stability_weight: config.temporal_stability_weight,
+            top_k_per_cell: config.top_k_per_cell.max(2),
+            windows_zindex: config.windows_zindex,
         }
     }
 }

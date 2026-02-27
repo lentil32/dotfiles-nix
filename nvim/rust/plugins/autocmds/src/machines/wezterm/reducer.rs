@@ -1,79 +1,88 @@
 use super::events::{WeztermCommand, WeztermCompletion, WeztermEvent, WeztermTransition};
-use super::state::{FailureChannel, WeztermState};
+use super::state::{FailureChannel, UpdateSlot, WeztermState};
 
 impl WeztermState {
-    fn complete_title(
-        &mut self,
-        title: support::TabTitle,
-        completion: WeztermCompletion,
+    fn transition_from_next<T>(
+        next: Option<T>,
+        make_command: impl FnOnce(T) -> WeztermCommand,
     ) -> WeztermTransition {
-        let next_title = match completion {
-            WeztermCompletion::Success => {
-                let completed = self.title.in_flight.as_ref() == Some(&title);
-                let next = self.title.complete_success(&title);
-                if completed {
-                    self.warning_gate.reset_after_success(FailureChannel::Title);
-                }
-                next
-            }
-            WeztermCompletion::Failed | WeztermCompletion::Unavailable => {
-                self.title.complete_failure(&title)
-            }
-        };
-        if completion == WeztermCompletion::Unavailable {
-            self.clear_pending_updates();
-        }
-        next_title.map_or_else(WeztermTransition::default, |next| {
-            WeztermTransition::with_command(WeztermCommand::SetTabTitle(next))
+        next.map_or_else(WeztermTransition::default, |value| {
+            WeztermTransition::with_command(make_command(value))
         })
     }
 
-    fn complete_working_dir(
+    fn request_slot<T>(
         &mut self,
-        cwd: String,
+        target: T,
+        slot_access: impl FnOnce(&mut Self) -> &mut UpdateSlot<T>,
+        make_command: impl FnOnce(T) -> WeztermCommand,
+    ) -> WeztermTransition
+    where
+        T: Clone + Eq,
+    {
+        let next = {
+            let slot = slot_access(self);
+            slot.request(target)
+        };
+        Self::transition_from_next(next, make_command)
+    }
+
+    fn complete_slot<T>(
+        &mut self,
+        target: T,
         completion: WeztermCompletion,
-    ) -> WeztermTransition {
-        let next_cwd = match completion {
-            WeztermCompletion::Success => {
-                let completed = self.cwd.in_flight.as_ref() == Some(&cwd);
-                let next = self.cwd.complete_success(&cwd);
-                if completed {
-                    self.warning_gate.reset_after_success(FailureChannel::Cwd);
+        channel: FailureChannel,
+        slot_access: impl FnOnce(&mut Self) -> &mut UpdateSlot<T>,
+        make_command: impl FnOnce(T) -> WeztermCommand,
+    ) -> WeztermTransition
+    where
+        T: Clone + Eq,
+    {
+        let (next, completed_successfully) = {
+            let slot = slot_access(self);
+            match completion {
+                WeztermCompletion::Success => {
+                    let completed_successfully = slot.in_flight.as_ref() == Some(&target);
+                    (slot.complete_success(&target), completed_successfully)
                 }
-                next
-            }
-            WeztermCompletion::Failed | WeztermCompletion::Unavailable => {
-                self.cwd.complete_failure(&cwd)
+                WeztermCompletion::Failed | WeztermCompletion::Unavailable => {
+                    (slot.complete_failure(&target), false)
+                }
             }
         };
+
+        if completed_successfully {
+            self.warning_gate.reset_after_success(channel);
+        }
         if completion == WeztermCompletion::Unavailable {
             self.clear_pending_updates();
         }
-        next_cwd.map_or_else(WeztermTransition::default, |next| {
-            WeztermTransition::with_command(WeztermCommand::SetWorkingDir(next))
-        })
+
+        Self::transition_from_next(next, make_command)
     }
 
     pub fn reduce(&mut self, event: WeztermEvent) -> WeztermTransition {
         match event {
-            WeztermEvent::RequestTitle { title } => self
-                .title
-                .request(title)
-                .map_or_else(WeztermTransition::default, |next| {
-                    WeztermTransition::with_command(WeztermCommand::SetTabTitle(next))
-                }),
-            WeztermEvent::RequestWorkingDir { cwd } => self
-                .cwd
-                .request(cwd)
-                .map_or_else(WeztermTransition::default, |next| {
-                    WeztermTransition::with_command(WeztermCommand::SetWorkingDir(next))
-                }),
-            WeztermEvent::TitleCompleted { title, completion } => {
-                self.complete_title(title, completion)
+            WeztermEvent::RequestTitle { title } => {
+                self.request_slot(title, |state| &mut state.title, WeztermCommand::SetTabTitle)
             }
-            WeztermEvent::WorkingDirCompleted { cwd, completion } => {
-                self.complete_working_dir(cwd, completion)
+            WeztermEvent::RequestWorkingDir { cwd } => {
+                self.request_slot(cwd, |state| &mut state.cwd, WeztermCommand::SetWorkingDir)
             }
+            WeztermEvent::TitleCompleted { title, completion } => self.complete_slot(
+                title,
+                completion,
+                FailureChannel::Title,
+                |state| &mut state.title,
+                WeztermCommand::SetTabTitle,
+            ),
+            WeztermEvent::WorkingDirCompleted { cwd, completion } => self.complete_slot(
+                cwd,
+                completion,
+                FailureChannel::Cwd,
+                |state| &mut state.cwd,
+                WeztermCommand::SetWorkingDir,
+            ),
         }
     }
 }

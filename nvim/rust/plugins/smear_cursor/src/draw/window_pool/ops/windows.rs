@@ -15,66 +15,45 @@ fn buffer_from_handle_i32_unchecked(handle: i32) -> api::Buffer {
 }
 
 fn open_hidden_window_config() -> WindowConfig {
-    let mut builder = WindowConfig::builder();
-    builder
-        .relative(WindowRelativeTo::Editor)
-        .row(0.0)
-        .col(0.0)
-        .width(1)
-        .height(1)
-        .focusable(false)
-        .style(WindowStyle::Minimal)
-        .noautocmd(true)
-        .hide(true)
-        .zindex(1);
-    builder.build()
+    crate::draw::open_hidden_floating_window_config(
+        1,
+        WindowRelativeTo::Editor,
+        WindowStyle::Minimal,
+    )
 }
 
 fn reconfigure_window_config(row: i64, col: i64, width: u32, zindex: u32) -> WindowConfig {
-    let mut builder = WindowConfig::builder();
-    builder
-        .relative(WindowRelativeTo::Editor)
-        .row(row as f64 - 1.0)
-        .col(col as f64 - 1.0)
-        .width(width.max(1))
-        .height(1)
-        .focusable(false)
-        .style(WindowStyle::Minimal)
-        .hide(false)
-        .zindex(zindex);
-    builder.build()
+    crate::draw::reconfigure_floating_window_config(
+        crate::draw::FloatingWindowPlacement {
+            row,
+            col,
+            width,
+            zindex,
+        },
+        false,
+        WindowRelativeTo::Editor,
+        WindowStyle::Minimal,
+    )
 }
 
 fn hide_window_config() -> WindowConfig {
-    let mut builder = WindowConfig::builder();
-    builder.hide(true);
-    builder.build()
+    crate::draw::hide_floating_window_config()
 }
 
-fn set_existing_window_config(window: &mut api::Window, mut config: WindowConfig) -> Result<()> {
-    // nvim_win_set_config rejects the `noautocmd` key for existing windows.
-    config.noautocmd = None;
-    window.set_config(&config)?;
-    Ok(())
+fn set_existing_window_config(window: &mut api::Window, config: WindowConfig) -> Result<()> {
+    crate::draw::set_existing_floating_window_config(window, config)
 }
 
 fn initialize_buffer_options(buffer: &api::Buffer) -> Result<()> {
-    let opts = OptionOpts::builder().buf(buffer.clone()).build();
-    api::set_option_value("buftype", RENDER_BUFFER_TYPE, &opts)?;
-    api::set_option_value("filetype", RENDER_BUFFER_FILETYPE, &opts)?;
-    api::set_option_value("bufhidden", "wipe", &opts)?;
-    api::set_option_value("swapfile", false, &opts)?;
-    Ok(())
+    crate::draw::initialize_floating_buffer_options(
+        buffer,
+        RENDER_BUFFER_TYPE,
+        RENDER_BUFFER_FILETYPE,
+    )
 }
 
 fn initialize_window_options(window: &api::Window) -> Result<()> {
-    let opts = OptionOpts::builder()
-        .scope(OptionScope::Local)
-        .win(window.clone())
-        .build();
-    api::set_option_value("winhighlight", "NormalFloat:Normal", &opts)?;
-    api::set_option_value("winblend", 100_i64, &opts)?;
-    Ok(())
+    crate::draw::initialize_floating_window_options(window, OptionScope::Local)
 }
 
 fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {

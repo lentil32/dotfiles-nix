@@ -35,6 +35,87 @@ fn clear_work_detection_requires_clear_when_visible_window_exists() {
 }
 
 #[test]
+fn cleanup_close_indices_target_only_shell_visible_cached_windows() {
+    let tab_windows = TabWindows {
+        visible_available_indices: vec![0],
+        windows: vec![
+            CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: 1,
+                    buffer_id: 11,
+                },
+                lifecycle: CachedWindowLifecycle::AvailableVisible {
+                    last_used_epoch: FrameEpoch(3),
+                },
+                placement: Some(WindowPlacement {
+                    row: 1,
+                    col: 1,
+                    width: 1,
+                    zindex: 80,
+                }),
+            },
+            cached(2, 12, 2),
+        ],
+        ..TabWindows::default()
+    };
+
+    assert_eq!(shell_visible_close_indices(&tab_windows), vec![0]);
+}
+
+#[test]
+fn cleanup_close_indices_include_untracked_in_use_windows() {
+    let tab_windows = TabWindows {
+        windows: vec![CachedRenderWindow {
+            handles: WindowBufferHandle {
+                window_id: 3,
+                buffer_id: 13,
+            },
+            lifecycle: CachedWindowLifecycle::InUse {
+                epoch: FrameEpoch(7),
+            },
+            placement: Some(WindowPlacement {
+                row: 2,
+                col: 4,
+                width: 1,
+                zindex: 90,
+            }),
+        }],
+        ..TabWindows::default()
+    };
+
+    assert_eq!(shell_visible_close_indices(&tab_windows), vec![0]);
+}
+
+#[test]
+fn clear_work_detection_ignores_stale_lifecycle_counters() {
+    let tabs = std::collections::HashMap::from([(
+        1_i32,
+        TabWindows {
+            windows: vec![CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: 1,
+                    buffer_id: 11,
+                },
+                lifecycle: CachedWindowLifecycle::AvailableVisible {
+                    last_used_epoch: FrameEpoch(3),
+                },
+                placement: Some(WindowPlacement {
+                    row: 1,
+                    col: 1,
+                    width: 1,
+                    zindex: 80,
+                }),
+            }],
+            lifecycle_counters: Default::default(),
+            ..TabWindows::default()
+        },
+    )]);
+
+    assert!(has_visible_windows(&tabs));
+    assert!(has_pending_clear_work(&tabs, 32));
+}
+
+#[test]
 fn clear_work_detection_requires_clear_when_cache_exceeds_budget() {
     let tabs = tabs_with(TabWindows {
         windows: vec![cached(1, 11, 1), cached(2, 12, 2), cached(3, 13, 3)],

@@ -80,38 +80,38 @@ fn effective_keep_budget(adaptive_budget: usize, max_kept_windows: usize) -> usi
     adaptive_budget.min(max_kept_windows)
 }
 
-fn tab_has_visible_windows(tab_windows: &TabWindows) -> bool {
-    tab_windows.windows.iter().any(|cached| {
-        matches!(
-            cached.lifecycle,
-            CachedWindowLifecycle::InUse { .. } | CachedWindowLifecycle::AvailableVisible { .. }
-        )
-    })
+pub(crate) fn tab_has_visible_windows(tab_windows: &TabWindows) -> bool {
+    tab_windows.visible_window_count() > 0
 }
 
+#[cfg(test)]
 pub(crate) fn has_visible_windows(tabs: &HashMap<i32, TabWindows>) -> bool {
     tabs.values().any(tab_has_visible_windows)
 }
 
+pub(crate) fn tab_has_pending_clear_work(
+    tab_windows: &TabWindows,
+    max_kept_windows: usize,
+) -> bool {
+    if tab_has_visible_windows(tab_windows) {
+        return true;
+    }
+
+    let keep_budget = effective_keep_budget(tab_windows.cached_budget, max_kept_windows);
+    if tab_windows.windows.len() > keep_budget {
+        return true;
+    }
+
+    tab_windows.has_invalid_windows()
+}
+
+#[cfg(test)]
 pub(crate) fn has_pending_clear_work(
     tabs: &HashMap<i32, TabWindows>,
     max_kept_windows: usize,
 ) -> bool {
-    tabs.values().any(|tab_windows| {
-        if tab_has_visible_windows(tab_windows) {
-            return true;
-        }
-
-        let keep_budget = effective_keep_budget(tab_windows.cached_budget, max_kept_windows);
-        if tab_windows.windows.len() > keep_budget {
-            return true;
-        }
-
-        tab_windows
-            .windows
-            .iter()
-            .any(|cached| matches!(cached.lifecycle, CachedWindowLifecycle::Invalid))
-    })
+    tabs.values()
+        .any(|tab_windows| tab_has_pending_clear_work(tab_windows, max_kept_windows))
 }
 
 fn lru_prune_indices(windows: &[CachedRenderWindow], keep_count: usize) -> Vec<usize> {

@@ -1,14 +1,17 @@
 use std::fmt;
 
 use nvim_oxi::mlua;
-use support::NonEmptyString;
+use support::{NonEmptyString, positive_i64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferNumber(i64);
 
 impl BufferNumber {
     pub const fn try_new(raw: i64) -> Option<Self> {
-        if raw > 0 { Some(Self(raw)) } else { None }
+        match positive_i64(raw) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 
     pub const fn raw(self) -> i64 {
@@ -21,7 +24,10 @@ pub struct LineNumber(i64);
 
 impl LineNumber {
     pub const fn try_new(raw: i64) -> Option<Self> {
-        if raw > 0 { Some(Self(raw)) } else { None }
+        match positive_i64(raw) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 
     pub const fn raw(self) -> i64 {
@@ -34,7 +40,10 @@ pub struct ColumnNumber(i64);
 
 impl ColumnNumber {
     pub const fn try_new(raw: i64) -> Option<Self> {
-        if raw > 0 { Some(Self(raw)) } else { None }
+        match positive_i64(raw) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 
     pub const fn raw(self) -> i64 {

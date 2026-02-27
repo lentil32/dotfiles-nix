@@ -9,6 +9,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Write,
     path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 static LOG_FILE_PATH: LazyLock<Option<PathBuf>> =
@@ -36,10 +37,20 @@ fn log_level_name(level: i64) -> &'static str {
     match level {
         LOG_LEVEL_TRACE => "TRACE",
         LOG_LEVEL_DEBUG => "DEBUG",
-        LOG_LEVEL_INFO => "INFO",
         LOG_LEVEL_WARN => "WARNING",
         LOG_LEVEL_ERROR => "ERROR",
         _ => "INFO",
+    }
+}
+
+fn should_notify(level: i64) -> bool {
+    level >= LOG_LEVEL_INFO
+}
+
+fn log_timestamp_ms() -> u128 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis(),
+        Err(err) => err.duration().as_millis(),
     }
 }
 
@@ -47,9 +58,8 @@ fn append_log_line(level_name: &str, message: &str) {
     let Some(path) = LOG_FILE_PATH.as_ref() else {
         return;
     };
-    let mut file_guard = match LOG_FILE_HANDLE.lock() {
-        Ok(guard) => guard,
-        Err(_) => return,
+    let Ok(mut file_guard) = LOG_FILE_HANDLE.lock() else {
+        return;
     };
 
     if file_guard.is_none() {
@@ -67,8 +77,13 @@ fn append_log_line(level_name: &str, message: &str) {
         }
     }
 
+    let timestamp_ms = log_timestamp_ms();
     if let Some(file) = file_guard.as_mut()
-        && let Err(err) = writeln!(file, "[{LOG_SOURCE_NAME}][{level_name}] {message}")
+        && let Err(err) = writeln!(
+            file,
+            "[{LOG_SOURCE_NAME}][{level_name}][{timestamp_ms}] {message}"
+        )
+        .and_then(|()| file.flush())
     {
         api::err_writeln(&format!(
             "[{LOG_SOURCE_NAME}] failed to write log file: {err}"
@@ -84,6 +99,10 @@ fn notify_log(level: i64, message: &str) {
 
     let level_name = log_level_name(level);
     append_log_line(level_name, message);
+    if !should_notify(level) {
+        return;
+    }
+
     let payload_message = format!("[{LOG_SOURCE_NAME}][{level_name}] {message}");
     let payload = Array::from_iter([Object::from(payload_message), Object::from(level)]);
     let args = Array::from_iter([
@@ -95,12 +114,23 @@ fn notify_log(level: i64, message: &str) {
     }
 }
 
-pub(super) fn warn(message: &str) {
+pub(crate) fn warn(message: &str) {
     notify_log(LOG_LEVEL_WARN, message);
+}
+
+pub(super) fn trace_lazy(message: impl FnOnce() -> String) {
+    if !should_log(LOG_LEVEL_TRACE) {
+        return;
+    }
+    notify_log(LOG_LEVEL_TRACE, &message());
 }
 
 pub(super) fn debug(message: &str) {
     notify_log(LOG_LEVEL_DEBUG, message);
+}
+
+pub(super) fn should_log_slow_callback(callback_duration_ms: f64) -> bool {
+    PERF_SLOW_CALLBACK_THRESHOLD_MS.is_some_and(|threshold_ms| callback_duration_ms >= threshold_ms)
 }
 
 pub(super) fn log_slow_callback(
@@ -110,10 +140,7 @@ pub(super) fn log_slow_callback(
     callback_duration_estimate_ms: f64,
     details: &str,
 ) {
-    let Some(threshold_ms) = *PERF_SLOW_CALLBACK_THRESHOLD_MS else {
-        return;
-    };
-    if callback_duration_ms < threshold_ms {
+    if !should_log_slow_callback(callback_duration_ms) {
         return;
     }
 
@@ -160,5 +187,23 @@ pub(super) fn unhide_real_cursor() {
         .build();
     if let Err(err) = api::set_hl(0, "SmearCursorHideable", &opts) {
         warn(&format!("restore highlight failed: {err}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_notify;
+
+    #[test]
+    fn trace_and_debug_logs_are_file_only() {
+        assert!(!should_notify(super::LOG_LEVEL_TRACE));
+        assert!(!should_notify(super::LOG_LEVEL_DEBUG));
+    }
+
+    #[test]
+    fn info_and_above_still_notify() {
+        assert!(should_notify(super::LOG_LEVEL_INFO));
+        assert!(should_notify(super::LOG_LEVEL_WARN));
+        assert!(should_notify(super::LOG_LEVEL_ERROR));
     }
 }

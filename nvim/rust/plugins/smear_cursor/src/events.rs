@@ -1,24 +1,35 @@
-use crate::state::RuntimeState;
-use std::ops::{Deref, DerefMut};
+use crate::core::state::{CoreState, CursorColorProbeWitness, CursorColorSample};
+use crate::core::types::Generation;
+use nvim_oxi::LuaRef;
 use std::sync::atomic::AtomicI64;
 use std::sync::{LazyLock, Mutex};
 
 mod cursor;
 mod event_loop;
-mod geometry;
 mod handlers;
+mod host_bridge;
+mod ingress;
 mod lifecycle;
 mod logging;
 mod options;
 mod policy;
+mod probe_cache;
 mod runtime;
 mod timers;
+mod trace;
+
+use probe_cache::{CursorColorCacheLookup, ProbeCacheState};
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use handlers::on_key_event;
-pub(crate) use lifecycle::{setup, toggle};
+pub(crate) use handlers::on_autocmd_event;
+pub(crate) use handlers::on_key_listener_event;
+pub(crate) use lifecycle::{diagnostics, setup, toggle};
+pub(crate) use logging::warn;
+pub(crate) use runtime::record_effect_failure;
+pub(crate) use timers::on_core_timer_event;
+pub(crate) use timers::schedule_guarded;
 
 const LOG_SOURCE_NAME: &str = "smear_cursor";
 const LOG_LEVEL_TRACE: i64 = 0;
@@ -27,9 +38,6 @@ const LOG_LEVEL_WARN: i64 = 3;
 const LOG_LEVEL_INFO: i64 = 2;
 const LOG_LEVEL_ERROR: i64 = 4;
 const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
-const MIN_RENDER_CLEANUP_DELAY_MS: u64 = 200;
-const MIN_RENDER_HARD_PURGE_DELAY_MS: u64 = 3_000;
-const RENDER_HARD_PURGE_DELAY_MULTIPLIER: u64 = 8;
 const CURSOR_COLOR_LUAEVAL_EXPR: &str = r##"(function()
   local function get_hl_color(group, attr)
     local hl = vim.api.nvim_get_hl(0, { name = group, link = false })
@@ -103,79 +111,102 @@ const CURSOR_COLOR_LUAEVAL_EXPR: &str = r##"(function()
   return nil
 end)()"##;
 
-#[derive(Debug, Clone, Copy, Default)]
-struct RenderCleanupGeneration {
-    value: u64,
-}
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct HostBridgeRevision(u32);
 
-impl RenderCleanupGeneration {
-    fn bump(&mut self) -> u64 {
-        self.value = self.value.wrapping_add(1);
-        self.value
-    }
+impl HostBridgeRevision {
+    const CURRENT: Self = Self(2);
 
-    const fn current(self) -> u64 {
-        self.value
+    const fn get(self) -> u32 {
+        self.0
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct RenderGeneration {
-    value: u64,
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+enum HostBridgeState {
+    #[default]
+    Unverified,
+    Verified {
+        revision: HostBridgeRevision,
+    },
 }
 
-impl RenderGeneration {
-    fn bump(&mut self) -> u64 {
-        self.value = self.value.wrapping_add(1);
-        self.value
+#[derive(Debug, Default)]
+struct ShellState {
+    namespace_id: Option<u32>,
+    host_bridge_state: HostBridgeState,
+    on_key_callback_lua_ref: Option<LuaRef>,
+    probe_cache: ProbeCacheState,
+}
+
+impl ShellState {
+    const fn namespace_id(&self) -> Option<u32> {
+        self.namespace_id
     }
 
-    const fn current(self) -> u64 {
-        self.value
+    fn set_namespace_id(&mut self, namespace_id: u32) {
+        self.namespace_id = Some(namespace_id);
+    }
+
+    const fn host_bridge_state(&self) -> HostBridgeState {
+        self.host_bridge_state
+    }
+
+    fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
+        self.host_bridge_state = HostBridgeState::Verified { revision };
+    }
+
+    const fn on_key_callback_lua_ref(&self) -> Option<LuaRef> {
+        self.on_key_callback_lua_ref
+    }
+
+    fn note_on_key_callback_lua_ref(&mut self, lua_ref: LuaRef) {
+        self.on_key_callback_lua_ref = Some(lua_ref);
+    }
+
+    fn cursor_color_colorscheme_generation(&self) -> Generation {
+        self.probe_cache.colorscheme_generation()
+    }
+
+    fn cached_cursor_color_sample(
+        &self,
+        witness: &CursorColorProbeWitness,
+    ) -> CursorColorCacheLookup {
+        self.probe_cache.cached_cursor_color_sample(witness)
+    }
+
+    fn store_cursor_color_sample(
+        &mut self,
+        witness: CursorColorProbeWitness,
+        sample: Option<CursorColorSample>,
+    ) {
+        self.probe_cache.store_cursor_color_sample(witness, sample);
+    }
+
+    fn note_cursor_color_colorscheme_change(&mut self) {
+        self.probe_cache.note_cursor_color_colorscheme_change();
+    }
+
+    fn reset_probe_caches(&mut self) {
+        self.probe_cache.reset();
     }
 }
 
 #[derive(Debug, Default)]
 struct EngineState {
-    runtime: RuntimeState,
-    render_cleanup_generation: RenderCleanupGeneration,
-    render_generation: RenderGeneration,
+    shell: ShellState,
+    core_state: CoreState,
 }
 
 impl EngineState {
-    fn bump_render_cleanup_generation(&mut self) -> u64 {
-        self.render_cleanup_generation.bump()
+    fn core_state(&self) -> CoreState {
+        self.core_state.clone()
     }
 
-    const fn current_render_cleanup_generation(&self) -> u64 {
-        self.render_cleanup_generation.current()
-    }
-
-    fn bump_render_generation(&mut self) -> u64 {
-        self.render_generation.bump()
-    }
-
-    const fn current_render_generation(&self) -> u64 {
-        self.render_generation.current()
+    fn set_core_state(&mut self, next_state: CoreState) {
+        self.core_state = next_state;
     }
 }
-
-struct RuntimeStateGuard(std::sync::MutexGuard<'static, EngineState>);
-
-impl Deref for RuntimeStateGuard {
-    type Target = RuntimeState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0.runtime
-    }
-}
-
-impl DerefMut for RuntimeStateGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0.runtime
-    }
-}
-
 #[derive(Debug)]
 struct EngineContext {
     state: Mutex<EngineState>,

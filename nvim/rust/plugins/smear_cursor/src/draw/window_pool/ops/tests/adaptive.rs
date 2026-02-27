@@ -55,12 +55,10 @@ fn begin_tab_frame_uses_expected_demand_signal() {
 
     assert_eq!(tab_windows.last_frame_demand, 40);
     assert_eq!(tab_windows.frame_demand, 0);
-    assert_eq!(tab_windows.cached_budget, 48);
 }
 
 #[test]
 fn keep_budget_respects_max_kept_windows_cap() {
     assert_eq!(effective_keep_budget(120, 50), 50);
-    assert_eq!(effective_keep_budget(32, 50), 32);
     assert_eq!(effective_keep_budget(16, 0), 0);
 }

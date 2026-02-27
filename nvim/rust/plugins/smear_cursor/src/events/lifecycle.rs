@@ -1,11 +1,13 @@
 use super::AUTOCMD_GROUP_NAME;
 use super::cursor::{cursor_position_for_mode, line_value, mode_string};
-use super::handlers;
-use super::logging::{debug, ensure_hideable_guicursor, set_log_level, unhide_real_cursor};
+use super::host_bridge::{
+    ensure_namespace_id, installed_host_bridge, set_on_key_listener, verify_host_bridge,
+};
+use super::ingress::registered_autocmd_event_names;
+use super::logging::{debug, ensure_hideable_guicursor, set_log_level, unhide_real_cursor, warn};
 use super::options::apply_runtime_options;
-use super::runtime::{reset_transient_event_state, state_lock};
-use super::timers::{clear_autocmd_group, ensure_namespace_id, set_on_key_listener};
-use crate::draw::{clear_all_namespaces, clear_highlight_cache};
+use super::runtime::{diagnostics_report, engine_lock, reset_transient_event_state};
+use crate::draw::{clear_highlight_cache, purge_render_windows};
 use crate::state::{CursorLocation, CursorShape};
 use crate::types::Point;
 use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, CreateCommandOpts};
@@ -25,8 +27,8 @@ fn jump_to_current_cursor() -> Result<()> {
     }
 
     let smear_to_cmd = {
-        let state = state_lock();
-        state.config.smear_to_cmd
+        let state = engine_lock();
+        state.core_state.runtime().config.smear_to_cmd
     };
     let Some((row, col)) = cursor_position_for_mode(&window, &mode, smear_to_cmd)? else {
         return Ok(());
@@ -39,27 +41,35 @@ fn jump_to_current_cursor() -> Result<()> {
         line_value(".")?,
     );
 
-    let (hide_target_hack, unhide_cursor) = {
-        let mut state = state_lock();
-        state.set_namespace_id(namespace_id);
-
+    let hide_target_hack = {
+        let mut state = engine_lock();
+        state.shell.set_namespace_id(namespace_id);
+        let mut runtime = state.core_state.runtime().clone();
         let cursor_shape = CursorShape::new(
-            state.config.cursor_is_vertical_bar(&mode),
-            state.config.cursor_is_horizontal_bar(&mode),
+            runtime.config.cursor_is_vertical_bar(&mode),
+            runtime.config.cursor_is_horizontal_bar(&mode),
         );
-        let unhide_cursor =
-            state.sync_to_current_cursor(Point { row, col }, cursor_shape, location);
-
-        (state.config.hide_target_hack, unhide_cursor)
+        runtime.sync_to_current_cursor(Point { row, col }, cursor_shape, location);
+        let hide_target_hack = runtime.config.hide_target_hack;
+        let next_core = state.core_state().with_runtime(runtime);
+        state.set_core_state(next_core);
+        hide_target_hack
     };
 
     reset_transient_event_state();
-    clear_all_namespaces(namespace_id);
-    if unhide_cursor && !hide_target_hack {
+    let _ = purge_render_windows(namespace_id);
+    if !hide_target_hack {
         unhide_real_cursor();
     }
 
     Ok(())
+}
+
+fn clear_autocmd_group() {
+    let opts = CreateAugroupOpts::builder().clear(true).build();
+    if let Err(err) = api::create_augroup(AUTOCMD_GROUP_NAME, &opts) {
+        warn(&format!("clear autocmd group failed: {err}"));
+    }
 }
 
 fn setup_autocmds() -> Result<()> {
@@ -68,32 +78,14 @@ fn setup_autocmds() -> Result<()> {
         &CreateAugroupOpts::builder().clear(true).build(),
     )?;
 
-    let move_opts = CreateAutocmdOpts::builder()
-        .group(group)
-        .callback(handlers::on_cursor_event)
-        .build();
-    api::create_autocmd(
-        [
-            "CmdlineChanged",
-            "CursorMoved",
-            "CursorMovedI",
-            "ModeChanged",
-            "WinScrolled",
-        ],
-        &move_opts,
-    )?;
-
-    let buf_enter_opts = CreateAutocmdOpts::builder()
-        .group(group)
-        .callback(handlers::on_buf_enter)
-        .build();
-    api::create_autocmd(["BufEnter"], &buf_enter_opts)?;
-
-    let colorscheme_opts = CreateAutocmdOpts::builder()
-        .group(group)
-        .callback(handlers::on_colorscheme)
-        .build();
-    api::create_autocmd(["ColorScheme"], &colorscheme_opts)?;
+    for event in registered_autocmd_event_names() {
+        let command = format!("lua require('rs_smear_cursor').on_autocmd('{event}')");
+        let opts = CreateAutocmdOpts::builder()
+            .group(group)
+            .command(command)
+            .build();
+        api::create_autocmd([event], &opts)?;
+    }
 
     Ok(())
 }
@@ -104,71 +96,119 @@ fn setup_user_command() -> Result<()> {
             "delete existing SmearCursorToggle failed (continuing): {err}"
         ));
     }
+    if let Err(err) = api::del_user_command("SmearCursorDiagnostics") {
+        debug(&format!(
+            "delete existing SmearCursorDiagnostics failed (continuing): {err}"
+        ));
+    }
     api::create_user_command(
         "SmearCursorToggle",
         "lua require('rs_smear_cursor').toggle()",
+        &CreateCommandOpts::builder().build(),
+    )?;
+    api::create_user_command(
+        "SmearCursorDiagnostics",
+        "lua print(require('rs_smear_cursor').diagnostics())",
         &CreateCommandOpts::builder().build(),
     )?;
     Ok(())
 }
 
 pub(crate) fn setup(opts: Dictionary) -> Result<()> {
+    let host_bridge = verify_host_bridge()?;
     let namespace_id = ensure_namespace_id();
     ensure_hideable_guicursor();
     unhide_real_cursor();
     clear_highlight_cache();
-    let has_enabled_option = opts.get(&NvimString::from("enabled")).is_some();
-    let enabled = {
-        let mut state = state_lock();
-        state.set_namespace_id(namespace_id);
-        // Setup defaults to enabled=true when the option is omitted.
-        if !has_enabled_option {
-            state.set_enabled(true);
-        }
-        apply_runtime_options(&mut state, &opts)?;
-        set_log_level(state.config.logging_level);
-        state.clear_runtime_state();
-        state.is_enabled()
-    };
+
+    {
+        let mut state = engine_lock();
+        state.shell.set_namespace_id(namespace_id);
+        let mut runtime = state.core_state.runtime().clone();
+        runtime.disable();
+        let next_core = state.core_state().with_runtime(runtime);
+        state.set_core_state(next_core);
+    }
+    clear_autocmd_group();
+    set_on_key_listener(host_bridge, namespace_id, false)?;
     reset_transient_event_state();
 
+    let has_enabled_option = opts.get(&NvimString::from("enabled")).is_some();
+    let (enabled, setup_warning) = {
+        let mut state = engine_lock();
+        state.shell.set_namespace_id(namespace_id);
+        let mut runtime = state.core_state.runtime().clone();
+        // Surprising: setup errors used to return before teardown, leaving stale callbacks alive.
+        // We disable+clear first, then re-enable only after options parse/apply succeeds.
+        // Setup defaults to enabled=true when the option is omitted.
+        if !has_enabled_option {
+            runtime.set_enabled(true);
+        }
+        let outcome = match apply_runtime_options(&mut runtime, &opts) {
+            Ok(()) => {
+                set_log_level(runtime.config.logging_level);
+                runtime.clear_runtime_state();
+                (runtime.is_enabled(), None)
+            }
+            Err(err) => {
+                runtime.disable();
+                runtime.clear_runtime_state();
+                (
+                    false,
+                    Some(format!(
+                        "setup rejected options; smear cursor remains disabled: {err}"
+                    )),
+                )
+            }
+        };
+        let next_core = state.core_state().with_runtime(runtime);
+        state.set_core_state(next_core);
+        outcome
+    };
+
     setup_user_command()?;
-    clear_autocmd_group();
-    set_on_key_listener(namespace_id, false)?;
     if enabled {
         setup_autocmds()?;
-        set_on_key_listener(namespace_id, true)?;
+        set_on_key_listener(host_bridge, namespace_id, true)?;
     }
     jump_to_current_cursor()?;
+    if let Some(message) = setup_warning {
+        warn(&message);
+    }
     Ok(())
 }
 
 pub(crate) fn toggle() -> Result<()> {
+    let host_bridge = installed_host_bridge()?;
     let (is_enabled, namespace_id, hide_target_hack) = {
-        let mut state = state_lock();
-        let toggled_enabled = !state.is_enabled();
+        let mut state = engine_lock();
+        let mut runtime = state.core_state.runtime().clone();
+        let toggled_enabled = !runtime.is_enabled();
         if toggled_enabled {
-            state.set_enabled(true);
+            runtime.set_enabled(true);
         } else {
-            state.disable();
+            runtime.disable();
         }
-        (
-            state.is_enabled(),
-            state.namespace_id(),
-            state.config.hide_target_hack,
-        )
+        let outcome = (
+            runtime.is_enabled(),
+            state.shell.namespace_id(),
+            runtime.config.hide_target_hack,
+        );
+        let next_core = state.core_state().with_runtime(runtime);
+        state.set_core_state(next_core);
+        outcome
     };
 
     if let Some(namespace_id) = namespace_id {
         if is_enabled {
             setup_autocmds()?;
-            set_on_key_listener(namespace_id, true)?;
+            set_on_key_listener(host_bridge, namespace_id, true)?;
             jump_to_current_cursor()?;
         } else {
             clear_autocmd_group();
-            set_on_key_listener(namespace_id, false)?;
+            set_on_key_listener(host_bridge, namespace_id, false)?;
             reset_transient_event_state();
-            clear_all_namespaces(namespace_id);
+            let _ = purge_render_windows(namespace_id);
             if !hide_target_hack {
                 unhide_real_cursor();
             }
@@ -176,4 +216,8 @@ pub(crate) fn toggle() -> Result<()> {
     }
 
     Ok(())
+}
+
+pub(crate) fn diagnostics() -> Result<String> {
+    Ok(diagnostics_report())
 }

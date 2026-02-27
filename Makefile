@@ -1,4 +1,4 @@
-.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc fmt check check-lua clean help
+.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc fmt check check-lua check-smear-cursor clean help
 
 hostname := $(shell hostname)
 user := $(shell whoami)
@@ -57,11 +57,16 @@ fmt:
 	nix fmt
 
 check:
+	$(MAKE) check-smear-cursor
 	$(MAKE) check-lua
 	nix flake check
 
 check-lua:
 	emmylua_check -c $(emmylua_config) $(emmylua_workspace)
+
+check-smear-cursor:
+	cd nvim/rust && cargo test -p rs_smear_cursor
+	cd nvim/rust && plugins/smear_cursor/scripts/test_timer_bridge.sh
 
 clean:
 	rm -rf result
@@ -77,4 +82,5 @@ help:
 	@echo "fmt          - Format Nix files"
 	@echo "check        - Run EmmyLua and flake checks"
 	@echo "check-lua    - Run EmmyLua checks"
+	@echo "check-smear-cursor - Run smear cursor Rust and headless bridge checks"
 	@echo "clean        - Remove result symlink"

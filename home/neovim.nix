@@ -49,8 +49,31 @@ in
         };
         toKebab = lib.strings.replaceStrings [ "_" ] [ "-" ];
         mkPname = crate: "${toKebab crate}-nvim";
-        mkInstallPhase = libBase: outBase: ''
+        runtimeDirs = [
+          "autoload"
+          "colors"
+          "compiler"
+          "doc"
+          "ftdetect"
+          "ftplugin"
+          "indent"
+          "keymap"
+          "lua"
+          "plugin"
+          "queries"
+          "snippets"
+          "syntax"
+        ];
+        mkInstallPhase = libBase: outBase: runtimeRoot: ''
           runHook preInstall
+          mkdir -p $out
+          ${lib.optionalString (runtimeRoot != null) ''
+            for runtimeDir in ${lib.concatStringsSep " " runtimeDirs}; do
+              if [ -d "${runtimeRoot}/$runtimeDir" ]; then
+                cp -r "${runtimeRoot}/$runtimeDir" "$out/"
+              fi
+            done
+          ''}
           mkdir -p $out/lua
           lib=""
           if [ -f target/release/lib${libBase}.dylib ]; then
@@ -82,6 +105,7 @@ in
             pname ? mkPname crate,
             libBase ? crate,
             outBase ? libBase,
+            runtimeRoot ? null,
             cargoBuildFlags ? [
               "--locked"
               "--package"
@@ -95,19 +119,22 @@ in
             cargoLock = rustCargoLock;
             cargoBuildFlags = cargoBuildFlags;
             doCheck = false;
-            installPhase = mkInstallPhase libBase outBase;
+            installPhase = mkInstallPhase libBase outBase runtimeRoot;
           };
-        rustPluginOrder = [
-          "rs_project_root"
-          "rs_plugin_util"
-          "rs_readline"
-          "rs_text"
-          "rs_snacks_preview"
-          "rs_autocmds"
-          "rs_smear_cursor"
-          "rs_theme_switcher"
+        rustPluginSpecs = [
+          { crate = "rs_project_root"; }
+          { crate = "rs_plugin_util"; }
+          { crate = "rs_readline"; }
+          { crate = "rs_text"; }
+          { crate = "rs_snacks_preview"; }
+          { crate = "rs_autocmds"; }
+          {
+            crate = "rs_smear_cursor";
+            runtimeRoot = rustWorkspace + "/plugins/smear_cursor";
+          }
+          { crate = "rs_theme_switcher"; }
         ];
-        rustPluginList = map (crate: mkRustPlugin { inherit crate; }) rustPluginOrder;
+        rustPluginList = map mkRustPlugin rustPluginSpecs;
         categoriesConfig = {
           general = {
             startupPlugins = [

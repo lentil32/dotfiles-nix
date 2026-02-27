@@ -158,15 +158,18 @@ in
   #
   ##########################################################################
 
-  environment.systemPackages = with pkgs; [
-    zsh
-    git
-    vim
-    man-pages
-    man-pages-posix
-    appleSdk
-    xcbuild
-  ] ++ buildEssentials;
+  environment.systemPackages =
+    with pkgs;
+    [
+      zsh
+      git
+      vim
+      man-pages
+      man-pages-posix
+      appleSdk
+      xcbuild
+    ]
+    ++ buildEssentials;
   environment.variables = {
     EDITOR = "vim";
 

@@ -7,6 +7,7 @@ let
   # Prefer a Nix-managed Python runtime + libs over Homebrew pip global installs.
   python = pkgs.python313.withPackages (
     ps: with ps; [
+      beautifulsoup4
       ipython
       numpy
       pandas

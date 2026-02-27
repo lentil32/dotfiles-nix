@@ -1,16 +1,18 @@
 #[cfg(test)]
 mod tests {
     use super::{
-        ADAPTIVE_POOL_HARD_MAX_BUDGET, ADAPTIVE_POOL_MIN_BUDGET, AdaptiveBudgetState,
-        CachedRenderWindow, CachedWindowLifecycle, EpochRollover, FrameEpoch, TabWindows,
-        WindowBufferHandle, WindowPlacement, adjust_tracking_after_remove,
-        available_window_index_for_placement, begin_tab_frame, effective_keep_budget,
-        has_pending_clear_work, has_visible_windows, lru_prune_indices, next_adaptive_budget,
-        rebuild_available_window_placement_index, rollover_in_use_windows,
+        ADAPTIVE_POOL_HARD_MAX_BUDGET, ADAPTIVE_POOL_MIN_BUDGET, AcquireError, AdaptiveBudgetState,
+        AllocationPolicy, CachedRenderWindow, CachedWindowLifecycle, EpochRollover, FrameEpoch,
+        ReuseFailureCounters, TabWindows, WindowBufferHandle, WindowPlacement, acquire,
+        adjust_tracking_after_remove, available_window_index_for_placement, begin_tab_frame,
+        effective_keep_budget, frame_capacity_target, has_pending_clear_work, has_visible_windows,
+        lru_prune_indices, next_adaptive_budget, rebuild_available_window_placement_index,
+        rollover_in_use_windows, shell_visible_close_indices,
     };
     use std::collections::HashMap;
 
-    fn tabs_with(tab_windows: TabWindows) -> HashMap<i32, TabWindows> {
+    fn tabs_with(mut tab_windows: TabWindows) -> HashMap<i32, TabWindows> {
+        tab_windows.sync_lifecycle_counters();
         HashMap::from([(1_i32, tab_windows)])
     }
 

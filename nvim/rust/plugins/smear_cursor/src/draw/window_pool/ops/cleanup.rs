@@ -32,20 +32,44 @@ fn prune_tab_windows(
     pruned_windows
 }
 
-pub(crate) fn prune(
-    tabs: &mut HashMap<i32, TabWindows>,
+pub(crate) fn prune_tab(
+    tab_windows: &mut TabWindows,
     namespace_id: u32,
     max_kept_windows: usize,
 ) -> usize {
-    let mut pruned_windows = 0_usize;
-    for tab_windows in tabs.values_mut() {
-        pruned_windows = pruned_windows.saturating_add(prune_tab_windows(
-            tab_windows,
-            namespace_id,
-            max_kept_windows,
-        ));
+    prune_tab_windows(tab_windows, namespace_id, max_kept_windows)
+}
+
+fn shell_visible_close_indices(tab_windows: &TabWindows) -> Vec<usize> {
+    // Surprising: `visible_available_indices` is only a reuse/hide queue. Cleanup authority must
+    // follow the retained window lifecycle itself so stale tracking cannot strand visible floats.
+    tab_windows
+        .windows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cached)| cached.is_shell_visible().then_some(index))
+        .collect()
+}
+
+fn close_visible_tab_windows(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
+    let remove_indices = shell_visible_close_indices(tab_windows);
+    if remove_indices.is_empty() {
+        return 0;
     }
-    pruned_windows
+
+    let _event_ignore = EventIgnoreGuard::set_all();
+    let mut closed_windows = 0_usize;
+    for remove_index in remove_indices.into_iter().rev() {
+        remove_cached_window_at(tab_windows, namespace_id, remove_index);
+        closed_windows = closed_windows.saturating_add(1);
+    }
+
+    rebuild_available_window_placement_index(tab_windows);
+    closed_windows
+}
+
+pub(crate) fn close_visible_tab(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
+    close_visible_tab_windows(tab_windows, namespace_id)
 }
 
 fn release_unused_tab_windows(
@@ -70,17 +94,33 @@ fn release_unused_tab_windows(
         }
 
         let handles = tab_windows.windows[index].handles;
+        let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id) else {
+            let _ = mark_cached_window_invalid(tab_windows, index);
+            continue;
+        };
         let Some(mut window) = window_from_handle_i32(handles.window_id) else {
             let _ = mark_cached_window_invalid(tab_windows, index);
             continue;
         };
+
+        // Surprising: some UIs can continue displaying the last float payload after a hide until
+        // a later repaint. Clear the render namespace before hiding so reused windows do not leak
+        // stale smear cells on screen.
+        if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
+            log_draw_error("clear cached render namespace before hide", &err);
+            let _ = mark_cached_window_invalid(tab_windows, index);
+            continue;
+        }
 
         if set_existing_window_config(&mut window, hide_config.clone()).is_err() {
             let _ = mark_cached_window_invalid(tab_windows, index);
             continue;
         }
 
+        let previous_lifecycle = tab_windows.windows[index].lifecycle;
         tab_windows.windows[index].mark_hidden();
+        let next_lifecycle = tab_windows.windows[index].lifecycle;
+        tab_windows.track_window_transition(previous_lifecycle, next_lifecycle);
         summary.hidden_windows = summary.hidden_windows.saturating_add(1);
     }
 
@@ -94,44 +134,18 @@ fn release_unused_tab_windows(
     summary
 }
 
-pub(crate) fn release_unused_tab(
-    tabs: &mut HashMap<i32, TabWindows>,
+pub(crate) fn release_unused_in_tab(
+    tab_windows: &mut TabWindows,
     namespace_id: u32,
-    tab_handle: i32,
 ) -> ReleaseUnusedSummary {
-    let Some(tab_windows) = tabs.get_mut(&tab_handle) else {
-        return ReleaseUnusedSummary::default();
-    };
     release_unused_tab_windows(tab_windows, namespace_id)
 }
 
-pub(crate) fn release_unused(
-    tabs: &mut HashMap<i32, TabWindows>,
+pub(crate) fn recover_invalid_window_in_tab(
+    tab_windows: &mut TabWindows,
     namespace_id: u32,
-) -> ReleaseUnusedSummary {
-    let mut summary = ReleaseUnusedSummary::default();
-    for tab_windows in tabs.values_mut() {
-        let tab_summary = release_unused_tab_windows(tab_windows, namespace_id);
-        summary.hidden_windows = summary
-            .hidden_windows
-            .saturating_add(tab_summary.hidden_windows);
-        summary.invalid_removed_windows = summary
-            .invalid_removed_windows
-            .saturating_add(tab_summary.invalid_removed_windows);
-    }
-
-    summary
-}
-
-pub(crate) fn recover_invalid_window(
-    tabs: &mut HashMap<i32, TabWindows>,
-    namespace_id: u32,
-    tab_handle: i32,
     window_id: i32,
 ) -> bool {
-    let Some(tab_windows) = tabs.get_mut(&tab_handle) else {
-        return false;
-    };
     let Some(index) = tab_windows
         .windows
         .iter()
@@ -176,8 +190,9 @@ fn buffer_has_render_marker(buffer: &api::Buffer) -> bool {
     buftype == RENDER_BUFFER_TYPE
 }
 
-pub(crate) fn close_orphan_render_windows(namespace_id: u32) {
+pub(crate) fn close_orphan_render_windows(namespace_id: u32) -> usize {
     let _event_ignore = EventIgnoreGuard::set_all();
+    let mut closed_windows = 0_usize;
     for window in api::list_wins() {
         let Some(mut buffer) = window_buffer(&window) else {
             continue;
@@ -189,21 +204,24 @@ pub(crate) fn close_orphan_render_windows(namespace_id: u32) {
         if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
             log_draw_error("clear orphan render namespace", &err);
         }
-        if let Err(err) = window.close(true) {
-            log_draw_error("close orphan render window", &err);
+        match window.close(true) {
+            Ok(()) => {
+                closed_windows = closed_windows.saturating_add(1);
+            }
+            Err(err) => {
+                log_draw_error("close orphan render window", &err);
+            }
         }
     }
+    closed_windows
 }
 
-pub(crate) fn purge(tabs: &mut HashMap<i32, TabWindows>, namespace_id: u32) {
+pub(crate) fn purge_tab(tab_windows: &mut TabWindows, namespace_id: u32) {
     let _event_ignore = EventIgnoreGuard::set_all();
 
-    for tab_windows in tabs.values() {
-        for cached in tab_windows.windows.iter().copied() {
-            close_cached_window(namespace_id, cached.handles);
-        }
+    for cached in tab_windows.windows.iter().copied() {
+        close_cached_window(namespace_id, cached.handles);
     }
 
-    tabs.clear();
-    close_orphan_render_windows(namespace_id);
+    *tab_windows = TabWindows::default();
 }

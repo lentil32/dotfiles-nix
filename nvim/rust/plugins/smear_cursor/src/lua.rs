@@ -11,6 +11,21 @@ pub(crate) fn invalid_key(key: &str, expected: &'static str) -> nvim_oxi::Error 
     to_nvim_error(OxiError::invalid_value(key, expected))
 }
 
+pub(crate) fn missing_key(key: &str) -> nvim_oxi::Error {
+    to_nvim_error(OxiError::missing_key(key))
+}
+
+pub(crate) fn require_object(value: Option<Object>, key: &str) -> Result<Object> {
+    value.ok_or_else(|| missing_key(key))
+}
+
+pub(crate) fn require_with<T, F>(value: Option<Object>, key: &str, parse: F) -> Result<T>
+where
+    F: Fn(&str, Object) -> Result<T>,
+{
+    parse(key, require_object(value, key)?)
+}
+
 pub(crate) fn f64_from_object(key: &str, value: Object) -> Result<f64> {
     if let Ok(parsed) = f64::from_object(value.clone()) {
         return Ok(parsed);
@@ -46,6 +61,40 @@ pub(crate) fn string_from_object(key: &str, value: Object) -> Result<String> {
     }
     let parsed = NvimString::from_object(value).map_err(|_| invalid_key(key, "string"))?;
     Ok(parsed.to_string_lossy().into_owned())
+}
+
+pub(crate) fn parse_optional_with<T, F>(
+    value: Option<Object>,
+    key: &str,
+    parse: F,
+) -> Result<Option<T>>
+where
+    F: Fn(&str, Object) -> Result<T>,
+{
+    value.map(|value| parse(key, value)).transpose()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ParsedOptionalChange<T> {
+    Set(T),
+    Clear,
+}
+
+pub(crate) fn parse_optional_change_with<T, F>(
+    value: Option<Object>,
+    key: &str,
+    parse: F,
+) -> Result<Option<ParsedOptionalChange<T>>>
+where
+    F: Fn(&str, Object) -> Result<T>,
+{
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(Some(ParsedOptionalChange::Clear));
+    }
+    parse(key, value).map(|parsed| Some(ParsedOptionalChange::Set(parsed)))
 }
 
 pub(crate) fn parse_indexed_objects(

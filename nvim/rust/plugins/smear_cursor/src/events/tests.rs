@@ -12,21 +12,12 @@ fn cterm_colors_object(colors: &[i64]) -> Object {
     Object::from(Array::from_iter(colors.iter().copied().map(Object::from)))
 }
 
-fn cursor_snapshot(mode: &str, row: f64, col: f64) -> crate::state::CursorSnapshot {
-    crate::state::CursorSnapshot {
-        mode: mode.to_string(),
-        row,
-        col,
-    }
-}
-
 mod cleanup_tests {
-    use super::super::timers::{render_cleanup_delay_ms, render_hard_cleanup_delay_ms};
-    use super::super::{
-        EngineState, MIN_RENDER_CLEANUP_DELAY_MS, MIN_RENDER_HARD_PURGE_DELAY_MS,
-        RENDER_HARD_PURGE_DELAY_MULTIPLIER, RenderCleanupGeneration, RenderGeneration,
-    };
     use crate::config::RuntimeConfig;
+    use crate::core::runtime_reducer::{
+        MIN_RENDER_CLEANUP_DELAY_MS, MIN_RENDER_HARD_PURGE_DELAY_MS,
+        RENDER_HARD_PURGE_DELAY_MULTIPLIER, render_cleanup_delay_ms, render_hard_cleanup_delay_ms,
+    };
 
     #[test]
     fn cleanup_delay_has_floor() {
@@ -84,83 +75,12 @@ mod cleanup_tests {
             MIN_RENDER_HARD_PURGE_DELAY_MS
         );
     }
-
-    #[test]
-    fn cleanup_generation_bumps_and_wraps() {
-        let mut generation = RenderCleanupGeneration::default();
-        assert_eq!(generation.current(), 0);
-        assert_eq!(generation.bump(), 1);
-        assert_eq!(generation.current(), 1);
-
-        generation = RenderCleanupGeneration { value: u64::MAX };
-        assert_eq!(generation.bump(), 0);
-        assert_eq!(generation.current(), 0);
-    }
-
-    #[test]
-    fn engine_state_exposes_cleanup_generation_transitions() {
-        let mut state = EngineState::default();
-        assert_eq!(state.current_render_cleanup_generation(), 0);
-        assert_eq!(state.bump_render_cleanup_generation(), 1);
-        assert_eq!(state.bump_render_cleanup_generation(), 2);
-        assert_eq!(state.current_render_cleanup_generation(), 2);
-    }
-
-    #[test]
-    fn render_generation_bumps_and_wraps() {
-        let mut generation = RenderGeneration::default();
-        assert_eq!(generation.current(), 0);
-        assert_eq!(generation.bump(), 1);
-        assert_eq!(generation.current(), 1);
-
-        generation = RenderGeneration { value: u64::MAX };
-        assert_eq!(generation.bump(), 0);
-        assert_eq!(generation.current(), 0);
-    }
-
-    #[test]
-    fn engine_state_exposes_render_generation_transitions() {
-        let mut state = EngineState::default();
-        assert_eq!(state.current_render_generation(), 0);
-        assert_eq!(state.bump_render_generation(), 1);
-        assert_eq!(state.bump_render_generation(), 2);
-        assert_eq!(state.current_render_generation(), 2);
-    }
 }
 
 mod event_loop_tests {
     use super::super::event_loop::EventLoopState;
-
-    #[test]
-    fn event_loop_state_pending_flag_is_idempotent_until_cleared() {
-        let mut state = EventLoopState::new();
-        assert!(state.mark_external_trigger_pending_if_idle());
-        assert!(!state.mark_external_trigger_pending_if_idle());
-        state.clear_external_trigger_pending();
-        assert!(state.mark_external_trigger_pending_if_idle());
-    }
-
-    #[test]
-    fn event_loop_state_coalesces_reentrant_external_triggers() {
-        let mut state = EventLoopState::new();
-        assert!(state.mark_external_trigger_pending_if_idle());
-        assert!(!state.mark_external_trigger_pending_if_idle());
-
-        // A re-entrant trigger while dispatch is pending should request one extra drain pass.
-        assert!(state.complete_external_trigger_dispatch());
-        // After the extra pass, pending should clear.
-        assert!(!state.complete_external_trigger_dispatch());
-        assert!(state.mark_external_trigger_pending_if_idle());
-    }
-
-    #[test]
-    fn event_loop_state_coalesces_cmdline_redraw_requests() {
-        let mut state = EventLoopState::new();
-        assert!(state.mark_cmdline_redraw_pending_if_idle());
-        assert!(!state.mark_cmdline_redraw_pending_if_idle());
-        state.clear_cmdline_redraw_pending();
-        assert!(state.mark_cmdline_redraw_pending_if_idle());
-    }
+    use super::super::handlers::{KeyEventAction, decide_key_event_action};
+    use super::super::policy::BufferEventPolicy;
 
     #[test]
     fn event_loop_state_elapsed_autocmd_time_handles_unset_and_monotonicity() {
@@ -182,11 +102,60 @@ mod event_loop_tests {
                 .is_infinite()
         );
     }
+
+    #[test]
+    fn key_fallback_decision_uses_buffer_policy_and_debounced_delay_only() {
+        let action_enabled = decide_key_event_action(BufferEventPolicy::Normal, 17);
+        assert_eq!(
+            action_enabled,
+            KeyEventAction::QueueKeyFallback { delay_ms: 17 }
+        );
+    }
+
+    #[test]
+    fn key_fallback_zero_delay_still_schedules_post_key_timer() {
+        let action = decide_key_event_action(BufferEventPolicy::Normal, 0);
+        assert_eq!(action, KeyEventAction::QueueKeyFallback { delay_ms: 1 });
+    }
+
+    #[test]
+    fn event_loop_state_tracks_structured_ingress_counters() {
+        let mut state = EventLoopState::new();
+        state.record_ingress_received();
+        state.record_ingress_received();
+        state.record_ingress_applied();
+        state.record_ingress_dropped();
+        state.record_ingress_coalesced();
+        state.record_ingress_starved();
+        state.record_observation_request_executed();
+        state.record_degraded_draw_application();
+        state.record_stale_token_event();
+        state.record_planner_compile_duration(320);
+        state.record_planner_compile_duration(1280);
+        state.record_planner_decode_duration(640);
+
+        let metrics = state.runtime_metrics();
+        assert_eq!(metrics.ingress_received, 2);
+        assert_eq!(metrics.ingress_applied, 1);
+        assert_eq!(metrics.ingress_dropped, 1);
+        assert_eq!(metrics.ingress_coalesced, 1);
+        assert_eq!(metrics.ingress_starved, 1);
+        assert_eq!(metrics.observation_requests_executed, 1);
+        assert_eq!(metrics.degraded_draw_applications, 1);
+        assert_eq!(metrics.stale_token_events, 1);
+        assert_eq!(metrics.planner_compile.samples, 2);
+        assert_eq!(metrics.planner_compile.total_micros, 1600);
+        assert_eq!(metrics.planner_compile.max_micros, 1280);
+        assert_eq!(metrics.planner_decode.samples, 1);
+        assert_eq!(metrics.planner_decode.total_micros, 640);
+        assert_eq!(metrics.planner_decode.max_micros, 640);
+    }
 }
 
 mod runtime_options_apply_tests {
     use super::super::options::apply_runtime_options;
     use super::{cterm_colors_object, options_dict};
+    use crate::config::RuntimeConfig;
     use crate::state::{
         ColorOptionsPatch, OptionalChange, RuntimeOptionsPatch, RuntimeState, RuntimeSwitchesPatch,
     };
@@ -195,13 +164,8 @@ mod runtime_options_apply_tests {
     #[test]
     fn runtime_options_patch_apply_clears_nullable_fields() {
         let mut state = RuntimeState::default();
-        state.config.delay_disable = Some(12.0);
         state.config.cursor_color = Some("#abcdef".to_string());
         let patch = RuntimeOptionsPatch {
-            runtime: RuntimeSwitchesPatch {
-                delay_disable: Some(OptionalChange::Clear),
-                ..RuntimeSwitchesPatch::default()
-            },
             color: ColorOptionsPatch {
                 cursor_color: Some(OptionalChange::Clear),
                 ..ColorOptionsPatch::default()
@@ -210,7 +174,6 @@ mod runtime_options_apply_tests {
         };
 
         patch.apply(&mut state);
-        assert_eq!(state.config.delay_disable, None);
         assert_eq!(state.config.cursor_color, None);
     }
 
@@ -264,6 +227,256 @@ mod runtime_options_apply_tests {
         patch.apply(&mut state);
         assert_eq!(state.config.max_kept_windows, 24);
     }
+
+    #[test]
+    fn runtime_options_patch_apply_fps_derives_time_interval() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([("fps", Object::from(120.0_f64))]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert_eq!(
+            state.config.time_interval,
+            RuntimeConfig::interval_ms_for_fps(120.0)
+        );
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_fps_overrides_explicit_time_interval() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("time_interval", Object::from(40.0_f64)),
+            ("fps", Object::from(200.0_f64)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert_eq!(
+            state.config.time_interval,
+            RuntimeConfig::interval_ms_for_fps(200.0)
+        );
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_non_positive_fps() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([("fps", Object::from(0.0_f64))]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(result.is_err(), "expected fps=0 to be rejected");
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_stop_hysteresis_thresholds() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("stop_distance_enter", Object::from(0.05_f64)),
+            ("stop_distance_exit", Object::from(0.25_f64)),
+            ("stop_velocity_enter", Object::from(0.08_f64)),
+            ("stop_hold_frames", Object::from(3_i64)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert_eq!(state.config.stop_distance_enter, 0.05_f64);
+        assert_eq!(state.config.stop_distance_exit, 0.25_f64);
+        assert_eq!(state.config.stop_velocity_enter, 0.08_f64);
+        assert_eq!(state.config.stop_hold_frames, 3_u32);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_decode_pipeline_options() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("tail_duration_ms", Object::from(260.0_f64)),
+            ("spatial_coherence_weight", Object::from(1.4_f64)),
+            ("temporal_stability_weight", Object::from(0.22_f64)),
+            ("top_k_per_cell", Object::from(6_i64)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert_eq!(state.config.tail_duration_ms, 260.0_f64);
+        assert_eq!(state.config.spatial_coherence_weight, 1.4_f64);
+        assert_eq!(state.config.temporal_stability_weight, 0.22_f64);
+        assert_eq!(state.config.top_k_per_cell, 6_u8);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_simulation_clock_options() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("fps", Object::from(144.0_f64)),
+            ("simulation_hz", Object::from(240.0_f64)),
+            ("max_simulation_steps_per_frame", Object::from(12_i64)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert_eq!(state.config.simulation_hz, 240.0_f64);
+        assert_eq!(state.config.max_simulation_steps_per_frame, 12_u32);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_animation_mode_flags() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("animate_in_insert_mode", Object::from(false)),
+            ("animate_command_line", Object::from(false)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert!(!state.config.animate_in_insert_mode);
+        assert!(!state.config.animate_command_line);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_window_buffer_smear_flags_for_all_combinations() {
+        let combos = [(false, false), (false, true), (true, false), (true, true)];
+        for (smear_between_windows, smear_between_buffers) in combos {
+            let mut state = RuntimeState::default();
+            let opts = options_dict([
+                ("smear_between_windows", Object::from(smear_between_windows)),
+                ("smear_between_buffers", Object::from(smear_between_buffers)),
+            ]);
+
+            let result = apply_runtime_options(&mut state, &opts);
+            assert!(
+                result.is_ok(),
+                "unexpected runtime option error for window/buffer flags: {result:?}"
+            );
+            assert_eq!(state.config.smear_between_windows, smear_between_windows);
+            assert_eq!(state.config.smear_between_buffers, smear_between_buffers);
+        }
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_time_domain_motion_options() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("head_response_ms", Object::from(40.0_f64)),
+            ("damping_ratio", Object::from(0.75_f64)),
+            ("tail_response_ms", Object::from(120.0_f64)),
+            ("trail_duration_ms", Object::from(220.0_f64)),
+            ("trail_short_duration_ms", Object::from(50.0_f64)),
+            ("trail_size", Object::from(0.7_f64)),
+            ("trail_min_distance", Object::from(1.5_f64)),
+            ("trail_thickness", Object::from(0.9_f64)),
+            ("trail_thickness_x", Object::from(1.1_f64)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+        assert_eq!(state.config.head_response_ms, 40.0_f64);
+        assert_eq!(state.config.damping_ratio, 0.75_f64);
+        assert_eq!(state.config.tail_response_ms, 120.0_f64);
+        assert_eq!(state.config.trail_duration_ms, 220.0_f64);
+        assert_eq!(state.config.trail_short_duration_ms, 50.0_f64);
+        assert_eq!(state.config.trail_size, 0.7_f64);
+        assert_eq!(state.config.trail_min_distance, 1.5_f64);
+        assert_eq!(state.config.trail_thickness, 0.9_f64);
+        assert_eq!(state.config.trail_thickness_x, 1.1_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_tail_response_below_head_response() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("head_response_ms", Object::from(80.0_f64)),
+            ("tail_response_ms", Object::from(40.0_f64)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(result.is_err(), "expected incompatible response range");
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_non_positive_damping_ratio() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([("damping_ratio", Object::from(0.0_f64))]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_err(),
+            "expected non-positive damping_ratio to be rejected"
+        );
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_stop_exit_below_stop_enter() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([
+            ("stop_distance_enter", Object::from(0.4_f64)),
+            ("stop_distance_exit", Object::from(0.2_f64)),
+        ]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(result.is_err(), "expected invalid stop distance range");
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_zero_stop_hold_frames() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([("stop_hold_frames", Object::from(0_i64))]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_err(),
+            "expected stop_hold_frames=0 to be rejected"
+        );
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_out_of_range_trail_size() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([("trail_size", Object::from(1.5_f64))]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(result.is_err(), "expected invalid trail_size");
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_negative_trail_thickness() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([("trail_thickness", Object::from(-0.1_f64))]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(result.is_err(), "expected invalid trail_thickness");
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_rejects_top_k_per_cell_below_two() {
+        let mut state = RuntimeState::default();
+        let opts = options_dict([("top_k_per_cell", Object::from(1_i64))]);
+
+        let result = apply_runtime_options(&mut state, &opts);
+        assert!(
+            result.is_err(),
+            "expected top_k_per_cell lower-bound failure"
+        );
+    }
 }
 
 mod runtime_options_parse_tests {
@@ -278,7 +491,7 @@ mod runtime_options_parse_tests {
     fn parse_optional_change_with_nil_maps_to_clear() {
         let parsed = parse_optional_change_with(
             Some(Object::nil()),
-            "delay_disable",
+            "cursor_color",
             validated_non_negative_f64,
         )
         .expect("expected parse success");
@@ -299,21 +512,6 @@ mod runtime_options_parse_tests {
         let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
         assert!(
             err.to_string().contains("windows_zindex"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            err.to_string().contains("non-negative integer"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn runtime_options_patch_parse_rejects_negative_max_kept_windows() {
-        let opts = options_dict([("max_kept_windows", Object::from(-1_i64))]);
-
-        let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
-        assert!(
-            err.to_string().contains("max_kept_windows"),
             "unexpected error: {err}"
         );
         assert!(
@@ -344,232 +542,275 @@ mod runtime_options_parse_tests {
         assert_eq!(colors.colors, vec![17_u16, 42_u16]);
         assert_eq!(colors.color_levels, 2_u32);
     }
+
+    #[test]
+    fn runtime_options_patch_parse_rejects_non_positive_simulation_hz() {
+        let opts = options_dict([("simulation_hz", Object::from(0.0_f64))]);
+
+        let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
+        assert!(
+            err.to_string().contains("simulation_hz"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("positive number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_options_patch_parse_rejects_top_k_per_cell_out_of_u8_range() {
+        let opts = options_dict([("top_k_per_cell", Object::from(999_i64))]);
+
+        let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
+        assert!(
+            err.to_string().contains("top_k_per_cell"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("between 2 and 255"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_options_patch_parse_rejects_legacy_and_removed_option_keys() {
+        for (legacy_key, value) in [
+            ("stiffness", Object::from(0.5_f64)),
+            ("neovide_parity_mode", Object::from(true)),
+            ("aa_band_min", Object::from(0.5_f64)),
+            ("aa_band_max", Object::from(0.5_f64)),
+            ("edge_gate_low", Object::from(0.5_f64)),
+            ("edge_gate_high", Object::from(0.5_f64)),
+            ("temporal_hysteresis_enter", Object::from(0.5_f64)),
+            ("temporal_hysteresis_exit", Object::from(0.5_f64)),
+        ] {
+            let opts = options_dict([(legacy_key, value)]);
+            let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
+            assert!(
+                err.to_string().contains(legacy_key),
+                "unexpected error: {err}"
+            );
+            let expects_removed_message = matches!(
+                legacy_key,
+                "aa_band_min"
+                    | "aa_band_max"
+                    | "edge_gate_low"
+                    | "edge_gate_high"
+                    | "temporal_hysteresis_enter"
+                    | "temporal_hysteresis_exit"
+            );
+            if expects_removed_message {
+                assert!(err.to_string().contains("removed render heuristic"));
+            } else {
+                assert!(
+                    err.to_string().contains("supported option key"),
+                    "unexpected error: {err}"
+                );
+            }
+        }
+    }
 }
 
 mod buffer_policy_tests {
-    use super::super::policy::BufferEventPolicy;
-
-    #[test]
-    fn buffer_event_policy_is_always_normal() {
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("", true, 1, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("", true, 1_999, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("acwrite", true, 1_999, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("nofile", true, 1, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("prompt", true, 1, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("terminal", true, 1, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("", false, 1, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("", true, 2_000, 0.0),
-            BufferEventPolicy::Normal
-        );
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("", true, 10_000, 0.0),
-            BufferEventPolicy::Normal
-        );
-    }
-
-    #[test]
-    fn buffer_event_policy_ignores_adaptive_delay_inputs() {
-        assert_eq!(
-            BufferEventPolicy::from_buffer_metadata("terminal", true, 1, 70.0),
-            BufferEventPolicy::Normal
-        );
-    }
-
-    #[test]
-    fn policy_enables_key_fallback_and_uses_zero_delay_floors() {
-        let policy = BufferEventPolicy::from_buffer_metadata("terminal", true, 1, 0.0);
-        assert!(policy.use_key_fallback());
-        assert_eq!(policy.settle_delay_floor_ms(), 0);
-        assert_eq!(policy.animation_delay_floor_ms(), 0);
-        assert!(policy.should_use_debounced_external_settle());
-        assert!(policy.should_prepaint_cursor());
-    }
-
-    #[test]
-    fn normal_policy_uses_debounced_external_settle() {
-        let policy = BufferEventPolicy::Normal;
-        assert!(policy.use_key_fallback());
-        assert!(policy.should_use_debounced_external_settle());
-        assert_eq!(policy.settle_delay_floor_ms(), 0);
-    }
-}
-
-mod throttle_tests {
-    use super::super::event_loop::ExternalEventTimerKind;
     use super::super::policy::{
-        remaining_throttle_delay_ms, should_replace_external_timer_with_throttle,
+        BufferEventPolicy, IngressCursorPresentationContext, IngressCursorPresentationPolicy,
     };
+    use crate::types::ScreenCell;
 
     #[test]
-    fn remaining_throttle_delay_clamps_at_zero_after_interval() {
-        assert_eq!(remaining_throttle_delay_ms(12, 4.0), 8);
-        assert_eq!(remaining_throttle_delay_ms(12, 12.0), 0);
-        assert_eq!(remaining_throttle_delay_ms(12, f64::INFINITY), 0);
-        assert_eq!(remaining_throttle_delay_ms(24, 10.0), 14);
+    fn normal_policy_enables_key_fallback_and_explicit_ingress_prepaint() {
+        let policy = BufferEventPolicy::from_buffer_metadata("terminal", true, 1, 0.0);
+        let cell = ScreenCell::new(3, 7).expect("valid test cell");
+        assert!(policy.use_key_fallback());
+        assert_eq!(
+            policy.ingress_cursor_presentation_policy(IngressCursorPresentationContext::new(
+                true,
+                false,
+                true,
+                false,
+                true,
+                Some(cell),
+                90,
+            )),
+            IngressCursorPresentationPolicy::HideCursorAndPrepaint { cell, zindex: 90 }
+        );
     }
 
     #[test]
-    fn throttle_timer_replaces_settle_timer_kind_only() {
-        assert!(should_replace_external_timer_with_throttle(Some(
-            ExternalEventTimerKind::Settle
-        )));
-        assert!(!should_replace_external_timer_with_throttle(Some(
-            ExternalEventTimerKind::Throttle
-        )));
-        assert!(!should_replace_external_timer_with_throttle(None));
-    }
-}
-
-mod external_settle_tests {
-    use super::super::timers::{ExternalSettleAction, decide_external_settle_action};
-    use super::cursor_snapshot;
-
-    #[test]
-    fn external_settle_clears_pending_in_cmd_mode_when_disabled() {
-        let expected = cursor_snapshot("c", 3.0, 7.0);
-        let current = cursor_snapshot("c", 3.0, 7.0);
-        let action = decide_external_settle_action("c", false, Some(&expected), Some(&current));
-        assert_eq!(action, ExternalSettleAction::ClearPending);
+    fn normal_policy_hides_without_prepaint_when_target_cell_cannot_round() {
+        let policy = BufferEventPolicy::Normal;
+        assert_eq!(
+            policy.ingress_cursor_presentation_policy(IngressCursorPresentationContext::new(
+                true, false, true, false, true, None, 90,
+            )),
+            IngressCursorPresentationPolicy::HideCursor
+        );
     }
 
     #[test]
-    fn external_settle_noops_without_pending_snapshot() {
-        let action = decide_external_settle_action("n", true, None, None);
-        assert_eq!(action, ExternalSettleAction::NoAction);
-    }
-
-    #[test]
-    fn external_settle_dispatches_when_snapshots_match() {
-        let expected = cursor_snapshot("n", 10.0, 2.0);
-        let current = cursor_snapshot("n", 10.0, 2.0);
-        let action = decide_external_settle_action("n", true, Some(&expected), Some(&current));
-        assert_eq!(action, ExternalSettleAction::DispatchExternal);
-    }
-
-    #[test]
-    fn external_settle_reschedules_when_snapshots_diverge() {
-        let expected = cursor_snapshot("n", 10.0, 2.0);
-        let current = cursor_snapshot("n", 11.0, 2.0);
-        let action = decide_external_settle_action("n", true, Some(&expected), Some(&current));
-        assert_eq!(action, ExternalSettleAction::Reschedule(current.clone()));
-    }
-
-    #[test]
-    fn external_settle_clears_pending_when_current_snapshot_missing() {
-        let expected = cursor_snapshot("n", 10.0, 2.0);
-        let action = decide_external_settle_action("n", true, Some(&expected), None);
-        assert_eq!(action, ExternalSettleAction::ClearPending);
+    fn normal_policy_skips_ingress_cursor_presentation_when_runtime_is_ineligible() {
+        let policy = BufferEventPolicy::Normal;
+        let cell = ScreenCell::new(3, 7).expect("valid test cell");
+        for context in [
+            IngressCursorPresentationContext::new(true, true, true, false, true, Some(cell), 90),
+            IngressCursorPresentationContext::new(false, false, true, false, true, Some(cell), 90),
+            IngressCursorPresentationContext::new(true, false, false, false, true, Some(cell), 90),
+            IngressCursorPresentationContext::new(true, false, true, true, true, Some(cell), 90),
+            IngressCursorPresentationContext::new(true, false, true, false, false, Some(cell), 90),
+        ] {
+            assert_eq!(
+                policy.ingress_cursor_presentation_policy(context),
+                IngressCursorPresentationPolicy::NoAction
+            );
+        }
     }
 }
 
 mod handler_decision_tests {
     use super::super::handlers::{
-        ExternalTriggerAction, KeyEventAction, decide_external_trigger_action,
-        decide_key_event_action, should_bump_render_generation,
+        select_core_event_source, should_request_observation_for_autocmd,
     };
-    use super::super::policy::BufferEventPolicy;
-    use super::cursor_snapshot;
-    use crate::reducer::EventSource;
+    use super::super::ingress::AutocmdIngress;
+    use crate::core::runtime_reducer::EventSource;
+    use crate::state::{CursorLocation, CursorShape, RuntimeState};
+    use crate::types::Point;
 
     #[test]
-    fn external_trigger_clears_pending_in_cmdline_when_smear_to_cmd_disabled() {
-        let action = decide_external_trigger_action(
-            BufferEventPolicy::Normal,
-            "c",
-            false,
-            25,
-            Some(cursor_snapshot("c", 2.0, 3.0)),
-            0.0,
+    fn core_observation_request_autocmd_filter_includes_cmdline_changed() {
+        assert!(should_request_observation_for_autocmd(
+            AutocmdIngress::CursorMoved
+        ));
+        assert!(should_request_observation_for_autocmd(
+            AutocmdIngress::CursorMovedInsert
+        ));
+        assert!(should_request_observation_for_autocmd(
+            AutocmdIngress::WinEnter
+        ));
+        assert!(should_request_observation_for_autocmd(
+            AutocmdIngress::WinScrolled
+        ));
+        assert!(should_request_observation_for_autocmd(
+            AutocmdIngress::CmdlineChanged
+        ));
+        assert!(!should_request_observation_for_autocmd(
+            AutocmdIngress::ModeChanged
+        ));
+        assert!(!should_request_observation_for_autocmd(
+            AutocmdIngress::BufEnter
+        ));
+        assert!(!should_request_observation_for_autocmd(
+            AutocmdIngress::Unknown
+        ));
+    }
+
+    fn initialized_state() -> RuntimeState {
+        let mut state = RuntimeState::default();
+        state.initialize_cursor(
+            Point {
+                row: 10.0,
+                col: 20.0,
+            },
+            CursorShape::new(false, false),
+            7,
+            CursorLocation::new(1, 1, 1, 10),
         );
-        assert_eq!(
-            action,
-            ExternalTriggerAction::ClearPending { clear_timer: true }
-        );
+        state
+    }
+
+    fn animating_state() -> RuntimeState {
+        let mut state = initialized_state();
+        state.start_animation();
+        state
     }
 
     #[test]
-    fn external_trigger_schedules_settle_when_snapshot_exists() {
-        let snapshot = cursor_snapshot("n", 5.0, 8.0);
-        let action = decide_external_trigger_action(
-            BufferEventPolicy::Normal,
+    fn select_core_event_source_uses_external_when_uninitialized() {
+        let state = RuntimeState::default();
+        let source = select_core_event_source(
             "n",
-            true,
-            40,
-            Some(snapshot.clone()),
-            0.0,
+            &state,
+            Some(Point {
+                row: 10.0,
+                col: 20.0,
+            }),
+            CursorLocation::new(1, 1, 1, 10),
         );
-        assert_eq!(
-            action,
-            ExternalTriggerAction::ScheduleSettle {
-                delay_ms: 40,
-                snapshot,
-            }
+        assert_eq!(source, EventSource::External);
+    }
+
+    #[test]
+    fn select_core_event_source_uses_external_when_target_changes_while_idle() {
+        let state = initialized_state();
+        let source = select_core_event_source(
+            "n",
+            &state,
+            Some(Point {
+                row: 18.0,
+                col: 28.0,
+            }),
+            CursorLocation::new(1, 1, 1, 10),
         );
+        assert_eq!(source, EventSource::External);
     }
 
     #[test]
-    fn external_trigger_clears_pending_without_snapshot() {
-        let action =
-            decide_external_trigger_action(BufferEventPolicy::Normal, "n", true, 33, None, 0.0);
-        assert_eq!(
-            action,
-            ExternalTriggerAction::ClearPending { clear_timer: false }
+    fn select_core_event_source_uses_animation_tick_for_inflight_target_change() {
+        let state = animating_state();
+        let source = select_core_event_source(
+            "n",
+            &state,
+            Some(Point {
+                row: 14.0,
+                col: 26.0,
+            }),
+            CursorLocation::new(1, 1, 1, 12),
         );
+        assert_eq!(source, EventSource::AnimationTick);
     }
 
     #[test]
-    fn key_event_noops_when_autocmd_is_recent() {
-        let action = decide_key_event_action(BufferEventPolicy::Normal, 17, 30.0, 5.0);
-        assert_eq!(action, KeyEventAction::NoAction);
+    fn select_core_event_source_uses_external_for_inflight_target_change_after_window_switch() {
+        let state = animating_state();
+        let source = select_core_event_source(
+            "n",
+            &state,
+            Some(Point {
+                row: 14.0,
+                col: 26.0,
+            }),
+            CursorLocation::new(2, 1, 1, 12),
+        );
+        assert_eq!(source, EventSource::External);
     }
 
     #[test]
-    fn key_event_schedules_key_timer_when_autocmd_is_stale() {
-        let action = decide_key_event_action(BufferEventPolicy::Normal, 17, 15.0, 60.0);
-        assert_eq!(action, KeyEventAction::ScheduleKeyTimer { delay_ms: 17 });
+    fn select_core_event_source_uses_external_when_location_changes_without_target_delta() {
+        let state = initialized_state();
+        let source = select_core_event_source(
+            "n",
+            &state,
+            Some(Point {
+                row: 10.0,
+                col: 20.0,
+            }),
+            CursorLocation::new(1, 1, 5, 15),
+        );
+        assert_eq!(source, EventSource::External);
     }
 
     #[test]
-    fn render_generation_bumps_for_external_event_when_idle() {
-        assert!(should_bump_render_generation(EventSource::External, false));
-    }
-
-    #[test]
-    fn render_generation_does_not_bump_for_external_event_while_animating() {
-        assert!(!should_bump_render_generation(EventSource::External, true));
-    }
-
-    #[test]
-    fn render_generation_never_bumps_for_animation_tick() {
-        assert!(!should_bump_render_generation(
-            EventSource::AnimationTick,
-            false
-        ));
-        assert!(!should_bump_render_generation(
-            EventSource::AnimationTick,
-            true
-        ));
+    fn select_core_event_source_uses_animation_tick_when_state_and_target_are_stable() {
+        let state = initialized_state();
+        let source = select_core_event_source(
+            "n",
+            &state,
+            Some(Point {
+                row: 10.0,
+                col: 20.0,
+            }),
+            CursorLocation::new(1, 1, 1, 10),
+        );
+        assert_eq!(source, EventSource::AnimationTick);
     }
 }

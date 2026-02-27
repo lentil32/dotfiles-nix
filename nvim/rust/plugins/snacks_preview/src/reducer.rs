@@ -1,12 +1,16 @@
 use nvim_oxi_utils::indexed_registry::{EvictionReason, IndexedRegistry, IndexedValue};
 use nvim_oxi_utils::state_machine::{Machine, Transition};
+use support::positive_i64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufKey(i64);
 
 impl BufKey {
     pub const fn try_new(raw: i64) -> Option<Self> {
-        if raw > 0 { Some(Self(raw)) } else { None }
+        match positive_i64(raw) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 }
 
@@ -15,7 +19,10 @@ pub struct PreviewToken(i64);
 
 impl PreviewToken {
     pub const fn try_new(raw: i64) -> Option<Self> {
-        if raw > 0 { Some(Self(raw)) } else { None }
+        match positive_i64(raw) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 
     pub const fn raw(self) -> i64 {
@@ -28,7 +35,10 @@ pub struct WinKey(i64);
 
 impl WinKey {
     pub const fn try_new(raw: i64) -> Option<Self> {
-        if raw > 0 { Some(Self(raw)) } else { None }
+        match positive_i64(raw) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 }
 
@@ -109,6 +119,16 @@ pub struct PreviewRegistry {
 }
 
 impl PreviewRegistry {
+    fn transition_from_closed(removed: Option<DocPreviewState>) -> PreviewTransition {
+        removed
+            .map(|old| Self::close_effects(&old))
+            .map_or_else(PreviewTransition::default, PreviewTransition::with_effects)
+    }
+
+    fn close_cleanup_only(cleanup_id: i64) -> PreviewTransition {
+        PreviewTransition::with_effects(vec![PreviewEffect::CloseCleanup(cleanup_id)])
+    }
+
     pub fn next_token(&mut self) -> PreviewToken {
         loop {
             self.next_token = if self.next_token == i64::MAX {
@@ -157,6 +177,10 @@ impl PreviewRegistry {
         self.previews.take_by_key(key)
     }
 
+    fn remove_preview_by_token(&mut self, token: PreviewToken) -> Option<DocPreviewState> {
+        self.previews.take_by_index_two(token).map(|(_, old)| old)
+    }
+
     fn close_effects(state: &DocPreviewState) -> Vec<PreviewEffect> {
         let mut effects = Vec::new();
         if let Some(plan) = RestoreNamePlan::from_state(state) {
@@ -186,15 +210,12 @@ impl PreviewRegistry {
 
     pub fn reduce(&mut self, event: PreviewEvent) -> PreviewTransition {
         match event {
-            PreviewEvent::Close { key } => self
-                .remove_preview_by_key(key)
-                .map(|old| Self::close_effects(&old))
-                .map_or_else(PreviewTransition::default, PreviewTransition::with_effects),
-            PreviewEvent::CloseByToken { token } => self
-                .previews
-                .take_by_index_two(token)
-                .map(|(_, old)| Self::close_effects(&old))
-                .map_or_else(PreviewTransition::default, PreviewTransition::with_effects),
+            PreviewEvent::Close { key } => {
+                Self::transition_from_closed(self.remove_preview_by_key(key))
+            }
+            PreviewEvent::CloseByToken { token } => {
+                Self::transition_from_closed(self.remove_preview_by_token(token))
+            }
             PreviewEvent::Register {
                 key,
                 win,
@@ -252,14 +273,10 @@ impl PreviewRegistry {
                 cleanup_id,
             } => {
                 let Some(entry) = self.get_preview_mut(key) else {
-                    return PreviewTransition::with_effects(vec![PreviewEffect::CloseCleanup(
-                        cleanup_id,
-                    )]);
+                    return Self::close_cleanup_only(cleanup_id);
                 };
                 if entry.token != token {
-                    return PreviewTransition::with_effects(vec![PreviewEffect::CloseCleanup(
-                        cleanup_id,
-                    )]);
+                    return Self::close_cleanup_only(cleanup_id);
                 }
                 let replaced = entry.cleanup.replace(cleanup_id);
                 let effects =

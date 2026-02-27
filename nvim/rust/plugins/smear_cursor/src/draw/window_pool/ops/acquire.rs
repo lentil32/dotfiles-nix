@@ -39,30 +39,37 @@ fn adjust_tracking_after_remove(tab_windows: &mut TabWindows, removed_index: usi
 fn remove_cached_window_at(tab_windows: &mut TabWindows, namespace_id: u32, remove_index: usize) {
     let cached = tab_windows.windows.remove(remove_index);
     adjust_tracking_after_remove(tab_windows, remove_index);
+    tab_windows.track_window_remove(cached.lifecycle);
     tab_windows.clear_payload(cached.handles.window_id);
     close_cached_window(namespace_id, cached.handles);
 }
 
 fn mark_cached_window_invalid(tab_windows: &mut TabWindows, index: usize) -> bool {
-    let Some(window_id) = tab_windows
+    let Some((window_id, previous_lifecycle, previous_placement)) = tab_windows
         .windows
         .get(index)
-        .map(|cached| cached.handles.window_id)
+        .map(|cached| (cached.handles.window_id, cached.lifecycle, cached.placement))
     else {
         return false;
     };
-    if tab_windows
-        .windows
-        .get(index)
-        .is_some_and(|cached| matches!(cached.lifecycle, CachedWindowLifecycle::Invalid))
-    {
+    if matches!(previous_lifecycle, CachedWindowLifecycle::Invalid) {
         return false;
     }
     tab_windows.clear_payload(window_id);
-    let Some(cached) = tab_windows.windows.get_mut(index) else {
+    let Some((next_lifecycle, next_placement)) = tab_windows.windows.get_mut(index).map(|cached| {
+        cached.mark_invalid();
+        (cached.lifecycle, cached.placement)
+    }) else {
         return false;
     };
-    cached.mark_invalid();
+    tab_windows.track_available_window_transition(
+        index,
+        previous_lifecycle,
+        previous_placement,
+        next_lifecycle,
+        next_placement,
+    );
+    tab_windows.track_window_transition(previous_lifecycle, next_lifecycle);
     true
 }
 
@@ -88,56 +95,82 @@ fn rollover_in_use_windows(tab_windows: &mut TabWindows, previous_epoch: FrameEp
     let in_use_indices = std::mem::take(&mut tab_windows.in_use_indices);
     let mut visible_available_indices = Vec::with_capacity(in_use_indices.len());
     for index in in_use_indices {
-        if let Some(cached) = tab_windows.windows.get_mut(index) {
+        let Some((
+            previous_lifecycle,
+            previous_placement,
+            rollover,
+            next_lifecycle,
+            next_placement,
+        )) = tab_windows.windows.get_mut(index).map(|cached| {
+            let previous_lifecycle = cached.lifecycle;
+            let previous_placement = cached.placement;
             let rollover = cached.rollover_to_next_epoch(previous_epoch);
-            if matches!(
+            (
+                previous_lifecycle,
+                previous_placement,
                 rollover,
-                EpochRollover::ReleasedForReuse | EpochRollover::RecoveredStaleInUse
-            ) {
-                visible_available_indices.push(index);
-            }
+                cached.lifecycle,
+                cached.placement,
+            )
+        })
+        else {
+            continue;
+        };
+        tab_windows.track_available_window_transition(
+            index,
+            previous_lifecycle,
+            previous_placement,
+            next_lifecycle,
+            next_placement,
+        );
+        tab_windows.track_window_transition(previous_lifecycle, next_lifecycle);
+        if matches!(
+            rollover,
+            EpochRollover::ReleasedForReuse | EpochRollover::RecoveredStaleInUse
+        ) {
+            visible_available_indices.push(index);
         }
     }
     tab_windows.visible_available_indices = visible_available_indices;
 }
 
 fn rebuild_available_window_placement_index(tab_windows: &mut TabWindows) {
-    tab_windows.available_windows_by_placement.clear();
-    for (index, cached) in tab_windows.windows.iter().enumerate() {
-        if !cached.is_available_for_reuse() {
-            continue;
-        }
-        let Some(placement) = cached.placement else {
-            continue;
-        };
-        tab_windows
-            .available_windows_by_placement
-            .entry(placement)
-            .or_default()
-            .push(index);
-    }
+    tab_windows.sync_lifecycle_counters();
+    // The placement index is keyed by `windows` vector indices, so removal/compaction changes its
+    // address space. Keep rebuilds on those structural paths only.
+    tab_windows.sync_available_window_placement_index();
 }
 
 fn available_window_index_for_placement(
     tab_windows: &mut TabWindows,
     placement: WindowPlacement,
 ) -> Option<usize> {
-    let candidates = tab_windows
-        .available_windows_by_placement
-        .get_mut(&placement)?;
-    while let Some(index) = candidates.pop() {
-        if tab_windows
-            .windows
-            .get(index)
-            .copied()
-            .is_some_and(|cached| {
-                cached.is_available_for_reuse() && cached.placement == Some(placement)
-            })
-        {
-            return Some(index);
+    let mut selected = None;
+    let remove_key = {
+        let candidates = tab_windows
+            .available_windows_by_placement
+            .get_mut(&placement)?;
+        while let Some(index) = candidates.pop() {
+            if tab_windows
+                .windows
+                .get(index)
+                .copied()
+                .is_some_and(|cached| {
+                    cached.is_available_for_reuse() && cached.placement == Some(placement)
+                })
+            {
+                selected = Some(index);
+                break;
+            }
         }
+        candidates.is_empty()
+    };
+    if remove_key {
+        tab_windows
+            .available_windows_by_placement
+            .remove(&placement);
     }
-    None
+    selected
 }
 
 enum ReuseAttempt {
@@ -185,9 +218,20 @@ fn try_reuse_cached_window_at_index(
     // Hot path: skip nvim_buf_is_valid and rely on set_extmark failure recovery.
     let buffer = buffer_from_handle_i32_unchecked(cached.handles.buffer_id);
 
+    let previous_lifecycle = tab_windows.windows[index].lifecycle;
+    let previous_placement = tab_windows.windows[index].placement;
     if !tab_windows.windows[index].mark_in_use(tab_windows.current_epoch) {
         return ReuseAttempt::NotCandidate;
     }
+    let next_lifecycle = tab_windows.windows[index].lifecycle;
+    tab_windows.track_available_window_transition(
+        index,
+        previous_lifecycle,
+        previous_placement,
+        next_lifecycle,
+        previous_placement,
+    );
+    tab_windows.track_window_transition(previous_lifecycle, next_lifecycle);
 
     tab_windows.windows[index].set_placement(placement);
     tab_windows.frame_demand = tab_windows.frame_demand.saturating_add(1);
@@ -200,21 +244,54 @@ fn try_reuse_cached_window_at_index(
     })
 }
 
+const REUSE_ONLY_WARM_SPARE_WINDOWS: usize = 1;
+
+pub(crate) fn frame_capacity_target(
+    in_use_windows: usize,
+    planned_windows: usize,
+    max_kept_windows: usize,
+    allocation_policy: AllocationPolicy,
+) -> usize {
+    let required_capacity = in_use_windows.saturating_add(planned_windows);
+    if required_capacity == 0 {
+        return 0;
+    }
+
+    let warm_spare = match allocation_policy {
+        AllocationPolicy::ReuseOnly => REUSE_ONLY_WARM_SPARE_WINDOWS,
+        AllocationPolicy::BootstrapIfPoolEmpty => 0,
+    };
+
+    required_capacity
+        .saturating_add(warm_spare)
+        .min(max_kept_windows)
+}
+
+#[cfg(test)]
 pub(crate) fn acquire(
     tabs: &mut HashMap<i32, TabWindows>,
     namespace_id: u32,
     tab_handle: i32,
     placement: WindowPlacement,
-    _allocation_policy: AllocationPolicy,
-) -> Result<Option<AcquiredWindow>> {
+    allocation_policy: AllocationPolicy,
+) -> std::result::Result<AcquiredWindow, AcquireError> {
     let tab_windows = tabs.entry(tab_handle).or_default();
+    acquire_in_tab(tab_windows, namespace_id, placement, allocation_policy)
+}
+
+pub(crate) fn acquire_in_tab(
+    tab_windows: &mut TabWindows,
+    namespace_id: u32,
+    placement: WindowPlacement,
+    allocation_policy: AllocationPolicy,
+) -> std::result::Result<AcquiredWindow, AcquireError> {
     let mut reuse_failures = ReuseFailureCounters::default();
 
     if let Some(index) = available_window_index_for_placement(tab_windows, placement) {
         match try_reuse_cached_window_at_index(tab_windows, index, placement) {
             ReuseAttempt::Reused(mut acquired) => {
                 acquired.reuse_failures = reuse_failures;
-                return Ok(Some(acquired));
+                return Ok(acquired);
             }
             ReuseAttempt::Failed(reason) => {
                 reuse_failures.record(reason);
@@ -233,7 +310,7 @@ pub(crate) fn acquire(
         match try_reuse_cached_window_at_index(tab_windows, index, placement) {
             ReuseAttempt::Reused(mut acquired) => {
                 acquired.reuse_failures = reuse_failures;
-                return Ok(Some(acquired));
+                return Ok(acquired);
             }
             ReuseAttempt::Failed(reason) => {
                 reuse_failures.record(reason);
@@ -245,22 +322,26 @@ pub(crate) fn acquire(
         }
     }
 
-    Ok(None)
+    Err(AcquireError::Exhausted { allocation_policy })
 }
 
-pub(crate) fn ensure_tab_capacity(
-    tabs: &mut HashMap<i32, TabWindows>,
-    tab_handle: i32,
+pub(crate) fn ensure_capacity_in_tab(
+    tab_windows: &mut TabWindows,
+    namespace_id: u32,
     desired_capacity: usize,
     max_kept_windows: usize,
 ) -> Result<usize> {
-    let tab_windows = tabs.entry(tab_handle).or_default();
+    if remove_invalid_windows(tab_windows, namespace_id) > 0 {
+        rebuild_available_window_placement_index(tab_windows);
+    }
+
     let target_capacity = desired_capacity.min(max_kept_windows);
-    if tab_windows.windows.len() >= target_capacity {
+    let usable_window_count = tab_windows.usable_window_count();
+    if usable_window_count >= target_capacity {
         return Ok(0);
     }
 
-    let create_count = target_capacity.saturating_sub(tab_windows.windows.len());
+    let create_count = target_capacity.saturating_sub(usable_window_count);
     if create_count == 0 {
         return Ok(0);
     }
@@ -279,24 +360,19 @@ pub(crate) fn ensure_tab_capacity(
             window_id: window.handle(),
             buffer_id: buffer.handle(),
         };
-        tab_windows
-            .windows
-            .push(CachedRenderWindow::new_available_hidden(
-                handles,
-                tab_windows.current_epoch,
-            ));
+        let cached = CachedRenderWindow::new_available_hidden(handles, tab_windows.current_epoch);
+        tab_windows.track_window_insert(cached.lifecycle);
+        tab_windows.windows.push(cached);
     }
 
     if target_capacity > tab_windows.cached_budget {
         tab_windows.cached_budget = target_capacity;
     }
-    rebuild_available_window_placement_index(tab_windows);
 
     Ok(create_count)
 }
 
 fn begin_tab_frame(tab_windows: &mut TabWindows, expected_demand: usize) {
-    tab_windows.last_draw_signature = None;
     let demand_signal = tab_windows.frame_demand.max(expected_demand);
     let next_budget = next_adaptive_budget(
         AdaptiveBudgetState {
@@ -325,21 +401,12 @@ fn begin_tab_frame(tab_windows: &mut TabWindows, expected_demand: usize) {
             .all(|cached| cached.is_available_for_reuse()),
         "cached render windows must be available after epoch rollover"
     );
-
-    rebuild_available_window_placement_index(tab_windows);
 }
 
-pub(crate) fn begin_frame_for_tab(
-    tabs: &mut HashMap<i32, TabWindows>,
-    tab_handle: i32,
-    expected_demand: usize,
-) {
-    let tab_windows = tabs.entry(tab_handle).or_default();
+pub(crate) fn begin_apply_frame(tab_windows: &mut TabWindows, expected_demand: usize) {
     begin_tab_frame(tab_windows, expected_demand);
 }
 
-pub(crate) fn begin_frame(tabs: &mut HashMap<i32, TabWindows>) {
-    for tab_windows in tabs.values_mut() {
-        begin_tab_frame(tab_windows, tab_windows.frame_demand);
-    }
+pub(crate) fn begin_cleanup_frame(tab_windows: &mut TabWindows) {
+    begin_tab_frame(tab_windows, tab_windows.frame_demand);
 }

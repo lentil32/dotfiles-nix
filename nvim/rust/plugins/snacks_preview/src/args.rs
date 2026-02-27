@@ -51,24 +51,30 @@ impl From<DecodeError> for ArgsError {
     }
 }
 
+fn parse_positive_i64<T>(
+    value: i64,
+    key: &'static str,
+    parse: impl FnOnce(i64) -> Option<T>,
+    invalid_error: impl FnOnce(String, i64) -> ArgsError,
+) -> ParseResult<T> {
+    parse(value).ok_or_else(|| invalid_error(key.to_string(), value))
+}
+
 fn parse_buf_handle(value: i64, key: &'static str) -> ParseResult<BufHandle> {
-    BufHandle::try_from_i64(value).ok_or_else(|| ArgsError::InvalidHandle {
-        key: key.to_string(),
-        value,
+    parse_positive_i64(value, key, BufHandle::try_from_i64, |key, value| {
+        ArgsError::InvalidHandle { key, value }
     })
 }
 
 fn parse_win_handle(value: i64, key: &'static str) -> ParseResult<WinHandle> {
-    WinHandle::try_from_i64(value).ok_or_else(|| ArgsError::InvalidHandle {
-        key: key.to_string(),
-        value,
+    parse_positive_i64(value, key, WinHandle::try_from_i64, |key, value| {
+        ArgsError::InvalidHandle { key, value }
     })
 }
 
 fn parse_preview_token(value: i64, key: &'static str) -> ParseResult<PreviewToken> {
-    PreviewToken::try_new(value).ok_or_else(|| ArgsError::InvalidToken {
-        key: key.to_string(),
-        value,
+    parse_positive_i64(value, key, PreviewToken::try_new, |key, value| {
+        ArgsError::InvalidToken { key, value }
     })
 }
 

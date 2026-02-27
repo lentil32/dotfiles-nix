@@ -316,6 +316,7 @@ pub mod notify {
 pub mod handles {
     use nvim_oxi::api;
     use nvim_oxi::api::{Buffer, Window};
+    use support::positive_i64;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct BufHandle(i64);
@@ -326,10 +327,8 @@ pub mod handles {
         }
 
         pub fn try_from_i64(handle: i64) -> Option<Self> {
-            if handle <= 0 {
-                return None;
-            }
-            i32::try_from(handle).ok().map(|_| Self(handle))
+            let positive = positive_i64(handle)?;
+            i32::try_from(positive).ok().map(|_| Self(positive))
         }
 
         pub const fn raw(self) -> i64 {
@@ -354,10 +353,8 @@ pub mod handles {
         }
 
         pub fn try_from_i64(handle: i64) -> Option<Self> {
-            if handle <= 0 {
-                return None;
-            }
-            i32::try_from(handle).ok().map(|_| Self(handle))
+            let positive = positive_i64(handle)?;
+            i32::try_from(positive).ok().map(|_| Self(positive))
         }
 
         pub const fn raw(self) -> i64 {

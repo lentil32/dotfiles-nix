@@ -184,8 +184,8 @@ lze.load({
         return
       end
       require("rs_smear_cursor").setup({
+        logging_level = 0,
         smear_terminal_mode = true,
-        filetypes_disabled = {},
       })
     end,
   },

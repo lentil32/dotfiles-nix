@@ -4,6 +4,11 @@ use derive_more::Display;
 
 pub mod cycle;
 
+/// Returns `Some(value)` when `value` is strictly positive, otherwise `None`.
+pub const fn positive_i64(value: i64) -> Option<i64> {
+    if value > 0 { Some(value) } else { None }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyStringError;
 
@@ -90,6 +95,17 @@ impl From<NonEmptyString> for TabTitle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positive_i64_rejects_non_positive_values() {
+        assert_eq!(positive_i64(0), None);
+        assert_eq!(positive_i64(-1), None);
+    }
+
+    #[test]
+    fn positive_i64_accepts_positive_values() {
+        assert_eq!(positive_i64(1), Some(1));
+    }
 
     #[test]
     fn non_empty_string_rejects_empty() {

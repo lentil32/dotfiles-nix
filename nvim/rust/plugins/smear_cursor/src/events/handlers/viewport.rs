@@ -1,9 +1,30 @@
-use super::cursor::{cursor_position_for_mode, mode_string, smear_outside_cmd_row};
-use crate::reducer::ScrollShift;
-use crate::state::{CursorLocation, CursorSnapshot};
-use crate::types::{EPSILON, Point};
+use super::super::cursor::{line_value, smear_outside_cmd_row};
+use crate::core::effect::ObservationRuntimeContext;
+use crate::core::runtime_reducer::ScrollShift;
+use crate::state::CursorLocation;
 use nvim_oxi::api::opts::WinTextHeightOpts;
 use nvim_oxi::{Result, api};
+
+pub(super) fn cursor_location_for_core_render(
+    tracked_location: Option<CursorLocation>,
+) -> CursorLocation {
+    let window = api::get_current_win();
+    let buffer = api::get_current_buf();
+    if window.is_valid() && buffer.is_valid() {
+        let default_top_row = tracked_location.map_or(0_i64, |location| location.top_row);
+        let default_line = tracked_location.map_or(0_i64, |location| location.line);
+        let top_row = line_value("w0").unwrap_or(default_top_row);
+        let line = line_value(".").unwrap_or(default_line);
+        return CursorLocation::new(
+            i64::from(window.handle()),
+            i64::from(buffer.handle()),
+            top_row,
+            line,
+        );
+    }
+
+    tracked_location.unwrap_or(CursorLocation::new(0, 0, 0, 0))
+}
 
 fn line_index_1_to_0(row: i64) -> usize {
     let clamped = row.max(1).saturating_sub(1);
@@ -40,17 +61,15 @@ fn screen_distance(window: &api::Window, row_start: i64, row_end: i64) -> Result
     }
 }
 
-pub(super) fn maybe_scroll_shift(
+pub(super) fn maybe_scroll_shift_for_core_event(
     window: &api::Window,
-    scroll_buffer_space: bool,
-    current_corners: &[Point; 4],
-    previous_location: Option<CursorLocation>,
+    context: ObservationRuntimeContext,
     current_location: CursorLocation,
 ) -> Result<Option<ScrollShift>> {
-    if !scroll_buffer_space {
+    if !context.scroll_buffer_space() {
         return Ok(None);
     }
-    let Some(previous_location) = previous_location else {
+    let Some(previous_location) = context.tracked_location() else {
         return Ok(None);
     };
     if previous_location.window_handle != current_location.window_handle
@@ -58,7 +77,7 @@ pub(super) fn maybe_scroll_shift(
     {
         return Ok(None);
     }
-    if !smear_outside_cmd_row(current_corners)? {
+    if !smear_outside_cmd_row(&context.current_corners())? {
         return Ok(None);
     }
     if previous_location.top_row == current_location.top_row
@@ -78,25 +97,4 @@ pub(super) fn maybe_scroll_shift(
         min_row,
         max_row,
     }))
-}
-
-pub(super) fn current_cursor_snapshot(smear_to_cmd: bool) -> Result<Option<CursorSnapshot>> {
-    let mode = mode_string();
-
-    let window = api::get_current_win();
-    if !window.is_valid() {
-        return Ok(None);
-    }
-
-    let Some((row, col)) = cursor_position_for_mode(&window, &mode, smear_to_cmd)? else {
-        return Ok(None);
-    };
-
-    Ok(Some(CursorSnapshot { mode, row, col }))
-}
-
-pub(super) fn snapshots_match(lhs: &CursorSnapshot, rhs: &CursorSnapshot) -> bool {
-    lhs.mode == rhs.mode
-        && (lhs.row - rhs.row).abs() <= EPSILON
-        && (lhs.col - rhs.col).abs() <= EPSILON
 }

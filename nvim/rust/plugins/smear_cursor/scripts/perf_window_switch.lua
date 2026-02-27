@@ -253,6 +253,8 @@ local function main()
   local max_stress_ratio = getenv_non_negative_number("SMEAR_MAX_STRESS_RATIO", 2.0)
   local max_floating_windows = getenv_positive_integer("SMEAR_MAX_FLOATING_WINDOWS", 256)
   local smear_between_buffers = getenv_bool("SMEAR_BETWEEN_BUFFERS", false)
+  local particles_enabled = getenv_bool("SMEAR_PARTICLES_ENABLED", false)
+  local particles_over_text = getenv_bool("SMEAR_PARTICLES_OVER_TEXT", false)
   local drain_every = getenv_non_negative_integer("SMEAR_DRAIN_EVERY", 16)
   local keys_per_switch = getenv_non_negative_integer("SMEAR_KEYS_PER_SWITCH", 0)
   local delay_event_to_smear = getenv_non_negative_number("SMEAR_DELAY_EVENT_TO_SMEAR", 1)
@@ -260,13 +262,14 @@ local function main()
   local workload_line_count = getenv_positive_integer("SMEAR_LINE_COUNT", 2000)
 
   smear.setup({
-    logging_level = 0,
-    particles_enabled = false,
+    logging_level = 4,
+    particles_enabled = particles_enabled,
+    particles_over_text = particles_over_text,
     smear_between_buffers = smear_between_buffers,
     smear_between_neighbor_lines = true,
     delay_event_to_smear = delay_event_to_smear,
     delay_after_key = delay_after_key,
-    time_interval = 16,
+    fps = 120,
   })
 
   local workload_buffer = create_workload_buffer(workload_line_count)
@@ -277,7 +280,7 @@ local function main()
 
   print(
     string.format(
-      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d settle_wait_ms=%.0f smear_between_buffers=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d keys_per_switch=%d delay_event_to_smear=%.3f delay_after_key=%.3f",
+      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d settle_wait_ms=%.0f smear_between_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d keys_per_switch=%d delay_event_to_smear=%.3f delay_after_key=%.3f",
       #windows,
       workload_line_count,
       warmup_iterations,
@@ -287,6 +290,8 @@ local function main()
       recovery_iterations,
       settle_wait_ms,
       tostring(smear_between_buffers),
+      tostring(particles_enabled),
+      tostring(particles_over_text),
       max_recovery_ratio,
       max_stress_ratio,
       drain_every,

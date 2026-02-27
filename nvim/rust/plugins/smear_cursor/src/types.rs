@@ -1,6 +1,18 @@
-pub(crate) const BASE_TIME_INTERVAL: f64 = 17.0;
+use crate::core::types::StrokeId;
+use std::ops::Deref;
+use std::sync::Arc;
+
+pub(crate) const BASE_TIME_INTERVAL: f64 = 1000.0 / 120.0;
 pub(crate) const EPSILON: f64 = 1.0e-9;
 pub(crate) const DEFAULT_RNG_STATE: u32 = 0xA341_316C;
+
+pub(crate) fn display_metric_row_scale(block_aspect_ratio: f64) -> f64 {
+    if block_aspect_ratio.is_finite() {
+        block_aspect_ratio.abs().max(EPSILON)
+    } else {
+        1.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Point {
@@ -15,6 +27,17 @@ impl Point {
         let dy = self.row - other.row;
         let dx = self.col - other.col;
         dy * dy + dx * dx
+    }
+
+    pub(crate) fn display_distance_squared(self, other: Self, block_aspect_ratio: f64) -> f64 {
+        let dy = (self.row - other.row) * display_metric_row_scale(block_aspect_ratio);
+        let dx = self.col - other.col;
+        dy * dy + dx * dx
+    }
+
+    pub(crate) fn display_distance(self, other: Self, block_aspect_ratio: f64) -> f64 {
+        self.display_distance_squared(other, block_aspect_ratio)
+            .sqrt()
     }
 }
 
@@ -59,71 +82,101 @@ impl ScreenCell {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Particle {
     pub(crate) position: Point,
     pub(crate) velocity: Point,
     pub(crate) lifetime: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GradientInfo {
-    pub(crate) origin: Point,
-    pub(crate) direction_scaled: Point,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RenderStepSample {
+    pub(crate) corners: [Point; 4],
+    pub(crate) dt_ms: f64,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct RenderFrame {
-    pub(crate) mode: String,
-    pub(crate) corners: [Point; 4],
-    pub(crate) target: Point,
-    pub(crate) target_corners: [Point; 4],
-    pub(crate) vertical_bar: bool,
-    pub(crate) particles: Vec<Particle>,
+impl RenderStepSample {
+    pub(crate) fn new(corners: [Point; 4], dt_ms: f64) -> Self {
+        let dt_ms = if dt_ms.is_finite() {
+            dt_ms.max(0.0)
+        } else {
+            0.0
+        };
+        Self { corners, dt_ms }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StaticRenderConfig {
     pub(crate) cursor_color: Option<String>,
     pub(crate) cursor_color_insert_mode: Option<String>,
     pub(crate) normal_bg: Option<String>,
     pub(crate) transparent_bg_fallback_color: String,
     pub(crate) cterm_cursor_colors: Option<Vec<u16>>,
     pub(crate) cterm_bg: Option<u16>,
-    pub(crate) color_at_cursor: Option<String>,
     pub(crate) hide_target_hack: bool,
     pub(crate) max_kept_windows: usize,
     pub(crate) never_draw_over_target: bool,
-    pub(crate) use_diagonal_blocks: bool,
-    pub(crate) max_slope_horizontal: f64,
-    pub(crate) min_slope_vertical: f64,
-    pub(crate) max_angle_difference_diagonal: f64,
-    pub(crate) max_offset_diagonal: f64,
-    pub(crate) min_shade_no_diagonal: f64,
-    pub(crate) min_shade_no_diagonal_vertical_bar: f64,
-    pub(crate) max_shade_no_matrix: f64,
     pub(crate) particle_max_lifetime: f64,
+    pub(crate) particle_switch_octant_braille: f64,
     pub(crate) particles_over_text: bool,
     pub(crate) color_levels: u32,
     pub(crate) gamma: f64,
-    pub(crate) gradient_exponent: f64,
-    pub(crate) matrix_pixel_threshold: f64,
-    pub(crate) matrix_pixel_threshold_vertical_bar: f64,
-    pub(crate) matrix_pixel_min_factor: f64,
+    pub(crate) block_aspect_ratio: f64,
+    pub(crate) tail_duration_ms: f64,
+    pub(crate) simulation_hz: f64,
+    pub(crate) trail_thickness: f64,
+    pub(crate) trail_thickness_x: f64,
+    pub(crate) spatial_coherence_weight: f64,
+    pub(crate) temporal_stability_weight: f64,
+    pub(crate) top_k_per_cell: u8,
     pub(crate) windows_zindex: u32,
-    pub(crate) gradient: Option<GradientInfo>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RenderFrame {
+    pub(crate) mode: String,
+    pub(crate) corners: [Point; 4],
+    pub(crate) step_samples: Vec<RenderStepSample>,
+    pub(crate) planner_idle_steps: u32,
+    pub(crate) target: Point,
+    pub(crate) target_corners: [Point; 4],
+    pub(crate) vertical_bar: bool,
+    pub(crate) trail_stroke_id: StrokeId,
+    pub(crate) retarget_epoch: u64,
+    pub(crate) particles: Vec<Particle>,
+    pub(crate) color_at_cursor: Option<String>,
+    pub(crate) static_config: Arc<StaticRenderConfig>,
+}
+
+impl Deref for RenderFrame {
+    type Target = StaticRenderConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.static_config
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct StepInput {
     pub(crate) mode: String,
     pub(crate) time_interval: f64,
     pub(crate) config_time_interval: f64,
+    pub(crate) head_response_ms: f64,
+    pub(crate) damping_ratio: f64,
     pub(crate) current_corners: [Point; 4],
+    pub(crate) trail_origin_corners: [Point; 4],
     pub(crate) target_corners: [Point; 4],
-    pub(crate) velocity_corners: [Point; 4],
-    pub(crate) stiffnesses: [f64; 4],
+    pub(crate) spring_velocity_corners: [Point; 4],
+    pub(crate) trail_elapsed_ms: [f64; 4],
     pub(crate) max_length: f64,
     pub(crate) max_length_insert_mode: f64,
-    pub(crate) damping: f64,
-    pub(crate) damping_insert_mode: f64,
-    pub(crate) delay_disable: Option<f64>,
+    pub(crate) trail_duration_ms: f64,
+    pub(crate) trail_short_duration_ms: f64,
+    pub(crate) trail_size: f64,
+    pub(crate) trail_min_distance: f64,
+    pub(crate) trail_thickness: f64,
+    pub(crate) trail_thickness_x: f64,
     pub(crate) particles: Vec<Particle>,
     pub(crate) previous_center: Point,
     pub(crate) particle_damping: f64,
@@ -149,11 +202,12 @@ pub(crate) struct StepInput {
 pub(crate) struct StepOutput {
     pub(crate) current_corners: [Point; 4],
     pub(crate) velocity_corners: [Point; 4],
+    pub(crate) spring_velocity_corners: [Point; 4],
+    pub(crate) trail_elapsed_ms: [f64; 4],
     pub(crate) particles: Vec<Particle>,
     pub(crate) previous_center: Point,
     pub(crate) index_head: usize,
     pub(crate) index_tail: usize,
-    pub(crate) disabled_due_to_delay: bool,
     pub(crate) rng_state: u32,
 }
 

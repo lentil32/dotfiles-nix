@@ -48,9 +48,22 @@ pub(super) fn draw_particles(
         return;
     }
 
-    let lifetime_switch_octant_braille = f64::INFINITY;
+    let particle_max_lifetime = if frame.particle_max_lifetime.is_finite() {
+        frame.particle_max_lifetime.max(0.0)
+    } else {
+        0.0
+    };
+    let switch_ratio = if frame.particle_switch_octant_braille.is_finite() {
+        frame.particle_switch_octant_braille.clamp(0.0, 1.0)
+    } else {
+        // Surprising: invalid switch values are normalized in-band to keep rendering total.
+        0.0
+    };
+    let lifetime_switch_octant_braille = switch_ratio * particle_max_lifetime;
     let requires_background_probe = !frame.particles_over_text;
 
+    // Surprising-but-important invariant: output particles are already unique per screen cell,
+    // so downstream probe logic should avoid re-deduplicating by `(row, col)`.
     let mut cells: BTreeMap<(i64, i64), ParticleCellAggregate> = BTreeMap::new();
     for particle in &frame.particles {
         let row = particle.position.row.floor() as i64;
@@ -76,24 +89,16 @@ pub(super) fn draw_particles(
         };
 
         let shade = if lifetime_average > lifetime_switch_octant_braille {
-            let denominator = frame.particle_max_lifetime - lifetime_switch_octant_braille;
-            if denominator <= 0.0 {
-                1.0
-            } else {
-                ((lifetime_average - lifetime_switch_octant_braille) / denominator).clamp(0.0, 1.0)
-            }
+            let denominator = (particle_max_lifetime - lifetime_switch_octant_braille).max(1.0e-9);
+            ((lifetime_average - lifetime_switch_octant_braille) / denominator).clamp(0.0, 1.0)
         } else {
-            let denominator = frame
-                .particle_max_lifetime
-                .min(lifetime_switch_octant_braille)
-                .max(1.0e-9);
+            let denominator = lifetime_switch_octant_braille.max(1.0e-9);
             (lifetime_average / denominator).clamp(0.0, 1.0)
         };
 
-        let level = level_from_shade(shade, frame.color_levels);
-        if level == 0 {
+        let Some(level) = level_from_shade(shade, frame.color_levels) else {
             continue;
-        }
+        };
 
         if lifetime_average > lifetime_switch_octant_braille {
             draw_octant_character(

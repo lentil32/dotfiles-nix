@@ -10,6 +10,9 @@ return {
     after = function()
       require("neogit").setup({
         kind = "auto",
+        preview_buffer = {
+          kind = "split",
+        },
         integrations = {
           diffview = false,
           fzf_lua = false,

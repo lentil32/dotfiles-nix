@@ -278,8 +278,11 @@ impl ThemeSwitcherMachine {
         &self.catalog
     }
 
-    fn reduce_move_next(&mut self) -> ThemeSwitcherTransition {
-        let Some(next) = self.catalog.next_wrapped(self.cursor) else {
+    fn reduce_move(
+        &mut self,
+        pick_next: impl FnOnce(&ThemeCatalog, ThemeIndex) -> Option<ThemeIndex>,
+    ) -> ThemeSwitcherTransition {
+        let Some(next) = pick_next(&self.catalog, self.cursor) else {
             return ThemeSwitcherTransition::default();
         };
         if next == self.cursor {
@@ -287,17 +290,6 @@ impl ThemeSwitcherMachine {
         }
         self.cursor = next;
         ThemeSwitcherTransition::with_effect(ThemeSwitcherEffect::PreviewTheme(next))
-    }
-
-    fn reduce_move_prev(&mut self) -> ThemeSwitcherTransition {
-        let Some(prev) = self.catalog.prev_wrapped(self.cursor) else {
-            return ThemeSwitcherTransition::default();
-        };
-        if prev == self.cursor {
-            return ThemeSwitcherTransition::default();
-        }
-        self.cursor = prev;
-        ThemeSwitcherTransition::with_effect(ThemeSwitcherEffect::PreviewTheme(prev))
     }
 
     fn reduce_confirm(&mut self) -> ThemeSwitcherTransition {
@@ -331,8 +323,8 @@ impl Machine for ThemeSwitcherMachine {
             return ThemeSwitcherTransition::default();
         }
         match event {
-            ThemeSwitcherEvent::MoveNext => self.reduce_move_next(),
-            ThemeSwitcherEvent::MovePrev => self.reduce_move_prev(),
+            ThemeSwitcherEvent::MoveNext => self.reduce_move(ThemeCatalog::next_wrapped),
+            ThemeSwitcherEvent::MovePrev => self.reduce_move(ThemeCatalog::prev_wrapped),
             ThemeSwitcherEvent::Confirm => self.reduce_confirm(),
             ThemeSwitcherEvent::Cancel => self.reduce_cancel(),
         }

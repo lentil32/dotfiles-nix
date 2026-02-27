@@ -62,12 +62,18 @@ in
       BUNBIN = "${homeDir}/.bun/bin";
       PNPM_HOME = "${homeDir}/Library/pnpm";
       NODE_PATH = "${homeDir}/.bun/install/global/node_modules";
+      MISE_RUSTUP_HOME = "${config.xdg.dataHome}/mise/rustup";
+      MISE_CARGO_HOME = "${config.xdg.dataHome}/mise/cargo";
     }
     // lib.optionalAttrs pkgs.stdenv.targetPlatform.isDarwin {
       PUPPETEER_EXECUTABLE_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
     };
 
     sessionPath = [
+      # Ensure `make nvim` activations are picked up in new shells.
+      "${config.xdg.stateHome}/nix/profiles/home-manager/home-path/bin"
+      # Ensure mise-managed tools are reachable in non-interactive shells.
+      "${config.xdg.dataHome}/mise/shims"
       "$BUNBIN"
       "${config.home.sessionVariables.PNPM_HOME}"
       "${homeDir}/.local/bin"

@@ -31,4 +31,4 @@ Helpful outputs:
 - ~*-tty-logs.txt~: list of terminal transcripts (when enabled)
 
 See also:
-- ~nvim/docs/porting-plugins-to-rust.md~
+- ~nvim/rust/docs/porting-plugins-to-rust.md~

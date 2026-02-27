@@ -1,12 +1,12 @@
 use super::log_draw_error;
 use super::palette::{HighlightGroupNames, highlight_group_names};
-use super::render_plan::{CellOp, Glyph, HighlightRef, RenderPlan, Viewport};
-use super::window_pool::{self, AcquireKind, AllocationPolicy, TabPoolSnapshot, WindowPlacement};
-use super::{
-    BRAILLE_CODE_MAX, BRAILLE_CODE_MIN, DrawState, EXTMARK_ID, OCTANT_CODE_MAX, OCTANT_CODE_MIN,
+use super::render_plan::{HighlightRef, Viewport};
+use super::window_pool::{
+    self, AcquireError, AcquireKind, AcquiredWindow, AllocationPolicy, TabPoolSnapshot,
+    WindowPlacement,
 };
-use crate::lua::i64_from_object;
-use crate::types::RenderFrame;
+use super::{EXTMARK_ID, with_render_tab};
+use crate::core::realization::{RealizationProjection, RealizationSpan, RealizationSpanChunk};
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{OptionOpts, SetExtmarkOpts};
@@ -26,6 +26,8 @@ pub(crate) struct ApplyMetrics {
     pub(crate) reuse_failed_reconfigure: usize,
     pub(crate) reuse_failed_missing_buffer: usize,
     pub(crate) pruned_windows: usize,
+    pub(crate) hidden_windows: usize,
+    pub(crate) invalid_removed_windows: usize,
     pub(crate) recovered_windows: usize,
     pub(crate) pool_snapshot: Option<TabPoolSnapshot>,
 }
@@ -44,210 +46,264 @@ pub(crate) fn current_tab_handle() -> i32 {
     api::get_current_tabpage().handle()
 }
 
-pub(crate) fn redraw() -> Result<()> {
-    Ok(api::command("redraw")?)
-}
+const FLUSH_REDRAW_LUAEVAL_EXPR: &str = r#"(function(_)
+  if vim.api.nvim__redraw then
+    vim.api.nvim__redraw({ cursor = true, valid = true, flush = true })
+    return true
+  end
+  return false
+end)(_A)"#;
 
-pub(crate) fn notify_delay_disabled_warning() -> Result<()> {
-    Ok(api::command(
-        "lua vim.notify(\"Smear cursor disabled in the current buffer due to high delay.\")",
-    )?)
+pub(crate) fn redraw() -> Result<()> {
+    let args = Array::from_iter([
+        Object::from(FLUSH_REDRAW_LUAEVAL_EXPR),
+        Object::from(Array::new()),
+    ]);
+    let flushed_via_api: bool = api::call_function("luaeval", args)?;
+    if flushed_via_api {
+        return Ok(());
+    }
+
+    Ok(api::command("redraw!")?)
 }
 
 pub(crate) fn err_writeln(message: &str) {
     api::err_writeln(message);
 }
 
-pub(crate) fn clear_namespace_in_buffer(buffer: &mut api::Buffer, namespace_id: u32) {
-    if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
-        log_draw_error("clear render namespace", &err);
+pub(crate) fn clear_namespace_in_buffer(buffer: &mut api::Buffer, namespace_id: u32) -> bool {
+    match buffer.clear_namespace(namespace_id, 0..) {
+        Ok(()) => true,
+        Err(err) => {
+            log_draw_error("clear render namespace", &err);
+            false
+        }
     }
 }
 
-pub(crate) fn clear_namespace_all_buffers(namespace_id: u32) {
+pub(crate) fn clear_namespace_all_buffers(namespace_id: u32) -> usize {
+    let mut cleared_buffers = 0_usize;
     for mut buffer in api::list_bufs() {
-        if buffer.is_valid() {
-            clear_namespace_in_buffer(&mut buffer, namespace_id);
+        if buffer.is_valid() && clear_namespace_in_buffer(&mut buffer, namespace_id) {
+            cleared_buffers = cleared_buffers.saturating_add(1);
         }
     }
+    cleared_buffers
 }
 
-fn highlight_group<'a>(group_names: &'a HighlightGroupNames, reference: HighlightRef) -> &'a str {
+fn highlight_group(group_names: &HighlightGroupNames, reference: HighlightRef) -> &str {
     match reference {
-        HighlightRef::Normal(level) => {
-            let level_index = usize::try_from(level)
-                .unwrap_or(0)
-                .min(group_names.normal.len().saturating_sub(1));
-            group_names
-                .normal
-                .get(level_index)
-                .map(String::as_str)
-                .unwrap_or("SmearCursor1")
-        }
-        HighlightRef::Inverted(level) => {
-            let level_index = usize::try_from(level)
-                .unwrap_or(0)
-                .min(group_names.inverted.len().saturating_sub(1));
-            group_names
-                .inverted
-                .get(level_index)
-                .map(String::as_str)
-                .unwrap_or("SmearCursorInverted1")
-        }
+        HighlightRef::Normal(level) => group_names.normal_name(level),
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SpanChunk {
-    glyph: Glyph,
-    highlight: HighlightRef,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SpanOp {
-    row: i64,
-    col: i64,
-    width: u32,
-    zindex: u32,
-    chunk_start: usize,
-    chunk_len: usize,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct SpanArena {
-    spans: Vec<SpanOp>,
-    chunks: Vec<SpanChunk>,
-}
-
-impl SpanArena {
-    fn clear(&mut self) {
-        self.spans.clear();
-        self.chunks.clear();
-    }
-
-    fn flush_pending(&mut self, pending: &mut Option<SpanOp>) {
-        if let Some(span) = pending.take() {
-            self.spans.push(span);
-        }
-    }
-
-    fn push_cell(&mut self, viewport: Viewport, op: &CellOp, pending: &mut Option<SpanOp>) {
-        if op.row < 1 || op.row > viewport.max_row || op.col < 1 || op.col > viewport.max_col {
-            return;
-        }
-
-        let can_append = pending.as_ref().is_some_and(|active| {
-            active.row == op.row
-                && active.zindex == op.zindex
-                && op.col == active.col.saturating_add(i64::from(active.width))
-        });
-        if !can_append {
-            self.flush_pending(pending);
-            *pending = Some(SpanOp {
-                row: op.row,
-                col: op.col,
-                width: 0,
-                zindex: op.zindex,
-                chunk_start: self.chunks.len(),
-                chunk_len: 0,
-            });
-        }
-
-        let Some(span) = pending.as_mut() else {
-            return;
-        };
-        span.width = span.width.saturating_add(1);
-        span.chunk_len = span.chunk_len.saturating_add(1);
-        self.chunks.push(SpanChunk {
-            glyph: op.glyph,
-            highlight: op.highlight,
-        });
-    }
-}
-
-fn span_payload_hash(chunks: &[SpanChunk]) -> u64 {
+fn span_payload_hash(chunks: &[RealizationSpanChunk]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for chunk in chunks {
-        chunk.glyph.hash(&mut hasher);
-        chunk.highlight.hash(&mut hasher);
+        chunk.glyph().hash(&mut hasher);
+        chunk.highlight().hash(&mut hasher);
     }
     hasher.finish()
 }
 
-fn draw_span(
-    draw_state: &mut DrawState,
-    tab_handle: i32,
+#[derive(Debug)]
+pub(crate) struct PreparedSpan<'a> {
+    span: &'a RealizationSpan,
+    payload_hash: u64,
+}
+
+impl PreparedSpan<'_> {
+    fn span(&self) -> &RealizationSpan {
+        self.span
+    }
+
+    fn payload_hash(&self) -> u64 {
+        self.payload_hash
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedApplyPlan<'a> {
+    group_names: HighlightGroupNames,
+    planned_ops: usize,
+    clears_existing_frame: bool,
+    spans: Vec<PreparedSpan<'a>>,
+}
+
+impl PreparedApplyPlan<'_> {
+    fn group_names(&self) -> &HighlightGroupNames {
+        &self.group_names
+    }
+
+    fn planned_ops(&self) -> usize {
+        self.planned_ops
+    }
+
+    fn clears_existing_frame(&self) -> bool {
+        self.clears_existing_frame
+    }
+
+    fn spans(&self) -> &[PreparedSpan<'_>] {
+        self.spans.as_slice()
+    }
+}
+
+pub(crate) fn prepare_apply_plan<'a>(
+    color_levels: u32,
+    projection: &'a RealizationProjection,
+) -> PreparedApplyPlan<'a> {
+    let group_names = highlight_group_names(color_levels.max(1));
+    let spans = projection
+        .spans()
+        .iter()
+        .map(|span| PreparedSpan {
+            span,
+            payload_hash: span_payload_hash(span.chunks()),
+        })
+        .collect::<Vec<_>>();
+
+    PreparedApplyPlan {
+        group_names,
+        planned_ops: spans.len(),
+        clears_existing_frame: projection.clear().is_some(),
+        spans,
+    }
+}
+
+fn acquire_window_for_span(
+    tab_windows: &mut window_pool::TabWindows,
     namespace_id: u32,
+    placement: WindowPlacement,
     allocation_policy: AllocationPolicy,
-    span: SpanOp,
-    span_chunks: &[SpanChunk],
+    metrics: &mut ApplyMetrics,
+) -> Result<Option<AcquiredWindow>> {
+    let acquired =
+        window_pool::acquire_in_tab(tab_windows, namespace_id, placement, allocation_policy);
+
+    match acquired {
+        Ok(acquired) => Ok(Some(acquired)),
+        Err(AcquireError::Exhausted {
+            allocation_policy: AllocationPolicy::ReuseOnly,
+        }) => {
+            // Frame-start prewarm owns reuse-only capacity growth. Keep the span loop allocation
+            // free so missed capacity invariants degrade by dropping spans instead of adding a
+            // second synchronous create/open window spike to the hot path.
+            metrics.skipped_ops_capacity = metrics.skipped_ops_capacity.saturating_add(1);
+            Ok(None)
+        }
+        Err(AcquireError::Exhausted {
+            allocation_policy: AllocationPolicy::BootstrapIfPoolEmpty,
+        }) => Err(nvim_oxi::Error::Api(nvim_oxi::api::Error::Other(
+            "render window acquire exhausted after frame-start bootstrap prewarm".into(),
+        ))),
+    }
+}
+
+fn mark_span_satisfied(metrics: &mut ApplyMetrics) {
+    metrics.applied_ops = metrics.applied_ops.saturating_add(1);
+}
+
+enum SpanApplyDecision {
+    Dropped,
+    AlreadySatisfied,
+    Apply {
+        window_id: i32,
+        buffer: api::Buffer,
+        payload_hash: u64,
+    },
+}
+
+fn draw_span(
+    namespace_id: u32,
+    tab_handle: i32,
+    allocation_policy: AllocationPolicy,
     group_names: &HighlightGroupNames,
     metrics: &mut ApplyMetrics,
+    prepared_span: &PreparedSpan<'_>,
 ) -> Result<()> {
-    if span.width == 0 || span_chunks.is_empty() {
+    let span = prepared_span.span();
+    if span.width() == 0 || span.chunks().is_empty() {
         return Ok(());
     }
 
     let placement = WindowPlacement {
-        row: span.row,
-        col: span.col,
-        width: span.width,
-        zindex: span.zindex,
+        row: span.row(),
+        col: span.col(),
+        width: span.width(),
+        zindex: span.zindex(),
     };
-    let acquired = window_pool::acquire(
-        &mut draw_state.tabs,
-        namespace_id,
-        tab_handle,
-        placement,
-        allocation_policy,
-    )?;
-    let Some(acquired) = acquired else {
-        metrics.skipped_ops_capacity = metrics.skipped_ops_capacity.saturating_add(1);
-        return Ok(());
-    };
-    metrics.reuse_failed_missing_window = metrics
-        .reuse_failed_missing_window
-        .saturating_add(acquired.reuse_failures.missing_window);
-    metrics.reuse_failed_reconfigure = metrics
-        .reuse_failed_reconfigure
-        .saturating_add(acquired.reuse_failures.reconfigure_failed);
-    metrics.reuse_failed_missing_buffer = metrics
-        .reuse_failed_missing_buffer
-        .saturating_add(acquired.reuse_failures.missing_buffer);
-    if matches!(acquired.kind, AcquireKind::Reused) {
-        metrics.reused_windows = metrics.reused_windows.saturating_add(1);
-    }
+    let payload_hash = prepared_span.payload_hash();
+    let decision = with_render_tab(tab_handle, |tab_windows| -> Result<SpanApplyDecision> {
+        let Some(acquired) = acquire_window_for_span(
+            tab_windows,
+            namespace_id,
+            placement,
+            allocation_policy,
+            metrics,
+        )?
+        else {
+            return Ok(SpanApplyDecision::Dropped);
+        };
+        metrics.reuse_failed_missing_window = metrics
+            .reuse_failed_missing_window
+            .saturating_add(acquired.reuse_failures.missing_window);
+        metrics.reuse_failed_reconfigure = metrics
+            .reuse_failed_reconfigure
+            .saturating_add(acquired.reuse_failures.reconfigure_failed);
+        metrics.reuse_failed_missing_buffer = metrics
+            .reuse_failed_missing_buffer
+            .saturating_add(acquired.reuse_failures.missing_buffer);
+        if matches!(acquired.kind, AcquireKind::Reused) {
+            metrics.reused_windows = metrics.reused_windows.saturating_add(1);
+        }
 
-    let window_id = acquired.window_id;
-    let payload_hash = span_payload_hash(span_chunks);
-    let mut buffer = acquired.buffer;
-    let payload_matches = draw_state
-        .tabs
-        .get(&tab_handle)
-        .is_some_and(|tab_windows| tab_windows.cached_payload_matches(window_id, payload_hash));
-    if payload_matches {
-        return Ok(());
-    }
+        if tab_windows.cached_payload_matches(acquired.window_id, payload_hash) {
+            return Ok(SpanApplyDecision::AlreadySatisfied);
+        }
+
+        Ok(SpanApplyDecision::Apply {
+            window_id: acquired.window_id,
+            buffer: acquired.buffer,
+            payload_hash,
+        })
+    })?;
+
+    let (window_id, mut buffer, payload_hash) = match decision {
+        SpanApplyDecision::Apply {
+            window_id,
+            buffer,
+            payload_hash,
+        } => (window_id, buffer, payload_hash),
+        SpanApplyDecision::AlreadySatisfied => {
+            // Comment: cached payload reuse already satisfies the planned span. Counting it as
+            // unapplied pushes the shell into a false degraded-apply recovery loop on hot reuse
+            // frames, which is exactly what the `gg` trace showed.
+            mark_span_satisfied(metrics);
+            return Ok(());
+        }
+        SpanApplyDecision::Dropped => {
+            return Ok(());
+        }
+    };
 
     let extmark_opts = SetExtmarkOpts::builder()
         .id(EXTMARK_ID)
-        .virt_text(span_chunks.iter().map(|chunk| {
+        .virt_text(span.chunks().iter().map(|chunk| {
             (
-                chunk.glyph.as_str(),
-                highlight_group(group_names, chunk.highlight),
+                chunk.glyph().as_str(),
+                highlight_group(group_names, chunk.highlight()),
             )
         }))
         .virt_text_pos(ExtmarkVirtTextPosition::Overlay)
         .virt_text_win_col(0)
         .build();
 
+    // Comment: the window pool reservation already lives in draw state. Apply the extmark outside
+    // the global draw mutex so one long frame does not block unrelated prepaint/cleanup bookkeeping.
     if let Err(err) = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts) {
-        let recovered = window_pool::recover_invalid_window(
-            &mut draw_state.tabs,
-            namespace_id,
-            tab_handle,
-            window_id,
-        );
+        let recovered = with_render_tab(tab_handle, |tab_windows| {
+            window_pool::recover_invalid_window_in_tab(tab_windows, namespace_id, window_id)
+        });
         if recovered {
             metrics.recovered_windows = metrics.recovered_windows.saturating_add(1);
             log_draw_error("recover invalid render window", &err);
@@ -256,117 +312,194 @@ fn draw_span(
         return Err(nvim_oxi::Error::Api(err));
     }
 
-    metrics.applied_ops = metrics.applied_ops.saturating_add(1);
-    if let Some(tab_windows) = draw_state.tabs.get_mut(&tab_handle) {
+    mark_span_satisfied(metrics);
+    with_render_tab(tab_handle, |tab_windows| {
         tab_windows.cache_payload(window_id, payload_hash);
-    }
+    });
     Ok(())
 }
 
-fn screen_char_code(row: i64, col: i64) -> Option<i64> {
-    let args = Array::from_iter([Object::from(row), Object::from(col)]);
-    let value = api::call_function("screenchar", args).ok()?;
-    i64_from_object("screenchar", value).ok()
-}
-
-fn particle_can_draw_at(row: i64, col: i64) -> bool {
-    let Some(bg_char_code) = screen_char_code(row, col) else {
-        return false;
-    };
-
-    let is_space = bg_char_code == 32;
-    let is_braille = (BRAILLE_CODE_MIN..=BRAILLE_CODE_MAX).contains(&bg_char_code);
-    let is_octant = (OCTANT_CODE_MIN..=OCTANT_CODE_MAX).contains(&bg_char_code);
-    is_space || is_braille || is_octant
-}
-
-fn build_span_ops(plan: &RenderPlan, viewport: Viewport, arena: &mut SpanArena) {
-    arena.clear();
-    let mut pending: Option<SpanOp> = None;
-
-    for op in &plan.particle_ops {
-        if op.requires_background_probe && !particle_can_draw_at(op.cell.row, op.cell.col) {
-            continue;
+fn prepare_frame_capacity(
+    namespace_id: u32,
+    tab_handle: i32,
+    max_kept_windows: usize,
+    prepared: &PreparedApplyPlan<'_>,
+    allocation_policy: AllocationPolicy,
+    metrics: &mut ApplyMetrics,
+) -> Result<()> {
+    with_render_tab(tab_handle, |tab_windows| -> Result<()> {
+        if prepared.clears_existing_frame() {
+            window_pool::begin_apply_frame(tab_windows, metrics.planned_ops);
         }
-        arena.push_cell(viewport, &op.cell, &mut pending);
-    }
 
-    for op in &plan.cell_ops {
-        arena.push_cell(viewport, op, &mut pending);
-    }
+        let in_use_windows = window_pool::tab_in_use_window_count_from_tab(tab_windows);
+        let required_capacity = window_pool::frame_capacity_target(
+            in_use_windows,
+            metrics.planned_ops,
+            max_kept_windows,
+            allocation_policy,
+        );
+        metrics.created_windows =
+            metrics
+                .created_windows
+                .saturating_add(window_pool::ensure_capacity_in_tab(
+                    tab_windows,
+                    namespace_id,
+                    required_capacity,
+                    max_kept_windows,
+                )?);
+        Ok(())
+    })
+}
 
-    if let Some(target_hack) = plan.target_hack {
-        let target_cell = CellOp {
-            row: target_hack.row,
-            col: target_hack.col,
-            zindex: target_hack.zindex,
-            glyph: Glyph::BLOCK,
-            highlight: HighlightRef::Normal(target_hack.level),
-        };
-        arena.push_cell(viewport, &target_cell, &mut pending);
-    }
-    arena.flush_pending(&mut pending);
+fn record_release_and_snapshot(namespace_id: u32, tab_handle: i32, metrics: &mut ApplyMetrics) {
+    let (release_summary, pool_snapshot) = with_render_tab(tab_handle, |tab_windows| {
+        (
+            window_pool::release_unused_in_tab(tab_windows, namespace_id),
+            Some(window_pool::tab_pool_snapshot_from_tab(tab_windows)),
+        )
+    });
+    record_release_summary(metrics, release_summary);
+    metrics.pool_snapshot = pool_snapshot;
 }
 
 pub(crate) fn apply_plan(
-    draw_state: &mut DrawState,
     namespace_id: u32,
     tab_handle: i32,
-    frame: &RenderFrame,
-    viewport: Viewport,
-    plan: &RenderPlan,
-    _allocation_policy: AllocationPolicy,
+    max_kept_windows: usize,
+    prepared: &PreparedApplyPlan<'_>,
+    allocation_policy: AllocationPolicy,
 ) -> Result<ApplyMetrics> {
-    let color_levels = frame.color_levels.max(1);
-    let group_names = highlight_group_names(color_levels);
-    let mut span_arena = std::mem::take(&mut draw_state.span_arena);
-    build_span_ops(plan, viewport, &mut span_arena);
-
     let mut metrics = ApplyMetrics {
-        planned_ops: span_arena.spans.len(),
+        planned_ops: prepared.planned_ops(),
         ..ApplyMetrics::default()
     };
-    if plan.clear.is_some() {
-        window_pool::begin_frame_for_tab(&mut draw_state.tabs, tab_handle, metrics.planned_ops);
-    }
-
-    let in_use_windows = window_pool::tab_pool_snapshot(&draw_state.tabs, tab_handle)
-        .map_or(0, |snapshot| snapshot.in_use_windows);
-    let required_capacity = in_use_windows
-        .saturating_add(metrics.planned_ops)
-        .min(frame.max_kept_windows);
-    metrics.created_windows =
-        metrics
-            .created_windows
-            .saturating_add(window_pool::ensure_tab_capacity(
-                &mut draw_state.tabs,
-                tab_handle,
-                required_capacity,
-                frame.max_kept_windows,
-            )?);
+    prepare_frame_capacity(
+        namespace_id,
+        tab_handle,
+        max_kept_windows,
+        prepared,
+        allocation_policy,
+        &mut metrics,
+    )?;
 
     let apply_result = (|| -> Result<()> {
-        for span in span_arena.spans.iter().copied() {
-            let chunk_end = span.chunk_start.saturating_add(span.chunk_len);
-            let Some(span_chunks) = span_arena.chunks.get(span.chunk_start..chunk_end) else {
-                continue;
-            };
+        for span in prepared.spans() {
             draw_span(
-                draw_state,
-                tab_handle,
                 namespace_id,
-                AllocationPolicy::ReuseOnly,
-                span,
-                span_chunks,
-                &group_names,
+                tab_handle,
+                allocation_policy,
+                prepared.group_names(),
                 &mut metrics,
+                span,
             )?;
         }
         Ok(())
     })();
 
-    draw_state.span_arena = span_arena;
-    let _ = window_pool::release_unused_tab(&mut draw_state.tabs, namespace_id, tab_handle);
-    metrics.pool_snapshot = window_pool::tab_pool_snapshot(&draw_state.tabs, tab_handle);
+    // Surprising: a drain frame can realize to zero spans while still hiding visible cached
+    // windows. Propagate that release summary so the shell can request a redraw for the final
+    // disappearance instead of waiting for later input.
+    record_release_and_snapshot(namespace_id, tab_handle, &mut metrics);
     apply_result.map(|()| metrics)
+}
+
+fn record_release_summary(
+    metrics: &mut ApplyMetrics,
+    release_summary: window_pool::ReleaseUnusedSummary,
+) {
+    metrics.hidden_windows = metrics
+        .hidden_windows
+        .saturating_add(release_summary.hidden_windows);
+    metrics.invalid_removed_windows = metrics
+        .invalid_removed_windows
+        .saturating_add(release_summary.invalid_removed_windows);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ApplyMetrics, FLUSH_REDRAW_LUAEVAL_EXPR, mark_span_satisfied, prepare_apply_plan,
+        record_release_summary, span_payload_hash,
+    };
+    use crate::core::realization::{LogicalRaster, realize_logical_raster};
+    use crate::draw::render_plan::{CellOp, ClearOp, Glyph, HighlightLevel, HighlightRef};
+    use crate::draw::window_pool::ReleaseUnusedSummary;
+    use std::sync::Arc;
+
+    #[test]
+    fn record_release_summary_tracks_hidden_and_invalid_removed_windows() {
+        let mut metrics = ApplyMetrics::default();
+        record_release_summary(
+            &mut metrics,
+            ReleaseUnusedSummary {
+                hidden_windows: 2,
+                invalid_removed_windows: 1,
+            },
+        );
+
+        assert_eq!(metrics.hidden_windows, 2);
+        assert_eq!(metrics.invalid_removed_windows, 1);
+    }
+
+    #[test]
+    fn mark_span_satisfied_counts_payload_reuse_as_applied() {
+        let mut metrics = ApplyMetrics::default();
+
+        mark_span_satisfied(&mut metrics);
+        mark_span_satisfied(&mut metrics);
+
+        assert_eq!(metrics.applied_ops, 2);
+    }
+
+    #[test]
+    fn flush_redraw_expression_requests_cursor_validity_and_flush() {
+        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("nvim__redraw"));
+        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("cursor = true"));
+        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("valid = true"));
+        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("flush = true"));
+    }
+
+    #[test]
+    fn prepare_apply_plan_materializes_read_only_span_inputs() {
+        let projection = realize_logical_raster(&LogicalRaster::new(
+            Some(ClearOp {
+                max_kept_windows: 3,
+            }),
+            Arc::from(vec![
+                CellOp {
+                    row: 4,
+                    col: 7,
+                    zindex: 99,
+                    glyph: Glyph::BLOCK,
+                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(1)),
+                },
+                CellOp {
+                    row: 4,
+                    col: 8,
+                    zindex: 99,
+                    glyph: Glyph::Static("x"),
+                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(2)),
+                },
+            ]),
+        ));
+        let span = &projection.spans()[0];
+
+        let prepared = prepare_apply_plan(4, &projection);
+
+        assert_eq!(prepared.planned_ops(), 1);
+        assert!(prepared.clears_existing_frame());
+        assert_eq!(prepared.spans().len(), 1);
+        assert_eq!(prepared.spans()[0].span(), span);
+        assert_eq!(
+            prepared.spans()[0].payload_hash(),
+            span_payload_hash(span.chunks()),
+        );
+        assert_eq!(
+            prepared
+                .group_names()
+                .normal_name(HighlightLevel::from_raw_clamped(4)),
+            "SmearCursor4"
+        );
+    }
 }

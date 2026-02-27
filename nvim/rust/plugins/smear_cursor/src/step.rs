@@ -1,52 +1,47 @@
 use crate::animation::simulate_step;
 use crate::lua::{
     bool_from_object, f64_from_object, i64_from_object, invalid_key, parse_indexed_objects,
-    string_from_object,
+    require_object, require_with, string_from_object,
 };
 use crate::types::{DEFAULT_RNG_STATE, Particle, Point, StepInput};
 use nvim_oxi::serde::Deserializer;
 use nvim_oxi::{Array, Dictionary, Object, Result};
-use nvim_oxi_utils::Error as OxiError;
 use serde::Deserialize;
 
 fn error(message: impl Into<String>) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(message.into()).into()
 }
 
-fn to_nvim_error(err: OxiError) -> nvim_oxi::Error {
-    nvim_oxi::api::Error::Other(err.to_string()).into()
-}
-
-fn missing_key(key: &str) -> nvim_oxi::Error {
-    to_nvim_error(OxiError::missing_key(key))
-}
-
-fn require_object(value: Option<Object>, key: &str) -> Result<Object> {
-    value.ok_or_else(|| missing_key(key))
-}
-
 fn require_f64(value: Option<Object>, key: &str) -> Result<f64> {
-    f64_from_object(key, require_object(value, key)?)
+    require_with(value, key, f64_from_object)
 }
 
 fn require_i64(value: Option<Object>, key: &str) -> Result<i64> {
-    i64_from_object(key, require_object(value, key)?)
+    require_with(value, key, i64_from_object)
 }
 
 fn require_bool(value: Option<Object>, key: &str) -> Result<bool> {
-    bool_from_object(key, require_object(value, key)?)
+    require_with(value, key, bool_from_object)
 }
 
 fn require_string(value: Option<Object>, key: &str) -> Result<String> {
-    string_from_object(key, require_object(value, key)?)
+    require_with(value, key, string_from_object)
 }
 
-fn require_optional_f64(value: Option<Object>, key: &str) -> Result<Option<f64>> {
-    match value {
-        None => Ok(None),
-        Some(value) if value.is_nil() => Ok(None),
-        Some(value) => Ok(Some(f64_from_object(key, value)?)),
+fn require_positive_f64(value: Option<Object>, key: &str) -> Result<f64> {
+    let parsed = require_f64(value, key)?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return Err(invalid_key(key, "positive number"));
     }
+    Ok(parsed)
+}
+
+fn require_non_negative_f64(value: Option<Object>, key: &str) -> Result<f64> {
+    let parsed = require_f64(value, key)?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        return Err(invalid_key(key, "non-negative number"));
+    }
+    Ok(parsed)
 }
 
 fn parse_point_from_value(key: &str, value: Option<Object>) -> Result<Point> {
@@ -72,13 +67,17 @@ fn parse_corners_from_object(key: &str, value: Object) -> Result<[Point; 4]> {
     Ok(parsed)
 }
 
-fn parse_stiffnesses_from_object(key: &str, value: Object) -> Result<[f64; 4]> {
-    let stiffnesses =
+fn parse_elapsed_ms_from_object(key: &str, value: Object) -> Result<[f64; 4]> {
+    let elapsed_values =
         parse_indexed_objects(key, value, Some(4)).map_err(|_| invalid_key(key, "array[4]"))?;
 
     let mut parsed = [0.0; 4];
-    for (index, stiffness) in stiffnesses.into_iter().enumerate() {
-        parsed[index] = f64_from_object(key, stiffness)?;
+    for (index, elapsed_ms) in elapsed_values.into_iter().enumerate() {
+        let value = f64_from_object(key, elapsed_ms)?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(invalid_key(key, "array[4] of non-negative numbers"));
+        }
+        parsed[index] = value;
     }
     Ok(parsed)
 }
@@ -134,23 +133,35 @@ struct RawStepInput {
     #[serde(default)]
     config_time_interval: Option<Object>,
     #[serde(default)]
+    head_response_ms: Option<Object>,
+    #[serde(default)]
+    damping_ratio: Option<Object>,
+    #[serde(default)]
     current_corners: Option<Object>,
+    #[serde(default)]
+    trail_origin_corners: Option<Object>,
     #[serde(default)]
     target_corners: Option<Object>,
     #[serde(default)]
-    velocity_corners: Option<Object>,
+    spring_velocity_corners: Option<Object>,
     #[serde(default)]
-    stiffnesses: Option<Object>,
+    trail_elapsed_ms: Option<Object>,
     #[serde(default)]
     max_length: Option<Object>,
     #[serde(default)]
     max_length_insert_mode: Option<Object>,
     #[serde(default)]
-    damping: Option<Object>,
+    trail_duration_ms: Option<Object>,
     #[serde(default)]
-    damping_insert_mode: Option<Object>,
+    trail_short_duration_ms: Option<Object>,
     #[serde(default)]
-    delay_disable: Option<Object>,
+    trail_size: Option<Object>,
+    #[serde(default)]
+    trail_min_distance: Option<Object>,
+    #[serde(default)]
+    trail_thickness: Option<Object>,
+    #[serde(default)]
+    trail_thickness_x: Option<Object>,
     #[serde(default)]
     particles: Option<Object>,
     #[serde(default)]
@@ -196,28 +207,49 @@ impl RawStepInput {
         let mode = require_string(self.mode, "mode")?;
         let time_interval = require_f64(self.time_interval, "time_interval")?;
         let config_time_interval = require_f64(self.config_time_interval, "config_time_interval")?;
+        let head_response_ms = require_positive_f64(self.head_response_ms, "head_response_ms")?;
+        let damping_ratio = require_positive_f64(self.damping_ratio, "damping_ratio")?;
         let current_corners = parse_corners_from_object(
             "current_corners",
             require_object(self.current_corners, "current_corners")?,
         )?;
+        let trail_origin_corners = match self.trail_origin_corners {
+            Some(value) if !value.is_nil() => {
+                parse_corners_from_object("trail_origin_corners", value)?
+            }
+            _ => current_corners,
+        };
         let target_corners = parse_corners_from_object(
             "target_corners",
             require_object(self.target_corners, "target_corners")?,
         )?;
-        let velocity_corners = parse_corners_from_object(
-            "velocity_corners",
-            require_object(self.velocity_corners, "velocity_corners")?,
-        )?;
-        let stiffnesses = parse_stiffnesses_from_object(
-            "stiffnesses",
-            require_object(self.stiffnesses, "stiffnesses")?,
-        )?;
+        let spring_velocity_corners = match self.spring_velocity_corners {
+            Some(value) if !value.is_nil() => {
+                parse_corners_from_object("spring_velocity_corners", value)?
+            }
+            _ => [Point::ZERO; 4],
+        };
+        let trail_elapsed_ms = match self.trail_elapsed_ms {
+            Some(value) if !value.is_nil() => {
+                parse_elapsed_ms_from_object("trail_elapsed_ms", value)?
+            }
+            _ => [0.0; 4],
+        };
         let max_length = require_f64(self.max_length, "max_length")?;
         let max_length_insert_mode =
             require_f64(self.max_length_insert_mode, "max_length_insert_mode")?;
-        let damping = require_f64(self.damping, "damping")?;
-        let damping_insert_mode = require_f64(self.damping_insert_mode, "damping_insert_mode")?;
-        let delay_disable = require_optional_f64(self.delay_disable, "delay_disable")?;
+        let trail_duration_ms = require_positive_f64(self.trail_duration_ms, "trail_duration_ms")?;
+        let trail_short_duration_ms =
+            require_positive_f64(self.trail_short_duration_ms, "trail_short_duration_ms")?;
+        let trail_size = require_f64(self.trail_size, "trail_size")?;
+        if !(0.0..=1.0).contains(&trail_size) {
+            return Err(invalid_key("trail_size", "number between 0.0 and 1.0"));
+        }
+        let trail_min_distance =
+            require_non_negative_f64(self.trail_min_distance, "trail_min_distance")?;
+        let trail_thickness = require_non_negative_f64(self.trail_thickness, "trail_thickness")?;
+        let trail_thickness_x =
+            require_non_negative_f64(self.trail_thickness_x, "trail_thickness_x")?;
         let particles =
             parse_particles_from_object("particles", require_object(self.particles, "particles")?)?;
         let previous_center = parse_point_from_object(
@@ -264,15 +296,21 @@ impl RawStepInput {
             mode,
             time_interval,
             config_time_interval,
+            head_response_ms,
+            damping_ratio,
             current_corners,
+            trail_origin_corners,
             target_corners,
-            velocity_corners,
-            stiffnesses,
+            spring_velocity_corners,
+            trail_elapsed_ms,
             max_length,
             max_length_insert_mode,
-            damping,
-            damping_insert_mode,
-            delay_disable,
+            trail_duration_ms,
+            trail_short_duration_ms,
+            trail_size,
+            trail_min_distance,
+            trail_thickness,
+            trail_thickness_x,
             particles,
             previous_center,
             particle_damping,
@@ -348,6 +386,14 @@ fn step_impl(args: Dictionary) -> Result<Dictionary> {
         "velocity_corners",
         corners_to_object(&output.velocity_corners),
     );
+    result.insert(
+        "spring_velocity_corners",
+        corners_to_object(&output.spring_velocity_corners),
+    );
+    result.insert(
+        "trail_elapsed_ms",
+        Object::from(Array::from_iter(output.trail_elapsed_ms)),
+    );
     result.insert("particles", particles_to_object(&output.particles));
     result.insert("previous_center", point_to_object(output.previous_center));
     result.insert(
@@ -358,9 +404,12 @@ fn step_impl(args: Dictionary) -> Result<Dictionary> {
         "index_tail",
         one_based_i64(output.index_tail, "index_tail")?,
     );
-    result.insert("disabled_due_to_delay", output.disabled_due_to_delay);
     result.insert("rng_state", i64::from(output.rng_state));
     Ok(result)
+}
+
+pub(crate) fn step(args: Dictionary) -> Result<Dictionary> {
+    step_impl(args)
 }
 
 #[cfg(test)]
@@ -392,17 +441,25 @@ mod tests {
     fn valid_step_args() -> Dictionary {
         let mut args = Dictionary::new();
         args.insert("mode", "n");
-        args.insert("time_interval", 16.0_f64);
-        args.insert("config_time_interval", 17.0_f64);
+        args.insert("time_interval", 8.0_f64);
+        args.insert("config_time_interval", 8.0_f64);
+        args.insert("head_response_ms", 110.0_f64);
+        args.insert("damping_ratio", 1.0_f64);
         args.insert("current_corners", rect_object(1.0, 1.0));
+        args.insert("trail_origin_corners", rect_object(1.0, 1.0));
         args.insert("target_corners", rect_object(1.5, 2.0));
-        args.insert("velocity_corners", rect_object(0.0, 0.0));
-        args.insert("stiffnesses", Array::from_iter([0.5_f64, 0.5, 0.5, 0.5]));
+        args.insert(
+            "trail_elapsed_ms",
+            Array::from_iter([0.0_f64, 0.0, 0.0, 0.0]),
+        );
         args.insert("max_length", 25.0_f64);
         args.insert("max_length_insert_mode", 1.0_f64);
-        args.insert("damping", 0.85_f64);
-        args.insert("damping_insert_mode", 0.9_f64);
-        args.insert("delay_disable", 250.0_f64);
+        args.insert("trail_duration_ms", 200.0_f64);
+        args.insert("trail_short_duration_ms", 40.0_f64);
+        args.insert("trail_size", 0.8_f64);
+        args.insert("trail_min_distance", 0.0_f64);
+        args.insert("trail_thickness", 1.0_f64);
+        args.insert("trail_thickness_x", 1.0_f64);
         args.insert("particles", particles_object());
         args.insert("previous_center", point_object(1.0, 1.0));
         args.insert("particle_damping", 0.2_f64);
@@ -489,12 +546,15 @@ mod tests {
         let parsed = parse_step_input(&args).expect("expected parse success");
         assert_eq!(parsed.rng_state, DEFAULT_RNG_STATE);
     }
-}
 
-pub(crate) fn step(args: Dictionary) -> Result<Dictionary> {
-    let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step_impl(args)));
-    match guarded {
-        Ok(result) => result,
-        Err(_) => Err(error("rs_smear_cursor.step panicked")),
+    #[test]
+    fn parse_step_input_rejects_out_of_range_trail_size() {
+        let mut args = valid_step_args();
+        set_arg(&mut args, "trail_size", Object::from(1.5_f64));
+        let err = parse_step_input(&args).expect_err("expected parse failure");
+        assert!(
+            err.to_string().contains("trail_size"),
+            "unexpected error: {err}"
+        );
     }
 }
