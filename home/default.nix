@@ -18,7 +18,6 @@ in
     ./alacritty.nix
     ./docker.nix
     ./git.nix
-    ./ghostty.nix
     ./neovim.nix
     ./python.nix
     ./ssh.nix
@@ -59,7 +58,8 @@ in
 
       SAM_CLI_TELEMETRY = "0";
 
-      BUNBIN = "${homeDir}/.bun/bin";
+      # Bun 1.3 global installs land in the cache bin directory.
+      BUNBIN = "${homeDir}/.cache/.bun/bin";
       PNPM_HOME = "${homeDir}/Library/pnpm";
       NODE_PATH = "${homeDir}/.bun/install/global/node_modules";
       MISE_RUSTUP_HOME = "${config.xdg.dataHome}/mise/rustup";

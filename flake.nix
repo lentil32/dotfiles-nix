@@ -25,10 +25,6 @@
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
 
-    ghostty = {
-      url = "github:ghostty-org/ghostty";
-    };
-
     nixCats.url = "github:BirdeeHub/nixCats-nvim";
 
     # Homebrew management
@@ -82,7 +78,6 @@
       treefmt-nix,
       crane,
       flake-utils,
-      ghostty,
       nix-homebrew,
       nur,
       homebrew-core,
@@ -123,7 +118,6 @@
       nixpkgsConfig = {
         overlays = [
           rust-overlay.overlays.default
-          ghostty.overlays.default
           nur.overlays.default
           (final: prev: {
             pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
@@ -164,7 +158,6 @@
           pkgs-unstable
           username
           useremail
-          ghostty
           ;
       };
 
