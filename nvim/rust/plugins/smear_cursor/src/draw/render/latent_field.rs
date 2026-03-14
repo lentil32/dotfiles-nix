@@ -1175,8 +1175,8 @@ mod tests {
         );
 
         let slice = make_slice(3);
-        history.push_back(slice.clone());
         cache.insert_slice(&slice);
+        history.push_back(slice);
         assert_eq!(
             compile_field_from_cache(&cache),
             compile_field(&history, StepIndex::new(3))

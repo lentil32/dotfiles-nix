@@ -2,6 +2,7 @@ use super::RuntimeState;
 use crate::config::RuntimeConfig;
 use crate::lua::invalid_key;
 use nvim_oxi::Result;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) struct RuntimeOptionsEffects {
@@ -272,9 +273,11 @@ impl RuntimeSwitchesPatch {
                 hide_target_hack,
                 max_kept_windows,
                 windows_zindex,
-                filetypes_disabled,
             ]
         );
+        if let Some(value) = self.filetypes_disabled.take() {
+            config.filetypes_disabled = Arc::from(value);
+        }
 
         if let Some(value) = self.logging_level.take() {
             config.logging_level = value;

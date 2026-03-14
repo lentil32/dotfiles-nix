@@ -2,9 +2,9 @@ use super::Transition;
 use super::observation::start_next_observation;
 use super::support::{
     DEFAULT_ANIMATION_DELAY_MS, advance_cleanup_for_proposal, apply_proposal_effect,
-    arm_pending_ingress_wake, arm_render_cleanup_timer, cleanup_state_after_applied,
-    delay_budget_from_ms, enter_recovering_with_backoff, record_event_loop_metric,
-    redraw_effect_for_proposal, schedule_timer_with_delay,
+    arm_delayed_ingress_wake, arm_render_cleanup_timer, cleanup_state_after_applied,
+    delay_budget_from_ms, delayed_pending_ingress_due_at, enter_recovering_with_backoff,
+    record_event_loop_metric, redraw_effect_for_proposal, schedule_timer_with_delay,
 };
 use crate::core::effect::{EventLoopMetricEffect, TimerKind};
 use crate::core::event::{
@@ -152,9 +152,10 @@ fn reduce_apply_completed(
             next_state.lifecycle(),
             crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
         )
-        && let Some((scheduled_state, wake)) =
-            arm_pending_ingress_wake(next_state.clone(), observed_at)
+        && let Some(due_at) = delayed_pending_ingress_due_at(&next_state, observed_at)
     {
+        let base_state = next_state;
+        let (scheduled_state, wake) = arm_delayed_ingress_wake(base_state, due_at, observed_at);
         next_state = scheduled_state;
         effects.push(wake);
     }

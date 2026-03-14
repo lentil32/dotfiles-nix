@@ -22,6 +22,7 @@ use nvim_utils::mode::{
     is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
 };
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -159,7 +160,7 @@ pub(super) struct IngressReadSnapshot {
     key_delay_ms: u64,
     current_corners: [Point; 4],
     mode_policy: IngressModePolicySnapshot,
-    filetypes_disabled: Box<[String]>,
+    filetypes_disabled: Arc<[String]>,
 }
 
 impl IngressReadSnapshot {
@@ -174,7 +175,7 @@ impl IngressReadSnapshot {
             key_delay_ms: as_delay_ms(config.delay_after_key),
             current_corners: runtime.current_corners(),
             mode_policy: IngressModePolicySnapshot::from_runtime_config(config),
-            filetypes_disabled: config.filetypes_disabled.clone().into_boxed_slice(),
+            filetypes_disabled: Arc::clone(&config.filetypes_disabled),
         }
     }
 
@@ -228,7 +229,7 @@ impl IngressReadSnapshot {
                 mode_policy.2,
                 mode_policy.3,
             ]),
-            filetypes_disabled: filetypes_disabled.into_boxed_slice(),
+            filetypes_disabled: Arc::from(filetypes_disabled),
         }
     }
 }
@@ -744,6 +745,7 @@ impl EffectExecutor for NeovimEffectExecutor {
 mod ingress_snapshot_tests {
     use super::{IngressModePolicySnapshot, IngressReadSnapshot};
     use crate::types::Point;
+    use std::sync::Arc;
 
     #[test]
     fn ingress_mode_policy_matches_composite_mode_rules() {
@@ -771,6 +773,24 @@ mod ingress_snapshot_tests {
         assert!(snapshot.filetype_disabled("lua"));
         assert!(snapshot.filetype_disabled("rust"));
         assert!(!snapshot.filetype_disabled("nix"));
+    }
+
+    #[test]
+    fn ingress_read_snapshot_can_share_disabled_filetypes_arc() {
+        let filetypes_disabled: Arc<[String]> = vec!["lua".to_string(), "rust".to_string()].into();
+        let snapshot = IngressReadSnapshot {
+            enabled: true,
+            needs_initialize: false,
+            key_delay_ms: 0,
+            current_corners: [Point::ZERO; 4],
+            mode_policy: IngressModePolicySnapshot::from_mode_flags([true, true, true, true]),
+            filetypes_disabled: Arc::clone(&filetypes_disabled),
+        };
+
+        assert!(Arc::ptr_eq(
+            &snapshot.filetypes_disabled,
+            &filetypes_disabled
+        ));
     }
 }
 

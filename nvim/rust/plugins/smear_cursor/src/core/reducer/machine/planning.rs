@@ -496,18 +496,18 @@ pub(crate) fn build_planned_render(
 ) -> PlannedRender {
     let (next_scene, projection, projection_failure) =
         update_scene_from_render_decision(planning_state, render_decision);
-    let basis = patch_basis(planning_state.realization(), projection.clone());
-    let patch = ScenePatch::derive(basis.clone());
+    let basis = patch_basis(planning_state.realization(), projection);
+    let patch_kind = ScenePatchKind::from_basis(&basis);
     let realization = realization_plan_for_render_decision(
         planning_state,
         render_decision,
-        patch.kind(),
-        projection.as_ref(),
+        patch_kind,
+        basis.target(),
         projection_failure,
     );
+    let patch = ScenePatch::derive(basis);
     let proposal = InFlightProposal::new(
         proposal_id,
-        basis,
         patch,
         realization,
         render_decision.render_cleanup_action,

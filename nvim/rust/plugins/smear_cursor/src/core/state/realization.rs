@@ -233,7 +233,6 @@ pub(crate) enum RealizationPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct InFlightProposal {
     proposal_id: ProposalId,
-    basis: PatchBasis,
     patch: ScenePatch,
     realization: RealizationPlan,
     cleanup_action: RenderCleanupAction,
@@ -274,13 +273,8 @@ impl PlannedRender {
 }
 
 impl InFlightProposal {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "proposal construction mirrors the reducer-owned transition payload exactly"
-    )]
     pub(crate) fn new(
         proposal_id: ProposalId,
-        basis: PatchBasis,
         patch: ScenePatch,
         realization: RealizationPlan,
         cleanup_action: RenderCleanupAction,
@@ -290,7 +284,6 @@ impl InFlightProposal {
     ) -> Self {
         Self {
             proposal_id,
-            basis,
             patch,
             realization,
             cleanup_action,
@@ -305,7 +298,7 @@ impl InFlightProposal {
     }
 
     pub(crate) const fn basis(&self) -> &PatchBasis {
-        &self.basis
+        self.patch.basis()
     }
 
     pub(crate) const fn patch(&self) -> &ScenePatch {

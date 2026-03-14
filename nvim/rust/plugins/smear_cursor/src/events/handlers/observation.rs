@@ -279,7 +279,7 @@ fn collect_cursor_color_report(payload: RequestProbeEffect) -> CoreEvent {
     match sampled_cursor_color_at_current_position() {
         Ok(sample) => {
             let sample = sample.map(CursorColorSample::new);
-            store_cursor_color_sample(expected_witness.clone(), sample.clone());
+            store_cursor_color_sample(current_witness, sample.clone());
             cursor_color_ready_event(&payload, ProbeReuse::Exact, sample)
         }
         Err(err) => {

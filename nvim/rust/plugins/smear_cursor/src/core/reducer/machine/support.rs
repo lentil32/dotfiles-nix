@@ -102,30 +102,26 @@ pub(super) fn schedule_timer_with_delay(
     (next_state, effect)
 }
 
-fn schedule_ingress_wake(
+pub(super) fn delayed_pending_ingress_due_at(
+    state: &CoreState,
+    observed_at: Millis,
+) -> Option<Millis> {
+    let due_at = state.demand_queue().next_due_at()?;
+    (due_at.value() > observed_at.value()).then_some(due_at)
+}
+
+pub(super) fn arm_delayed_ingress_wake(
     state: CoreState,
     due_at: Millis,
-    requested_at: Millis,
-) -> Option<(CoreState, Effect)> {
-    let delay_ms = due_at.value().saturating_sub(requested_at.value());
-    if delay_ms == 0 {
-        return None;
-    }
-
-    Some(schedule_timer_with_delay(
+    observed_at: Millis,
+) -> (CoreState, Effect) {
+    let delay_ms = due_at.value().saturating_sub(observed_at.value());
+    schedule_timer_with_delay(
         state,
         TimerKind::Ingress,
         delay_budget_from_ms(delay_ms),
-        requested_at,
-    ))
-}
-
-pub(super) fn arm_pending_ingress_wake(
-    state: CoreState,
-    observed_at: Millis,
-) -> Option<(CoreState, Effect)> {
-    let due_at = state.demand_queue().next_due_at()?;
-    schedule_ingress_wake(state, due_at, observed_at)
+        observed_at,
+    )
 }
 
 fn cursor_position_read_policy(state: &CoreState) -> CursorPositionReadPolicy {

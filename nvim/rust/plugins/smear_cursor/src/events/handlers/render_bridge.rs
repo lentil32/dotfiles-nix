@@ -29,11 +29,11 @@ pub(crate) fn execute_core_apply_proposal_effect(
     let apply_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let apply_started_ms = now_ms();
         let namespace_id = ensure_namespace_id();
-        let realization = proposal.realization().clone();
+        let realization = proposal.realization();
         let patch = proposal.patch();
         let render_side_effects = proposal.side_effects();
 
-        if let RealizationPlan::Failure(failure) = &realization {
+        if let RealizationPlan::Failure(failure) = realization {
             return CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
                 proposal_id,
                 reason: failure.reason(),

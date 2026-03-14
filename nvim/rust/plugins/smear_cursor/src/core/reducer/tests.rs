@@ -259,11 +259,10 @@ fn applying_state_with_realization_plan(
             .cloned(),
         None,
     );
-    let patch = ScenePatch::derive(basis.clone());
+    let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
     let proposal = InFlightProposal::new(
         proposal_id,
-        basis,
         patch,
         realization,
         RenderCleanupAction::NoAction,
@@ -314,7 +313,9 @@ fn lifecycle_constructors_preserve_protocol_owned_shared_state() {
     assert_eq!(primed.ingress_policy(), ingress_policy);
 
     let request = observation_request(11, ExternalDemandKind::ExternalCursor, 77);
-    let observing = primed.into_observing(request, DemandQueue::default());
+    let observing = primed
+        .with_demand_queue(DemandQueue::default())
+        .into_observing(request);
     assert_eq!(observing.timers(), timers);
     assert_eq!(observing.recovery_policy(), recovery_policy);
     assert_eq!(observing.ingress_policy(), ingress_policy);
@@ -1670,11 +1671,10 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
     runtime.config.max_kept_windows = 21;
     let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
     let basis = PatchBasis::new(None, None);
-    let patch = ScenePatch::derive(basis.clone());
+    let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
     let proposal = InFlightProposal::new(
         proposal_id,
-        basis,
         patch,
         RealizationPlan::Clear(RealizationClear::new(21)),
         RenderCleanupAction::Schedule,
@@ -1725,11 +1725,10 @@ fn clear_apply_completion_redraws_after_visual_change_outside_cmdline() {
     runtime.config.max_kept_windows = 21;
     let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
     let basis = PatchBasis::new(None, None);
-    let patch = ScenePatch::derive(basis.clone());
+    let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
     let proposal = InFlightProposal::new(
         proposal_id,
-        basis,
         patch,
         RealizationPlan::Clear(RealizationClear::new(21)),
         RenderCleanupAction::Schedule,
@@ -1776,11 +1775,10 @@ fn cleanup_timer_soft_clear_rearms_hard_purge_without_new_ingress() {
     runtime.config.max_kept_windows = 21;
     let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
     let basis = PatchBasis::new(None, None);
-    let patch = ScenePatch::derive(basis.clone());
+    let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
     let proposal = InFlightProposal::new(
         proposal_id,
-        basis,
         patch,
         RealizationPlan::Clear(RealizationClear::new(21)),
         RenderCleanupAction::Schedule,

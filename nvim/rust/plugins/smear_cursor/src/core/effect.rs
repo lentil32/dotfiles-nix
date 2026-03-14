@@ -467,7 +467,7 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
             requested_at: at,
         }),
         Effect::RequestObservationBase(RequestObservationBaseEffect {
-            request: request.clone(),
+            request,
             context: ObservationRuntimeContext::new(
                 CursorPositionReadPolicy::new(true),
                 true,
@@ -524,7 +524,6 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
         Effect::ApplyProposal(Box::new(ApplyProposalEffect {
             proposal: crate::core::state::InFlightProposal::new(
                 proposal_id,
-                crate::core::state::PatchBasis::new(None, None),
                 crate::core::state::ScenePatch::derive(crate::core::state::PatchBasis::new(
                     None, None,
                 )),

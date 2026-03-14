@@ -465,22 +465,27 @@ pub(crate) enum ScenePatchKind {
     Replace,
 }
 
+impl ScenePatchKind {
+    pub(crate) fn from_basis(basis: &PatchBasis) -> Self {
+        match (basis.acknowledged(), basis.target()) {
+            (None, None) => Self::Noop,
+            (Some(acknowledged), Some(target)) if acknowledged.same_render_output_as(target) => {
+                Self::Noop
+            }
+            (_, None) => Self::Clear,
+            _ => {
+                // Comment: phase 4 keeps patch shape intentionally coarse. The authoritative basis
+                // is explicit now; phase 5 can refine replace work into realization-specific
+                // projection without reopening protocol ownership.
+                Self::Replace
+            }
+        }
+    }
+}
+
 impl ScenePatch {
     pub(crate) fn derive(basis: PatchBasis) -> Self {
-        let kind = match (basis.acknowledged(), basis.target()) {
-            (None, None) => ScenePatchKind::Noop,
-            (Some(acknowledged), Some(target)) if acknowledged.same_render_output_as(target) => {
-                ScenePatchKind::Noop
-            }
-            (_, None) => ScenePatchKind::Clear,
-            _ => {
-                // Comment: phase 4 keeps patch shape intentionally coarse. The
-                // authoritative basis is explicit now; phase 5 can refine replace
-                // work into realization-specific projection without reopening
-                // protocol ownership.
-                ScenePatchKind::Replace
-            }
-        };
+        let kind = ScenePatchKind::from_basis(&basis);
         Self { basis, kind }
     }
 

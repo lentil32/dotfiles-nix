@@ -200,7 +200,7 @@ mod runtime_options_apply_tests {
     #[test]
     fn runtime_options_patch_apply_clears_filetypes_list() {
         let mut state = RuntimeState::default();
-        state.config.filetypes_disabled = vec!["lua".to_string(), "nix".to_string()];
+        state.config.filetypes_disabled = vec!["lua".to_string(), "nix".to_string()].into();
         let patch = RuntimeOptionsPatch {
             runtime: RuntimeSwitchesPatch {
                 filetypes_disabled: Some(Vec::new()),

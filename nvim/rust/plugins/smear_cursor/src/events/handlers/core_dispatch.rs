@@ -112,12 +112,14 @@ pub(crate) fn dispatch_core_event(
     stage_effect_batch: &mut impl FnMut(Vec<Effect>),
 ) -> Result<()> {
     let previous_state = core_state();
-    let transition = reduce_core_event(&previous_state, initial_event.clone());
+    let event_label = core_event_label(&initial_event);
+    let event_summary = core_event_summary(&initial_event);
+    let transition = reduce_core_event(&previous_state, initial_event);
     trace_lazy(|| {
         format!(
             "core_transition event={} details={} from=[{}] to=[{}] effects={}",
-            core_event_label(&initial_event),
-            core_event_summary(&initial_event),
+            event_label,
+            event_summary,
             core_state_summary(&previous_state),
             core_state_summary(&transition.next),
             transition.effects.len()

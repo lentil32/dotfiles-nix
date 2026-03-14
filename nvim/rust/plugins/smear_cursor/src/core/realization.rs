@@ -319,10 +319,10 @@ pub(crate) fn project_render_plan(
                 continue;
             };
             if background_probe.is_some_and(|probe| probe.allows_particle(screen_cell)) {
-                linear_cells.push(op.cell.clone());
+                linear_cells.push(op.cell);
             }
         } else {
-            linear_cells.push(op.cell.clone());
+            linear_cells.push(op.cell);
         }
     }
 
@@ -330,7 +330,7 @@ pub(crate) fn project_render_plan(
         plan.cell_ops
             .iter()
             .filter(|op| in_bounds(viewport, op.row, op.col))
-            .cloned(),
+            .copied(),
     );
 
     if let Some(overlay) = plan.target_cell_overlay
@@ -478,13 +478,13 @@ mod tests {
             .filter(|op| {
                 !op.requires_background_probe && in_bounds(viewport, op.cell.row, op.cell.col)
             })
-            .map(|op| op.cell.clone())
+            .map(|op| op.cell)
             .collect::<Vec<_>>();
         cells.extend(
             plan.cell_ops
                 .iter()
                 .filter(|op| in_bounds(viewport, op.row, op.col))
-                .cloned(),
+                .copied(),
         );
         if let Some(overlay) = plan.target_cell_overlay
             && in_bounds(viewport, overlay.row, overlay.col)

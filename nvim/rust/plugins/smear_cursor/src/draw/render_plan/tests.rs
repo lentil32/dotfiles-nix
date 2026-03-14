@@ -624,7 +624,7 @@ fn ribbon_dp_prefers_consistent_cross_section_over_local_flip() {
     };
 
     let solved =
-        solve_ribbon_dp(&[slice0, slice1.clone(), slice2], 1024).expect("ribbon path should solve");
+        solve_ribbon_dp(&[slice0, slice1, slice2], 1024).expect("ribbon path should solve");
     assert_eq!(solved.len(), 3);
     assert_eq!(solved[0].run_start_key(), Some(0));
     assert_eq!(solved[1].run_start_key(), Some(0));

@@ -49,9 +49,11 @@ fn parse_point_from_value(key: &str, value: Option<Object>) -> Result<Point> {
 }
 
 fn parse_point_from_object(key: &str, value: Object) -> Result<Point> {
-    let values = parse_indexed_objects(key, value, Some(2))?;
-    let row = f64_from_object(key, values[0].clone())?;
-    let col = f64_from_object(key, values[1].clone())?;
+    let [row, col]: [Object; 2] = parse_indexed_objects(key, value, Some(2))?
+        .try_into()
+        .map_err(|_| invalid_key(key, "array[2]"))?;
+    let row = f64_from_object(key, row)?;
+    let col = f64_from_object(key, col)?;
     Ok(Point { row, col })
 }
 
@@ -334,10 +336,19 @@ impl RawStepInput {
     }
 }
 
-fn parse_step_input(args: &Dictionary) -> Result<StepInput> {
-    let raw = RawStepInput::deserialize(Deserializer::new(Object::from(args.clone())))
+fn parse_step_input_object(args: Object) -> Result<StepInput> {
+    let raw = RawStepInput::deserialize(Deserializer::new(args))
         .map_err(|err| error(format!("invalid step args: {err}")))?;
     raw.into_step_input()
+}
+
+#[cfg(test)]
+fn parse_step_input(args: &Dictionary) -> Result<StepInput> {
+    parse_step_input_object(Object::from(args.clone()))
+}
+
+fn parse_step_input_owned(args: Dictionary) -> Result<StepInput> {
+    parse_step_input_object(Object::from(args))
 }
 
 fn point_to_object(point: Point) -> Object {
@@ -373,7 +384,7 @@ fn one_based_i64(value: usize, field: &str) -> Result<i64> {
 }
 
 fn step_impl(args: Dictionary) -> Result<Dictionary> {
-    let input = parse_step_input(&args)?;
+    let input = parse_step_input_owned(args)?;
     let output = simulate_step(input);
 
     let mut result = Dictionary::new();

@@ -174,6 +174,17 @@ pub(crate) fn set_existing_floating_window_config(
     Ok(())
 }
 
+pub(crate) fn set_existing_floating_window_config_ref(
+    window: &mut api::Window,
+    config: &WindowConfig,
+) -> Result<()> {
+    if config.noautocmd.is_some() {
+        return set_existing_floating_window_config(window, config.clone());
+    }
+    window.set_config(config)?;
+    Ok(())
+}
+
 pub(crate) fn initialize_floating_buffer_options(
     buffer: &api::Buffer,
     buftype: &str,

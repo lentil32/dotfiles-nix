@@ -34,31 +34,6 @@ impl ProtocolSharedState {
     pub(crate) const fn render_cleanup(&self) -> RenderCleanupState {
         self.render_cleanup
     }
-
-    pub(crate) fn with_demand(mut self, demand: DemandQueue) -> Self {
-        self.demand = demand;
-        self
-    }
-
-    pub(crate) fn with_timers(mut self, timers: TimerState) -> Self {
-        self.timers = timers;
-        self
-    }
-
-    pub(crate) fn with_recovery_policy(mut self, recovery_policy: RecoveryPolicyState) -> Self {
-        self.recovery_policy = recovery_policy;
-        self
-    }
-
-    pub(crate) fn with_ingress_policy(mut self, ingress_policy: IngressPolicyState) -> Self {
-        self.ingress_policy = ingress_policy;
-        self
-    }
-
-    pub(crate) fn with_render_cleanup(mut self, render_cleanup: RenderCleanupState) -> Self {
-        self.render_cleanup = render_cleanup;
-        self
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,47 +93,56 @@ impl ProtocolState {
         }
     }
 
-    fn with_shared(self, shared: ProtocolSharedState) -> Self {
+    fn shared_mut(&mut self) -> &mut ProtocolSharedState {
         match self {
-            Self::Idle { .. } => Self::Idle { shared },
-            Self::Primed { .. } => Self::Primed { shared },
+            Self::Idle { shared }
+            | Self::Primed { shared }
+            | Self::Observing { shared, .. }
+            | Self::Ready { shared, .. }
+            | Self::Planning { shared, .. }
+            | Self::Applying { shared, .. }
+            | Self::Recovering { shared, .. } => shared,
+        }
+    }
+
+    fn into_shared(self) -> ProtocolSharedState {
+        match self {
+            Self::Idle { shared }
+            | Self::Primed { shared }
+            | Self::Observing { shared, .. }
+            | Self::Ready { shared, .. }
+            | Self::Planning { shared, .. }
+            | Self::Applying { shared, .. }
+            | Self::Recovering { shared, .. } => shared,
+        }
+    }
+
+    fn into_shared_and_observation(self) -> (ProtocolSharedState, Option<ObservationSnapshot>) {
+        match self {
+            Self::Idle { shared } | Self::Primed { shared } => (shared, None),
             Self::Observing {
-                request,
+                shared,
                 observation,
-                probe_refresh,
                 ..
-            } => Self::Observing {
-                shared,
-                request,
-                observation,
-                probe_refresh,
-            },
-            Self::Ready { observation, .. } => Self::Ready {
+            }
+            | Self::Recovering {
                 shared,
                 observation,
-            },
-            Self::Planning {
+            } => (shared, observation),
+            Self::Ready {
+                shared,
                 observation,
-                proposal_id,
+            }
+            | Self::Planning {
+                shared,
+                observation,
                 ..
-            } => Self::Planning {
+            }
+            | Self::Applying {
                 shared,
                 observation,
-                proposal_id,
-            },
-            Self::Applying {
-                observation,
-                proposal,
                 ..
-            } => Self::Applying {
-                shared,
-                observation,
-                proposal,
-            },
-            Self::Recovering { observation, .. } => Self::Recovering {
-                shared,
-                observation,
-            },
+            } => (shared, Some(observation)),
         }
     }
 
@@ -205,31 +189,6 @@ impl ProtocolState {
             | Self::Applying { observation, .. } => Some(observation),
         }
     }
-
-    pub(crate) fn with_demand(self, next_demand: DemandQueue) -> Self {
-        let shared = self.shared().clone().with_demand(next_demand);
-        self.with_shared(shared)
-    }
-
-    pub(crate) fn with_timers(self, timers: TimerState) -> Self {
-        let shared = self.shared().clone().with_timers(timers);
-        self.with_shared(shared)
-    }
-
-    pub(crate) fn with_recovery_policy(self, recovery_policy: RecoveryPolicyState) -> Self {
-        let shared = self.shared().clone().with_recovery_policy(recovery_policy);
-        self.with_shared(shared)
-    }
-
-    pub(crate) fn with_ingress_policy(self, ingress_policy: IngressPolicyState) -> Self {
-        let shared = self.shared().clone().with_ingress_policy(ingress_policy);
-        self.with_shared(shared)
-    }
-
-    pub(crate) fn with_render_cleanup(self, render_cleanup: RenderCleanupState) -> Self {
-        let shared = self.shared().clone().with_render_cleanup(render_cleanup);
-        self.with_shared(shared)
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -258,6 +217,32 @@ impl Default for CoreState {
 }
 
 impl CoreState {
+    fn map_protocol<F>(mut self, map: F) -> Self
+    where
+        F: FnOnce(ProtocolState) -> ProtocolState,
+    {
+        let previous_lifecycle = self.protocol.lifecycle();
+        let protocol = map(std::mem::take(&mut self.protocol));
+        if previous_lifecycle != protocol.lifecycle() {
+            self.generation = self.next_generation();
+        }
+        self.protocol = protocol;
+        self
+    }
+
+    fn try_map_protocol<F>(mut self, map: F) -> Option<Self>
+    where
+        F: FnOnce(ProtocolState) -> Option<ProtocolState>,
+    {
+        let previous_lifecycle = self.protocol.lifecycle();
+        let protocol = map(std::mem::take(&mut self.protocol))?;
+        if previous_lifecycle != protocol.lifecycle() {
+            self.generation = self.next_generation();
+        }
+        self.protocol = protocol;
+        Some(self)
+    }
+
     pub(crate) const fn generation(&self) -> Generation {
         self.generation
     }
@@ -350,24 +335,24 @@ impl CoreState {
         }
     }
 
-    pub(crate) fn with_timers(self, timers: TimerState) -> Self {
-        let protocol = self.protocol.clone().with_timers(timers);
-        self.with_protocol(protocol)
+    pub(crate) fn with_timers(mut self, timers: TimerState) -> Self {
+        self.protocol.shared_mut().timers = timers;
+        self
     }
 
-    pub(crate) fn with_recovery_policy(self, recovery_policy: RecoveryPolicyState) -> Self {
-        let protocol = self.protocol.clone().with_recovery_policy(recovery_policy);
-        self.with_protocol(protocol)
+    pub(crate) fn with_recovery_policy(mut self, recovery_policy: RecoveryPolicyState) -> Self {
+        self.protocol.shared_mut().recovery_policy = recovery_policy;
+        self
     }
 
-    pub(crate) fn with_ingress_policy(self, ingress_policy: IngressPolicyState) -> Self {
-        let protocol = self.protocol.clone().with_ingress_policy(ingress_policy);
-        self.with_protocol(protocol)
+    pub(crate) fn with_ingress_policy(mut self, ingress_policy: IngressPolicyState) -> Self {
+        self.protocol.shared_mut().ingress_policy = ingress_policy;
+        self
     }
 
-    pub(crate) fn with_render_cleanup(self, render_cleanup: RenderCleanupState) -> Self {
-        let protocol = self.protocol.clone().with_render_cleanup(render_cleanup);
-        self.with_protocol(protocol)
+    pub(crate) fn with_render_cleanup(mut self, render_cleanup: RenderCleanupState) -> Self {
+        self.protocol.shared_mut().render_cleanup = render_cleanup;
+        self
     }
 
     pub(crate) fn with_entropy(mut self, entropy: EntropyState) -> Self {
@@ -391,40 +376,43 @@ impl CoreState {
     }
 
     pub(crate) fn with_runtime(mut self, runtime: crate::state::RuntimeState) -> Self {
-        self.payload.scene = self.payload.scene.clone().with_motion(runtime);
+        let scene = std::mem::take(&mut self.payload.scene);
+        self.payload.scene = scene.with_motion(runtime);
         self
     }
 
-    pub(crate) fn with_protocol(mut self, protocol: ProtocolState) -> Self {
-        if self.protocol.lifecycle() != protocol.lifecycle() {
-            self.generation = self.next_generation();
-        }
-        self.protocol = protocol;
+    pub(crate) fn with_demand_queue(mut self, demand: DemandQueue) -> Self {
+        self.protocol.shared_mut().demand = demand;
         self
     }
 
-    pub(crate) fn with_demand_queue(self, demand: DemandQueue) -> Self {
-        let protocol = self.protocol.clone().with_demand(demand);
-        self.with_protocol(protocol)
+    pub(crate) fn map_demand_queue<R>(
+        mut self,
+        map: impl FnOnce(DemandQueue) -> (DemandQueue, R),
+    ) -> (Self, R) {
+        // Comment: reducers that already own `CoreState` should move the demand queue through the
+        // transition edge instead of cloning protocol-shared ingress state.
+        let demand = std::mem::take(&mut self.protocol.shared_mut().demand);
+        let (demand, result) = map(demand);
+        self.protocol.shared_mut().demand = demand;
+        (self, result)
     }
 
     pub(crate) fn initialize(self) -> Self {
-        let shared = self.protocol.shared().clone();
-        self.with_protocol(ProtocolState::Primed { shared })
+        self.map_protocol(|protocol| ProtocolState::Primed {
+            shared: protocol.into_shared(),
+        })
     }
 
-    pub(crate) fn into_observing(
-        self,
-        request: ObservationRequest,
-        remaining: DemandQueue,
-    ) -> Self {
-        let observation = self.observation().cloned();
-        let shared = self.protocol.shared().clone().with_demand(remaining);
-        self.with_protocol(ProtocolState::Observing {
-            shared,
-            request,
-            observation,
-            probe_refresh: ProbeRefreshState::default(),
+    pub(crate) fn into_observing(self, request: ObservationRequest) -> Self {
+        self.map_protocol(|protocol| {
+            let (shared, observation) = protocol.into_shared_and_observation();
+            ProtocolState::Observing {
+                shared,
+                request,
+                observation,
+                probe_refresh: ProbeRefreshState::default(),
+            }
         })
     }
 
@@ -432,19 +420,20 @@ impl CoreState {
         self,
         observation: Option<ObservationSnapshot>,
     ) -> Option<Self> {
-        let probe_refresh = self.probe_refresh_state()?;
-        let ProtocolState::Observing {
-            shared, request, ..
-        } = self.protocol().clone()
-        else {
-            return None;
-        };
-        Some(self.with_protocol(ProtocolState::Observing {
-            shared,
-            request,
-            observation,
-            probe_refresh,
-        }))
+        self.try_map_protocol(|protocol| match protocol {
+            ProtocolState::Observing {
+                shared,
+                request,
+                probe_refresh,
+                ..
+            } => Some(ProtocolState::Observing {
+                shared,
+                request,
+                observation,
+                probe_refresh,
+            }),
+            _ => None,
+        })
     }
 
     pub(crate) const fn probe_refresh_state(&self) -> Option<ProbeRefreshState> {
@@ -455,62 +444,67 @@ impl CoreState {
     }
 
     pub(crate) fn with_probe_refresh_state(self, probe_refresh: ProbeRefreshState) -> Option<Self> {
-        let ProtocolState::Observing {
-            shared,
-            request,
-            observation,
-            ..
-        } = self.protocol().clone()
-        else {
-            return None;
-        };
-        Some(self.with_protocol(ProtocolState::Observing {
-            shared,
-            request,
-            observation,
-            probe_refresh,
-        }))
+        self.try_map_protocol(|protocol| match protocol {
+            ProtocolState::Observing {
+                shared,
+                request,
+                observation,
+                ..
+            } => Some(ProtocolState::Observing {
+                shared,
+                request,
+                observation,
+                probe_refresh,
+            }),
+            _ => None,
+        })
     }
 
     pub(crate) fn into_ready_with_observation(self, observation: ObservationSnapshot) -> Self {
-        let shared = self.protocol.shared().clone();
-        self.with_protocol(ProtocolState::Ready {
-            shared,
+        self.map_protocol(|protocol| ProtocolState::Ready {
+            shared: protocol.into_shared(),
             observation,
         })
     }
 
     pub(crate) fn into_planning(self, proposal_id: ProposalId) -> Option<Self> {
-        let observation = self.observation()?.clone();
-        let shared = self.protocol.shared().clone();
-        Some(self.with_protocol(ProtocolState::Planning {
-            shared,
-            observation,
-            proposal_id,
-        }))
+        self.try_map_protocol(|protocol| {
+            let (shared, observation) = protocol.into_shared_and_observation();
+            let observation = observation?;
+            Some(ProtocolState::Planning {
+                shared,
+                observation,
+                proposal_id,
+            })
+        })
     }
 
     pub(crate) fn into_primed(self) -> Self {
-        let shared = self.protocol.shared().clone();
-        self.with_protocol(ProtocolState::Primed { shared })
+        self.map_protocol(|protocol| ProtocolState::Primed {
+            shared: protocol.into_shared(),
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn into_applying(self, proposal: InFlightProposal) -> Option<Self> {
-        let observation = self.observation()?.clone();
-        let shared = self.protocol.shared().clone();
-        Some(self.with_protocol(ProtocolState::Applying {
-            shared,
-            observation,
-            proposal: Box::new(proposal),
-        }))
+        self.try_map_protocol(|protocol| {
+            let (shared, observation) = protocol.into_shared_and_observation();
+            let observation = observation?;
+            Some(ProtocolState::Applying {
+                shared,
+                observation,
+                proposal: Box::new(proposal),
+            })
+        })
     }
 
     pub(crate) fn into_recovering(self) -> Self {
-        let observation = self.observation().cloned();
-        let shared = self.protocol.shared().clone();
-        self.with_protocol(ProtocolState::Recovering {
-            shared,
-            observation,
+        self.map_protocol(|protocol| {
+            let (shared, observation) = protocol.into_shared_and_observation();
+            ProtocolState::Recovering {
+                shared,
+                observation,
+            }
         })
     }
 
@@ -528,17 +522,22 @@ impl CoreState {
         self,
         proposal_id: ProposalId,
     ) -> Option<(Self, InFlightProposal)> {
-        let pending = self.pending_proposal()?.clone();
-        if pending.proposal_id() != proposal_id {
-            return None;
-        }
-
-        let observation = self.observation()?.clone();
-        let shared = self.protocol.shared().clone();
-        let next_state = self.with_protocol(ProtocolState::Ready {
-            shared,
-            observation,
-        });
+        let mut pending = None;
+        let next_state = self.try_map_protocol(|protocol| match protocol {
+            ProtocolState::Applying {
+                shared,
+                observation,
+                proposal,
+            } if proposal.proposal_id() == proposal_id => {
+                pending = Some(*proposal);
+                Some(ProtocolState::Ready {
+                    shared,
+                    observation,
+                })
+            }
+            _ => None,
+        })?;
+        let pending = pending?;
         Some((next_state, pending))
     }
 
@@ -548,25 +547,18 @@ impl CoreState {
     ) -> Option<Self> {
         let proposal_id = planned_render.proposal_id();
         let (next_scene, proposal) = planned_render.into_parts();
-        let ProtocolState::Planning {
-            shared,
-            observation,
-            proposal_id: active_proposal_id,
-        } = self.protocol().clone()
-        else {
-            return None;
-        };
-        if active_proposal_id != proposal_id {
-            return None;
-        }
-
-        Some(
-            self.with_scene(next_scene)
-                .with_protocol(ProtocolState::Applying {
-                    shared,
-                    observation,
-                    proposal: Box::new(proposal),
-                }),
-        )
+        self.try_map_protocol(|protocol| match protocol {
+            ProtocolState::Planning {
+                shared,
+                observation,
+                proposal_id: active_proposal_id,
+            } if active_proposal_id == proposal_id => Some(ProtocolState::Applying {
+                shared,
+                observation,
+                proposal: Box::new(proposal),
+            }),
+            _ => None,
+        })
+        .map(|state| state.with_scene(next_scene))
     }
 }

@@ -393,10 +393,10 @@ fn draw_realization_target_projection(
 pub(super) fn apply_render_action(
     namespace_id: u32,
     patch: &ScenePatch,
-    realization: RealizationPlan,
+    realization: &RealizationPlan,
     render_side_effects: RenderSideEffects,
 ) -> std::result::Result<RenderExecutionMetrics, ApplyRenderActionError> {
-    let realization_summary = realization_plan_summary(&realization);
+    let realization_summary = realization_plan_summary(realization);
     let patch_summary = scene_patch_summary(patch);
     let side_effects_summary = render_side_effects_summary(render_side_effects);
     trace_lazy(|| {
@@ -629,13 +629,9 @@ mod tests {
     #[test]
     fn clear_realization_accepts_noop_patch_basis() {
         let patch = ScenePatch::derive(PatchBasis::new(None, None));
+        let realization = RealizationPlan::Clear(RealizationClear::new(1));
 
-        let result = apply_render_action(
-            0,
-            &patch,
-            RealizationPlan::Clear(RealizationClear::new(1)),
-            RenderSideEffects::default(),
-        );
+        let result = apply_render_action(0, &patch, &realization, RenderSideEffects::default());
 
         assert!(result.is_ok());
     }

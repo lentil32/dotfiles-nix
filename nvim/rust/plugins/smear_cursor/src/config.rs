@@ -2,6 +2,7 @@ use crate::types::{BASE_TIME_INTERVAL, StaticRenderConfig};
 #[cfg(test)]
 use nvim_utils::mode::{is_cmdline_mode, is_terminal_like_mode};
 use nvim_utils::mode::{is_insert_like_mode, is_replace_like_mode};
+use std::sync::Arc;
 
 pub(crate) const DEFAULT_ANIMATION_FPS: f64 = 144.0;
 pub(crate) const DEFAULT_BLOCK_ASPECT_RATIO: f64 = 2.0;
@@ -57,7 +58,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) cross_window_bridge_strength_scale: f64,
     pub(crate) max_kept_windows: usize,
     pub(crate) windows_zindex: u32,
-    pub(crate) filetypes_disabled: Vec<String>,
+    pub(crate) filetypes_disabled: Arc<[String]>,
     pub(crate) logging_level: i64,
     pub(crate) cursor_color: Option<String>,
     pub(crate) cursor_color_insert_mode: Option<String>,
@@ -197,7 +198,7 @@ impl Default for RuntimeConfig {
             cross_window_bridge_strength_scale: 1.0,
             max_kept_windows: 384,
             windows_zindex: 300,
-            filetypes_disabled: Vec::new(),
+            filetypes_disabled: Arc::default(),
             logging_level: 2,
             cursor_color: None,
             cursor_color_insert_mode: None,

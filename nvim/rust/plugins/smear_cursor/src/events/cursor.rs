@@ -22,11 +22,15 @@ fn dictionary_i64_field(dict: &Dictionary, context: &str, field: &str) -> Result
         .transpose()
 }
 
-fn parse_screenpos_cell(screenpos: &Object) -> Result<Option<ScreenCell>> {
-    let dict = Dictionary::from_object(screenpos.clone())
-        .map_err(|_| nvim_oxi::api::Error::Other("screenpos returned invalid dictionary".into()))?;
-    let row = dictionary_i64_field(&dict, "screenpos", "row")?;
-    let col = dictionary_i64_field(&dict, "screenpos", "col")?;
+fn screenpos_dictionary(screenpos: Object) -> Result<Dictionary> {
+    Dictionary::from_object(screenpos).map_err(|_| {
+        nvim_oxi::api::Error::Other("screenpos returned invalid dictionary".into()).into()
+    })
+}
+
+fn parse_screenpos_cell_from_dict(dict: &Dictionary) -> Result<Option<ScreenCell>> {
+    let row = dictionary_i64_field(dict, "screenpos", "row")?;
+    let col = dictionary_i64_field(dict, "screenpos", "col")?;
 
     match (row, col) {
         (None, None) => Ok(None),
@@ -34,6 +38,10 @@ fn parse_screenpos_cell(screenpos: &Object) -> Result<Option<ScreenCell>> {
         (Some(_), Some(_)) => Ok(None),
         _ => Err(nvim_oxi::api::Error::Other("screenpos missing row/col".into()).into()),
     }
+}
+
+fn parse_screenpos_cell(screenpos: Object) -> Result<Option<ScreenCell>> {
+    parse_screenpos_cell_from_dict(&screenpos_dictionary(screenpos)?)
 }
 
 fn buffer_column_to_col1(column: usize) -> i64 {
@@ -47,7 +55,7 @@ fn screen_cell_to_point((row, col): ScreenCell) -> ScreenPoint {
 struct BufferCursorRead {
     line: usize,
     column: usize,
-    screenpos: Object,
+    screenpos_summary: String,
     raw_position: Option<ScreenPoint>,
     resolved_position: Option<ScreenPoint>,
 }
@@ -93,20 +101,18 @@ fn screenpos_field_summary(dict: &Dictionary, field: &str) -> String {
     }
 }
 
+fn screenpos_summary(dict: &Dictionary) -> String {
+    format!(
+        "row={} col={} endcol={} curscol={}",
+        screenpos_field_summary(dict, "row"),
+        screenpos_field_summary(dict, "col"),
+        screenpos_field_summary(dict, "endcol"),
+        screenpos_field_summary(dict, "curscol"),
+    )
+}
+
 fn trace_screen_cursor_read(window: &api::Window, buffer_read: &BufferCursorRead) {
     trace_lazy(|| {
-        let screenpos_summary = Dictionary::from_object(buffer_read.screenpos.clone())
-            .ok()
-            .map(|dict| {
-                format!(
-                    "row={} col={} endcol={} curscol={}",
-                    screenpos_field_summary(&dict, "row"),
-                    screenpos_field_summary(&dict, "col"),
-                    screenpos_field_summary(&dict, "endcol"),
-                    screenpos_field_summary(&dict, "curscol"),
-                )
-            })
-            .unwrap_or_else(|| "invalid".to_string());
         let buffer_summary = buffer_read
             .raw_position
             .map(|(row, col)| format!("{row:.1}:{col:.1}"))
@@ -127,7 +133,7 @@ fn trace_screen_cursor_read(window: &api::Window, buffer_read: &BufferCursorRead
             buffer_read.line,
             buffer_read.column,
             buffer_read.column.saturating_add(1),
-            screenpos_summary,
+            buffer_read.screenpos_summary,
             buffer_summary,
             conceal_adjusted_summary,
             selected_summary,
@@ -147,22 +153,20 @@ fn replacement_display_width(replacement: &str) -> Result<i64> {
 }
 
 fn parse_synconcealed(value: Object) -> Result<Option<(String, i64)>> {
-    let values = Vec::<Object>::from_object(value)
-        .map_err(|_| nvim_oxi::api::Error::Other("synconcealed returned invalid list".into()))?;
-    if values.len() != 3 {
-        return Err(nvim_oxi::api::Error::Other(
-            "synconcealed returned unexpected list length".into(),
-        )
-        .into());
-    }
+    let [concealed, replacement, match_id]: [Object; 3] = Vec::<Object>::from_object(value)
+        .map_err(|_| nvim_oxi::api::Error::Other("synconcealed returned invalid list".into()))?
+        .try_into()
+        .map_err(|_| {
+            nvim_oxi::api::Error::Other("synconcealed returned unexpected list length".into())
+        })?;
 
-    let concealed = i64_from_object("synconcealed[0]", values[0].clone())?;
+    let concealed = i64_from_object("synconcealed[0]", concealed)?;
     if concealed == 0 {
         return Ok(None);
     }
 
-    let replacement = string_from_object("synconcealed[1]", values[1].clone())?;
-    let match_id = i64_from_object("synconcealed[2]", values[2].clone())?;
+    let replacement = string_from_object("synconcealed[1]", replacement)?;
+    let match_id = i64_from_object("synconcealed[2]", match_id)?;
     Ok(Some((replacement, match_id)))
 }
 
@@ -224,7 +228,7 @@ fn resolve_buffer_cursor_position(
     let current_col1 = buffer_column_to_col1(column);
     let mut conceal_delta = 0_i64;
     for region in concealed_regions_before_cursor(line, column)? {
-        let start = parse_screenpos_cell(&screenpos_for_buffer_column(
+        let start = parse_screenpos_cell(screenpos_for_buffer_column(
             window,
             line,
             region.start_col1,
@@ -233,7 +237,7 @@ fn resolve_buffer_cursor_position(
         let end = if next_col1 == current_col1 {
             Some(raw_cell)
         } else {
-            parse_screenpos_cell(&screenpos_for_buffer_column(window, line, next_col1)?)?
+            parse_screenpos_cell(screenpos_for_buffer_column(window, line, next_col1)?)?
         };
 
         let (Some((start_row, start_col)), Some((end_row, end_col))) = (start, end) else {
@@ -257,10 +261,11 @@ fn resolve_buffer_cursor_position(
 fn buffer_screen_cursor_position(window: &api::Window) -> Result<BufferCursorRead> {
     let (line, column) = window.get_cursor()?;
     let screenpos = screenpos_for_buffer_column(window, line, buffer_column_to_col1(column))?;
+    let screenpos = screenpos_dictionary(screenpos)?;
     // Comment: `screenpos.curscol` points at the cursor landing column, which is the end of a
     // Tab expansion. The smear target needs the first screen cell that renders the buffer
     // character under the cursor, which is `screenpos.col`.
-    let raw_cell = parse_screenpos_cell(&screenpos)?;
+    let raw_cell = parse_screenpos_cell_from_dict(&screenpos)?;
     let raw_position = raw_cell.map(screen_cell_to_point);
     let resolved_position = raw_cell
         .map(|raw_cell| resolve_buffer_cursor_position(window, line, column, raw_cell))
@@ -268,7 +273,7 @@ fn buffer_screen_cursor_position(window: &api::Window) -> Result<BufferCursorRea
     Ok(BufferCursorRead {
         line,
         column,
-        screenpos,
+        screenpos_summary: screenpos_summary(&screenpos),
         raw_position,
         resolved_position,
     })
@@ -391,16 +396,16 @@ mod tests {
     #[test]
     fn parse_screenpos_cell_uses_first_screen_column() {
         let position =
-            parse_screenpos_cell(&screenpos_object(4, 3, 8, 8)).expect("screenpos should parse");
+            parse_screenpos_cell(screenpos_object(4, 3, 8, 8)).expect("screenpos should parse");
 
         assert_eq!(position, Some((4, 3)));
     }
 
     #[test]
     fn parse_screenpos_cell_returns_none_for_hidden_or_invalid_positions() {
-        let hidden = parse_screenpos_cell(&screenpos_object(0, 0, 0, 0))
+        let hidden = parse_screenpos_cell(screenpos_object(0, 0, 0, 0))
             .expect("hidden screenpos should parse");
-        let invalid = parse_screenpos_cell(&Object::from(Dictionary::new()))
+        let invalid = parse_screenpos_cell(Object::from(Dictionary::new()))
             .expect("empty screenpos dictionary should map to none");
 
         assert_eq!(hidden, None);
@@ -424,7 +429,7 @@ mod tests {
         let read = BufferCursorRead {
             line: 2,
             column: 37,
-            screenpos: screenpos_object(2, 38, 38, 38),
+            screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
             raw_position: Some((2.0, 38.0)),
             resolved_position: Some((2.0, 33.0)),
         };
@@ -439,7 +444,7 @@ mod tests {
         let read = BufferCursorRead {
             line: 2,
             column: 37,
-            screenpos: screenpos_object(2, 38, 38, 38),
+            screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
             raw_position: Some((2.0, 38.0)),
             resolved_position: Some((2.0, 38.0)),
         };

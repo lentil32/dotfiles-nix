@@ -112,7 +112,8 @@ fn release_unused_tab_windows(
             continue;
         }
 
-        if set_existing_window_config(&mut window, hide_config.clone()).is_err() {
+        if crate::draw::set_existing_floating_window_config_ref(&mut window, &hide_config).is_err()
+        {
             let _ = mark_cached_window_invalid(tab_windows, index);
             continue;
         }

@@ -80,7 +80,7 @@ impl Glyph {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CellOp {
     pub(crate) row: i64,
     pub(crate) col: i64,
