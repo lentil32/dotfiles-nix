@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -32,6 +32,9 @@ support = { path = "libs/support" }
 # External
 derive_more = { version = "2.1.1", features = ["display"] }
 nonempty = "0.12.0"
+nvim-oxi = { version = "0.6", features = ["neovim-0-11"] }
+proptest = "1.6"
+serde = "1.0"
 
 [workspace.lints.clippy]
 expect_used = "deny"

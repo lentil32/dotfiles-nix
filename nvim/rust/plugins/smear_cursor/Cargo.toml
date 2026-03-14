@@ -1,7 +1,8 @@
 [package]
 name = "rs_smear_cursor"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
@@ -10,10 +11,10 @@ crate-type = ["cdylib"]
 workspace = true
 
 [dependencies]
-nvim-oxi = { version = "0.6", features = ["neovim-0-11", "libuv"] }
+nvim-oxi = { workspace = true, features = ["libuv"] }
 nvim-oxi-utils = { workspace = true }
 nvim-utils = { workspace = true }
-serde = { version = "1.0", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-proptest = "1.6"
+proptest = { workspace = true }
