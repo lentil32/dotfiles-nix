@@ -70,13 +70,13 @@ fn is_dir(path: Option<String>) -> bool {
     path.as_deref().is_some_and(is_dir_path)
 }
 
-fn normalize_oil_target(path: Option<String>) -> Option<String> {
-    let path = path?.trim().to_string();
+fn normalize_oil_target(path: Option<&str>) -> Option<String> {
+    let path = path?.trim();
     if path.is_empty() {
         return None;
     }
 
-    let stripped = strip_known_prefixes(path.as_str()).trim();
+    let stripped = strip_known_prefixes(path).trim();
     if stripped.is_empty() {
         return None;
     }
@@ -280,7 +280,7 @@ fn patch_oil_parse_url() -> Result<()> {
 }
 
 fn open_oil(path: Option<String>) -> Result<()> {
-    let Some(path) = normalize_oil_target(path) else {
+    let Some(path) = normalize_oil_target(path.as_deref()) else {
         return Ok(());
     };
     if is_dir_path(path.as_str()) {
@@ -507,7 +507,7 @@ fn is_non_floating_window(win: &Window) -> bool {
 fn count_non_floating_windows_in_current_tab() -> Result<usize> {
     let tab = api::get_current_tabpage();
     let wins = tab.list_wins()?;
-    Ok(wins.filter(|win| is_non_floating_window(win)).count())
+    Ok(wins.filter(is_non_floating_window).count())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -576,20 +576,20 @@ mod tests {
     #[test]
     fn normalize_oil_target_rejects_empty_values() {
         assert_eq!(normalize_oil_target(None), None);
-        assert_eq!(normalize_oil_target(Some(String::new())), None);
-        assert_eq!(normalize_oil_target(Some("   ".to_string())), None);
-        assert_eq!(normalize_oil_target(Some("oil://".to_string())), None);
-        assert_eq!(normalize_oil_target(Some("file://".to_string())), None);
+        assert_eq!(normalize_oil_target(Some("")), None);
+        assert_eq!(normalize_oil_target(Some("   ")), None);
+        assert_eq!(normalize_oil_target(Some("oil://")), None);
+        assert_eq!(normalize_oil_target(Some("file://")), None);
     }
 
     #[test]
     fn normalize_oil_target_strips_known_uri_prefixes() {
         assert_eq!(
-            normalize_oil_target(Some("oil:///tmp/demo".to_string())),
+            normalize_oil_target(Some("oil:///tmp/demo")),
             Some("/tmp/demo".to_string())
         );
         assert_eq!(
-            normalize_oil_target(Some("file:///tmp/demo".to_string())),
+            normalize_oil_target(Some("file:///tmp/demo")),
             Some("/tmp/demo".to_string())
         );
     }
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn normalize_oil_target_keeps_regular_paths() {
         assert_eq!(
-            normalize_oil_target(Some(" ./src ".to_string())),
+            normalize_oil_target(Some(" ./src ")),
             Some("./src".to_string())
         );
     }

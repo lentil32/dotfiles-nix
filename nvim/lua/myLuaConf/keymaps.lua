@@ -210,16 +210,25 @@ function M.list()
       function()
         ---@module "oil.util"
         local oil_util = require("oil.util")
-        if oil_util.is_oil_bufnr(vim.api.nvim_get_current_buf()) then
-          local keys = vim.api.nvim_replace_termcodes("<BS>", true, false, true)
-          vim.api.nvim_feedkeys(keys, "m", false)
+        local oil = require("oil")
+        local cur_buf = vim.api.nvim_get_current_buf()
+        if oil_util.is_oil_bufnr(cur_buf) then
+          require("oil.actions").parent.callback()
           return
         end
-        local path = vim.fn.expand("%:p:h")
-        if path == "" then
-          path = vim.fn.getcwd()
+
+        if vim.bo[cur_buf].buftype == "terminal" or vim.bo[cur_buf].filetype == "snacks_terminal" then
+          -- Surprising: terminal buffer names are `term://...` command targets, not directory paths.
+          local snacks_terminal = vim.b[cur_buf].snacks_terminal
+          local cwd = type(snacks_terminal) == "table" and snacks_terminal.cwd or vim.fn.getcwd()
+          if cwd == nil or cwd == "" then
+            return
+          end
+          oil.open(cwd)
+          return
         end
-        oil.open_oil(path)
+
+        oil.open()
       end,
       desc = "Jump to directory (Oil)",
     },
