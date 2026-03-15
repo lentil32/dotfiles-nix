@@ -952,44 +952,21 @@ fn solve_pairwise_fallback(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     spatial_weight_q10: u32,
 ) -> BTreeMap<(i64, i64), DecodedCellState> {
-    let coords = cell_candidates.keys().copied().collect::<Vec<_>>();
-    let coord_set = coords.iter().copied().collect::<BTreeSet<_>>();
     let mut assignment = BTreeMap::<(i64, i64), Option<DecodedCellState>>::new();
-    for coord in &coords {
-        let state = cell_candidates
-            .get(coord)
-            .and_then(|candidates| candidates.first())
-            .and_then(|candidate| candidate.state);
-        assignment.insert(*coord, state);
+    for (&coord, candidates) in cell_candidates {
+        let state = candidates.first().and_then(|candidate| candidate.state);
+        assignment.insert(coord, state);
     }
 
-    let neighborhood = coords
-        .iter()
-        .copied()
-        .map(|coord| {
-            let candidates = [
+    for _ in 0..FALLBACK_ITERATIONS {
+        let mut changed = false;
+        for (&coord, candidates) in cell_candidates {
+            let neighbors = [
                 (coord.0 - 1, coord.1),
                 (coord.0 + 1, coord.1),
                 (coord.0, coord.1 - 1),
                 (coord.0, coord.1 + 1),
             ];
-            let neighbors = candidates
-                .into_iter()
-                .filter(|neighbor| coord_set.contains(neighbor))
-                .collect::<Vec<_>>();
-            (coord, neighbors)
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    for _ in 0..FALLBACK_ITERATIONS {
-        let mut changed = false;
-        for coord in &coords {
-            let Some(candidates) = cell_candidates.get(coord) else {
-                continue;
-            };
-            let neighbors = neighborhood
-                .get(coord)
-                .map_or(&[] as &[(i64, i64)], Vec::as_slice);
             let mut best = CellCandidate {
                 state: None,
                 unary_cost: u64::MAX,
@@ -997,8 +974,11 @@ fn solve_pairwise_fallback(
             let mut best_total = u64::MAX;
 
             for candidate in candidates.iter().copied() {
-                let pairwise = neighbors.iter().fold(0_u64, |acc, neighbor| {
-                    let neighbor_state = assignment.get(neighbor).copied().flatten();
+                let pairwise = neighbors.into_iter().fold(0_u64, |acc, neighbor| {
+                    if !cell_candidates.contains_key(&neighbor) {
+                        return acc;
+                    }
+                    let neighbor_state = assignment.get(&neighbor).copied().flatten();
                     let raw = spatial_distance(candidate.state, neighbor_state);
                     acc.saturating_add(scale_penalty(raw, spatial_weight_q10))
                 });
@@ -1012,10 +992,10 @@ fn solve_pairwise_fallback(
                 }
             }
 
-            let current = assignment.get(coord).copied().flatten();
+            let current = assignment.get(&coord).copied().flatten();
             if current != best.state {
                 changed = true;
-                assignment.insert(*coord, best.state);
+                assignment.insert(coord, best.state);
             }
         }
         if !changed {

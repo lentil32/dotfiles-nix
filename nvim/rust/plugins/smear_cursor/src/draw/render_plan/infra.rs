@@ -1,5 +1,6 @@
 use super::PARTICLE_ZINDEX_OFFSET;
 use crate::core::types::{ArcLenQ16, StepIndex, StrokeId};
+use crate::draw::BRAILLE_CODE_MIN;
 use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::types::{Point, RenderFrame, RenderStepSample};
 use std::cmp::Ordering;
@@ -68,17 +69,34 @@ pub(crate) enum HighlightRef {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Glyph {
     Static(&'static str),
+    Braille(u8),
 }
 
 impl Glyph {
     pub(crate) const BLOCK: Self = Self::Static("█");
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Static(value) => value,
+            Self::Braille(index) => match BRAILLE_GLYPHS.get(index.saturating_sub(1) as usize) {
+                Some(value) => value.as_ref(),
+                None => "",
+            },
         }
     }
 }
+
+// Comment: cache boxed braille strings once so `Glyph::Braille` can hand extmark writes a
+// stable `&str` without turning the lookup table into a process-lifetime leak.
+static BRAILLE_GLYPHS: LazyLock<Box<[Box<str>]>> = LazyLock::new(|| {
+    (1_u32..=255_u32)
+        .filter_map(|index| {
+            char::from_u32((BRAILLE_CODE_MIN as u32).saturating_add(index))
+                .map(|character| character.to_string().into_boxed_str())
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+});
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CellOp {

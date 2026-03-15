@@ -703,12 +703,12 @@ impl EffectExecutor for NeovimEffectExecutor {
             Effect::RequestProbe(payload) => {
                 let kind = payload.kind;
                 let started_at = Instant::now();
-                let result = super::handlers::execute_core_request_probe_effect(payload);
+                let result = super::handlers::execute_core_request_probe_effect(&payload);
                 record_probe_duration(kind, duration_to_micros(started_at.elapsed()));
                 Ok(result)
             }
             Effect::RequestRenderPlan(payload) => {
-                super::handlers::execute_core_request_render_plan_effect(*payload)
+                super::handlers::execute_core_request_render_plan_effect(payload.as_ref())
             }
             Effect::ApplyProposal(payload) => {
                 super::handlers::execute_core_apply_proposal_effect(*payload)

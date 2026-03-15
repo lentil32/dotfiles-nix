@@ -66,8 +66,8 @@ impl RuntimeState {
         self.animation_state.is_draining()
     }
 
-    pub(crate) fn pending_target(&self) -> Option<PendingTarget> {
-        self.transient.pending_target
+    pub(crate) fn pending_target(&self) -> Option<&PendingTarget> {
+        self.transient.pending_target.as_ref()
     }
 
     pub(crate) fn current_corners(&self) -> [Point; 4] {

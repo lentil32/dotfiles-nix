@@ -1,6 +1,6 @@
 use super::CURSOR_COLOR_LUAEVAL_EXPR;
 use super::logging::trace_lazy;
-use crate::lua::{i64_from_object, string_from_object};
+use crate::lua::{i64_from_object, i64_from_object_ref_with, string_from_object};
 use crate::types::Point;
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::conversion::FromObject;
@@ -16,10 +16,11 @@ pub(super) fn mode_string() -> String {
 
 fn dictionary_i64_field(dict: &Dictionary, context: &str, field: &str) -> Result<Option<i64>> {
     let field_key = NvimString::from(field);
-    dict.get(&field_key)
-        .cloned()
-        .map(|value| i64_from_object(&format!("{context}.{field}"), value))
-        .transpose()
+    let Some(value) = dict.get(&field_key) else {
+        return Ok(None);
+    };
+
+    i64_from_object_ref_with(value, || format!("{context}.{field}")).map(Some)
 }
 
 fn screenpos_dictionary(screenpos: Object) -> Result<Dictionary> {
@@ -113,19 +114,20 @@ fn screenpos_summary(dict: &Dictionary) -> String {
 
 fn trace_screen_cursor_read(window: &api::Window, buffer_read: &BufferCursorRead) {
     trace_lazy(|| {
-        let buffer_summary = buffer_read
-            .raw_position
-            .map(|(row, col)| format!("{row:.1}:{col:.1}"))
-            .unwrap_or_else(|| "none".to_string());
-        let conceal_adjusted_summary = buffer_read
-            .conceal_adjusted_position()
-            .map(|(row, col)| format!("{row:.1}:{col:.1}"))
-            .unwrap_or_else(|| "none".to_string());
+        let buffer_summary = buffer_read.raw_position.map_or_else(
+            || "none".to_string(),
+            |(row, col)| format!("{row:.1}:{col:.1}"),
+        );
+        let conceal_adjusted_summary = buffer_read.conceal_adjusted_position().map_or_else(
+            || "none".to_string(),
+            |(row, col)| format!("{row:.1}:{col:.1}"),
+        );
         let selected = buffer_read.selected_position();
         let selected_source = buffer_read.selected_source();
-        let selected_summary = selected
-            .map(|(row, col)| format!("{row:.1}:{col:.1}"))
-            .unwrap_or_else(|| "none".to_string());
+        let selected_summary = selected.map_or_else(
+            || "none".to_string(),
+            |(row, col)| format!("{row:.1}:{col:.1}"),
+        );
 
         format!(
             "cursor_read win={} cursor=line:{} byte_col0={} screenpos_arg_col={} screenpos=({}) buffer_parsed={} conceal_adjusted={} selected={} selected_source={}",

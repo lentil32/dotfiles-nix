@@ -479,6 +479,16 @@ fn refresh_highlight_palette_for_spec(
         .normal_background
         .unwrap_or(resolved_palette.transparent_fallback);
     let group_names = highlight_group_names(color_levels);
+    let inverted_foreground = rgb_to_hex(
+        resolved_palette
+            .normal_background
+            .unwrap_or(resolved_palette.transparent_fallback),
+    );
+    let inverted_ctermfg = spec.cterm_bg().or_else(|| {
+        resolved_palette
+            .cterm_cursor_colors
+            .and_then(|colors| colors.first().copied())
+    });
 
     for level in 1..=color_levels {
         let level_ref = HighlightLevel::from_raw_clamped(level);
@@ -489,11 +499,6 @@ fn refresh_highlight_palette_for_spec(
             opacity,
         );
         let blended_hex = rgb_to_hex(blended);
-        let inverted_foreground = rgb_to_hex(
-            resolved_palette
-                .normal_background
-                .unwrap_or(resolved_palette.transparent_fallback),
-        );
         let cterm_level_color = cterm_color_at_level(resolved_palette.cterm_cursor_colors, level);
         let hl_group = group_names.normal_name(level_ref);
         let inverted_hl_group = group_names.inverted_name(level_ref);
@@ -507,11 +512,6 @@ fn refresh_highlight_palette_for_spec(
             None,
         )?;
 
-        let inverted_ctermfg = spec.cterm_bg().or_else(|| {
-            resolved_palette
-                .cterm_cursor_colors
-                .and_then(|colors| colors.first().copied())
-        });
         set_highlight_group(
             inverted_hl_group,
             inverted_foreground.as_str(),

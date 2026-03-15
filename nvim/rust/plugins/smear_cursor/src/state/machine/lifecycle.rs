@@ -69,10 +69,10 @@ impl RuntimeState {
     ) {
         self.transient.drain_steps_remaining = 0;
         let delay_ms = self.config.delay_event_to_smear.max(0.0);
-        let pending = match self.transient.pending_target {
+        let pending = match self.transient.pending_target.as_ref() {
             Some(existing) if existing.matches_observation(position, location) => PendingTarget {
                 settle_deadline_ms: now_ms + delay_ms,
-                ..existing
+                ..existing.clone()
             },
             _ => PendingTarget::new(position, location, now_ms, now_ms + delay_ms),
         };
@@ -88,7 +88,7 @@ impl RuntimeState {
         observed_position: Point,
         observed_location: CursorLocation,
     ) -> bool {
-        let Some(pending) = self.transient.pending_target else {
+        let Some(pending) = self.transient.pending_target.as_ref() else {
             return false;
         };
         pending.matches_observation(observed_position, observed_location)
@@ -155,6 +155,7 @@ impl RuntimeState {
     pub(crate) fn settle_deadline_ms(&self) -> Option<f64> {
         self.transient
             .pending_target
+            .as_ref()
             .map(|pending| pending.settle_deadline_ms)
     }
 

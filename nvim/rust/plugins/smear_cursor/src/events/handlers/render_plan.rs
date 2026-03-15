@@ -5,7 +5,7 @@ use crate::core::reducer::build_planned_render;
 use nvim_oxi::Result;
 
 pub(crate) fn execute_core_request_render_plan_effect(
-    payload: RequestRenderPlanEffect,
+    payload: &RequestRenderPlanEffect,
 ) -> Result<Vec<CoreEvent>> {
     trace_lazy(|| {
         format!(

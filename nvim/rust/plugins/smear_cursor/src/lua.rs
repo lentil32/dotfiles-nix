@@ -3,16 +3,18 @@ use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Dictionary, Object, ObjectKind, Result, String as NvimString};
 use nvim_oxi_utils::Error as OxiError;
 
-fn to_nvim_error(err: OxiError) -> nvim_oxi::Error {
+fn to_nvim_error(err: &OxiError) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(err.to_string()).into()
 }
 
 pub(crate) fn invalid_key(key: &str, expected: &'static str) -> nvim_oxi::Error {
-    to_nvim_error(OxiError::invalid_value(key, expected))
+    let err = OxiError::invalid_value(key, expected);
+    to_nvim_error(&err)
 }
 
 pub(crate) fn missing_key(key: &str) -> nvim_oxi::Error {
-    to_nvim_error(OxiError::missing_key(key))
+    let err = OxiError::missing_key(key);
+    to_nvim_error(&err)
 }
 
 pub(crate) fn require_object(value: Option<Object>, key: &str) -> Result<Object> {
@@ -38,22 +40,38 @@ pub(crate) fn f64_from_object(key: &str, value: Object) -> Result<f64> {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Most object parse call sites own their Object already; the borrowed fast path lives in i64_from_object_ref_with"
+)]
 pub(crate) fn i64_from_object(key: &str, value: Object) -> Result<i64> {
+    i64_from_object_ref_with(&value, || key.to_owned())
+}
+
+pub(crate) fn i64_from_object_ref_with<K>(value: &Object, key: K) -> Result<i64>
+where
+    K: Fn() -> String,
+{
+    let invalid_integer = || {
+        let key = key();
+        invalid_key(&key, "integer")
+    };
+
     match value.kind() {
         ObjectKind::Integer | ObjectKind::Buffer | ObjectKind::Window | ObjectKind::TabPage => {
-            i64::from_object(value).map_err(|_| invalid_key(key, "integer"))
+            Ok(unsafe { value.as_integer_unchecked() })
         }
         ObjectKind::Float => {
-            let parsed = f64::from_object(value).map_err(|_| invalid_key(key, "integer"))?;
+            let parsed = unsafe { value.as_float_unchecked() };
             if parsed.is_finite() {
                 let rounded = parsed.round();
                 if (rounded - parsed).abs() <= EPSILON {
                     return Ok(rounded as i64);
                 }
             }
-            Err(invalid_key(key, "integer"))
+            Err(invalid_integer())
         }
-        _ => Err(invalid_key(key, "integer")),
+        _ => Err(invalid_integer()),
     }
 }
 

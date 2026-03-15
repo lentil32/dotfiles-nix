@@ -148,7 +148,7 @@ fn queue_external_demand(
 
 pub(super) fn reduce_external_demand_queued(
     state: &CoreState,
-    payload: ExternalDemandQueuedEvent,
+    payload: &ExternalDemandQueuedEvent,
 ) -> Transition {
     if state.needs_initialize() {
         return Transition::stay(state);
@@ -219,7 +219,10 @@ pub(super) fn reduce_observation_base_collected(
         return Transition::stay(state);
     }
 
-    let next_cursor = payload.basis.cursor_position().or(state.last_cursor());
+    let next_cursor = payload
+        .basis
+        .cursor_position()
+        .or_else(|| state.last_cursor());
     let probes = crate::core::state::ProbeSet::from_request(&payload.request);
     let next_observation =
         ObservationSnapshot::new(payload.request, payload.basis, probes, payload.motion);
@@ -400,7 +403,7 @@ fn complete_observation(state: CoreState, observation: ObservationSnapshot) -> T
     let next_cursor = observation
         .basis()
         .cursor_position()
-        .or(state.last_cursor());
+        .or_else(|| state.last_cursor());
     let ready = reset_recovery_attempt(
         state
             .with_last_cursor(next_cursor)
@@ -409,14 +412,14 @@ fn complete_observation(state: CoreState, observation: ObservationSnapshot) -> T
     plan_ready_state(ready, observation, observed_at)
 }
 
-pub(super) fn reduce_probe_reported(state: &CoreState, payload: ProbeReportedEvent) -> Transition {
+pub(super) fn reduce_probe_reported(state: &CoreState, payload: &ProbeReportedEvent) -> Transition {
     let Some(active_request) = state.active_observation_request().cloned() else {
         return Transition::stay(state);
     };
     let Some(active_observation) = state.observation().cloned() else {
         return Transition::stay(state);
     };
-    let Some(resolution) = apply_probe_report(&active_observation, &payload) else {
+    let Some(resolution) = apply_probe_report(&active_observation, payload) else {
         return Transition::stay(state);
     };
 

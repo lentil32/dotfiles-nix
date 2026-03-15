@@ -89,7 +89,7 @@ pub(crate) struct Particle {
     pub(crate) lifetime: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RenderStepSample {
     pub(crate) corners: [Point; 4],
     pub(crate) dt_ms: f64,

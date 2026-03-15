@@ -265,8 +265,8 @@ fn on_key_event() -> Result<()> {
     dispatch_ingress(Ingress::KeyObserved)
 }
 
-pub(crate) fn on_autocmd_event(event: String) -> Result<()> {
-    dispatch_ingress(Ingress::Autocmd(parse_autocmd_ingress(&event)))
+pub(crate) fn on_autocmd_event(event: &str) -> Result<()> {
+    dispatch_ingress(Ingress::Autocmd(parse_autocmd_ingress(event)))
 }
 
 #[cfg(test)]

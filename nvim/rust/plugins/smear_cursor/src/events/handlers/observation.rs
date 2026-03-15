@@ -242,10 +242,10 @@ fn batch_screen_char_codes(cells: &[ScreenCell]) -> Option<Vec<i64>> {
         .collect()
 }
 
-fn collect_cursor_color_report(payload: RequestProbeEffect) -> CoreEvent {
+fn collect_cursor_color_report(payload: &RequestProbeEffect) -> CoreEvent {
     let Some(expected_witness) = payload.observation_basis.cursor_color_witness() else {
         warn("cursor color probe missing witness");
-        return cursor_color_failed_event(&payload);
+        return cursor_color_failed_event(payload);
     };
     let current_mode = mode_string();
     let current_position =
@@ -253,7 +253,7 @@ fn collect_cursor_color_report(payload: RequestProbeEffect) -> CoreEvent {
             Ok(position) => position,
             Err(err) => {
                 warn(&format!("cursor color probe failed: {err}"));
-                return cursor_color_failed_event(&payload);
+                return cursor_color_failed_event(payload);
             }
         };
     let current_witness = match current_cursor_color_probe_witness(&current_mode, current_position)
@@ -261,17 +261,17 @@ fn collect_cursor_color_report(payload: RequestProbeEffect) -> CoreEvent {
         Ok(witness) => witness,
         Err(err) => {
             warn(&format!("cursor color probe witness read failed: {err}"));
-            return cursor_color_failed_event(&payload);
+            return cursor_color_failed_event(payload);
         }
     };
 
     if &current_witness != expected_witness {
-        return cursor_color_ready_event(&payload, ProbeReuse::RefreshRequired, None);
+        return cursor_color_ready_event(payload, ProbeReuse::RefreshRequired, None);
     }
 
     match cached_cursor_color_sample(expected_witness) {
         CursorColorCacheLookup::Hit(sample) => {
-            return cursor_color_ready_event(&payload, ProbeReuse::Exact, sample);
+            return cursor_color_ready_event(payload, ProbeReuse::Exact, sample);
         }
         CursorColorCacheLookup::Miss => {}
     }
@@ -280,16 +280,16 @@ fn collect_cursor_color_report(payload: RequestProbeEffect) -> CoreEvent {
         Ok(sample) => {
             let sample = sample.map(CursorColorSample::new);
             store_cursor_color_sample(current_witness, sample.clone());
-            cursor_color_ready_event(&payload, ProbeReuse::Exact, sample)
+            cursor_color_ready_event(payload, ProbeReuse::Exact, sample)
         }
         Err(err) => {
             warn(&format!("cursor color sampling failed: {err}"));
-            cursor_color_failed_event(&payload)
+            cursor_color_failed_event(payload)
         }
     }
 }
 
-fn collect_background_report(payload: RequestProbeEffect) -> CoreEvent {
+fn collect_background_report(payload: &RequestProbeEffect) -> CoreEvent {
     let current_viewport = match current_viewport_snapshot() {
         Ok(viewport) => viewport,
         Err(err) => {
@@ -356,7 +356,7 @@ pub(crate) fn execute_core_request_observation_base_effect(
     )])
 }
 
-pub(crate) fn execute_core_request_probe_effect(payload: RequestProbeEffect) -> Vec<CoreEvent> {
+pub(crate) fn execute_core_request_probe_effect(payload: &RequestProbeEffect) -> Vec<CoreEvent> {
     let event = match payload.kind {
         ProbeKind::CursorColor => collect_cursor_color_report(payload),
         ProbeKind::Background => collect_background_report(payload),

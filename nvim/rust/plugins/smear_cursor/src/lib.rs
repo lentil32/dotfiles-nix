@@ -21,14 +21,13 @@ fn guard_plugin_call<T>(
     function_name: &'static str,
     callback: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
-        result
-    } else {
+    let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) else {
         events::record_effect_failure(EffectFailureSource::PluginEntry, function_name);
-        Err(plugin_error(format!(
+        return Err(plugin_error(format!(
             "rs_smear_cursor.{function_name} panicked"
-        )))
-    }
+        )));
+    };
+    result
 }
 
 #[nvim_oxi::plugin]
@@ -51,7 +50,8 @@ fn rs_smear_cursor() -> Dictionary {
         "setup",
         Function::<Option<Dictionary>, ()>::from_fn(|opts| {
             guard_plugin_call("setup", || {
-                events::setup(opts.unwrap_or_else(Dictionary::new))
+                let opts = opts.unwrap_or_else(Dictionary::new);
+                events::setup(&opts)
             })
         }),
     );
@@ -76,7 +76,7 @@ fn rs_smear_cursor() -> Dictionary {
     api.insert(
         "on_autocmd",
         Function::<String, ()>::from_fn(|event| {
-            guard_plugin_call("on_autocmd", || events::on_autocmd_event(event))
+            guard_plugin_call("on_autocmd", || events::on_autocmd_event(&event))
         }),
     );
     api.insert(

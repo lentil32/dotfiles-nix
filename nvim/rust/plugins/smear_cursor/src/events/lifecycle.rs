@@ -114,7 +114,7 @@ fn setup_user_command() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn setup(opts: Dictionary) -> Result<()> {
+pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
     let host_bridge = verify_host_bridge()?;
     let namespace_id = ensure_namespace_id();
     ensure_hideable_guicursor();
@@ -144,7 +144,7 @@ pub(crate) fn setup(opts: Dictionary) -> Result<()> {
         if !has_enabled_option {
             runtime.set_enabled(true);
         }
-        let outcome = match apply_runtime_options(&mut runtime, &opts) {
+        let outcome = match apply_runtime_options(&mut runtime, opts) {
             Ok(()) => {
                 set_log_level(runtime.config.logging_level);
                 runtime.clear_runtime_state();

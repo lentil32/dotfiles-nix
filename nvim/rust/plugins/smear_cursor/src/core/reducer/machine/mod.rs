@@ -29,12 +29,12 @@ use timers::{reduce_timer_fired_with_token, reduce_timer_lost_with_token};
 pub(crate) fn reduce(state: &CoreState, event: Event) -> Transition {
     match event {
         Event::Initialize(payload) => reduce_initialize(state, payload),
-        Event::ExternalDemandQueued(payload) => reduce_external_demand_queued(state, payload),
+        Event::ExternalDemandQueued(payload) => reduce_external_demand_queued(state, &payload),
         Event::KeyFallbackQueued(payload) => reduce_key_fallback_queued(state, payload),
         Event::ObservationBaseCollected(payload) => {
             reduce_observation_base_collected(state, payload)
         }
-        Event::ProbeReported(payload) => reduce_probe_reported(state, payload),
+        Event::ProbeReported(payload) => reduce_probe_reported(state, &payload),
         Event::RenderPlanComputed(payload) => reduce_render_plan_computed(state, payload),
         Event::RenderPlanFailed(payload) => reduce_render_plan_failed(state, payload),
         Event::ApplyReported(payload) => reduce_apply_reported(state, payload),

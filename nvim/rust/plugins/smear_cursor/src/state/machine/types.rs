@@ -106,7 +106,7 @@ pub(crate) enum JumpCuePhase {
     Fade,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct JumpCue {
     pub(crate) cue_id: u64,
     pub(crate) epoch: u64,
@@ -118,7 +118,7 @@ pub(crate) struct JumpCue {
     pub(crate) phase: JumpCuePhase,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PendingTarget {
     pub(crate) position: Point,
     pub(crate) cursor_location: CursorLocation,
@@ -142,7 +142,7 @@ impl PendingTarget {
     }
 
     pub(super) fn matches_observation(
-        self,
+        &self,
         position: Point,
         cursor_location: CursorLocation,
     ) -> bool {

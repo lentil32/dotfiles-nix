@@ -8,12 +8,12 @@ use crate::core::types::{
     CursorPosition, Millis, ObservationId, ProbeRequestId, ProposalId, TimerToken,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct InitializeEvent {
     pub(crate) observed_at: Millis,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct ExternalDemandQueuedEvent {
     pub(crate) kind: ExternalDemandKind,
     pub(crate) observed_at: Millis,
@@ -21,7 +21,7 @@ pub(crate) struct ExternalDemandQueuedEvent {
     pub(crate) ingress_cursor_presentation: Option<IngressCursorPresentationRequest>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct KeyFallbackQueuedEvent {
     pub(crate) observed_at: Millis,
     pub(crate) due_at: Millis,
@@ -66,7 +66,7 @@ pub(crate) enum ProbeReportedEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ApplyReport {
     AppliedFully {
         proposal_id: ProposalId,
@@ -94,7 +94,7 @@ pub(crate) struct RenderPlanComputedEvent {
     pub(crate) observed_at: Millis,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct RenderPlanFailedEvent {
     pub(crate) proposal_id: ProposalId,
     pub(crate) observed_at: Millis,
@@ -106,20 +106,20 @@ pub(crate) enum RenderCleanupAppliedAction {
     HardPurged,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct RenderCleanupAppliedEvent {
     pub(crate) observed_at: Millis,
     pub(crate) action: RenderCleanupAppliedAction,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TimerFiredWithTokenEvent {
     pub(crate) kind: TimerKind,
     pub(crate) token: TimerToken,
     pub(crate) observed_at: Millis,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TimerLostWithTokenEvent {
     pub(crate) kind: TimerKind,
     pub(crate) token: TimerToken,
@@ -133,7 +133,7 @@ pub(crate) enum EffectFailureSource {
     ScheduledCallback,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct EffectFailedEvent {
     pub(crate) proposal_id: Option<ProposalId>,
     pub(crate) observed_at: Millis,

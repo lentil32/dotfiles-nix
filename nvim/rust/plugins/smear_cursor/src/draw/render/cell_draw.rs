@@ -1,16 +1,5 @@
-use super::super::BRAILLE_CODE_MIN;
 use super::{Glyph, HighlightLevel, HighlightRef, PlanResources};
 use crate::octant_chars::OCTANT_CHARACTERS;
-use std::sync::LazyLock;
-
-static BRAILLE_GLYPHS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    (1_u32..=255_u32)
-        .filter_map(|index| {
-            char::from_u32((BRAILLE_CODE_MIN as u32).saturating_add(index))
-                .map(|character| Box::leak(character.to_string().into_boxed_str()) as &'static str)
-        })
-        .collect()
-});
 
 pub(super) fn draw_braille_character(
     resources: &mut PlanResources<'_>,
@@ -34,7 +23,7 @@ pub(super) fn draw_braille_character(
         return false;
     }
 
-    let Some(character) = BRAILLE_GLYPHS.get(braille_index.saturating_sub(1)).copied() else {
+    let Ok(character) = u8::try_from(braille_index) else {
         return false;
     };
 
@@ -42,7 +31,7 @@ pub(super) fn draw_braille_character(
         row,
         col,
         zindex,
-        Glyph::Static(character),
+        Glyph::Braille(character),
         HighlightRef::Normal(level),
         requires_background_probe,
     )
