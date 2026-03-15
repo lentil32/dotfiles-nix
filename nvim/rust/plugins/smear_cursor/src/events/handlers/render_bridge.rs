@@ -25,7 +25,20 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
     });
     let apply_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let apply_started_ms = now_ms();
-        let namespace_id = ensure_namespace_id();
+        let namespace_id = match ensure_namespace_id() {
+            Ok(namespace_id) => namespace_id,
+            Err(err) => {
+                warn(&format!(
+                    "engine state re-entered while resolving render namespace; applying typed failure: {err}"
+                ));
+                return CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
+                    proposal_id,
+                    reason: ApplyFailureKind::ShellError,
+                    divergence: RealizationDivergence::ShellStateUnknown,
+                    observed_at,
+                });
+            }
+        };
 
         if let Some(failure) = proposal.failure_reason() {
             return CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
@@ -85,17 +98,29 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
                 })
             }
             Err(err) => {
-                let reason = match err {
-                    ApplyRenderActionError::ViewportDrift => ApplyFailureKind::ViewportDrift,
+                let (reason, divergence) = match err {
+                    ApplyRenderActionError::ViewportDrift => (
+                        ApplyFailureKind::ViewportDrift,
+                        RealizationDivergence::ShellStateUnknown,
+                    ),
                     ApplyRenderActionError::Shell(error) => {
                         warn(&format!("core render apply failed: {error}"));
-                        ApplyFailureKind::ShellError
+                        (
+                            ApplyFailureKind::ShellError,
+                            RealizationDivergence::ShellStateUnknown,
+                        )
+                    }
+                    ApplyRenderActionError::FailureProposalReachedShell(failure) => {
+                        warn(
+                            "failure proposal reached render shell apply; preserving typed failure",
+                        );
+                        (failure.reason(), failure.divergence())
                     }
                 };
                 CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
                     proposal_id,
                     reason,
-                    divergence: RealizationDivergence::ShellStateUnknown,
+                    divergence,
                     observed_at,
                 })
             }

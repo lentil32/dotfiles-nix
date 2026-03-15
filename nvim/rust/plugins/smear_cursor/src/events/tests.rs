@@ -24,7 +24,6 @@ mod render_cleanup_delay_policy {
         let config = RuntimeConfig {
             time_interval: 0.0,
             delay_event_to_smear: 0.0,
-            delay_after_key: 0.0,
             ..RuntimeConfig::default()
         };
 
@@ -39,11 +38,10 @@ mod render_cleanup_delay_policy {
         let config = RuntimeConfig {
             time_interval: 160.0,
             delay_event_to_smear: 40.0,
-            delay_after_key: 20.0,
             ..RuntimeConfig::default()
         };
 
-        assert_eq!(render_cleanup_delay_ms(&config), 220);
+        assert_eq!(render_cleanup_delay_ms(&config), 200);
     }
 
     #[test]
@@ -51,13 +49,12 @@ mod render_cleanup_delay_policy {
         let config = RuntimeConfig {
             time_interval: 160.0,
             delay_event_to_smear: 40.0,
-            delay_after_key: 20.0,
             ..RuntimeConfig::default()
         };
 
         assert_eq!(
             render_hard_cleanup_delay_ms(&config),
-            (220 * RENDER_HARD_PURGE_DELAY_MULTIPLIER).max(MIN_RENDER_HARD_PURGE_DELAY_MS)
+            (200 * RENDER_HARD_PURGE_DELAY_MULTIPLIER).max(MIN_RENDER_HARD_PURGE_DELAY_MS)
         );
     }
 
@@ -66,7 +63,6 @@ mod render_cleanup_delay_policy {
         let config = RuntimeConfig {
             time_interval: 0.0,
             delay_event_to_smear: 0.0,
-            delay_after_key: 0.0,
             ..RuntimeConfig::default()
         };
 
@@ -77,10 +73,8 @@ mod render_cleanup_delay_policy {
     }
 }
 
-mod event_loop_state_and_key_fallback_policy {
+mod event_loop_state_metrics {
     use super::super::event_loop::EventLoopState;
-    use super::super::handlers::{KeyEventAction, decide_key_event_action};
-    use super::super::policy::BufferEventPolicy;
 
     fn metrics_after(
         record: impl FnOnce(&mut EventLoopState),
@@ -112,21 +106,6 @@ mod event_loop_state_and_key_fallback_policy {
     }
 
     #[test]
-    fn key_fallback_decision_uses_buffer_policy_and_debounced_delay_only() {
-        let action_enabled = decide_key_event_action(BufferEventPolicy::Normal, 17);
-        assert_eq!(
-            action_enabled,
-            KeyEventAction::QueueKeyFallback { delay_ms: 17 }
-        );
-    }
-
-    #[test]
-    fn key_fallback_zero_delay_still_schedules_post_key_timer() {
-        let action = decide_key_event_action(BufferEventPolicy::Normal, 0);
-        assert_eq!(action, KeyEventAction::QueueKeyFallback { delay_ms: 1 });
-    }
-
-    #[test]
     fn event_loop_state_counts_each_received_ingress() {
         let metrics = metrics_after(|state| {
             state.record_ingress_received();
@@ -137,37 +116,37 @@ mod event_loop_state_and_key_fallback_policy {
 
     #[test]
     fn event_loop_state_counts_each_applied_ingress() {
-        let metrics = metrics_after(|state| state.record_ingress_applied());
+        let metrics = metrics_after(EventLoopState::record_ingress_applied);
         assert_eq!(metrics.ingress_applied, 1);
     }
 
     #[test]
     fn event_loop_state_counts_each_dropped_ingress() {
-        let metrics = metrics_after(|state| state.record_ingress_dropped());
+        let metrics = metrics_after(EventLoopState::record_ingress_dropped);
         assert_eq!(metrics.ingress_dropped, 1);
     }
 
     #[test]
     fn event_loop_state_counts_each_coalesced_ingress() {
-        let metrics = metrics_after(|state| state.record_ingress_coalesced());
+        let metrics = metrics_after(EventLoopState::record_ingress_coalesced);
         assert_eq!(metrics.ingress_coalesced, 1);
     }
 
     #[test]
     fn event_loop_state_counts_each_executed_observation_request() {
-        let metrics = metrics_after(|state| state.record_observation_request_executed());
+        let metrics = metrics_after(EventLoopState::record_observation_request_executed);
         assert_eq!(metrics.observation_requests_executed, 1);
     }
 
     #[test]
     fn event_loop_state_counts_each_degraded_draw_application() {
-        let metrics = metrics_after(|state| state.record_degraded_draw_application());
+        let metrics = metrics_after(EventLoopState::record_degraded_draw_application);
         assert_eq!(metrics.degraded_draw_applications, 1);
     }
 
     #[test]
     fn event_loop_state_counts_each_stale_token_event() {
-        let metrics = metrics_after(|state| state.record_stale_token_event());
+        let metrics = metrics_after(EventLoopState::record_stale_token_event);
         assert_eq!(metrics.stale_token_events, 1);
     }
 }
@@ -658,10 +637,9 @@ mod buffer_event_policy {
     use crate::types::ScreenCell;
 
     #[test]
-    fn normal_policy_enables_key_fallback_and_explicit_ingress_prepaint() {
+    fn normal_policy_allows_explicit_ingress_prepaint() {
         let policy = BufferEventPolicy::from_buffer_metadata("terminal", true, 1, 0.0);
         let cell = ScreenCell::new(3, 7).expect("valid test cell");
-        assert!(policy.use_key_fallback());
         assert_eq!(
             policy.ingress_cursor_presentation_policy(IngressCursorPresentationContext::new(
                 true,
@@ -712,6 +690,7 @@ mod handler_decisions {
     };
     use super::super::ingress::AutocmdIngress;
     use crate::core::runtime_reducer::EventSource;
+    use crate::core::state::SemanticEvent;
     use crate::state::{CursorLocation, CursorShape, RuntimeState};
     use crate::types::Point;
 
@@ -751,15 +730,15 @@ mod handler_decisions {
     }
 
     #[test]
-    fn mode_changed_autocmd_does_not_request_observation() {
-        assert!(!should_request_observation_for_autocmd(
+    fn mode_changed_autocmd_requests_observation() {
+        assert!(should_request_observation_for_autocmd(
             AutocmdIngress::ModeChanged
         ));
     }
 
     #[test]
-    fn buf_enter_autocmd_does_not_request_observation() {
-        assert!(!should_request_observation_for_autocmd(
+    fn buf_enter_autocmd_requests_observation() {
+        assert!(should_request_observation_for_autocmd(
             AutocmdIngress::BufEnter
         ));
     }
@@ -797,6 +776,7 @@ mod handler_decisions {
         let source = select_core_event_source(
             "n",
             &state,
+            SemanticEvent::FrameCommitted,
             Some(Point {
                 row: 10.0,
                 col: 20.0,
@@ -812,6 +792,7 @@ mod handler_decisions {
         let source = select_core_event_source(
             "n",
             &state,
+            SemanticEvent::FrameCommitted,
             Some(Point {
                 row: 18.0,
                 col: 28.0,
@@ -827,6 +808,7 @@ mod handler_decisions {
         let source = select_core_event_source(
             "n",
             &state,
+            SemanticEvent::FrameCommitted,
             Some(Point {
                 row: 14.0,
                 col: 26.0,
@@ -842,6 +824,7 @@ mod handler_decisions {
         let source = select_core_event_source(
             "n",
             &state,
+            SemanticEvent::ViewportOrWindowMoved,
             Some(Point {
                 row: 14.0,
                 col: 26.0,
@@ -852,11 +835,28 @@ mod handler_decisions {
     }
 
     #[test]
+    fn select_core_event_source_uses_external_for_text_mutation_retarget() {
+        let state = animating_state();
+        let source = select_core_event_source(
+            "i",
+            &state,
+            SemanticEvent::TextMutatedAtCursorContext,
+            Some(Point {
+                row: 14.0,
+                col: 26.0,
+            }),
+            &CursorLocation::new(1, 1, 1, 12),
+        );
+        assert_eq!(source, EventSource::External);
+    }
+
+    #[test]
     fn select_core_event_source_uses_external_when_location_changes_without_target_delta() {
         let state = initialized_state();
         let source = select_core_event_source(
             "n",
             &state,
+            SemanticEvent::ViewportOrWindowMoved,
             Some(Point {
                 row: 10.0,
                 col: 20.0,
@@ -872,6 +872,7 @@ mod handler_decisions {
         let source = select_core_event_source(
             "n",
             &state,
+            SemanticEvent::FrameCommitted,
             Some(Point {
                 row: 10.0,
                 col: 20.0,

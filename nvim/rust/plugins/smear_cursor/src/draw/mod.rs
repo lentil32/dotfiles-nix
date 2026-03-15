@@ -254,12 +254,26 @@ pub(crate) fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
 }
 
 fn take_render_tabs() -> HashMap<i32, window_pool::TabWindows> {
+    // Detach the tracked tabs before mutating them so any later shell work runs after the
+    // RefCell borrow is released. Re-entrant draw recovery should operate on detached state.
     DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().render_tabs))
 }
 
 fn restore_render_tabs(render_tabs: HashMap<i32, window_pool::TabWindows>) {
     DRAW_CONTEXT.with(|context| {
         context.borrow_mut().render_tabs = render_tabs;
+    });
+}
+
+fn take_prepaint_by_tab() -> HashMap<i32, PrepaintOverlay> {
+    // Detach the tracked overlays before mutating them so any later shell work runs after the
+    // RefCell borrow is released. Re-entrant draw recovery should operate on detached state.
+    DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().prepaint_by_tab))
+}
+
+fn restore_prepaint_by_tab(prepaint_by_tab: HashMap<i32, PrepaintOverlay>) {
+    DRAW_CONTEXT.with(|context| {
+        context.borrow_mut().prepaint_by_tab = prepaint_by_tab;
     });
 }
 
@@ -278,19 +292,16 @@ fn with_render_tabs<R>(mutator: impl FnOnce(&mut HashMap<i32, window_pool::TabWi
 }
 
 fn with_prepaint_by_tab<R>(mutator: impl FnOnce(&mut HashMap<i32, PrepaintOverlay>) -> R) -> R {
-    let mut prepaint_by_tab =
-        DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().prepaint_by_tab));
+    // Prepaint overlays follow the same detach-mutate-restore pattern as render tabs so shell
+    // callbacks never run while the DRAW_CONTEXT RefCell itself is mutably borrowed.
+    let mut prepaint_by_tab = take_prepaint_by_tab();
     match catch_unwind(AssertUnwindSafe(|| mutator(&mut prepaint_by_tab))) {
         Ok(output) => {
-            DRAW_CONTEXT.with(|context| {
-                context.borrow_mut().prepaint_by_tab = prepaint_by_tab;
-            });
+            restore_prepaint_by_tab(prepaint_by_tab);
             output
         }
         Err(panic_payload) => {
-            DRAW_CONTEXT.with(|context| {
-                context.borrow_mut().prepaint_by_tab = HashMap::with_capacity(2);
-            });
+            restore_prepaint_by_tab(HashMap::with_capacity(2));
             resume_unwind(panic_payload);
         }
     }
@@ -333,9 +344,7 @@ fn prepaint_snapshot_for_test() -> HashMap<i32, PrepaintOverlay> {
 #[cfg(test)]
 fn clear_draw_context_for_test() {
     restore_render_tabs(HashMap::with_capacity(4));
-    DRAW_CONTEXT.with(|context| {
-        context.borrow_mut().prepaint_by_tab = HashMap::with_capacity(2);
-    });
+    restore_prepaint_by_tab(HashMap::with_capacity(2));
 }
 
 pub(crate) fn with_render_tab<T>(
@@ -617,6 +626,12 @@ fn clear_all_prepaint_tracked(
     (cleared_prepaint_overlays, had_visible_overlays)
 }
 
+fn evict_empty_render_tab_entries(render_tabs: &mut HashMap<i32, window_pool::TabWindows>) {
+    render_tabs.retain(|_, tab_windows| {
+        window_pool::tab_pool_snapshot_from_tab(tab_windows).total_windows > 0
+    });
+}
+
 fn summarize_tracked_purge_state(
     render_tabs: &HashMap<i32, window_pool::TabWindows>,
     prepaint_by_tab: &HashMap<i32, PrepaintOverlay>,
@@ -693,14 +708,14 @@ pub(crate) fn clear_active_render_windows(
                 .saturating_add(tab_summary.invalid_removed_windows);
         }
 
+        evict_empty_render_tab_entries(render_tabs);
         summary
     })
 }
 
 pub(crate) fn purge_render_windows(namespace_id: u32) -> PurgeRenderWindowsSummary {
     let mut render_tabs = take_render_tabs();
-    let mut prepaint_by_tab =
-        DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().prepaint_by_tab));
+    let mut prepaint_by_tab = take_prepaint_by_tab();
     let summary = summarize_tracked_purge_state(&render_tabs, &prepaint_by_tab);
     let _ = clear_all_prepaint_tracked(&mut prepaint_by_tab, namespace_id);
 
@@ -742,10 +757,11 @@ mod tests {
     use super::{
         ApplyMetrics, PrepaintOverlay, PurgeRenderWindowsSummary, RecoveryNamespaceCleanupSummary,
         RenderOutcome, classify_draw_outcome, clear_active_render_windows,
-        clear_all_prepaint_tracked, clear_draw_context_for_test, insert_prepaint_overlay_for_test,
-        prepaint_count_for_test, prepaint_snapshot_for_test, render_tab_handles,
-        restore_render_tabs, summarize_recovery_namespace_cleanup, summarize_tracked_purge_state,
-        take_render_tabs_for_test, with_prepaint_by_tab, with_render_tab,
+        clear_all_prepaint_tracked, clear_draw_context_for_test, evict_empty_render_tab_entries,
+        insert_prepaint_overlay_for_test, prepaint_count_for_test, prepaint_snapshot_for_test,
+        render_tab_handles, restore_render_tabs, summarize_recovery_namespace_cleanup,
+        summarize_tracked_purge_state, take_render_tabs_for_test, with_prepaint_by_tab,
+        with_render_tab,
     };
     use crate::core::types::StrokeId;
     use crate::draw::window_pool::WindowBufferHandle;
@@ -965,6 +981,65 @@ mod tests {
             clear_active_render_windows(99, 32),
             super::ClearActiveRenderWindowsSummary::default()
         );
+
+        reset_draw_context_for_test();
+    }
+
+    #[test]
+    fn clear_active_render_windows_evicts_empty_tab_registry_entries() {
+        let _guard = DRAW_TEST_MUTEX
+            .lock()
+            .expect("draw test mutex should not be poisoned");
+        reset_draw_context_for_test();
+
+        with_render_tab(17, |tab_windows| tab_windows.cache_payload(77, 707));
+        assert_eq!(render_tab_handles(), vec![17]);
+
+        assert_eq!(
+            clear_active_render_windows(99, 32),
+            super::ClearActiveRenderWindowsSummary::default()
+        );
+        assert!(
+            render_tab_handles().is_empty(),
+            "soft cleanup should evict empty tab bookkeeping instead of retaining dead metadata"
+        );
+
+        reset_draw_context_for_test();
+    }
+
+    #[test]
+    fn empty_render_tab_eviction_preserves_tabs_with_retained_windows() {
+        let _guard = DRAW_TEST_MUTEX
+            .lock()
+            .expect("draw test mutex should not be poisoned");
+        reset_draw_context_for_test();
+
+        with_render_tab(7, |_| {});
+        with_render_tab(9, |tab_windows| {
+            tab_windows.push_test_visible_window(
+                WindowBufferHandle {
+                    window_id: -9,
+                    buffer_id: -19,
+                },
+                super::window_pool::WindowPlacement {
+                    row: 2,
+                    col: 3,
+                    width: 1,
+                    zindex: 80,
+                },
+                2,
+            );
+        });
+
+        let mut render_tabs = take_render_tabs_for_test()
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        evict_empty_render_tab_entries(&mut render_tabs);
+
+        let mut handles = render_tabs.keys().copied().collect::<Vec<_>>();
+        handles.sort_unstable();
+        assert_eq!(handles, vec![9]);
 
         reset_draw_context_for_test();
     }

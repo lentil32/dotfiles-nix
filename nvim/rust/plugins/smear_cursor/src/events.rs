@@ -1,7 +1,7 @@
 use crate::core::state::{CoreState, CursorColorProbeWitness, CursorColorSample};
 use crate::core::types::Generation;
-use nvim_oxi::LuaRef;
 use std::cell::{Cell, RefCell};
+use thiserror::Error;
 
 mod cursor;
 mod event_loop;
@@ -23,7 +23,6 @@ use probe_cache::{CursorColorCacheLookup, ProbeCacheState};
 mod tests;
 
 pub(crate) use handlers::on_autocmd_event;
-pub(crate) use handlers::on_key_listener_event;
 pub(crate) use lifecycle::{diagnostics, setup, toggle};
 pub(crate) use logging::warn;
 pub(crate) use runtime::record_effect_failure;
@@ -134,7 +133,6 @@ enum HostBridgeState {
 struct ShellState {
     namespace_id: Option<u32>,
     host_bridge_state: HostBridgeState,
-    on_key_callback_lua_ref: Option<LuaRef>,
     probe_cache: ProbeCacheState,
 }
 
@@ -153,14 +151,6 @@ impl ShellState {
 
     fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
         self.host_bridge_state = HostBridgeState::Verified { revision };
-    }
-
-    const fn on_key_callback_lua_ref(&self) -> Option<LuaRef> {
-        self.on_key_callback_lua_ref
-    }
-
-    fn note_on_key_callback_lua_ref(&mut self, lua_ref: LuaRef) {
-        self.on_key_callback_lua_ref = Some(lua_ref);
     }
 
     fn cursor_color_colorscheme_generation(&self) -> Generation {
@@ -219,6 +209,18 @@ impl Default for EngineStateSlot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
+pub(super) enum EngineAccessError {
+    #[error("engine state re-entered while already in use")]
+    Reentered,
+}
+
+impl From<EngineAccessError> for nvim_oxi::Error {
+    fn from(error: EngineAccessError) -> Self {
+        nvim_oxi::api::Error::Other(error.to_string()).into()
+    }
+}
+
 #[derive(Debug)]
 struct EngineContext {
     state: RefCell<EngineStateSlot>,
@@ -233,11 +235,11 @@ impl EngineContext {
         }
     }
 
-    fn take_state(&self) -> EngineState {
+    fn take_state(&self) -> Result<EngineState, EngineAccessError> {
         let mut slot = self.state.borrow_mut();
         match std::mem::replace(&mut *slot, EngineStateSlot::InUse) {
-            EngineStateSlot::Ready(state) => *state,
-            EngineStateSlot::InUse => panic!("engine state re-entered while already in use"),
+            EngineStateSlot::Ready(state) => Ok(*state),
+            EngineStateSlot::InUse => Err(EngineAccessError::Reentered),
         }
     }
 

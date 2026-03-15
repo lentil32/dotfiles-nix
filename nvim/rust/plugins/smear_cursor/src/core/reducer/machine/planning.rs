@@ -12,7 +12,7 @@ use crate::core::state::{
     ProjectionPlannerClock, ProjectionReuseKey, ProjectionSnapshot, ProjectionWitness,
     RealizationClear, RealizationDivergence, RealizationDraw, RealizationFailure,
     RealizationLedger, RealizationPlan, ScenePatch, SceneState, SemanticEntity, SemanticEntityId,
-    SemanticScene,
+    SemanticScene, classify_semantic_event,
 };
 use crate::core::types::{Millis, ProjectorRevision, ProposalId, SceneRevision, ViewportSnapshot};
 use crate::draw::render_plan::{self, PlannerState as ProjectionPlannerState, Viewport};
@@ -451,6 +451,7 @@ fn realization_plan_for_render_decision(
 
 fn plan_runtime_transition(
     state: &CoreState,
+    previous_observation: Option<&ObservationSnapshot>,
     observation: &ObservationSnapshot,
     observed_at: Millis,
 ) -> (
@@ -468,7 +469,14 @@ fn plan_runtime_transition(
         .cursor_position()
         .map(point_from_cursor_position);
     let fallback_target = runtime.target_position();
-    let source = select_event_source(mode, &runtime, requested_target, &cursor_location);
+    let semantic_event = classify_semantic_event(previous_observation, observation);
+    let source = select_event_source(
+        mode,
+        &runtime,
+        semantic_event,
+        requested_target,
+        &cursor_location,
+    );
     let event_now_ms = match source {
         EventSource::External => observation.basis().observed_at().value() as f64,
         EventSource::AnimationTick => {
@@ -494,6 +502,7 @@ fn plan_runtime_transition(
         seed: deterministic_event_seed(observation),
         cursor_location,
         scroll_shift: observation.scroll_shift(),
+        semantic_event,
     };
     let transition = reduce_cursor_event(&mut runtime, mode, &event, source);
     (runtime, transition)
@@ -501,10 +510,12 @@ fn plan_runtime_transition(
 
 pub(super) fn plan_ready_state(
     state: CoreState,
+    previous_observation: Option<&ObservationSnapshot>,
     observation: ObservationSnapshot,
     observed_at: Millis,
 ) -> Transition {
-    let (runtime, cursor_transition) = plan_runtime_transition(&state, &observation, observed_at);
+    let (runtime, cursor_transition) =
+        plan_runtime_transition(&state, previous_observation, &observation, observed_at);
     let crate::core::runtime_reducer::CursorTransition {
         render_decision,
         motion_class: _,
@@ -536,12 +547,55 @@ pub(super) fn plan_ready_state(
     )
 }
 
+fn build_in_flight_proposal(
+    proposal_id: ProposalId,
+    patch: ScenePatch,
+    realization: RealizationPlan,
+    render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction,
+    render_side_effects: crate::core::runtime_reducer::RenderSideEffects,
+    animation_schedule: AnimationSchedule,
+) -> Result<InFlightProposal, crate::core::state::ProposalShapeError> {
+    match realization {
+        RealizationPlan::Draw(draw) => InFlightProposal::draw(
+            proposal_id,
+            patch,
+            draw,
+            render_cleanup_action,
+            render_side_effects,
+            animation_schedule,
+        ),
+        RealizationPlan::Clear(clear) => InFlightProposal::clear(
+            proposal_id,
+            patch,
+            clear,
+            render_cleanup_action,
+            render_side_effects,
+            animation_schedule,
+        ),
+        RealizationPlan::Noop => InFlightProposal::noop(
+            proposal_id,
+            patch,
+            render_cleanup_action,
+            render_side_effects,
+            animation_schedule,
+        ),
+        RealizationPlan::Failure(failure) => Ok(InFlightProposal::failure(
+            proposal_id,
+            patch,
+            failure,
+            render_cleanup_action,
+            render_side_effects,
+            animation_schedule,
+        )),
+    }
+}
+
 pub(crate) fn build_planned_render(
     planning_state: &CoreState,
     proposal_id: ProposalId,
     render_decision: &RenderDecision,
     animation_schedule: AnimationSchedule,
-) -> PlannedRender {
+) -> Result<PlannedRender, crate::core::state::ProposalShapeError> {
     let (next_scene, projection, projection_failure) =
         update_scene_from_render_decision(planning_state, render_decision);
     let basis = patch_basis(planning_state.realization(), projection);
@@ -552,63 +606,36 @@ pub(crate) fn build_planned_render(
         projection_failure,
     );
     let patch = ScenePatch::derive(basis);
-    let proposal = match realization {
-        RealizationPlan::Draw(draw) => InFlightProposal::draw(
-            proposal_id,
-            patch,
-            draw,
-            render_decision.render_cleanup_action,
-            render_decision.render_side_effects,
-            animation_schedule,
-        )
-        .expect("draw proposals require a non-clear patch with a target projection"),
-        RealizationPlan::Clear(clear) => InFlightProposal::clear(
-            proposal_id,
-            patch,
-            clear,
-            render_decision.render_cleanup_action,
-            render_decision.render_side_effects,
-            animation_schedule,
-        )
-        .expect("clear proposals only allow clear or noop patches"),
-        RealizationPlan::Noop => InFlightProposal::noop(
-            proposal_id,
-            patch,
-            render_decision.render_cleanup_action,
-            render_decision.render_side_effects,
-            animation_schedule,
-        )
-        .expect("noop proposals require a noop patch"),
-        RealizationPlan::Failure(failure) => InFlightProposal::failure(
-            proposal_id,
-            patch,
-            failure,
-            render_decision.render_cleanup_action,
-            render_decision.render_side_effects,
-            animation_schedule,
-        ),
-    };
-    PlannedRender::new(next_scene, proposal)
+    build_in_flight_proposal(
+        proposal_id,
+        patch,
+        realization,
+        render_decision.render_cleanup_action,
+        render_decision.render_side_effects,
+        animation_schedule,
+    )
+    .map(|proposal| PlannedRender::new(next_scene, proposal))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        dirty_entities, patch_basis, planner_seed, project_draw_frame,
-        realization_plan_for_render_decision, reusable_projection_entry,
-        update_scene_from_render_decision,
+        AnimationSchedule, PaletteSpec, build_in_flight_proposal, dirty_entities, patch_basis,
+        planner_seed, project_draw_frame, realization_plan_for_render_decision,
+        reusable_projection_entry, update_scene_from_render_decision,
     };
     use crate::core::runtime_reducer::{RenderAction, RenderDecision, TargetCellPresentation};
     use crate::core::state::{
         CoreState, CursorTrailGeometry, CursorTrailProjectionPolicy, CursorTrailSemantic,
         ExternalDemand, ExternalDemandKind, ObservationBasis, ObservationMotion,
-        ObservationRequest, ObservationSnapshot, ProbeRequestSet, ProjectionCache,
-        RealizationClear, RealizationDivergence, RealizationLedger, RealizationPlan, ScenePatch,
-        ScenePatchKind, SceneState, SemanticEntity, SemanticEntityId, SemanticScene,
+        ObservationRequest, ObservationSnapshot, PatchBasis, ProbeRequestSet, ProjectionCache,
+        RealizationClear, RealizationDivergence, RealizationDraw, RealizationLedger,
+        RealizationPlan, ScenePatch, ScenePatchKind, SceneState, SemanticEntity, SemanticEntityId,
+        SemanticScene,
     };
     use crate::core::types::{
-        CursorCol, CursorPosition, CursorRow, IngressSeq, Millis, ObservationId, SceneRevision,
-        StrokeId, ViewportSnapshot,
+        CursorCol, CursorPosition, CursorRow, IngressSeq, Millis, ObservationId, ProposalId,
+        SceneRevision, StrokeId, ViewportSnapshot,
     };
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
     use crate::state::CursorLocation;
@@ -1059,6 +1086,29 @@ mod tests {
                 projection_failure,
             ),
             RealizationPlan::Noop
+        );
+    }
+
+    #[test]
+    fn invalid_proposal_shape_returns_typed_error_instead_of_panicking() {
+        let patch = ScenePatch::derive(PatchBasis::new(None, None));
+
+        let result = build_in_flight_proposal(
+            ProposalId::new(11),
+            patch,
+            RealizationPlan::Draw(RealizationDraw::new(
+                PaletteSpec::from_frame(&base_frame()),
+                crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
+                32,
+            )),
+            crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+            crate::core::runtime_reducer::RenderSideEffects::default(),
+            AnimationSchedule::Idle,
+        );
+
+        assert_eq!(
+            result,
+            Err(crate::core::state::ProposalShapeError::DrawMissingTargetProjection)
         );
     }
 }

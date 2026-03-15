@@ -62,7 +62,11 @@ fn append_log_line(level_name: &str, message: &str) {
         return;
     };
     LOG_FILE_HANDLE.with(|file_handle| {
-        let mut file_guard = file_handle.borrow_mut();
+        // File logging is best-effort diagnostics. If a nested callback is already writing, skip
+        // this line instead of panicking the plugin on a RefCell borrow failure.
+        let Ok(mut file_guard) = file_handle.try_borrow_mut() else {
+            return;
+        };
 
         if file_guard.is_none() {
             match OpenOptions::new().create(true).append(true).open(path) {

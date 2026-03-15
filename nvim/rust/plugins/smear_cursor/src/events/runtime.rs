@@ -4,7 +4,7 @@ use super::logging::{set_log_level, trace_lazy, warn};
 use super::probe_cache::CursorColorCacheLookup;
 use super::timers::{NvimTimerId, start_timer_once, stop_timer};
 use super::trace::{timer_kind_name, timer_token_summary};
-use super::{ENGINE_CONTEXT, EngineContext, EngineState, HostBridgeState};
+use super::{ENGINE_CONTEXT, EngineAccessError, EngineContext, EngineState, HostBridgeState};
 use crate::config::RuntimeConfig;
 use crate::core::effect::{Effect, EventLoopMetricEffect, TimerKind};
 use crate::core::event::{
@@ -15,6 +15,7 @@ use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::{CoreState, CursorColorProbeWitness, CursorColorSample, ProbeKind};
 use crate::core::types::{DelayBudgetMs, Generation, Millis, TimerId, TimerToken};
 use crate::draw::recover_all_namespaces;
+use crate::state::CursorLocation;
 use crate::types::Point;
 use nvim_oxi::Result;
 use nvim_utils::mode::{
@@ -24,6 +25,8 @@ use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub(super) type EngineAccessResult<T> = std::result::Result<T, EngineAccessError>;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct CoreTimerHandle {
@@ -156,14 +159,14 @@ impl IngressModePolicySnapshot {
 pub(super) struct IngressReadSnapshot {
     enabled: bool,
     needs_initialize: bool,
-    key_delay_ms: u64,
     current_corners: [Point; 4],
+    tracked_location: Option<CursorLocation>,
     mode_policy: IngressModePolicySnapshot,
     filetypes_disabled: Arc<[String]>,
 }
 
 impl IngressReadSnapshot {
-    fn capture() -> Self {
+    fn capture() -> EngineAccessResult<Self> {
         read_engine_state(|state| {
             let runtime = state.core_state.runtime();
             let config = &runtime.config;
@@ -171,8 +174,8 @@ impl IngressReadSnapshot {
             Self {
                 enabled: runtime.is_enabled(),
                 needs_initialize: state.core_state.needs_initialize(),
-                key_delay_ms: as_delay_ms(config.delay_after_key),
                 current_corners: runtime.current_corners(),
+                tracked_location: runtime.tracked_location(),
                 mode_policy: IngressModePolicySnapshot::from_runtime_config(config),
                 filetypes_disabled: Arc::clone(&config.filetypes_disabled),
             }
@@ -187,12 +190,12 @@ impl IngressReadSnapshot {
         self.needs_initialize
     }
 
-    pub(super) const fn key_delay_ms(&self) -> u64 {
-        self.key_delay_ms
-    }
-
     pub(super) const fn current_corners(&self) -> [Point; 4] {
         self.current_corners
+    }
+
+    pub(super) fn tracked_location(&self) -> Option<&CursorLocation> {
+        self.tracked_location.as_ref()
     }
 
     pub(super) fn mode_allowed(&self, mode: &str) -> bool {
@@ -213,16 +216,16 @@ impl IngressReadSnapshot {
     pub(super) fn new_for_test(
         enabled: bool,
         needs_initialize: bool,
-        key_delay_ms: u64,
         current_corners: [Point; 4],
+        tracked_location: Option<CursorLocation>,
         mode_policy: (bool, bool, bool, bool),
         filetypes_disabled: Vec<String>,
     ) -> Self {
         Self {
             enabled,
             needs_initialize,
-            key_delay_ms,
             current_corners,
+            tracked_location,
             mode_policy: IngressModePolicySnapshot::from_mode_flags([
                 mode_policy.0,
                 mode_policy.1,
@@ -347,6 +350,14 @@ pub(super) fn record_scheduled_queue_depth(depth: usize) {
     event_loop::record_scheduled_queue_depth(depth);
 }
 
+pub(super) fn record_scheduled_drain_items(drained_items: usize) {
+    event_loop::record_scheduled_drain_items(drained_items);
+}
+
+pub(super) fn record_scheduled_drain_reschedule() {
+    event_loop::record_scheduled_drain_reschedule();
+}
+
 pub(super) fn record_probe_duration(kind: ProbeKind, duration_micros: u64) {
     event_loop::record_probe_duration(kind, duration_micros);
 }
@@ -365,7 +376,7 @@ pub(super) fn event_loop_diagnostics() -> event_loop::EventLoopDiagnostics {
 
 pub(super) fn diagnostics_report() -> String {
     let loop_diag = event_loop_diagnostics();
-    read_engine_state(|state| {
+    match read_engine_state(|state| {
         let runtime = state.core_state.runtime();
         let core = state.core_state();
         let host_bridge_state = match state.shell.host_bridge_state() {
@@ -386,7 +397,7 @@ pub(super) fn diagnostics_report() -> String {
         };
 
         format!(
-            "smear_cursor enabled={} animation_phase={} core_lifecycle={:?} host_bridge={} ingress_received={} ingress_applied={} ingress_dropped={} ingress_coalesced={} observation_requests_executed={} degraded_draw_applications={} stale_token_events={} timer_schedule_samples={} timer_schedule_mean_ms={:.3} timer_schedule_max_ms={:.3} timer_fire_samples={} timer_fire_mean_ms={:.3} timer_fire_max_ms={:.3} scheduled_queue_depth_samples={} scheduled_queue_depth_mean={:.3} scheduled_queue_depth_max={} cursor_probe_samples={} cursor_probe_mean_ms={:.3} cursor_probe_max_ms={:.3} cursor_probe_refresh_retries={} cursor_probe_refresh_budget_exhausted={} background_probe_samples={} background_probe_mean_ms={:.3} background_probe_max_ms={:.3} background_probe_refresh_retries={} background_probe_refresh_budget_exhausted={} callback_ewma_ms={:.3} last_autocmd_ms={:.3} last_observation_request_ms={:.3}",
+            "smear_cursor enabled={} animation_phase={} core_lifecycle={:?} host_bridge={} ingress_received={} ingress_applied={} ingress_dropped={} ingress_coalesced={} observation_requests_executed={} degraded_draw_applications={} stale_token_events={} timer_schedule_samples={} timer_schedule_mean_ms={:.3} timer_schedule_max_ms={:.3} timer_fire_samples={} timer_fire_mean_ms={:.3} timer_fire_max_ms={:.3} scheduled_queue_depth_samples={} scheduled_queue_depth_mean={:.3} scheduled_queue_depth_max={} scheduled_drain_samples={} scheduled_drain_mean_items={:.3} scheduled_drain_max_items={} scheduled_drain_reschedules={} cursor_probe_samples={} cursor_probe_mean_ms={:.3} cursor_probe_max_ms={:.3} cursor_probe_refresh_retries={} cursor_probe_refresh_budget_exhausted={} background_probe_samples={} background_probe_mean_ms={:.3} background_probe_max_ms={:.3} background_probe_refresh_retries={} background_probe_refresh_budget_exhausted={} callback_ewma_ms={:.3} last_autocmd_ms={:.3} last_observation_request_ms={:.3}",
             runtime.is_enabled(),
             animation_phase,
             core.lifecycle(),
@@ -407,6 +418,10 @@ pub(super) fn diagnostics_report() -> String {
             loop_diag.metrics.scheduled_queue_depth.samples,
             loop_diag.metrics.scheduled_queue_depth.mean_depth(),
             loop_diag.metrics.scheduled_queue_depth.max_depth,
+            loop_diag.metrics.scheduled_drain_items.samples,
+            loop_diag.metrics.scheduled_drain_items.mean_depth(),
+            loop_diag.metrics.scheduled_drain_items.max_depth,
+            loop_diag.metrics.scheduled_drain_reschedules,
             loop_diag.metrics.cursor_color_probe.duration.samples,
             loop_diag.metrics.cursor_color_probe.duration.mean_ms(),
             loop_diag.metrics.cursor_color_probe.duration.max_ms(),
@@ -424,15 +439,22 @@ pub(super) fn diagnostics_report() -> String {
             loop_diag.last_autocmd_event_ms,
             loop_diag.last_observation_request_ms,
         )
-    })
+    }) {
+        Ok(report) => report,
+        Err(err) => format!("smear_cursor error={err}"),
+    }
 }
 
 fn reset_transient_event_state_with_policy() {
     clear_all_core_timer_handles();
     super::handlers::reset_scheduled_effect_queue();
-    mutate_engine_state(|state| {
+    if let Err(err) = mutate_engine_state(|state| {
         state.shell.reset_probe_caches();
-    });
+    }) {
+        warn(&format!(
+            "engine state re-entered during transient reset; skipping shell cache reset: {err}"
+        ));
+    }
     clear_autocmd_event_timestamp();
     clear_observation_request_timestamp();
     clear_cursor_callback_duration_estimate();
@@ -472,12 +494,14 @@ fn post_engine_state_recovery(namespace_id: Option<u32>) {
     reset_transient_event_state_without_generation_bump();
 }
 
-fn with_engine_state_access<R>(accessor: impl FnOnce(&mut EngineState) -> R) -> R {
-    let mut state = ENGINE_CONTEXT.with(EngineContext::take_state);
+fn with_engine_state_access<R>(
+    accessor: impl FnOnce(&mut EngineState) -> R,
+) -> EngineAccessResult<R> {
+    let mut state = ENGINE_CONTEXT.with(EngineContext::take_state)?;
     match catch_unwind(AssertUnwindSafe(|| accessor(&mut state))) {
         Ok(output) => {
             ENGINE_CONTEXT.with(|context| context.restore_state(state));
-            output
+            Ok(output)
         }
         Err(panic_payload) => {
             let namespace_id = recover_engine_state(&mut state);
@@ -488,55 +512,53 @@ fn with_engine_state_access<R>(accessor: impl FnOnce(&mut EngineState) -> R) -> 
     }
 }
 
-pub(super) fn read_engine_state<R>(reader: impl FnOnce(&EngineState) -> R) -> R {
+pub(super) fn read_engine_state<R>(reader: impl FnOnce(&EngineState) -> R) -> EngineAccessResult<R> {
     with_engine_state_access(|state| reader(state))
 }
 
-pub(super) fn mutate_engine_state<R>(mutator: impl FnOnce(&mut EngineState) -> R) -> R {
+pub(super) fn mutate_engine_state<R>(
+    mutator: impl FnOnce(&mut EngineState) -> R,
+) -> EngineAccessResult<R> {
     with_engine_state_access(mutator)
 }
 
-pub(super) fn is_enabled() -> bool {
-    read_engine_state(|state| state.core_state.runtime().is_enabled())
-}
-
-pub(super) fn ingress_read_snapshot() -> IngressReadSnapshot {
+pub(super) fn ingress_read_snapshot() -> EngineAccessResult<IngressReadSnapshot> {
     IngressReadSnapshot::capture()
 }
 
-pub(super) fn core_state() -> CoreState {
+pub(super) fn core_state() -> EngineAccessResult<CoreState> {
     read_engine_state(EngineState::core_state)
 }
 
-pub(super) fn set_core_state(next_state: CoreState) {
+pub(super) fn set_core_state(next_state: CoreState) -> EngineAccessResult<()> {
     mutate_engine_state(|state| {
         state.set_core_state(next_state);
-    });
+    })
 }
 
-pub(super) fn cursor_color_colorscheme_generation() -> Generation {
+pub(super) fn cursor_color_colorscheme_generation() -> EngineAccessResult<Generation> {
     read_engine_state(|state| state.shell.cursor_color_colorscheme_generation())
 }
 
 pub(super) fn cached_cursor_color_sample(
     witness: &CursorColorProbeWitness,
-) -> CursorColorCacheLookup {
+) -> EngineAccessResult<CursorColorCacheLookup> {
     read_engine_state(|state| state.shell.cached_cursor_color_sample(witness))
 }
 
 pub(super) fn store_cursor_color_sample(
     witness: CursorColorProbeWitness,
     sample: Option<CursorColorSample>,
-) {
+) -> EngineAccessResult<()> {
     mutate_engine_state(|state| {
         state.shell.store_cursor_color_sample(witness, sample);
-    });
+    })
 }
 
-pub(super) fn note_cursor_color_colorscheme_change() {
+pub(super) fn note_cursor_color_colorscheme_change() -> EngineAccessResult<()> {
     mutate_engine_state(|state| {
         state.shell.note_cursor_color_colorscheme_change();
-    });
+    })
 }
 
 pub(crate) fn record_effect_failure(source: EffectFailureSource, context: &'static str) {
@@ -547,7 +569,7 @@ pub(crate) fn record_effect_failure(source: EffectFailureSource, context: &'stat
             observed_at.value(),
         )
     });
-    super::handlers::dispatch_core_event_with_default_scheduler(Event::EffectFailed(
+    super::handlers::stage_core_event_with_default_scheduler(Event::EffectFailed(
         EffectFailedEvent {
             proposal_id: None,
             observed_at,
@@ -583,15 +605,24 @@ pub(super) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId) {
         observed_at,
     });
 
-    super::handlers::dispatch_core_event_with_default_scheduler(event);
+    if let Err(err) = super::handlers::dispatch_core_event_with_default_scheduler(event.clone()) {
+        warn(&format!(
+            "engine state re-entered while dispatching timer event; re-staging for recovery: {err}"
+        ));
+        super::handlers::stage_core_event_with_default_scheduler(event);
+    }
     record_timer_fire_duration(duration_to_micros(started_at.elapsed()));
 }
 
 fn reset_core_state() {
-    mutate_engine_state(|state| {
+    if let Err(err) = mutate_engine_state(|state| {
         let runtime = state.core_state.runtime().clone();
         state.set_core_state(CoreState::default().with_runtime(runtime));
-    });
+    }) {
+        warn(&format!(
+            "engine state re-entered during core reset; keeping existing state: {err}"
+        ));
+    }
 }
 
 pub(super) fn to_core_millis(value_ms: f64) -> Millis {
@@ -655,10 +686,18 @@ fn schedule_core_timer_effect(
 
 fn resolved_timer_delay_ms(kind: TimerKind, delay: DelayBudgetMs) -> u64 {
     if kind == TimerKind::Animation && delay == DelayBudgetMs::DEFAULT_ANIMATION {
-        return read_engine_state(|state| {
+        return match read_engine_state(|state| {
             let configured_interval_ms = state.core_state.runtime().config.time_interval;
             as_delay_ms(configured_interval_ms).max(1)
-        });
+        }) {
+            Ok(delay_ms) => delay_ms,
+            Err(err) => {
+                warn(&format!(
+                    "engine state re-entered while resolving animation delay; using default timer budget: {err}"
+                ));
+                delay.value()
+            }
+        };
     }
     delay.value()
 }
@@ -779,8 +818,8 @@ mod ingress_snapshot_tests {
         let snapshot = IngressReadSnapshot::new_for_test(
             true,
             false,
-            7,
             [Point { row: 1.0, col: 2.0 }; 4],
+            None,
             (true, true, true, true),
             vec!["lua".to_string(), "rust".to_string()],
         );
@@ -797,8 +836,8 @@ mod ingress_snapshot_tests {
         let snapshot = IngressReadSnapshot {
             enabled: true,
             needs_initialize: false,
-            key_delay_ms: 0,
             current_corners: [Point::ZERO; 4],
+            tracked_location: None,
             mode_policy: IngressModePolicySnapshot::from_mode_flags([true, true, true, true]),
             filetypes_disabled: Arc::clone(&filetypes_disabled),
         };
@@ -886,6 +925,20 @@ mod tests {
         assert_eq!(
             handles.take_by_shell_timer_id(recovery.shell_timer_id),
             None
+        );
+    }
+
+    #[test]
+    fn nested_engine_state_access_returns_reentry_error_and_preserves_state() {
+        let nested = mutate_engine_state(|state| {
+            state.shell.set_namespace_id(77);
+            read_engine_state(|inner| inner.shell.namespace_id())
+        });
+
+        assert_eq!(nested, Ok(Err(EngineAccessError::Reentered)));
+        assert_eq!(
+            read_engine_state(|state| state.shell.namespace_id()),
+            Ok(Some(77))
         );
     }
 }

@@ -125,6 +125,8 @@ fn with_palette_state<R>(reader: impl FnOnce(&PaletteState) -> R) -> R {
 
 fn with_palette_state_mut<R>(mutator: impl FnOnce(&mut PaletteState) -> R) -> R {
     PALETTE_STATE.with(|state| {
+        // Keep palette mutators cache-local. Shell calls and logging must happen after this
+        // borrow is released so palette refresh cannot self-reenter through the RefCell.
         let mut state = state.borrow_mut();
         match catch_unwind(AssertUnwindSafe(|| mutator(&mut state))) {
             Ok(output) => output,
@@ -480,13 +482,14 @@ fn refresh_highlight_palette_for_spec(
                 },
             )
         });
-        match cache_lookup {
-            None => return Ok(PaletteRefreshOutcome::SkippedStale),
-            Some(PaletteRefreshOutcome::ReusedCommitted) => {
+        match interpret_palette_refresh_cache_lookup(cache_lookup) {
+            PaletteRefreshOutcome::SkippedStale => {
+                return Ok(PaletteRefreshOutcome::SkippedStale);
+            }
+            PaletteRefreshOutcome::ReusedCommitted => {
                 return Ok(PaletteRefreshOutcome::ReusedCommitted);
             }
-            Some(PaletteRefreshOutcome::AppliedHighlights) => {}
-            Some(PaletteRefreshOutcome::SkippedStale) => unreachable!(),
+            PaletteRefreshOutcome::AppliedHighlights => {}
         }
     }
 
@@ -544,6 +547,25 @@ fn refresh_highlight_palette_for_spec(
         state.pending_refresh_key = None;
     });
     Ok(PaletteRefreshOutcome::AppliedHighlights)
+}
+
+fn interpret_palette_refresh_cache_lookup(
+    cache_lookup: Option<PaletteRefreshOutcome>,
+) -> PaletteRefreshOutcome {
+    match cache_lookup {
+        None => PaletteRefreshOutcome::SkippedStale,
+        Some(PaletteRefreshOutcome::ReusedCommitted) => PaletteRefreshOutcome::ReusedCommitted,
+        Some(PaletteRefreshOutcome::AppliedHighlights) => PaletteRefreshOutcome::AppliedHighlights,
+        Some(PaletteRefreshOutcome::SkippedStale) => {
+            // Surprising: stale refresh currently travels through `None`, not `Some(SkippedStale)`.
+            // Keep a release-safe fallback here so cache-state refactors cannot revive a panic.
+            debug_assert!(
+                false,
+                "palette refresh cache lookup should encode stale requests with None"
+            );
+            PaletteRefreshOutcome::SkippedStale
+        }
+    }
 }
 
 fn defer_palette_refresh(spec: PaletteSpec, raw_input_key: RawPaletteInputKey) {
@@ -829,5 +851,17 @@ mod tests {
             PaletteRefreshDisposition::RefreshAlreadyPending
         );
         assert_eq!(state.pending_refresh_key, Some(raw_key));
+    }
+
+    #[test]
+    fn stale_palette_cache_fallback_keeps_debug_invariant_visible() {
+        let outcome = std::panic::catch_unwind(|| {
+            interpret_palette_refresh_cache_lookup(Some(PaletteRefreshOutcome::SkippedStale))
+        });
+
+        assert!(
+            outcome.is_err(),
+            "debug builds should surface the stale-cache invariant"
+        );
     }
 }

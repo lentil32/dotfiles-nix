@@ -1,5 +1,5 @@
 use super::super::host_bridge::ensure_namespace_id;
-use super::super::logging::{hide_real_cursor, trace_lazy, unhide_real_cursor};
+use super::super::logging::{hide_real_cursor, trace_lazy, unhide_real_cursor, warn};
 use super::super::runtime::{now_ms, to_core_millis};
 use super::super::trace::{
     realization_plan_summary, render_cleanup_execution_summary, render_side_effects_summary,
@@ -8,10 +8,12 @@ use super::super::trace::{
 use crate::core::effect::{
     ApplyRenderCleanupEffect, IngressCursorPresentationEffect, RenderCleanupExecution,
 };
+use crate::core::event::{EffectFailedEvent, Event as CoreEvent};
 use crate::core::realization::realize_logical_raster;
 use crate::core::runtime_reducer::{CursorVisibilityEffect, RenderAllocationPolicy};
 use crate::core::state::{
     DegradedApplyMetrics, InFlightProposal, ProjectionSnapshot, ProposalExecution,
+    RealizationFailure,
 };
 use crate::draw::{
     AllocationPolicy, ApplyMetrics, PurgeRenderWindowsSummary, clear_active_render_windows,
@@ -197,6 +199,8 @@ pub(super) enum ApplyRenderActionError {
     Shell(#[from] nvim_oxi::Error),
     #[error("render apply viewport drifted")]
     ViewportDrift,
+    #[error("failure proposal reached render shell apply")]
+    FailureProposalReachedShell(RealizationFailure),
 }
 
 pub(crate) fn apply_ingress_cursor_presentation_effect(effect: IngressCursorPresentationEffect) {
@@ -206,7 +210,12 @@ pub(crate) fn apply_ingress_cursor_presentation_effect(effect: IngressCursorPres
         }
         IngressCursorPresentationEffect::HideCursorAndPrepaint { cell, zindex } => {
             hide_real_cursor();
-            prepaint_cursor_block(ensure_namespace_id(), cell, zindex);
+            match ensure_namespace_id() {
+                Ok(namespace_id) => prepaint_cursor_block(namespace_id, cell, zindex),
+                Err(err) => warn(&format!(
+                    "engine state re-entered while preparing ingress prepaint; skipping overlay: {err}"
+                )),
+            }
         }
     }
 }
@@ -258,9 +267,20 @@ impl RenderCleanupOutcome {
 
 pub(crate) fn execute_core_apply_render_cleanup_effect(
     payload: ApplyRenderCleanupEffect,
-) -> Vec<crate::core::event::Event> {
+) -> Vec<CoreEvent> {
     let observed_at = to_core_millis(now_ms());
-    let namespace_id = ensure_namespace_id();
+    let namespace_id = match ensure_namespace_id() {
+        Ok(namespace_id) => namespace_id,
+        Err(err) => {
+            warn(&format!(
+                "engine state re-entered while applying render cleanup; emitting effect failure: {err}"
+            ));
+            return vec![CoreEvent::EffectFailed(EffectFailedEvent {
+                proposal_id: None,
+                observed_at,
+            })];
+        }
+    };
     let cleanup_summary = render_cleanup_execution_summary(payload.execution);
     trace_lazy(|| {
         format!(
@@ -299,7 +319,7 @@ pub(crate) fn execute_core_apply_render_cleanup_effect(
         )
     });
 
-    vec![crate::core::event::Event::RenderCleanupApplied(
+    vec![CoreEvent::RenderCleanupApplied(
         crate::core::event::RenderCleanupAppliedEvent {
             observed_at,
             action,
@@ -433,8 +453,10 @@ pub(super) fn apply_render_action(
                 render_side_effects.allow_real_cursor_updates,
             );
         }
-        ProposalExecution::Failure { .. } => {
-            unreachable!("failure proposals are converted before shell apply");
+        ProposalExecution::Failure { failure, .. } => {
+            return Err(ApplyRenderActionError::FailureProposalReachedShell(
+                *failure,
+            ));
         }
     }
 
@@ -454,14 +476,14 @@ pub(super) fn apply_render_action(
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyMetrics, RenderCleanupOutcome, RenderExecutionMetrics, apply_render_action,
-        draw_release_requires_redraw, viewport_matches_projection_witness,
+        ApplyMetrics, ApplyRenderActionError, RenderCleanupOutcome, RenderExecutionMetrics,
+        apply_render_action, draw_release_requires_redraw, viewport_matches_projection_witness,
     };
     use crate::core::realization::LogicalRaster;
     use crate::core::runtime_reducer::RenderSideEffects;
     use crate::core::state::{
-        InFlightProposal, PatchBasis, ProjectionSnapshot, ProjectionWitness, RealizationClear,
-        ScenePatch,
+        ApplyFailureKind, InFlightProposal, PatchBasis, ProjectionSnapshot, ProjectionWitness,
+        RealizationClear, RealizationDivergence, RealizationFailure, ScenePatch,
     };
     use crate::core::types::{
         CursorCol, CursorRow, IngressSeq, ObservationId, ProjectorRevision, ProposalId,
@@ -649,5 +671,29 @@ mod tests {
         });
 
         assert!(outcome.had_visual_change());
+    }
+
+    #[test]
+    fn failure_proposal_returns_typed_error_instead_of_panicking() {
+        let failure = RealizationFailure::new(
+            ApplyFailureKind::MissingProjection,
+            RealizationDivergence::ShellStateUnknown,
+        );
+        let proposal = InFlightProposal::failure(
+            ProposalId::new(1),
+            ScenePatch::derive(PatchBasis::new(None, None)),
+            failure,
+            crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+            RenderSideEffects::default(),
+            crate::core::state::AnimationSchedule::Idle,
+        );
+
+        let result = apply_render_action(0, &proposal);
+
+        assert!(matches!(
+            result,
+            Err(ApplyRenderActionError::FailureProposalReachedShell(actual))
+                if actual == failure
+        ));
     }
 }

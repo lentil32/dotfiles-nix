@@ -21,12 +21,6 @@ pub(crate) struct ExternalDemandQueuedEvent {
     pub(crate) ingress_cursor_presentation: Option<IngressCursorPresentationRequest>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct KeyFallbackQueuedEvent {
-    pub(crate) observed_at: Millis,
-    pub(crate) due_at: Millis,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObservationBaseCollectedEvent {
     pub(crate) request: ObservationRequest,
@@ -127,7 +121,6 @@ pub(crate) struct TimerLostWithTokenEvent {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum EffectFailureSource {
     PluginEntry,
-    KeyListener,
     ScheduledCallback,
 }
 
@@ -137,11 +130,14 @@ pub(crate) struct EffectFailedEvent {
     pub(crate) observed_at: Millis,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Reducer events stay fully typed values; boxing the largest payload would spread allocation through the state machine hot path."
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Event {
     Initialize(InitializeEvent),
     ExternalDemandQueued(ExternalDemandQueuedEvent),
-    KeyFallbackQueued(KeyFallbackQueuedEvent),
     ObservationBaseCollected(ObservationBaseCollectedEvent),
     ProbeReported(ProbeReportedEvent),
     RenderPlanComputed(RenderPlanComputedEvent),

@@ -306,6 +306,39 @@ fn cursor_color_witness_fingerprint(
         ^ witness.colorscheme_generation().value().rotate_left(23)
 }
 
+fn observed_text_rows_fingerprint(rows: &[crate::core::state::ObservedTextRow]) -> u64 {
+    rows.iter().fold(0_u64, |seed, row| {
+        seed ^ u64::from_ne_bytes(row.line().to_ne_bytes()).rotate_left(5)
+            ^ row
+                .text()
+                .bytes()
+                .fold(0_u64, |row_seed, byte| {
+                    row_seed.rotate_left(7) ^ u64::from(byte)
+                })
+                .rotate_left(11)
+    })
+}
+
+fn cursor_text_context_fingerprint(context: Option<&crate::core::state::CursorTextContext>) -> u64 {
+    let Some(context) = context else {
+        return 0_u64;
+    };
+
+    let tracked_rows_seed = context
+        .tracked_nearby_rows()
+        .map_or(0_u64, observed_text_rows_fingerprint);
+
+    u64::from_ne_bytes(context.buffer_handle().to_ne_bytes())
+        ^ context.changedtick().rotate_left(7)
+        ^ u64::from_ne_bytes(context.cursor_line().to_ne_bytes()).rotate_left(13)
+        ^ observed_text_rows_fingerprint(context.nearby_rows()).rotate_left(17)
+        ^ context
+            .tracked_cursor_line()
+            .map_or(0_u64, |line| u64::from_ne_bytes(line.to_ne_bytes()))
+            .rotate_left(23)
+        ^ tracked_rows_seed.rotate_left(29)
+}
+
 impl Effect {
     pub(crate) fn fingerprint(&self) -> u64 {
         match self {
@@ -351,6 +384,8 @@ impl Effect {
                 });
                 let cursor_color_witness_seed =
                     cursor_color_witness_fingerprint(basis.cursor_color_witness());
+                let cursor_text_context_seed =
+                    cursor_text_context_fingerprint(basis.cursor_text_context());
                 109_u64
                     ^ basis.observation_id().value()
                     ^ basis.observed_at().value()
@@ -367,6 +402,7 @@ impl Effect {
                     ^ u64::from(viewport.max_col.value()).rotate_left(29)
                     ^ background_chunk_seed.rotate_left(31)
                     ^ cursor_color_witness_seed.rotate_left(37)
+                    ^ cursor_text_context_seed.rotate_left(41)
             }
             Self::RequestRenderPlan(payload) => {
                 111_u64
@@ -458,6 +494,24 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
         crate::core::state::ObservationMotion::default(),
     );
 
+    let noop_patch = crate::core::state::ScenePatch::derive(crate::core::state::PatchBasis::new(
+        None, None,
+    ));
+    let noop_proposal = match crate::core::state::InFlightProposal::noop(
+        proposal_id,
+        noop_patch,
+        crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+        crate::core::runtime_reducer::RenderSideEffects::default(),
+        crate::core::state::AnimationSchedule::Idle,
+    ) {
+        Ok(proposal) => proposal,
+        Err(_) => {
+            // Keep the phase-4 fingerprint seed deterministic even if the noop fixture shape
+            // regresses unexpectedly during future refactors.
+            return 107_u64 ^ proposal_id.value().rotate_left(7);
+        }
+    };
+
     let effects = [
         Effect::ScheduleTimer(ScheduleTimerEffect {
             token: schedule_token,
@@ -529,16 +583,7 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
             requested_at: at,
         })),
         Effect::ApplyProposal(Box::new(ApplyProposalEffect {
-            proposal: crate::core::state::InFlightProposal::noop(
-                proposal_id,
-                crate::core::state::ScenePatch::derive(crate::core::state::PatchBasis::new(
-                    None, None,
-                )),
-                crate::core::runtime_reducer::RenderCleanupAction::NoAction,
-                crate::core::runtime_reducer::RenderSideEffects::default(),
-                crate::core::state::AnimationSchedule::Idle,
-            )
-            .expect("noop proposal fingerprint fixture should be constructible"),
+            proposal: noop_proposal,
             requested_at: at,
         })),
         Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {

@@ -400,8 +400,10 @@ mod cursor_transition_operations {
 
     #[test]
     fn initialize_cursor_clears_velocity_corners() {
-        let mut state = RuntimeState::default();
-        state.velocity_corners = [point(1.0, 2.0); 4];
+        let mut state = RuntimeState {
+            velocity_corners: [point(1.0, 2.0); 4],
+            ..RuntimeState::default()
+        };
 
         state.initialize_cursor(
             point(8.0, 9.0),

@@ -1,5 +1,6 @@
 use crate::config::RuntimeConfig;
 use crate::core::runtime_reducer::MotionClass;
+use crate::core::state::SemanticEvent;
 use crate::state::{CursorLocation, RuntimeState};
 use crate::types::{EPSILON, Point, display_metric_row_scale};
 use nvim_utils::mode::{
@@ -117,10 +118,19 @@ fn same_window_and_buffer(left: &CursorLocation, right: &CursorLocation) -> bool
 pub(crate) fn select_event_source(
     mode: &str,
     state: &RuntimeState,
+    semantic_event: SemanticEvent,
     requested_target: Option<Point>,
     cursor_location: &CursorLocation,
 ) -> super::EventSource {
     if is_cmdline_mode(mode) {
+        return super::EventSource::External;
+    }
+    if matches!(
+        semantic_event,
+        SemanticEvent::ModeChanged
+            | SemanticEvent::TextMutatedAtCursorContext
+            | SemanticEvent::ViewportOrWindowMoved
+    ) {
         return super::EventSource::External;
     }
     let Some(target) = requested_target else {

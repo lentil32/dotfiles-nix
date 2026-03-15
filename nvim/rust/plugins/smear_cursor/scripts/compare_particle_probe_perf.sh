@@ -18,7 +18,6 @@ set -euo pipefail
 #   SMEAR_COMPARE_RECOVERY           (default: 800)
 #   SMEAR_COMPARE_SETTLE_WAIT_MS     (default: 300)
 #   SMEAR_COMPARE_WINDOWS            (default: 8)
-#   SMEAR_COMPARE_KEYS_PER_SWITCH    (default: 2)
 #   SMEAR_COMPARE_DRAIN_EVERY        (default: 1)
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +43,6 @@ stress_rounds="${SMEAR_COMPARE_STRESS_ROUNDS:-1}"
 recovery_iterations="${SMEAR_COMPARE_RECOVERY:-800}"
 settle_wait_ms="${SMEAR_COMPARE_SETTLE_WAIT_MS:-300}"
 windows_count="${SMEAR_COMPARE_WINDOWS:-8}"
-keys_per_switch="${SMEAR_COMPARE_KEYS_PER_SWITCH:-2}"
 drain_every="${SMEAR_COMPARE_DRAIN_EVERY:-1}"
 
 worktree_dir="$(mktemp -d /tmp/smear_probe_compare.XXXXXX)"
@@ -99,9 +97,7 @@ run_once() {
       SMEAR_PARTICLES_ENABLED=true \
       SMEAR_PARTICLES_OVER_TEXT="${particles_over_text}" \
       SMEAR_DRAIN_EVERY="${drain_every}" \
-      SMEAR_KEYS_PER_SWITCH="${keys_per_switch}" \
       SMEAR_DELAY_EVENT_TO_SMEAR=0 \
-      SMEAR_DELAY_AFTER_KEY=0 \
       "${NVIM_BIN:-nvim}" --headless -u NONE -c "luafile ${driver_lua}"
   ) >"${log_file}" 2>&1
 

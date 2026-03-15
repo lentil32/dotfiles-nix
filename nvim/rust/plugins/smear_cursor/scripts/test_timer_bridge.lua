@@ -38,12 +38,9 @@ local function main()
   smear.setup({
     enabled = true,
     logging_level = 0,
-    delay_after_key = 0,
     delay_event_to_smear = 0,
     fps = 120,
   })
-
-  smear.on_key()
   vim.wait(50, function()
     return false
   end, 5)

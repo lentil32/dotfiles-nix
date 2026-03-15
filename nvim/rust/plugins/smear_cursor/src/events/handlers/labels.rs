@@ -5,7 +5,6 @@ pub(super) fn core_event_label(event: &CoreEvent) -> &'static str {
     match event {
         CoreEvent::Initialize(_) => "initialize",
         CoreEvent::ExternalDemandQueued(_) => "external_demand_queued",
-        CoreEvent::KeyFallbackQueued(_) => "key_fallback_queued",
         CoreEvent::ObservationBaseCollected(_) => "observation_base_collected",
         CoreEvent::ProbeReported(_) => "probe_reported",
         CoreEvent::RenderPlanComputed(_) => "render_plan_computed",

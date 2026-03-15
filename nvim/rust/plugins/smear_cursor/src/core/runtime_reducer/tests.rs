@@ -5,6 +5,7 @@ use super::{
     keep_warm_until_ms, next_cleanup_check_delay_ms, reduce_cursor_event,
 };
 use crate::config::RuntimeConfig;
+use crate::core::state::SemanticEvent;
 use crate::state::{CursorLocation, CursorShape, JumpCuePhase, RuntimeState};
 use crate::types::{Particle, Point, RenderFrame, StepOutput};
 use proptest::collection::vec;
@@ -46,6 +47,7 @@ fn event_at(row: f64, col: f64, now_ms: f64) -> CursorEventContext {
         seed: 7,
         cursor_location: CursorLocation::new(10, 20, 1, 1),
         scroll_shift: None,
+        semantic_event: SemanticEvent::FrameCommitted,
     }
 }
 
@@ -64,6 +66,7 @@ fn event_with_location(
         seed,
         cursor_location: CursorLocation::new(window_handle, buffer_handle, 1, 1),
         scroll_shift: None,
+        semantic_event: SemanticEvent::FrameCommitted,
     }
 }
 
@@ -89,6 +92,14 @@ fn event_with_location_and_scroll(
         seed,
         cursor_location: CursorLocation::new(window_handle, buffer_handle, 1, 1),
         scroll_shift,
+        semantic_event: SemanticEvent::FrameCommitted,
+    }
+}
+
+fn text_mutation_event(row: f64, col: f64, now_ms: f64) -> CursorEventContext {
+    CursorEventContext {
+        semantic_event: SemanticEvent::TextMutatedAtCursorContext,
+        ..event_at(row, col, now_ms)
     }
 }
 
@@ -1401,6 +1412,20 @@ mod mode_specific_transitions {
         (state, boundary)
     }
 
+    fn text_mutation_snap() -> (RuntimeState, CursorTransition) {
+        let (mut state, _) = animating_runtime_after_kickoff(|state| {
+            state.config.smear_insert_mode = true;
+            state.config.animate_in_insert_mode = true;
+        });
+        let transition = reduce_cursor_event(
+            &mut state,
+            "i",
+            text_mutation_event(5.0, 20.0, 132.0),
+            EventSource::External,
+        );
+        (state, transition)
+    }
+
     fn animation_tick_retarget() -> (RuntimeState, u64, CursorTransition) {
         let (mut state, _) = animating_runtime_after_kickoff(|state| {
             state.config.delay_event_to_smear = 0.0;
@@ -1424,6 +1449,7 @@ mod mode_specific_transitions {
                 seed: 12,
                 cursor_location: CursorLocation::new(10, 20, 1, 2),
                 scroll_shift: None,
+                semantic_event: SemanticEvent::FrameCommitted,
             },
             EventSource::AnimationTick,
         );
@@ -1479,6 +1505,39 @@ mod mode_specific_transitions {
             Point {
                 row: 5.0,
                 col: 20.0
+            }
+        );
+    }
+
+    #[test]
+    fn insert_mode_motion_still_animates_without_text_mutation() {
+        let (mut state, _) = initialized_runtime("n", |state| {
+            state.config.smear_insert_mode = true;
+            state.config.animate_in_insert_mode = true;
+        });
+        let transition = reduce_cursor_event(
+            &mut state,
+            "i",
+            event_with_location(5.0, 20.0, 116.0, 17, 10, 20),
+            EventSource::External,
+        );
+
+        assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
+        assert!(state.is_animating());
+    }
+
+    #[test]
+    fn text_mutation_snap_clears_existing_smear_instead_of_animating() {
+        let (state, transition) = text_mutation_snap();
+
+        assert!(matches!(render_action(&transition), RenderAction::ClearAll));
+        assert!(!transition.should_schedule_next_animation);
+        assert!(!state.is_animating());
+        assert_eq!(
+            state.target_position(),
+            Point {
+                row: 5.0,
+                col: 20.0,
             }
         );
     }

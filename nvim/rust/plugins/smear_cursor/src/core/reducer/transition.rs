@@ -46,9 +46,8 @@ fn lifecycle_fingerprint(lifecycle: Lifecycle) -> u64 {
 const fn demand_kind_fingerprint(kind: ExternalDemandKind) -> u64 {
     match kind {
         ExternalDemandKind::ExternalCursor => 1_u64,
-        ExternalDemandKind::KeyFallback => 2_u64,
-        ExternalDemandKind::ModeChanged => 3_u64,
-        ExternalDemandKind::BufferEntered => 4_u64,
+        ExternalDemandKind::ModeChanged => 2_u64,
+        ExternalDemandKind::BufferEntered => 3_u64,
     }
 }
 
@@ -109,19 +108,7 @@ fn demand_fingerprint(demand: &ExternalDemand) -> u64 {
 }
 
 fn queued_demand_fingerprint(demand: &QueuedDemand) -> u64 {
-    match demand {
-        QueuedDemand::Ready(demand) => demand_fingerprint(demand),
-        QueuedDemand::PendingKeyFallback {
-            seq,
-            due_at,
-            requested_target,
-        } => {
-            seq.value()
-                ^ demand_kind_fingerprint(ExternalDemandKind::KeyFallback)
-                ^ due_at.value().rotate_left(7)
-                ^ requested_target.map_or(0_u64, crate::core::types::CursorPosition::fingerprint)
-        }
-    }
+    demand_fingerprint(demand.as_demand())
 }
 
 fn ingress_policy_fingerprint(last_cursor_autocmd_at: Option<crate::core::types::Millis>) -> u64 {
@@ -245,6 +232,33 @@ fn cursor_color_witness_fingerprint(
         ^ witness.colorscheme_generation().value().rotate_left(23)
 }
 
+fn observed_text_rows_fingerprint(rows: &[crate::core::state::ObservedTextRow]) -> u64 {
+    rows.iter().fold(0_u64, |seed, row| {
+        seed ^ u64::from_ne_bytes(row.line().to_ne_bytes()).rotate_left(5)
+            ^ debug_fingerprint(row.text()).rotate_left(11)
+    })
+}
+
+fn cursor_text_context_fingerprint(context: Option<&crate::core::state::CursorTextContext>) -> u64 {
+    let Some(context) = context else {
+        return 0_u64;
+    };
+
+    let tracked_rows_seed = context
+        .tracked_nearby_rows()
+        .map_or(0_u64, observed_text_rows_fingerprint);
+
+    u64::from_ne_bytes(context.buffer_handle().to_ne_bytes())
+        ^ context.changedtick().rotate_left(7)
+        ^ u64::from_ne_bytes(context.cursor_line().to_ne_bytes()).rotate_left(13)
+        ^ observed_text_rows_fingerprint(context.nearby_rows()).rotate_left(17)
+        ^ context
+            .tracked_cursor_line()
+            .map_or(0_u64, |line| u64::from_ne_bytes(line.to_ne_bytes()))
+            .rotate_left(23)
+        ^ tracked_rows_seed.rotate_left(29)
+}
+
 fn observation_snapshot_fingerprint(observation: &crate::core::state::ObservationSnapshot) -> u64 {
     let basis = observation.basis();
     observation.request().observation_id().value()
@@ -255,8 +269,9 @@ fn observation_snapshot_fingerprint(observation: &crate::core::state::Observatio
         ^ u64::from(basis.viewport().max_row.value())
         ^ u64::from(basis.viewport().max_col.value())
         ^ cursor_color_witness_fingerprint(basis.cursor_color_witness()).rotate_left(11)
-        ^ probe_set_fingerprint(observation.probes()).rotate_left(17)
-        ^ background_progress_fingerprint(observation.background_progress()).rotate_left(23)
+        ^ cursor_text_context_fingerprint(basis.cursor_text_context()).rotate_left(17)
+        ^ probe_set_fingerprint(observation.probes()).rotate_left(23)
+        ^ background_progress_fingerprint(observation.background_progress()).rotate_left(29)
 }
 
 fn semantic_entity_fingerprint(entity: &SemanticEntity) -> u64 {

@@ -18,6 +18,7 @@ use crate::animation::{
     corners_for_cursor, corners_for_render, outside_stop_exit, simulate_step, stop_metrics,
     within_stop_enter,
 };
+use crate::core::state::SemanticEvent;
 use crate::state::{CursorShape, RuntimeState};
 use crate::types::{EPSILON, Point, RenderStepSample};
 use nvim_utils::mode::is_cmdline_mode;
@@ -301,6 +302,15 @@ pub(crate) fn reduce_cursor_event(
             if external_mode_ignores_cursor(&state.config, mode) {
                 return CursorTransitions::noop(mode, allow_real_cursor_updates)
                     .with_cursor_visibility(CursorVisibilityEffect::Show)
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            }
+            if event.semantic_event == SemanticEvent::TextMutatedAtCursorContext {
+                state.jump_and_stop_animation(
+                    target_position,
+                    cursor_shape,
+                    &event.cursor_location,
+                );
+                return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
             if external_mode_requires_immediate_movement(

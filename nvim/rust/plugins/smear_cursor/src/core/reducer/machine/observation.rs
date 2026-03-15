@@ -1,49 +1,37 @@
 use super::Transition;
 use super::planning::plan_ready_state;
 use super::support::{
-    arm_delayed_ingress_wake, delayed_pending_ingress_due_at, ingress_cursor_presentation_effect,
+    delay_budget_from_ms, ingress_cursor_presentation_effect,
     ingress_marks_cursor_autocmd_freshness, invalidate_cleanup_state, next_pending_probe_effect,
     probe_refresh_budget_exhausted_metric, probe_refresh_retry_metric, probe_requests_for,
     record_event_loop_metric, request_observation_base, reset_recovery_attempt,
-    suppresses_key_fallback_at,
+    schedule_timer_with_delay,
 };
-use crate::core::effect::{Effect, EventLoopMetricEffect};
+use crate::core::effect::{Effect, EventLoopMetricEffect, TimerKind};
 use crate::core::event::{
-    ExternalDemandQueuedEvent, InitializeEvent, KeyFallbackQueuedEvent,
-    ObservationBaseCollectedEvent, ProbeReportedEvent,
+    ExternalDemandQueuedEvent, InitializeEvent, ObservationBaseCollectedEvent, ProbeReportedEvent,
 };
+use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::{
-    BackgroundProbeUpdate, CoreState, ExternalDemand, ExternalDemandKind, ObservationRequest,
-    ObservationSnapshot, ProbeKind, ProbeReuse, ProbeState, QueuedDemand,
+    BackgroundProbeUpdate, CoreState, ExternalDemand, ObservationRequest, ObservationSnapshot,
+    ProbeKind, ProbeReuse, ProbeState, QueuedDemand,
 };
 use crate::core::types::Millis;
 
 pub(super) fn start_next_observation(
     state: CoreState,
-    observed_at: Millis,
+    _observed_at: Millis,
 ) -> (CoreState, Option<Effect>) {
-    let mut next_state = state;
+    let (next_state, next_demand) =
+        state.map_demand_queue(crate::core::state::DemandQueue::dequeue_ready);
+    let Some(demand) = next_demand else {
+        return (next_state, None);
+    };
 
-    loop {
-        let (state_with_queue_update, next_demand) =
-            next_state.map_demand_queue(|queue| queue.dequeue_ready(observed_at));
-        next_state = state_with_queue_update;
-
-        let Some(demand) = next_demand else {
-            return (next_state, None);
-        };
-
-        if demand.kind() == ExternalDemandKind::KeyFallback
-            && suppresses_key_fallback_at(&next_state, observed_at)
-        {
-            continue;
-        }
-
-        let request = ObservationRequest::new(demand, probe_requests_for(&next_state));
-        let next_state = next_state.into_observing(request.clone());
-        let effect = request_observation_base(&next_state, request);
-        return (next_state, Some(effect));
-    }
+    let request = ObservationRequest::new(demand, probe_requests_for(&next_state));
+    let next_state = next_state.into_observing(request.clone());
+    let effect = request_observation_base(&next_state, request);
+    (next_state, Some(effect))
 }
 
 pub(super) fn transition_ready_or_observe(state: CoreState, observed_at: Millis) -> Transition {
@@ -56,10 +44,6 @@ pub(super) fn transition_ready_or_observe(state: CoreState, observed_at: Millis)
         Some(observation) => next_state.into_ready_with_observation(observation),
         None => next_state.into_primed(),
     };
-    if let Some(due_at) = delayed_pending_ingress_due_at(&settled, observed_at) {
-        let (scheduled_state, wake) = arm_delayed_ingress_wake(settled, due_at, observed_at);
-        return Transition::new(scheduled_state, vec![wake]);
-    }
 
     Transition::new(settled, Vec::new())
 }
@@ -70,26 +54,13 @@ pub(super) fn observe_or_plan(state: CoreState, observed_at: Millis) -> Transiti
         return Transition::new(next_state, vec![effect]);
     }
 
-    let mut transition = match next_state.retained_observation().cloned() {
+    match next_state.retained_observation().cloned() {
         Some(observation) => {
             let ready = next_state.into_ready_with_observation(observation.clone());
-            plan_ready_state(ready, observation, observed_at)
+            plan_ready_state(ready, None, observation, observed_at)
         }
         None => Transition::new(next_state.into_primed(), Vec::new()),
-    };
-    if transition.effects.is_empty()
-        && matches!(
-            transition.next.lifecycle(),
-            crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
-        )
-        && let Some(due_at) = delayed_pending_ingress_due_at(&transition.next, observed_at)
-    {
-        let next_state = std::mem::take(&mut transition.next);
-        let (scheduled_state, wake) = arm_delayed_ingress_wake(next_state, due_at, observed_at);
-        transition.next = scheduled_state;
-        transition.effects.push(wake);
     }
-    transition
 }
 
 pub(super) fn reduce_initialize(state: &CoreState, payload: InitializeEvent) -> Transition {
@@ -101,32 +72,45 @@ pub(super) fn reduce_initialize(state: &CoreState, payload: InitializeEvent) -> 
     Transition::new(state.clone().initialize(), Vec::new())
 }
 
+fn delayed_cursor_ingress_transition(state: CoreState, observed_at: Millis) -> Option<Transition> {
+    let delay_ms = as_delay_ms(state.runtime().config.delay_event_to_smear);
+    if delay_ms == 0 {
+        return None;
+    }
+
+    let (scheduled_state, effect) = schedule_timer_with_delay(
+        state,
+        TimerKind::Ingress,
+        delay_budget_from_ms(delay_ms),
+        observed_at,
+    );
+    Some(Transition::new(scheduled_state, vec![effect]))
+}
+
 fn queue_external_demand(
     state: CoreState,
     queued_demand: QueuedDemand,
     observed_at: Millis,
 ) -> Transition {
-    let invalidates_cleanup = !matches!(&queued_demand, QueuedDemand::PendingKeyFallback { .. });
+    let should_delay_cursor_ingress = queued_demand.is_cursor();
     let active_cursor_superseded = state
         .active_demand()
         .is_some_and(|active| active.is_cursor() && queued_demand.is_cursor());
     let (queued_state, queue_coalesced) =
         state.map_demand_queue(|queue| queue.enqueue(queued_demand));
     let was_coalesced = active_cursor_superseded || queue_coalesced;
-    let queued_state = if invalidates_cleanup {
-        invalidate_cleanup_state(queued_state)
-    } else {
-        // a debounced key-fallback demand is only advisory until it matures into an
-        // actual observation. Canceling render cleanup here lets a later-suppressed fallback
-        // strand the last smear frame with no retry path.
-        queued_state
-    };
+    let queued_state = invalidate_cleanup_state(queued_state);
 
     let mut transition = match queued_state.protocol() {
         crate::core::state::ProtocolState::Idle { .. } => Transition::stay(&queued_state),
         crate::core::state::ProtocolState::Primed { .. }
         | crate::core::state::ProtocolState::Ready { .. } => {
-            transition_ready_or_observe(queued_state, observed_at)
+            if should_delay_cursor_ingress {
+                delayed_cursor_ingress_transition(queued_state.clone(), observed_at)
+                    .unwrap_or_else(|| transition_ready_or_observe(queued_state, observed_at))
+            } else {
+                transition_ready_or_observe(queued_state, observed_at)
+            }
         }
         crate::core::state::ProtocolState::ObservingRequest { .. }
         | crate::core::state::ProtocolState::ObservingActive { .. }
@@ -183,28 +167,6 @@ pub(super) fn reduce_external_demand_queued(
         transition.effects.insert(0, effect);
     }
     transition
-}
-
-pub(super) fn reduce_key_fallback_queued(
-    state: &CoreState,
-    payload: KeyFallbackQueuedEvent,
-) -> Transition {
-    if state.needs_initialize() {
-        return Transition::stay(state);
-    }
-
-    let (state_with_seq, seq) = state.clone().allocate_ingress_seq();
-    let queued_demand = if payload.due_at.value() <= payload.observed_at.value() {
-        QueuedDemand::ready(ExternalDemand::new(
-            seq,
-            ExternalDemandKind::KeyFallback,
-            payload.observed_at,
-            None,
-        ))
-    } else {
-        QueuedDemand::pending_key_fallback(seq, payload.due_at, None)
-    };
-    queue_external_demand(state_with_seq, queued_demand, payload.observed_at)
 }
 
 pub(super) fn reduce_observation_base_collected(
@@ -374,6 +336,7 @@ fn apply_probe_report(
 
 fn complete_observation(state: CoreState, observation: ObservationSnapshot) -> Transition {
     let observed_at = observation.basis().observed_at();
+    let previous_observation = state.retained_observation().cloned();
     let next_cursor = observation
         .basis()
         .cursor_position()
@@ -383,7 +346,12 @@ fn complete_observation(state: CoreState, observation: ObservationSnapshot) -> T
             .with_last_cursor(next_cursor)
             .into_ready_with_observation(observation.clone()),
     );
-    plan_ready_state(ready, observation, observed_at)
+    plan_ready_state(
+        ready,
+        previous_observation.as_ref(),
+        observation,
+        observed_at,
+    )
 }
 
 pub(super) fn reduce_probe_reported(state: &CoreState, payload: &ProbeReportedEvent) -> Transition {

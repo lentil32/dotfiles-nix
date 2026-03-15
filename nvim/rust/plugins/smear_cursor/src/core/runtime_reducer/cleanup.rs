@@ -92,8 +92,7 @@ pub(crate) fn next_cleanup_check_delay_ms(input: CleanupPolicyInput) -> Option<u
 }
 
 pub(crate) fn render_cleanup_delay_ms(config: &RuntimeConfig) -> u64 {
-    let baseline =
-        as_delay_ms(config.time_interval + config.delay_event_to_smear + config.delay_after_key);
+    let baseline = as_delay_ms(config.time_interval + config.delay_event_to_smear);
     baseline.max(MIN_RENDER_CLEANUP_DELAY_MS)
 }
 

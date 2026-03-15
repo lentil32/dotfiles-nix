@@ -4,6 +4,7 @@ use crate::core::runtime_reducer::{
     RenderAllocationPolicy, RenderCleanupAction, RenderSideEffects,
 };
 use crate::core::types::{Millis, ProposalId};
+use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct DegradedApplyMetrics {
@@ -248,12 +249,17 @@ impl AnimationSchedule {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum ProposalShapeError {
+    #[error("draw realization reached a clear patch")]
     DrawReachedClearPatch,
+    #[error("draw realization requires a target projection")]
     DrawMissingTargetProjection,
+    #[error("clear realization reached a draw patch")]
     ClearReachedDrawPatch,
+    #[error("noop realization reached a draw patch")]
     NoopReachedDrawPatch,
+    #[error("noop realization reached a clear patch")]
     NoopReachedClearPatch,
 }
 
@@ -337,6 +343,7 @@ impl ProposalExecution {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn draw_realization(&self) -> Option<(&ProjectionSnapshot, &RealizationDraw)> {
         match self {
             Self::Draw {

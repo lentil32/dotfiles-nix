@@ -1,6 +1,5 @@
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum Ingress {
-    KeyObserved,
     Autocmd(AutocmdIngress),
 }
 
@@ -87,15 +86,9 @@ impl AutocmdIngress {
                 | Self::WinEnter
                 | Self::WinScrolled
                 | Self::CmdlineChanged
+                | Self::ModeChanged
+                | Self::BufEnter
         )
-    }
-
-    pub(super) const fn requests_mode_changed_dispatch(self) -> bool {
-        matches!(self, Self::ModeChanged)
-    }
-
-    pub(super) const fn is_buffer_enter(self) -> bool {
-        matches!(self, Self::BufEnter)
     }
 
     pub(super) const fn is_colorscheme(self) -> bool {

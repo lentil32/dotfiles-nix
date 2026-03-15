@@ -1,6 +1,5 @@
 mod core_dispatch;
 mod ingress_router;
-mod key_fallback;
 mod labels;
 mod observation;
 mod render_apply;
@@ -19,10 +18,9 @@ mod viewport;
 pub(super) use crate::core::runtime_reducer::EventSource;
 pub(super) use core_dispatch::{
     dispatch_core_event_with_default_scheduler, reset_scheduled_effect_queue,
+    stage_core_event_with_default_scheduler,
 };
-pub(crate) use ingress_router::{on_autocmd_event, on_key_listener_event};
-#[cfg(test)]
-pub(super) use key_fallback::{KeyEventAction, decide_key_event_action};
+pub(crate) use ingress_router::on_autocmd_event;
 pub(super) use observation::{
     execute_core_request_observation_base_effect, execute_core_request_probe_effect,
 };

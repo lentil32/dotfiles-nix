@@ -32,12 +32,19 @@ pub(crate) fn execute_core_request_render_plan_effect(
                 observed_at: payload.requested_at,
             })
         },
-        |planned_render| {
-            CoreEvent::RenderPlanComputed(RenderPlanComputedEvent {
+        |planned_render| match planned_render {
+            Ok(planned_render) => CoreEvent::RenderPlanComputed(RenderPlanComputedEvent {
                 proposal_id: payload.proposal_id,
                 planned_render: Box::new(planned_render),
                 observed_at: payload.requested_at,
-            })
+            }),
+            Err(err) => {
+                warn(&format!("core render planning failed: {err}"));
+                CoreEvent::RenderPlanFailed(RenderPlanFailedEvent {
+                    proposal_id: payload.proposal_id,
+                    observed_at: payload.requested_at,
+                })
+            }
         },
     );
 

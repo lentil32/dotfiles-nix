@@ -18,7 +18,6 @@ enum OptionKey {
     SimulationHz,
     MaxSimulationStepsPerFrame,
     DelayEventToSmear,
-    DelayAfterKey,
     SmearToCmd,
     SmearInsertMode,
     SmearReplaceMode,
@@ -95,7 +94,6 @@ impl OptionKey {
             Self::SimulationHz => "simulation_hz",
             Self::MaxSimulationStepsPerFrame => "max_simulation_steps_per_frame",
             Self::DelayEventToSmear => "delay_event_to_smear",
-            Self::DelayAfterKey => "delay_after_key",
             Self::SmearToCmd => "smear_to_cmd",
             Self::SmearInsertMode => "smear_insert_mode",
             Self::SmearReplaceMode => "smear_replace_mode",
@@ -496,13 +494,6 @@ define_option_spec!(
     DelayEventToSmear,
     parse_optional_non_negative_f64,
     runtime.delay_event_to_smear
-);
-define_option_spec!(
-    spec_delay_after_key_apply,
-    SPEC_DELAY_AFTER_KEY,
-    DelayAfterKey,
-    parse_optional_non_negative_f64,
-    runtime.delay_after_key
 );
 define_option_spec!(
     spec_smear_to_cmd_apply,
@@ -967,7 +958,6 @@ const OPTION_SPECS: &[OptionSpec] = &[
     SPEC_SIMULATION_HZ,
     SPEC_MAX_SIMULATION_STEPS_PER_FRAME,
     SPEC_DELAY_EVENT_TO_SMEAR,
-    SPEC_DELAY_AFTER_KEY,
     SPEC_SMEAR_TO_CMD,
     SPEC_SMEAR_INSERT_MODE,
     SPEC_SMEAR_REPLACE_MODE,

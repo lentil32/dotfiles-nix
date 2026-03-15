@@ -6,24 +6,25 @@ use crate::core::effect::{
 };
 use crate::core::event::{
     ApplyReport, EffectFailedEvent, Event, ExternalDemandQueuedEvent, InitializeEvent,
-    KeyFallbackQueuedEvent, ObservationBaseCollectedEvent, ProbeReportedEvent,
-    RenderCleanupAppliedAction, RenderCleanupAppliedEvent, RenderPlanComputedEvent,
-    TimerFiredWithTokenEvent, TimerLostWithTokenEvent,
+    ObservationBaseCollectedEvent, ProbeReportedEvent, RenderCleanupAppliedAction,
+    RenderCleanupAppliedEvent, RenderPlanComputedEvent, TimerFiredWithTokenEvent,
+    TimerLostWithTokenEvent,
 };
 use crate::core::runtime_reducer::{
-    RenderCleanupAction, RenderSideEffects, render_cleanup_delay_ms, render_hard_cleanup_delay_ms,
+    RenderAction, RenderCleanupAction, RenderSideEffects, render_cleanup_delay_ms,
+    render_hard_cleanup_delay_ms,
 };
 use crate::core::state::{
-    BackgroundProbeBatch, BackgroundProbeChunk, CoreState, CursorColorSample, DegradedApplyMetrics,
-    DemandQueue, ExternalDemand, ExternalDemandKind, InFlightProposal, IngressPolicyState,
-    ObservationBasis, ObservationMotion, ObservationRequest, ObservationSnapshot, PatchBasis,
-    ProbeFailure, ProbeKind, ProbeRequestSet, ProbeReuse, ProbeSlot, ProbeState, RealizationClear,
-    RealizationDivergence, RealizationLedger, RealizationPlan, RecoveryPolicyState,
-    RenderCleanupState, ScenePatch, SemanticEntityId,
+    BackgroundProbeBatch, BackgroundProbeChunk, CoreState, CursorColorSample, CursorTextContext,
+    DegradedApplyMetrics, DemandQueue, ExternalDemand, ExternalDemandKind, InFlightProposal,
+    ObservationBasis, ObservationMotion, ObservationRequest, ObservationSnapshot, ObservedTextRow,
+    PatchBasis, ProbeFailure, ProbeKind, ProbeRequestSet, ProbeReuse, ProbeSlot, ProbeState,
+    RealizationClear, RealizationDivergence, RealizationLedger, RealizationPlan,
+    RecoveryPolicyState, ScenePatch, SemanticEntityId,
 };
 use crate::core::types::{
     CursorCol, CursorPosition, CursorRow, DelayBudgetMs, IngressSeq, Lifecycle, Millis, ProposalId,
-    TimerGeneration, TimerId, TimerToken, ViewportSnapshot,
+    TimerId, TimerToken, ViewportSnapshot,
 };
 use crate::state::{CursorLocation, CursorShape, RuntimeState};
 use crate::types::{Point, ScreenCell};
@@ -87,6 +88,60 @@ fn observation_basis(
         CursorLocation::new(11, 22, 3, 4),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
     )
+}
+
+fn observed_rows(rows: &[(i64, &str)]) -> Vec<ObservedTextRow> {
+    rows.iter()
+        .map(|(line, text)| ObservedTextRow::new(*line, (*text).to_string()))
+        .collect()
+}
+
+fn text_context(
+    changedtick: u64,
+    cursor_line: i64,
+    rows: &[(i64, &str)],
+    tracked_cursor_line: Option<i64>,
+    tracked_rows: Option<&[(i64, &str)]>,
+) -> CursorTextContext {
+    CursorTextContext::new(
+        22,
+        changedtick,
+        cursor_line,
+        observed_rows(rows),
+        tracked_cursor_line,
+        tracked_rows.map(observed_rows),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The test fixture mirrors the distinct text-context inputs under comparison."
+)]
+fn observation_basis_with_text_context(
+    request: &ObservationRequest,
+    position: Option<CursorPosition>,
+    observed_at: u64,
+    cursor_line: i64,
+    changedtick: u64,
+    rows: &[(i64, &str)],
+    tracked_cursor_line: Option<i64>,
+    tracked_rows: Option<&[(i64, &str)]>,
+) -> ObservationBasis {
+    ObservationBasis::new(
+        request.observation_id(),
+        Millis::new(observed_at),
+        "n".to_string(),
+        position,
+        CursorLocation::new(11, 22, 3, cursor_line),
+        ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+    )
+    .with_cursor_text_context(Some(text_context(
+        changedtick,
+        cursor_line,
+        rows,
+        tracked_cursor_line,
+        tracked_rows,
+    )))
 }
 
 fn observation_motion() -> ObservationMotion {
@@ -297,13 +352,6 @@ fn animation_tick_event(token: TimerToken, observed_at: u64) -> Event {
     })
 }
 
-fn ingress_tick_event(token: TimerToken, observed_at: u64) -> Event {
-    Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
-        token,
-        observed_at: Millis::new(observed_at),
-    })
-}
-
 fn cleanup_tick_event(token: TimerToken, observed_at: u64) -> Event {
     Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
         token,
@@ -330,12 +378,15 @@ fn planned_state_after_animation_tick(
         &transition.next,
         Event::RenderPlanComputed(RenderPlanComputedEvent {
             proposal_id,
-            planned_render: Box::new(crate::core::reducer::build_planned_render(
-                &payload.planning_state,
-                payload.proposal_id,
-                &payload.render_decision,
-                payload.animation_schedule,
-            )),
+            planned_render: Box::new(
+                crate::core::reducer::build_planned_render(
+                    &payload.planning_state,
+                    payload.proposal_id,
+                    &payload.render_decision,
+                    payload.animation_schedule,
+                )
+                .expect("planned render should satisfy proposal shape invariants"),
+            ),
             observed_at: payload.requested_at,
         }),
     );
@@ -438,6 +489,7 @@ fn initialize_from_idle_enters_primed_protocol_without_follow_up_reads() {
 
 mod protocol_shared_state_constructors {
     use super::*;
+    use crate::core::state::IngressPolicyState;
 
     fn primed_state_with_shared_policy() -> (
         CoreState,
@@ -623,12 +675,126 @@ mod observing_cursor_demand_queue {
             .expect("queued cursor demand");
         assert_eq!(
             queued_cursor,
-            &crate::core::state::QueuedDemand::Ready(ExternalDemand::new(
+            &crate::core::state::QueuedDemand::ready(ExternalDemand::new(
                 IngressSeq::new(3),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(22),
                 None,
             ))
+        );
+    }
+}
+
+mod delayed_cursor_demand_queue {
+    use super::*;
+
+    fn delayed_ready_state() -> CoreState {
+        ready_state_with_runtime_config(|runtime| {
+            runtime.config.delay_event_to_smear = 40.0;
+        })
+    }
+
+    #[test]
+    fn first_cursor_demand_arms_the_ingress_timer_before_observing() {
+        let ready = delayed_ready_state();
+
+        let first = reduce(
+            &ready,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        );
+
+        let ingress_token = first
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("cursor ingress delay should arm the ingress timer");
+        assert_eq!(first.next.lifecycle(), ready.lifecycle());
+        assert_eq!(
+            first.effects,
+            vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+                token: ingress_token,
+                delay: DelayBudgetMs::try_new(40).expect("ingress delay budget"),
+                requested_at: Millis::new(20),
+            })]
+        );
+        assert!(first.next.demand_queue().latest_cursor().is_some());
+    }
+
+    #[test]
+    fn delayed_cursor_timer_fire_starts_the_queued_observation() {
+        let ready = delayed_ready_state();
+        let delayed = reduce(
+            &ready,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        )
+        .next;
+        let ingress_token = delayed
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("ingress timer token");
+
+        let fired = reduce(
+            &delayed,
+            Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
+                token: ingress_token,
+                observed_at: Millis::new(60),
+            }),
+        );
+
+        assert_eq!(fired.next.lifecycle(), Lifecycle::Observing);
+        assert!(matches!(
+            fired.effects.as_slice(),
+            [Effect::RequestObservationBase(
+                RequestObservationBaseEffect { .. }
+            )]
+        ));
+    }
+
+    #[test]
+    fn newer_delayed_cursor_demand_replaces_the_pending_queue_and_rearms_the_timer() {
+        let ready = delayed_ready_state();
+        let first = reduce(
+            &ready,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        );
+        let first_token = first
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("first ingress timer token");
+
+        let second = reduce(
+            &first.next,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        );
+
+        let second_token = second
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("replacement ingress timer token");
+        assert_ne!(second_token, first_token);
+        assert_eq!(
+            second.next.demand_queue().latest_cursor(),
+            Some(&crate::core::state::QueuedDemand::ready(
+                ExternalDemand::new(
+                    IngressSeq::new(2),
+                    ExternalDemandKind::ExternalCursor,
+                    Millis::new(21),
+                    None,
+                )
+            ))
+        );
+        assert_eq!(
+            second.effects,
+            vec![
+                Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
+                Effect::ScheduleTimer(ScheduleTimerEffect {
+                    token: second_token,
+                    delay: DelayBudgetMs::try_new(40).expect("ingress delay budget"),
+                    requested_at: Millis::new(21),
+                }),
+            ]
         );
     }
 }
@@ -1365,257 +1531,6 @@ mod observation_completion_planning {
     }
 }
 
-mod key_fallback_suppression {
-    use super::*;
-
-    fn state_with_recent_cursor_autocmd() -> CoreState {
-        let mut runtime = ready_state().runtime().clone();
-        runtime.config.delay_after_key = 25.0;
-        ready_state().with_runtime(runtime).with_ingress_policy(
-            IngressPolicyState::default().note_cursor_autocmd(Millis::new(100)),
-        )
-    }
-
-    fn queued_pending_key_fallback_with_cleanup()
-    -> (RenderCleanupState, TimerToken, TimerToken, Transition) {
-        let mut runtime = ready_state().runtime().clone();
-        runtime.config.delay_after_key = 25.0;
-        let cleanup = RenderCleanupState::scheduled(Millis::new(90), 200, 3_000, 21);
-        let (timers, cleanup_token) = ready_state().timers().arm(TimerId::Cleanup);
-        let state = ready_state()
-            .with_runtime(runtime)
-            .with_timers(timers)
-            .with_render_cleanup(cleanup)
-            .with_ingress_policy(
-                IngressPolicyState::default().note_cursor_autocmd(Millis::new(100)),
-            );
-        let queued = reduce(
-            &state,
-            Event::KeyFallbackQueued(KeyFallbackQueuedEvent {
-                observed_at: Millis::new(112),
-                due_at: Millis::new(120),
-            }),
-        );
-        let ingress_token = queued
-            .next
-            .timers()
-            .active_token(TimerId::Ingress)
-            .expect("pending key fallback should arm ingress timer");
-        (cleanup, cleanup_token, ingress_token, queued)
-    }
-
-    #[test]
-    fn recent_autocmd_suppression_leaves_lifecycle_and_ingress_entropy_unchanged() {
-        let state = state_with_recent_cursor_autocmd();
-
-        let suppressed = reduce(
-            &state,
-            external_demand_event(ExternalDemandKind::KeyFallback, 112, None),
-        );
-
-        assert_eq!(suppressed.next.lifecycle(), state.lifecycle());
-        assert_eq!(
-            suppressed.next.entropy().next_ingress_seq(),
-            IngressSeq::new(1)
-        );
-        assert!(suppressed.effects.is_empty());
-    }
-
-    #[test]
-    fn recent_autocmd_suppression_does_not_queue_the_key_fallback_demand() {
-        let state = state_with_recent_cursor_autocmd();
-
-        let suppressed = reduce(
-            &state,
-            external_demand_event(ExternalDemandKind::KeyFallback, 112, None),
-        );
-
-        assert!(suppressed.next.demand_queue().latest_cursor().is_none());
-        assert!(suppressed.next.demand_queue().ordered().is_empty());
-    }
-
-    #[test]
-    fn pending_key_fallback_queueing_preserves_the_existing_cleanup_state() {
-        let (cleanup, cleanup_token, _ingress_token, queued) =
-            queued_pending_key_fallback_with_cleanup();
-
-        assert_eq!(queued.next.render_cleanup(), cleanup);
-        assert_eq!(
-            queued.next.timers().active_token(TimerId::Cleanup),
-            Some(cleanup_token)
-        );
-    }
-
-    #[test]
-    fn suppressed_pending_key_fallback_keeps_cleanup_timer_armed() {
-        let (cleanup, cleanup_token, ingress_token, queued) =
-            queued_pending_key_fallback_with_cleanup();
-
-        let suppressed = reduce(&queued.next, ingress_tick_event(ingress_token, 120));
-
-        assert_eq!(suppressed.next.render_cleanup(), cleanup);
-        assert_eq!(
-            suppressed.next.timers().active_token(TimerId::Cleanup),
-            Some(cleanup_token)
-        );
-    }
-
-    #[test]
-    fn suppressed_pending_key_fallback_disarms_the_ingress_timer_without_effects() {
-        let (_cleanup, _cleanup_token, ingress_token, queued) =
-            queued_pending_key_fallback_with_cleanup();
-
-        let suppressed = reduce(&queued.next, ingress_tick_event(ingress_token, 120));
-
-        assert_eq!(
-            suppressed.next.timers().active_token(TimerId::Ingress),
-            None
-        );
-        assert!(suppressed.effects.is_empty());
-    }
-}
-
-#[test]
-fn stale_autocmd_ingress_allows_key_fallback_in_reducer() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.delay_after_key = 25.0;
-    let state = ready_state()
-        .with_runtime(runtime)
-        .with_ingress_policy(IngressPolicyState::default().note_cursor_autocmd(Millis::new(100)));
-
-    let admitted = reduce(
-        &state,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::KeyFallback,
-            observed_at: Millis::new(160),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    );
-
-    assert_eq!(admitted.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
-        admitted.effects,
-        with_cleanup_invalidation(vec![Effect::RequestObservationBase(
-            RequestObservationBaseEffect {
-                request: observation_request(1, ExternalDemandKind::KeyFallback, 160),
-                context: observation_runtime_context(&state),
-            }
-        )])
-    );
-}
-
-#[test]
-fn deferred_key_fallback_is_queued_and_arms_ingress_timer() {
-    let transition = reduce(
-        &ready_state(),
-        Event::KeyFallbackQueued(KeyFallbackQueuedEvent {
-            observed_at: Millis::new(120),
-            due_at: Millis::new(145),
-        }),
-    );
-
-    let expected_token = TimerToken::new(TimerId::Ingress, TimerGeneration::new(1));
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Primed);
-    assert_eq!(
-        transition.next.demand_queue().latest_cursor(),
-        Some(&crate::core::state::QueuedDemand::PendingKeyFallback {
-            seq: IngressSeq::new(1),
-            due_at: Millis::new(145),
-            requested_target: None,
-        })
-    );
-    assert_eq!(
-        transition.effects,
-        with_cleanup_invalidation(vec![Effect::ScheduleTimer(ScheduleTimerEffect {
-            token: expected_token,
-            delay: DelayBudgetMs::try_new(25).expect("positive delay"),
-            requested_at: Millis::new(120),
-        })])
-    );
-}
-
-#[test]
-fn ingress_timer_fires_and_requests_deferred_key_fallback_observation() {
-    let queued = reduce(
-        &ready_state(),
-        Event::KeyFallbackQueued(KeyFallbackQueuedEvent {
-            observed_at: Millis::new(120),
-            due_at: Millis::new(145),
-        }),
-    );
-    let token = TimerToken::new(TimerId::Ingress, TimerGeneration::new(1));
-
-    let activated = reduce(&queued.next, ingress_tick_event(token, 145));
-
-    assert_eq!(activated.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
-        activated.effects,
-        vec![Effect::RequestObservationBase(
-            RequestObservationBaseEffect {
-                request: observation_request(1, ExternalDemandKind::KeyFallback, 145),
-                context: observation_runtime_context(&queued.next),
-            }
-        )]
-    );
-}
-
-#[test]
-fn recent_autocmd_suppresses_deferred_key_fallback_when_ingress_timer_fires() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.delay_after_key = 25.0;
-    let queued = reduce(
-        &ready_state().with_runtime(runtime.clone()),
-        Event::KeyFallbackQueued(KeyFallbackQueuedEvent {
-            observed_at: Millis::new(120),
-            due_at: Millis::new(145),
-        }),
-    );
-    let token = TimerToken::new(TimerId::Ingress, TimerGeneration::new(1));
-    let state = queued
-        .next
-        .with_runtime(runtime)
-        .with_ingress_policy(IngressPolicyState::default().note_cursor_autocmd(Millis::new(130)));
-
-    let suppressed = reduce(&state, ingress_tick_event(token, 145));
-
-    assert_eq!(suppressed.next.lifecycle(), Lifecycle::Primed);
-    assert!(suppressed.effects.is_empty());
-}
-
-#[test]
-fn external_cursor_supersedes_pending_deferred_key_fallback() {
-    let queued = reduce(
-        &ready_state(),
-        Event::KeyFallbackQueued(KeyFallbackQueuedEvent {
-            observed_at: Millis::new(120),
-            due_at: Millis::new(145),
-        }),
-    );
-
-    let superseded = reduce(
-        &queued.next,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(121),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    );
-
-    assert_eq!(superseded.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
-        superseded.effects,
-        vec![
-            Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
-            Effect::RequestObservationBase(RequestObservationBaseEffect {
-                request: observation_request(2, ExternalDemandKind::ExternalCursor, 121),
-                context: observation_runtime_context(&queued.next),
-            }),
-        ]
-    );
-}
-
 #[test]
 fn cursor_autocmd_demands_refresh_ingress_policy_state() {
     let transition = reduce(
@@ -1721,7 +1636,8 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
         payload.proposal_id,
         &payload.render_decision,
         payload.animation_schedule,
-    );
+    )
+    .expect("animation planning should preserve proposal shape invariants");
     let proposal = planned_render.proposal();
     let RealizationPlan::Draw(_) = proposal.realization() else {
         panic!(
@@ -1738,6 +1654,191 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
         "next animation deadline should advance from timer time, got {}",
         next_animation_at.value()
     );
+}
+
+#[test]
+fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
+    let previous_request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
+    let previous_observation = ObservationSnapshot::new(
+        previous_request.clone(),
+        observation_basis_with_text_context(
+            &previous_request,
+            Some(cursor(9, 9)),
+            91,
+            9,
+            10,
+            &[(8, "before"), (9, "alpha"), (10, "after")],
+            None,
+            None,
+        ),
+        observation_motion(),
+    );
+    let mut runtime = ready_state().runtime().clone();
+    runtime.initialize_cursor(
+        Point { row: 9.0, col: 9.0 },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(11, 22, 3, 9),
+    );
+    let ready = ready_state()
+        .with_last_cursor(Some(cursor(9, 9)))
+        .with_runtime(runtime)
+        .into_ready_with_observation(previous_observation);
+    let observing = reduce(
+        &ready,
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+    )
+    .next;
+    let request = active_request(&observing);
+
+    let transition = collect_observation_base(
+        &observing,
+        &request,
+        observation_basis_with_text_context(
+            &request,
+            Some(cursor(9, 10)),
+            101,
+            9,
+            11,
+            &[(8, "before"), (9, "alphab"), (10, "after")],
+            Some(9),
+            Some(&[(8, "before"), (9, "alphab"), (10, "after")]),
+        ),
+        observation_motion(),
+    );
+
+    let [Effect::RequestRenderPlan(payload)] = transition.effects.as_slice() else {
+        panic!("expected render plan request after text mutation observation");
+    };
+    assert!(matches!(
+        payload.render_decision.render_action,
+        RenderAction::ClearAll
+    ));
+}
+
+#[test]
+fn observation_completion_with_motion_only_requests_draw_render_plan() {
+    let previous_request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
+    let previous_observation = ObservationSnapshot::new(
+        previous_request.clone(),
+        observation_basis_with_text_context(
+            &previous_request,
+            Some(cursor(9, 9)),
+            91,
+            9,
+            10,
+            &[(8, "before"), (9, "alpha"), (10, "after")],
+            None,
+            None,
+        ),
+        observation_motion(),
+    );
+    let mut runtime = ready_state().runtime().clone();
+    runtime.initialize_cursor(
+        Point { row: 9.0, col: 9.0 },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(11, 22, 3, 9),
+    );
+    let ready = ready_state()
+        .with_last_cursor(Some(cursor(9, 9)))
+        .with_runtime(runtime)
+        .into_ready_with_observation(previous_observation);
+    let observing = reduce(
+        &ready,
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+    )
+    .next;
+    let request = active_request(&observing);
+
+    let transition = collect_observation_base(
+        &observing,
+        &request,
+        observation_basis_with_text_context(
+            &request,
+            Some(cursor(10, 9)),
+            101,
+            10,
+            10,
+            &[(9, "alpha"), (10, "after"), (11, "tail")],
+            Some(9),
+            Some(&[(8, "before"), (9, "alpha"), (10, "after")]),
+        ),
+        observation_motion(),
+    );
+
+    let [Effect::RequestRenderPlan(payload)] = transition.effects.as_slice() else {
+        panic!("expected render plan request after motion-only observation");
+    };
+    assert!(matches!(
+        payload.render_decision.render_action,
+        RenderAction::Draw(_)
+    ));
+}
+
+#[test]
+fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all_render_plan() {
+    let previous_request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
+    let previous_observation = ObservationSnapshot::new(
+        previous_request.clone(),
+        observation_basis_with_text_context(
+            &previous_request,
+            Some(cursor(9, 9)),
+            91,
+            9,
+            10,
+            &[(8, "before"), (9, "alpha"), (10, "after")],
+            None,
+            None,
+        ),
+        observation_motion(),
+    );
+    let mut runtime = ready_state().runtime().clone();
+    runtime.initialize_cursor(
+        Point { row: 9.0, col: 9.0 },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(11, 22, 1, 9),
+    );
+    let ready = ready_state()
+        .with_last_cursor(Some(cursor(9, 9)))
+        .with_runtime(runtime)
+        .into_ready_with_observation(previous_observation);
+    let observing = reduce(
+        &ready,
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+    )
+    .next;
+    let request = active_request(&observing);
+
+    let transition = collect_observation_base(
+        &observing,
+        &request,
+        ObservationBasis::new(
+            request.observation_id(),
+            Millis::new(101),
+            "n".to_string(),
+            Some(cursor(10, 3)),
+            CursorLocation::new(11, 22, 4, 10),
+            ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        )
+        .with_cursor_text_context(Some(text_context(
+            11,
+            10,
+            &[(9, "alpha pasted"), (10, "block"), (11, "tail")],
+            Some(9),
+            Some(&[(8, "before"), (9, "alpha pasted"), (10, "block")]),
+        ))),
+        observation_motion(),
+    );
+
+    let [Effect::RequestRenderPlan(payload)] = transition.effects.as_slice() else {
+        panic!("expected render plan request after scroll + text mutation observation");
+    };
+    assert!(matches!(
+        payload.render_decision.render_action,
+        RenderAction::ClearAll
+    ));
 }
 
 mod animation_timer_draw_state {

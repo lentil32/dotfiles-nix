@@ -1,7 +1,8 @@
 use super::super::logging::{trace_lazy, warn};
 use super::super::runtime::{
-    EffectExecutor, NeovimEffectExecutor, core_state, now_ms, record_scheduled_queue_depth,
-    set_core_state, to_core_millis,
+    EffectExecutor, NeovimEffectExecutor, core_state, now_ms, record_scheduled_drain_items,
+    record_scheduled_drain_reschedule, record_scheduled_queue_depth, set_core_state,
+    to_core_millis,
 };
 use super::super::timers::schedule_guarded;
 use super::super::trace::{core_event_summary, core_state_summary, effect_summary};
@@ -10,10 +11,12 @@ use crate::core::effect::Effect;
 use crate::core::event::{EffectFailedEvent, Event as CoreEvent, ProbeReportedEvent};
 use crate::core::reducer::reduce as reduce_core_event;
 use crate::core::state::ProbeReuse;
+use nvim_oxi::Result;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
-const MAX_SCHEDULED_WORK_ITEMS_PER_EDGE: usize = 1;
+const MIN_SCHEDULED_WORK_ITEMS_PER_EDGE: usize = 16;
+const MAX_SCHEDULED_WORK_ITEMS_PER_EDGE: usize = 32;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ScheduledEffectDrainEntry {
@@ -77,6 +80,9 @@ thread_local! {
 
 fn with_scheduled_effect_queue<R>(mutator: impl FnOnce(&mut ScheduledEffectQueueState) -> R) -> R {
     SCHEDULED_EFFECT_QUEUE.with(|queue| {
+        // Keep queue borrows scoped to staging/pop bookkeeping only. Reducer execution and effect
+        // dispatch always happen after this borrow is released, so re-entering here would signal a
+        // structural bug we should fix directly instead of silently dropping queued work.
         let mut queue = queue.borrow_mut();
         mutator(&mut queue)
     })
@@ -109,8 +115,8 @@ fn stage_core_event_on_default_queue(event: CoreEvent) {
 pub(crate) fn dispatch_core_event(
     initial_event: CoreEvent,
     stage_effect_batch: &mut impl FnMut(Vec<Effect>),
-) {
-    let previous_state = core_state();
+) -> Result<()> {
+    let previous_state = core_state()?;
     let event_label = core_event_label(&initial_event);
     let event_summary = core_event_summary(&initial_event);
     let transition = reduce_core_event(&previous_state, initial_event);
@@ -126,30 +132,36 @@ pub(crate) fn dispatch_core_event(
     });
 
     let effects = transition.effects;
-    set_core_state(transition.next);
+    set_core_state(transition.next)?;
     if !effects.is_empty() {
         stage_effect_batch(effects);
     }
+    Ok(())
 }
 
 pub(crate) fn dispatch_core_events(
     initial_events: impl IntoIterator<Item = CoreEvent>,
     stage_effect_batch: &mut impl FnMut(Vec<Effect>),
-) {
+) -> Result<()> {
     for event in initial_events {
-        dispatch_core_event(event, stage_effect_batch);
+        dispatch_core_event(event, stage_effect_batch)?;
     }
+    Ok(())
 }
 
-pub(crate) fn dispatch_core_event_with_default_scheduler(initial_event: CoreEvent) {
+pub(crate) fn dispatch_core_event_with_default_scheduler(initial_event: CoreEvent) -> Result<()> {
     dispatch_core_events_with_default_scheduler([initial_event])
 }
 
 pub(crate) fn dispatch_core_events_with_default_scheduler(
     initial_events: impl IntoIterator<Item = CoreEvent>,
-) {
+) -> Result<()> {
     let mut stage_effect_batch = stage_effect_batch_on_default_queue;
     dispatch_core_events(initial_events, &mut stage_effect_batch)
+}
+
+pub(crate) fn stage_core_event_with_default_scheduler(initial_event: CoreEvent) {
+    stage_core_event_on_default_queue(initial_event);
 }
 
 pub(crate) fn reset_scheduled_effect_queue() {
@@ -163,13 +175,17 @@ struct ScheduledWorkExecutionError {
 }
 
 fn handle_scheduled_work_drain_failure(work_name: &'static str, error: &nvim_oxi::Error) {
+    reset_scheduled_queue_after_failure();
     warn(&format!("scheduled core work failed: {work_name}: {error}"));
-    reset_scheduled_effect_queue();
     let observed_at = to_core_millis(now_ms());
-    dispatch_core_event_with_default_scheduler(CoreEvent::EffectFailed(EffectFailedEvent {
+    stage_core_event_with_default_scheduler(CoreEvent::EffectFailed(EffectFailedEvent {
         proposal_id: None,
         observed_at,
     }));
+}
+
+fn reset_scheduled_queue_after_failure() {
+    reset_scheduled_effect_queue();
 }
 
 fn execute_scheduled_effect_batch(
@@ -210,6 +226,7 @@ fn execute_scheduled_effect_batch(
     }
 
     for follow_up in follow_ups {
+        let work_name = core_event_label(&follow_up);
         if should_schedule_follow_up_event(&follow_up) {
             // retry-class probe reports stay typed reducer inputs, but they hop back onto
             // the scheduled queue so one probe edge cannot immediately replay the next observation.
@@ -218,7 +235,12 @@ fn execute_scheduled_effect_batch(
         }
 
         let mut stage_effect_batch = stage_effect_batch_on_default_queue;
-        dispatch_core_event(follow_up, &mut stage_effect_batch);
+        dispatch_core_event(follow_up, &mut stage_effect_batch).map_err(|error| {
+            ScheduledWorkExecutionError {
+                work_name,
+                error,
+            }
+        })?;
     }
 
     Ok(())
@@ -239,20 +261,51 @@ fn should_schedule_follow_up_event(event: &CoreEvent) -> bool {
     )
 }
 
-fn dispatch_scheduled_core_event(event: CoreEvent) {
+fn dispatch_scheduled_core_event(event: CoreEvent) -> Result<()> {
     let mut stage_effect_batch = stage_effect_batch_on_default_queue;
-    dispatch_core_event(event, &mut stage_effect_batch);
+    dispatch_core_event(event, &mut stage_effect_batch)
+}
+
+fn scheduled_drain_budget() -> usize {
+    with_scheduled_effect_queue(|queue| {
+        let queued_items = queue.items.len();
+        if queued_items == 0 {
+            queue.drain_scheduled = false;
+            return 0;
+        }
+
+        scheduled_drain_budget_for_depth(queued_items)
+    })
+}
+
+fn scheduled_drain_budget_for_depth(queued_items: usize) -> usize {
+    if queued_items == 0 {
+        return 0;
+    }
+
+    // Drain a bounded fraction of the queued snapshot so backlog converges geometrically under
+    // burst load, while smaller queues still clear in a single shell edge.
+    let half_backlog = queued_items.saturating_add(1) / 2;
+    let bounded_half =
+        half_backlog.clamp(MIN_SCHEDULED_WORK_ITEMS_PER_EDGE, MAX_SCHEDULED_WORK_ITEMS_PER_EDGE);
+    queued_items.min(bounded_half)
 }
 
 fn drain_scheduled_work_with_executor(
     executor: &mut impl EffectExecutor,
 ) -> std::result::Result<bool, ScheduledWorkExecutionError> {
-    let mut remaining_budget = MAX_SCHEDULED_WORK_ITEMS_PER_EDGE;
+    // Drain a bounded snapshot of already-staged work so backlog can recover faster, while any
+    // reducer follow-ups created during this pass still remain deferred to a later scheduled edge.
+    let mut remaining_budget = scheduled_drain_budget();
+    let mut drained_items = 0_usize;
     while remaining_budget > 0 {
         let Some(item) = with_scheduled_effect_queue(ScheduledEffectQueueState::pop_item) else {
             with_scheduled_effect_queue(|queue| {
                 queue.drain_scheduled = false;
             });
+            if drained_items > 0 {
+                record_scheduled_drain_items(drained_items);
+            }
             return Ok(false);
         };
 
@@ -261,9 +314,16 @@ fn drain_scheduled_work_with_executor(
                 execute_scheduled_effect_batch(effects, executor)?;
             }
             ScheduledWorkItem::CoreEvent(event) => {
-                dispatch_scheduled_core_event(*event);
+                let work_name = core_event_label(&event);
+                dispatch_scheduled_core_event(*event).map_err(|error| {
+                    ScheduledWorkExecutionError {
+                        work_name,
+                        error,
+                    }
+                })?;
             }
         }
+        drained_items = drained_items.saturating_add(1);
         remaining_budget -= 1;
     }
 
@@ -274,6 +334,13 @@ fn drain_scheduled_work_with_executor(
         }
         has_more_items
     });
+
+    if drained_items > 0 {
+        record_scheduled_drain_items(drained_items);
+    }
+    if has_more_items {
+        record_scheduled_drain_reschedule();
+    }
 
     Ok(has_more_items)
 }
@@ -303,7 +370,8 @@ fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
 mod tests {
     use super::{
         ScheduledWorkItem, dispatch_core_event, drain_scheduled_work_with_executor,
-        reset_scheduled_effect_queue, with_scheduled_effect_queue,
+        reset_scheduled_effect_queue, reset_scheduled_queue_after_failure,
+        scheduled_drain_budget_for_depth, with_scheduled_effect_queue,
     };
     use crate::core::effect::{Effect, EventLoopMetricEffect};
     use crate::core::event::{
@@ -342,6 +410,14 @@ mod tests {
         fn execute_effect(&mut self, effect: Effect) -> Result<Vec<CoreEvent>> {
             self.executed_effects.push(effect);
             Ok(self.planned_follow_ups.pop_front().unwrap_or_default())
+        }
+    }
+
+    struct FailingExecutor;
+
+    impl super::EffectExecutor for FailingExecutor {
+        fn execute_effect(&mut self, _effect: Effect) -> Result<Vec<CoreEvent>> {
+            Err(nvim_oxi::api::Error::Other("planned scheduled drain failure".to_string()).into())
         }
     }
 
@@ -423,13 +499,13 @@ mod tests {
     impl CoreDispatchTestContext {
         fn new() -> Self {
             let guard = core_dispatch_test_guard();
-            set_core_state(CoreState::default());
+            replace_core_state(CoreState::default());
             reset_scheduled_effect_queue();
             Self { _guard: guard }
         }
 
         fn set_core_state(&self, state: CoreState) {
-            set_core_state(state);
+            replace_core_state(state);
         }
 
         fn dispatch_external_cursor_ingress_to_queue(
@@ -445,9 +521,10 @@ mod tests {
                     should_schedule,
                     "ingress dispatch should arm exactly one scheduled work item"
                 );
-            });
+            })
+            .expect("ingress dispatch should commit reducer state");
 
-            core_state()
+            current_core_state()
                 .active_observation_request()
                 .cloned()
                 .expect("ingress dispatch should leave an active observation request")
@@ -455,7 +532,7 @@ mod tests {
 
         fn observing_state_after_base_collection(&self) -> (ObservationRequest, CoreState) {
             self.set_core_state(ready_state_with_cursor_color_probe());
-            let observing = reduce_core_event(&core_state(), external_cursor_demand(25)).next;
+            let observing = reduce_core_event(&current_core_state(), external_cursor_demand(25)).next;
             let request = observing
                 .active_observation_request()
                 .cloned()
@@ -474,9 +551,17 @@ mod tests {
 
     impl Drop for CoreDispatchTestContext {
         fn drop(&mut self) {
-            set_core_state(CoreState::default());
+            replace_core_state(CoreState::default());
             reset_scheduled_effect_queue();
         }
+    }
+
+    fn current_core_state() -> CoreState {
+        core_state().expect("test core state access should not re-enter")
+    }
+
+    fn replace_core_state(state: CoreState) {
+        set_core_state(state).expect("test core state write should not re-enter")
     }
 
     fn external_cursor_demand(observed_at: u64) -> CoreEvent {
@@ -586,7 +671,8 @@ mod tests {
 
             dispatch_core_event(external_cursor_demand(21), &mut |effects| {
                 staged_batches.push(effects)
-            });
+            })
+            .expect("external ingress dispatch should succeed");
 
             assert_eq!(staged_batches.len(), 1);
             assert!(
@@ -600,9 +686,10 @@ mod tests {
             let scope = CoreDispatchTestContext::new();
             scope.set_core_state(ready_state());
 
-            dispatch_core_event(external_cursor_demand(21), &mut |_| {});
+            dispatch_core_event(external_cursor_demand(21), &mut |_| {})
+                .expect("external ingress dispatch should succeed");
 
-            let staged_state = core_state();
+            let staged_state = current_core_state();
             assert_eq!(staged_state.lifecycle(), Lifecycle::Observing);
             assert!(
                 staged_state.active_observation_request().is_some(),
@@ -628,44 +715,15 @@ mod tests {
         }
 
         #[test]
-        fn first_edge_executes_only_the_front_batch() {
+        fn first_edge_executes_a_bounded_snapshot_of_existing_batches() {
             let _scope = stage_two_effect_batches();
             let mut executor = RecordingExecutor::default();
 
-            let has_more_items = drain_next_edge(&mut executor);
-
-            assert!(
-                has_more_items,
-                "first scheduled edge should leave later work queued"
-            );
-            assert_eq!(executor.executed_effects, vec![Effect::RedrawCmdline]);
-        }
-
-        #[test]
-        fn first_edge_keeps_the_remaining_batch_queued_and_scheduled() {
-            let _scope = stage_two_effect_batches();
-            let mut executor = RecordingExecutor::default();
-
-            let _ = drain_next_edge(&mut executor);
-
-            assert_eq!(queued_work_count(), 1, "one work item should remain queued");
-            assert!(
-                queue_is_marked_scheduled(),
-                "queue should stay marked scheduled until the remaining work item is drained"
-            );
-        }
-
-        #[test]
-        fn final_edge_executes_the_remaining_batch() {
-            let _scope = stage_two_effect_batches();
-            let mut executor = RecordingExecutor::default();
-
-            let _ = drain_next_edge(&mut executor);
             let has_more_items = drain_next_edge(&mut executor);
 
             assert!(
                 !has_more_items,
-                "second scheduled edge should finish the remaining queued work"
+                "bounded drain should finish the queued snapshot when it fits in budget"
             );
             assert_eq!(
                 executor.executed_effects,
@@ -677,20 +735,122 @@ mod tests {
         }
 
         #[test]
-        fn final_edge_clears_the_queue_and_scheduled_flag() {
+        fn first_edge_clears_the_queue_and_scheduled_flag_when_snapshot_finishes() {
             let _scope = stage_two_effect_batches();
             let mut executor = RecordingExecutor::default();
 
             let _ = drain_next_edge(&mut executor);
-            let _ = drain_next_edge(&mut executor);
+
+            assert_eq!(queued_work_count(), 0, "queued snapshot should fully drain");
+            assert!(
+                !queue_is_marked_scheduled(),
+                "queue should clear its scheduled flag once the staged snapshot is drained"
+            );
+        }
+
+        #[test]
+        fn first_edge_leaves_new_follow_up_work_for_a_later_edge() {
+            let _scope = stage_two_effect_batches();
+            replace_core_state(ready_state());
+            let mut executor = RecordingExecutor::default();
+            executor
+                .planned_follow_ups
+                .push_back(vec![external_cursor_demand(21)]);
+            executor.planned_follow_ups.push_back(Vec::new());
+
+            let has_more_items = drain_next_edge(&mut executor);
 
             assert!(
-                queued_work_count() == 0,
-                "queue should be empty after the second drain edge"
+                has_more_items,
+                "follow-up work staged during the drain should remain deferred"
+            );
+            assert_eq!(
+                executor.executed_effects,
+                vec![
+                    Effect::RedrawCmdline,
+                    Effect::RecordEventLoopMetric(EventLoopMetricEffect::StaleToken),
+                ]
+            );
+            assert!(
+                matches!(
+                    queued_front_work_item(),
+                    Some(ScheduledWorkItem::EffectBatch(ref effects))
+                        if contains_observation_base_request(effects)
+                ),
+                "newly staged follow-up work should remain queued for the next scheduled edge"
+            );
+            assert!(
+                queue_is_marked_scheduled(),
+                "queue must stay armed when new follow-up work remains"
+            );
+        }
+
+        #[test]
+        fn drain_failure_resets_the_scheduled_queue_state() {
+            let _scope = stage_two_effect_batches();
+            let mut executor = FailingExecutor;
+
+            let err = drain_scheduled_work_with_executor(&mut executor)
+                .expect_err("planned executor failure should surface from the drain");
+            let _ = err;
+            reset_scheduled_queue_after_failure();
+
+            assert_eq!(
+                queued_work_count(),
+                0,
+                "failure reset should clear queued work"
             );
             assert!(
                 !queue_is_marked_scheduled(),
-                "queue should clear its scheduled flag once all batches are drained"
+                "failure reset should disarm the scheduled drain flag"
+            );
+        }
+
+        #[test]
+        fn backlog_aware_budget_clears_small_queues_and_caps_large_backlogs() {
+            assert_eq!(scheduled_drain_budget_for_depth(0), 0);
+            assert_eq!(scheduled_drain_budget_for_depth(3), 3);
+            assert_eq!(scheduled_drain_budget_for_depth(16), 16);
+            assert_eq!(scheduled_drain_budget_for_depth(24), 16);
+            assert_eq!(scheduled_drain_budget_for_depth(40), 20);
+            assert_eq!(scheduled_drain_budget_for_depth(117), 32);
+        }
+
+        #[test]
+        fn first_edge_reschedules_when_backlog_exceeds_the_bounded_fractional_budget() {
+            let _scope = CoreDispatchTestContext::new();
+            for _ in 0..40 {
+                let should_schedule = queue_stage_batch(vec![Effect::RedrawCmdline]);
+                if queued_work_count() == 1 {
+                    assert!(should_schedule, "first staged item should arm the drain");
+                } else {
+                    assert!(
+                        !should_schedule,
+                        "subsequent staged items should reuse the armed drain edge"
+                    );
+                }
+            }
+            let mut executor = RecordingExecutor::default();
+
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(
+                has_more_items,
+                "large backlog should keep work queued for a later edge"
+            );
+            assert_eq!(
+                executor.executed_effects.len(),
+                20,
+                "40 queued items should drain half the backlog on the first edge"
+            );
+            assert_eq!(
+                queued_work_count(),
+                20,
+                "remaining backlog should stay queued after the first bounded drain"
+            );
+            assert!(
+                queue_is_marked_scheduled(),
+                "queue should remain armed while bounded backlog remains"
             );
         }
     }
@@ -745,7 +905,7 @@ mod tests {
 
             let _ = drain_next_edge(&mut executor);
 
-            assert_eq!(core_state(), based_state);
+            assert_eq!(current_core_state(), based_state);
         }
 
         #[test]
@@ -756,7 +916,7 @@ mod tests {
             let _ = drain_next_edge(&mut executor);
             let _ = drain_next_edge(&mut executor);
 
-            let retried_state = core_state();
+            let retried_state = current_core_state();
             assert_eq!(retried_state.lifecycle(), Lifecycle::Observing);
             assert_eq!(retried_state.active_observation_request(), Some(&request));
         }
@@ -770,7 +930,7 @@ mod tests {
             let _ = drain_next_edge(&mut executor);
 
             assert!(
-                core_state().observation().is_none(),
+                current_core_state().observation().is_none(),
                 "refresh-required retry should clear retained observation data before replay"
             );
         }
@@ -809,7 +969,7 @@ mod tests {
         #[test]
         fn ingress_dispatch_queues_one_observation_base_batch() {
             let (_scope, _request) = setup_cursor_probe_ingress();
-            let after_ingress = core_state();
+            let after_ingress = current_core_state();
 
             assert_eq!(after_ingress.lifecycle(), Lifecycle::Observing);
             assert!(after_ingress.observation().is_none());
@@ -861,7 +1021,7 @@ mod tests {
                 )]);
 
             let _ = drain_next_edge(&mut executor);
-            let after_observation = core_state();
+            let after_observation = current_core_state();
 
             assert_eq!(after_observation.lifecycle(), Lifecycle::Observing);
             assert!(after_observation.observation().is_some());
@@ -900,7 +1060,7 @@ mod tests {
             let _ = drain_next_edge(&mut executor);
 
             assert_eq!(
-                core_state()
+                current_core_state()
                     .observation()
                     .and_then(|observation| observation.cursor_color()),
                 Some("#abcdef")
@@ -990,7 +1150,7 @@ mod tests {
                 .planned_follow_ups
                 .push_back(vec![compatible_probe_report(&request)]);
             let _ = drain_next_edge(&mut executor);
-            let first_background_chunk = core_state()
+            let first_background_chunk = current_core_state()
                 .observation()
                 .and_then(|observation| observation.background_progress())
                 .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
@@ -1048,7 +1208,7 @@ mod tests {
                 )]);
 
             let has_more_items = drain_next_edge(&mut executor);
-            let second_background_chunk = core_state()
+            let second_background_chunk = current_core_state()
                 .observation()
                 .and_then(|observation| observation.background_progress())
                 .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
@@ -1089,7 +1249,7 @@ mod tests {
                 .push_back(vec![background_probe_report(&request, basis.viewport())]);
 
             let _ = drain_next_edge(&mut executor);
-            let after_completion = core_state();
+            let after_completion = current_core_state();
 
             assert_eq!(after_completion.lifecycle(), Lifecycle::Planning);
             assert!(after_completion.pending_proposal().is_none());

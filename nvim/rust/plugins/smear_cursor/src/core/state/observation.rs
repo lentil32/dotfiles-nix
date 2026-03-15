@@ -6,7 +6,7 @@
     )
 )]
 
-use super::ExternalDemand;
+use super::{ExternalDemand, ExternalDemandKind};
 use crate::core::runtime_reducer::ScrollShift;
 use crate::core::types::{
     CursorPosition, CursorRow, Generation, Millis, ObservationId, ProbeRequestId, ViewportSnapshot,
@@ -205,6 +205,90 @@ impl CursorColorProbeWitness {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ObservedTextRow {
+    line: i64,
+    text: String,
+}
+
+impl ObservedTextRow {
+    pub(crate) fn new(line: i64, text: String) -> Self {
+        Self { line, text }
+    }
+
+    pub(crate) const fn line(&self) -> i64 {
+        self.line
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct CursorTextContext {
+    buffer_handle: i64,
+    changedtick: u64,
+    cursor_line: i64,
+    nearby_rows: Vec<ObservedTextRow>,
+    tracked_cursor_line: Option<i64>,
+    tracked_nearby_rows: Option<Vec<ObservedTextRow>>,
+}
+
+impl CursorTextContext {
+    pub(crate) fn new(
+        buffer_handle: i64,
+        changedtick: u64,
+        cursor_line: i64,
+        nearby_rows: Vec<ObservedTextRow>,
+        tracked_cursor_line: Option<i64>,
+        tracked_nearby_rows: Option<Vec<ObservedTextRow>>,
+    ) -> Self {
+        Self {
+            buffer_handle,
+            changedtick,
+            cursor_line,
+            nearby_rows,
+            tracked_cursor_line,
+            tracked_nearby_rows,
+        }
+    }
+
+    pub(crate) const fn buffer_handle(&self) -> i64 {
+        self.buffer_handle
+    }
+
+    pub(crate) const fn changedtick(&self) -> u64 {
+        self.changedtick
+    }
+
+    pub(crate) const fn cursor_line(&self) -> i64 {
+        self.cursor_line
+    }
+
+    pub(crate) fn nearby_rows(&self) -> &[ObservedTextRow] {
+        &self.nearby_rows
+    }
+
+    pub(crate) const fn tracked_cursor_line(&self) -> Option<i64> {
+        self.tracked_cursor_line
+    }
+
+    pub(crate) fn tracked_nearby_rows(&self) -> Option<&[ObservedTextRow]> {
+        self.tracked_nearby_rows.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) enum SemanticEvent {
+    #[default]
+    FrameCommitted,
+    ModeChanged,
+    CursorMovedWithoutTextMutation,
+    TextMutatedAtCursorContext,
+    ViewportOrWindowMoved,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct BackgroundProbeChunk {
     start_row: CursorRow,
@@ -268,10 +352,10 @@ impl Iterator for BackgroundProbeChunkMaskIter<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(current) = &mut self.current {
-                if let Some(value) = current.next() {
-                    return Some(value);
-                }
+            if let Some(current) = &mut self.current
+                && let Some(value) = current.next()
+            {
+                return Some(value);
             }
 
             let next_chunk = self.chunks.next()?;
@@ -857,6 +941,7 @@ pub(crate) struct ObservationBasis {
     cursor_location: CursorLocation,
     viewport: ViewportSnapshot,
     cursor_color_witness: Option<CursorColorProbeWitness>,
+    cursor_text_context: Option<CursorTextContext>,
 }
 
 impl ObservationBasis {
@@ -876,6 +961,7 @@ impl ObservationBasis {
             cursor_location,
             viewport,
             cursor_color_witness: None,
+            cursor_text_context: None,
         }
     }
 
@@ -907,11 +993,23 @@ impl ObservationBasis {
         self.cursor_color_witness.as_ref()
     }
 
+    pub(crate) fn cursor_text_context(&self) -> Option<&CursorTextContext> {
+        self.cursor_text_context.as_ref()
+    }
+
     pub(crate) fn with_cursor_color_witness(
         mut self,
         cursor_color_witness: Option<CursorColorProbeWitness>,
     ) -> Self {
         self.cursor_color_witness = cursor_color_witness;
+        self
+    }
+
+    pub(crate) fn with_cursor_text_context(
+        mut self,
+        cursor_text_context: Option<CursorTextContext>,
+    ) -> Self {
+        self.cursor_text_context = cursor_text_context;
         self
     }
 }
@@ -1018,6 +1116,84 @@ impl ObservationSnapshot {
     }
 }
 
+fn cursor_motion_detected(previous: &ObservationBasis, current: &ObservationBasis) -> bool {
+    previous.cursor_position() != current.cursor_position()
+        || previous.cursor_location().line != current.cursor_location().line
+}
+
+fn viewport_or_window_moved(previous: &ObservationBasis, current: &ObservationBasis) -> bool {
+    let previous_location = previous.cursor_location();
+    let current_location = current.cursor_location();
+    previous_location.window_handle != current_location.window_handle
+        || previous_location.buffer_handle != current_location.buffer_handle
+        || previous_location.top_row != current_location.top_row
+        || previous.viewport() != current.viewport()
+}
+
+fn text_mutated_at_cursor_context(
+    previous: Option<&CursorTextContext>,
+    current: Option<&CursorTextContext>,
+) -> bool {
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return false;
+    };
+    if previous.buffer_handle() != current.buffer_handle()
+        || previous.changedtick() == current.changedtick()
+    {
+        return false;
+    }
+
+    // Surprising: line numbers drift after insertions and deletions above the cursor, so text
+    // mutation detection compares the last committed footprint against a footprint sampled around
+    // the runtime's previously tracked cursor line instead of trusting absolute line numbers.
+    current.tracked_nearby_rows().is_some_and(|tracked_rows| {
+        rows_differ_by_relative_offset(previous.nearby_rows(), tracked_rows)
+    }) || (previous.cursor_line() == current.cursor_line()
+        && rows_differ_by_relative_offset(previous.nearby_rows(), current.nearby_rows()))
+}
+
+fn rows_differ_by_relative_offset(
+    previous_rows: &[ObservedTextRow],
+    current_rows: &[ObservedTextRow],
+) -> bool {
+    previous_rows.len() != current_rows.len()
+        || previous_rows
+            .iter()
+            .zip(current_rows)
+            .any(|(previous_row, current_row)| previous_row.text() != current_row.text())
+}
+
+pub(crate) fn classify_semantic_event(
+    previous: Option<&ObservationSnapshot>,
+    current: &ObservationSnapshot,
+) -> SemanticEvent {
+    let Some(previous) = previous else {
+        return SemanticEvent::FrameCommitted;
+    };
+
+    let previous_basis = previous.basis();
+    let current_basis = current.basis();
+    if current.request().demand().kind() == ExternalDemandKind::ModeChanged
+        || previous_basis.mode() != current_basis.mode()
+    {
+        return SemanticEvent::ModeChanged;
+    }
+    if text_mutated_at_cursor_context(
+        previous_basis.cursor_text_context(),
+        current_basis.cursor_text_context(),
+    ) {
+        return SemanticEvent::TextMutatedAtCursorContext;
+    }
+    if viewport_or_window_moved(previous_basis, current_basis) {
+        return SemanticEvent::ViewportOrWindowMoved;
+    }
+    if cursor_motion_detected(previous_basis, current_basis) {
+        return SemanticEvent::CursorMovedWithoutTextMutation;
+    }
+
+    SemanticEvent::FrameCommitted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1051,6 +1227,90 @@ mod tests {
             CursorLocation::new(1, 1, 1, 1),
             viewport,
         )
+    }
+
+    fn observed_rows(rows: &[(i64, &str)]) -> Vec<ObservedTextRow> {
+        rows.iter()
+            .map(|(row, text)| ObservedTextRow::new(*row, (*text).to_string()))
+            .collect()
+    }
+
+    fn text_context(
+        changedtick: u64,
+        line: i64,
+        rows: &[(i64, &str)],
+        tracked_line: Option<i64>,
+        tracked_rows: Option<&[(i64, &str)]>,
+    ) -> CursorTextContext {
+        CursorTextContext::new(
+            99,
+            changedtick,
+            line,
+            observed_rows(rows),
+            tracked_line,
+            tracked_rows.map(observed_rows),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The assertion helper keeps previous and current text contexts explicit at the call site."
+    )]
+    fn assert_text_mutation_classification(
+        previous_position: CursorPosition,
+        previous_line: i64,
+        previous_rows: &[(i64, &str)],
+        current_position: CursorPosition,
+        current_line: i64,
+        current_rows: &[(i64, &str)],
+        current_tracked_line: Option<i64>,
+        current_tracked_rows: Option<&[(i64, &str)]>,
+    ) {
+        let request = observation_request(ProbeRequestSet::default());
+        let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+        let previous = ObservationSnapshot::new(
+            request.clone(),
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                Millis::new(10),
+                "n".to_string(),
+                Some(previous_position),
+                CursorLocation::new(1, 1, 1, previous_line),
+                viewport,
+            )
+            .with_cursor_text_context(Some(text_context(
+                4,
+                previous_line,
+                previous_rows,
+                None,
+                None,
+            ))),
+            ObservationMotion::default(),
+        );
+        let current = ObservationSnapshot::new(
+            request,
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                Millis::new(11),
+                "n".to_string(),
+                Some(current_position),
+                CursorLocation::new(1, 1, 1, current_line),
+                viewport,
+            )
+            .with_cursor_text_context(Some(text_context(
+                5,
+                current_line,
+                current_rows,
+                current_tracked_line,
+                current_tracked_rows,
+            ))),
+            ObservationMotion::default(),
+        );
+
+        assert_eq!(
+            classify_semantic_event(Some(&previous), &current),
+            SemanticEvent::TextMutatedAtCursorContext
+        );
     }
 
     #[test]
@@ -1154,5 +1414,315 @@ mod tests {
             ProbeSlot::Requested(ProbeState::Ready { .. })
         ));
         assert!(snapshot.background_probe().is_some());
+    }
+
+    #[test]
+    fn semantic_classifier_detects_text_mutation_before_motion_only() {
+        assert_text_mutation_classification(
+            CursorPosition {
+                row: CursorRow(4),
+                col: CursorCol(5),
+            },
+            7,
+            &[(6, "before"), (7, "alpha"), (8, "after")],
+            CursorPosition {
+                row: CursorRow(4),
+                col: CursorCol(6),
+            },
+            8,
+            &[(7, "alph"), (8, "a"), (9, "after")],
+            Some(7),
+            Some(&[(6, "before"), (7, "alph"), (8, "a")]),
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_insert_char_as_text_mutation() {
+        assert_text_mutation_classification(
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(5),
+            },
+            9,
+            &[(8, "header"), (9, "alpha"), (10, "tail")],
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(6),
+            },
+            9,
+            &[(8, "header"), (9, "alphax"), (10, "tail")],
+            Some(9),
+            Some(&[(8, "header"), (9, "alphax"), (10, "tail")]),
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_backspace_as_text_mutation() {
+        assert_text_mutation_classification(
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(6),
+            },
+            9,
+            &[(8, "header"), (9, "alphax"), (10, "tail")],
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(5),
+            },
+            9,
+            &[(8, "header"), (9, "alpha"), (10, "tail")],
+            Some(9),
+            Some(&[(8, "header"), (9, "alpha"), (10, "tail")]),
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_delete_as_text_mutation() {
+        assert_text_mutation_classification(
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(5),
+            },
+            9,
+            &[(8, "header"), (9, "alpha"), (10, "tail")],
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(5),
+            },
+            9,
+            &[(8, "header"), (9, "alha"), (10, "tail")],
+            Some(9),
+            Some(&[(8, "header"), (9, "alha"), (10, "tail")]),
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_paste_as_text_mutation() {
+        assert_text_mutation_classification(
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(5),
+            },
+            9,
+            &[(8, "header"), (9, "alpha"), (10, "tail")],
+            CursorPosition {
+                row: CursorRow(6),
+                col: CursorCol(3),
+            },
+            10,
+            &[(9, "alpha pasted"), (10, "block"), (11, "tail")],
+            Some(9),
+            Some(&[(8, "header"), (9, "alpha pasted"), (10, "block")]),
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_ime_commit_as_text_mutation() {
+        assert_text_mutation_classification(
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(5),
+            },
+            9,
+            &[(8, "header"), (9, "ka"), (10, "tail")],
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(7),
+            },
+            9,
+            &[(8, "header"), (9, "kana"), (10, "tail")],
+            Some(9),
+            Some(&[(8, "header"), (9, "kana"), (10, "tail")]),
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_motion_without_text_mutation() {
+        let request = observation_request(ProbeRequestSet::default());
+        let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+        let previous = ObservationSnapshot::new(
+            request.clone(),
+            observation_basis(&request, viewport).with_cursor_text_context(Some(text_context(
+                8,
+                7,
+                &[(6, "before"), (7, "alpha"), (8, "after")],
+                None,
+                None,
+            ))),
+            ObservationMotion::default(),
+        );
+        let current = ObservationSnapshot::new(
+            request,
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                Millis::new(11),
+                "n".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(5),
+                    col: CursorCol(5),
+                }),
+                CursorLocation::new(1, 1, 1, 8),
+                viewport,
+            )
+            .with_cursor_text_context(Some(text_context(
+                8,
+                8,
+                &[(7, "alpha"), (8, "after"), (9, "tail")],
+                Some(7),
+                Some(&[(6, "before"), (7, "alpha"), (8, "after")]),
+            ))),
+            ObservationMotion::default(),
+        );
+
+        assert_eq!(
+            classify_semantic_event(Some(&previous), &current),
+            SemanticEvent::CursorMovedWithoutTextMutation
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_viewport_or_window_motion() {
+        let request = observation_request(ProbeRequestSet::default());
+        let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+        let previous = ObservationSnapshot::new(
+            request.clone(),
+            observation_basis(&request, viewport),
+            ObservationMotion::default(),
+        );
+        let current = ObservationSnapshot::new(
+            request,
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                Millis::new(11),
+                "n".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(4),
+                    col: CursorCol(5),
+                }),
+                CursorLocation::new(2, 1, 3, 1),
+                viewport,
+            ),
+            ObservationMotion::default(),
+        );
+
+        assert_eq!(
+            classify_semantic_event(Some(&previous), &current),
+            SemanticEvent::ViewportOrWindowMoved
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_mode_change() {
+        let previous_request = observation_request(ProbeRequestSet::default());
+        let current_request = ObservationRequest::new(
+            ExternalDemand::new(
+                IngressSeq::new(1),
+                ExternalDemandKind::ModeChanged,
+                Millis::new(10),
+                None,
+            ),
+            ProbeRequestSet::default(),
+        );
+        let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+        let previous = ObservationSnapshot::new(
+            previous_request.clone(),
+            observation_basis(&previous_request, viewport),
+            ObservationMotion::default(),
+        );
+        let current = ObservationSnapshot::new(
+            current_request.clone(),
+            ObservationBasis::new(
+                current_request.observation_id(),
+                Millis::new(11),
+                "i".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(4),
+                    col: CursorCol(5),
+                }),
+                CursorLocation::new(1, 1, 1, 1),
+                viewport,
+            ),
+            ObservationMotion::default(),
+        );
+
+        assert_eq!(
+            classify_semantic_event(Some(&previous), &current),
+            SemanticEvent::ModeChanged
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_detects_multiline_paste_without_absolute_line_overlap() {
+        assert_text_mutation_classification(
+            CursorPosition {
+                row: CursorRow(5),
+                col: CursorCol(5),
+            },
+            9,
+            &[(8, "header"), (9, "alpha"), (10, "tail")],
+            CursorPosition {
+                row: CursorRow(10),
+                col: CursorCol(3),
+            },
+            14,
+            &[(13, "inserted two"), (14, "inserted three"), (15, "tail")],
+            Some(9),
+            Some(&[(8, "header"), (9, "alpha pasted"), (10, "inserted one")]),
+        );
+    }
+
+    #[test]
+    fn semantic_classifier_prioritizes_text_mutation_before_viewport_motion() {
+        let request = observation_request(ProbeRequestSet::default());
+        let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+        let previous = ObservationSnapshot::new(
+            request.clone(),
+            ObservationBasis::new(
+                request.observation_id(),
+                Millis::new(10),
+                "n".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(5),
+                    col: CursorCol(5),
+                }),
+                CursorLocation::new(1, 1, 1, 9),
+                viewport,
+            )
+            .with_cursor_text_context(Some(text_context(
+                10,
+                9,
+                &[(8, "header"), (9, "alpha"), (10, "tail")],
+                None,
+                None,
+            ))),
+            ObservationMotion::default(),
+        );
+        let current = ObservationSnapshot::new(
+            request,
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                Millis::new(11),
+                "n".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(6),
+                    col: CursorCol(3),
+                }),
+                CursorLocation::new(1, 1, 4, 10),
+                viewport,
+            )
+            .with_cursor_text_context(Some(text_context(
+                11,
+                10,
+                &[(9, "alpha pasted"), (10, "block"), (11, "tail")],
+                Some(9),
+                Some(&[(8, "header"), (9, "alpha pasted"), (10, "block")]),
+            ))),
+            ObservationMotion::default(),
+        );
+
+        assert_eq!(
+            classify_semantic_event(Some(&previous), &current),
+            SemanticEvent::TextMutatedAtCursorContext
+        );
     }
 }

@@ -4,6 +4,7 @@ use super::runtime::IngressReadSnapshot;
 use crate::types::ScreenCell;
 use nvim_oxi::{Result, api};
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BufferEventPolicy {
     Normal,
@@ -52,6 +53,7 @@ pub(super) enum IngressCursorPresentationPolicy {
     HideCursorAndPrepaint { cell: ScreenCell, zindex: u32 },
 }
 
+#[cfg(test)]
 impl BufferEventPolicy {
     #[cfg(test)]
     pub(super) fn from_buffer_metadata(
@@ -61,12 +63,6 @@ impl BufferEventPolicy {
         _callback_duration_estimate_ms: f64,
     ) -> Self {
         Self::Normal
-    }
-
-    pub(super) const fn use_key_fallback(self) -> bool {
-        match self {
-            Self::Normal => true,
-        }
     }
 
     #[cfg(test)]
@@ -97,12 +93,6 @@ impl BufferEventPolicy {
             })
     }
 }
-
-pub(super) fn current_buffer_event_policy(_buffer: &api::Buffer) -> BufferEventPolicy {
-    // Policy variants are currently static; avoid per-callback metadata probes in the hot path.
-    BufferEventPolicy::Normal
-}
-
 pub(super) fn skip_current_buffer_events(
     snapshot: &IngressReadSnapshot,
     buffer: &api::Buffer,

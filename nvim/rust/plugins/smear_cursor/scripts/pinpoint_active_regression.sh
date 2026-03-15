@@ -86,11 +86,9 @@ run_case() {
   local variant="$1"
   local case_label="$2"
   local worktree="$3"
-  local keys_per_switch="$4"
-  local drain_every="$5"
-  local delay_event_to_smear="$6"
-  local delay_after_key="$7"
-  local smear_between_buffers="$8"
+  local drain_every="$4"
+  local delay_event_to_smear="$5"
+  local smear_between_buffers="$6"
 
   local log_file="${artifact_dir}/run_${variant}_${case_label}.log"
   (
@@ -102,10 +100,8 @@ run_case() {
       SMEAR_RECOVERY_ITERATIONS=1000 \
       SMEAR_SETTLE_WAIT_MS=500 \
       SMEAR_BETWEEN_BUFFERS="${smear_between_buffers}" \
-      SMEAR_KEYS_PER_SWITCH="${keys_per_switch}" \
       SMEAR_DRAIN_EVERY="${drain_every}" \
       SMEAR_DELAY_EVENT_TO_SMEAR="${delay_event_to_smear}" \
-      SMEAR_DELAY_AFTER_KEY="${delay_after_key}" \
       plugins/smear_cursor/scripts/run_perf_window_switch.sh
   ) >"${log_file}" 2>&1
 

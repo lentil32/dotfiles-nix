@@ -68,7 +68,6 @@ fn viewport_summary(viewport: ViewportSnapshot) -> String {
 fn external_demand_kind_name(kind: ExternalDemandKind) -> &'static str {
     match kind {
         ExternalDemandKind::ExternalCursor => "external_cursor",
-        ExternalDemandKind::KeyFallback => "key_fallback",
         ExternalDemandKind::ModeChanged => "mode_changed",
         ExternalDemandKind::BufferEntered => "buffer_entered",
     }
@@ -85,34 +84,14 @@ fn external_demand_summary(demand: &ExternalDemand) -> String {
 }
 
 fn queued_demand_summary(demand: &QueuedDemand) -> String {
-    match demand {
-        QueuedDemand::Ready(demand) => format!("ready({})", external_demand_summary(demand)),
-        QueuedDemand::PendingKeyFallback {
-            seq,
-            due_at,
-            requested_target,
-        } => format!(
-            "pending_key_fallback(seq={} due_at={} target={})",
-            seq.value(),
-            millis_summary(*due_at),
-            cursor_position_summary(*requested_target),
-        ),
-    }
+    format!("ready({})", external_demand_summary(demand.as_demand()))
 }
 
 fn demand_queue_summary(queue: &DemandQueue) -> String {
     let cursor = queue
         .latest_cursor()
         .map_or_else(|| "none".to_string(), queued_demand_summary);
-    let next_due = queue
-        .next_due_at()
-        .map_or_else(|| "none".to_string(), |due_at| due_at.value().to_string());
-    format!(
-        "cursor={} ordered={} next_due={}",
-        cursor,
-        queue.ordered().len(),
-        next_due
-    )
+    format!("cursor={} ordered={}", cursor, queue.ordered().len())
 }
 
 fn observation_request_summary(request: &ObservationRequest) -> String {
@@ -506,11 +485,6 @@ pub(super) fn core_event_summary(event: &CoreEvent) -> String {
             millis_summary(payload.observed_at),
             cursor_position_summary(payload.requested_target),
             payload.ingress_cursor_presentation,
-        ),
-        CoreEvent::KeyFallbackQueued(payload) => format!(
-            "observed_at={} due_at={}",
-            millis_summary(payload.observed_at),
-            millis_summary(payload.due_at),
         ),
         CoreEvent::ObservationBaseCollected(payload) => format!(
             "request=({}) basis=({}) scroll_shift={:?}",

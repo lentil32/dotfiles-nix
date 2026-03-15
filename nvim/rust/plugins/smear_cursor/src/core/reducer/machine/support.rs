@@ -6,8 +6,7 @@ use crate::core::effect::{
 };
 use crate::core::event::RenderCleanupAppliedAction;
 use crate::core::runtime_reducer::{
-    RenderCleanupAction, RenderDecision, as_delay_ms, render_cleanup_delay_ms,
-    render_hard_cleanup_delay_ms,
+    RenderCleanupAction, RenderDecision, render_cleanup_delay_ms, render_hard_cleanup_delay_ms,
 };
 use crate::core::state::{
     AnimationSchedule, CoreState, ExternalDemandKind, InFlightProposal, ObservationBasis,
@@ -78,13 +77,6 @@ pub(super) fn ingress_marks_cursor_autocmd_freshness(kind: ExternalDemandKind) -
     )
 }
 
-pub(super) fn suppresses_key_fallback_at(state: &CoreState, observed_at: Millis) -> bool {
-    let freshness_window_ms = as_delay_ms(state.runtime().config.delay_after_key);
-    !state
-        .ingress_policy()
-        .admits_key_fallback(observed_at, freshness_window_ms)
-}
-
 pub(super) fn schedule_timer_with_delay(
     state: CoreState,
     kind: TimerKind,
@@ -100,28 +92,6 @@ pub(super) fn schedule_timer_with_delay(
         requested_at,
     });
     (next_state, effect)
-}
-
-pub(super) fn delayed_pending_ingress_due_at(
-    state: &CoreState,
-    observed_at: Millis,
-) -> Option<Millis> {
-    let due_at = state.demand_queue().next_due_at()?;
-    (due_at.value() > observed_at.value()).then_some(due_at)
-}
-
-pub(super) fn arm_delayed_ingress_wake(
-    state: CoreState,
-    due_at: Millis,
-    observed_at: Millis,
-) -> (CoreState, Effect) {
-    let delay_ms = due_at.value().saturating_sub(observed_at.value());
-    schedule_timer_with_delay(
-        state,
-        TimerKind::Ingress,
-        delay_budget_from_ms(delay_ms),
-        observed_at,
-    )
 }
 
 fn cursor_position_read_policy(state: &CoreState) -> CursorPositionReadPolicy {

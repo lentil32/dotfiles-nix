@@ -14,7 +14,6 @@ pub(crate) struct RuntimeConfig {
     pub(crate) simulation_hz: f64,
     pub(crate) max_simulation_steps_per_frame: u32,
     pub(crate) delay_event_to_smear: f64,
-    pub(crate) delay_after_key: f64,
     pub(crate) anticipation: f64,
     pub(crate) head_response_ms: f64,
     pub(crate) damping_ratio: f64,
@@ -149,7 +148,6 @@ impl Default for RuntimeConfig {
             simulation_hz: 120.0,
             max_simulation_steps_per_frame: 16,
             delay_event_to_smear: 0.0,
-            delay_after_key: 0.0,
             // Neovide does not inject a retarget anticipation impulse for cursor corners.
             anticipation: 0.0,
             head_response_ms: 110.0,

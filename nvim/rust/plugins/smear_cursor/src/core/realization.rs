@@ -4,12 +4,15 @@
 //! payloads that the host bridge can apply, keeping missing-basis failures as
 //! explicit lifecycle results instead of hidden exceptions.
 
-use crate::core::state::{BackgroundProbeBatch, ProjectionSnapshot, ScenePatch, ScenePatchKind};
+use crate::core::state::BackgroundProbeBatch;
+#[cfg(test)]
+use crate::core::state::{ProjectionSnapshot, ScenePatch, ScenePatchKind};
 use crate::draw::render_plan::{
     CellOp, ClearOp, Glyph, HighlightRef, RenderPlan, TargetCellOverlay, Viewport,
 };
 use crate::types::{RenderFrame, ScreenCell, StaticRenderConfig};
 use std::sync::Arc;
+#[cfg(test)]
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +177,7 @@ impl RealizationProjection {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ScenePatchRealization<'a> {
     Draw(&'a ProjectionSnapshot),
@@ -181,6 +185,7 @@ pub(crate) enum ScenePatchRealization<'a> {
     Noop,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum ScenePatchRealizationError {
     #[error("replace patch missing target projection")]
@@ -188,6 +193,7 @@ pub(crate) enum ScenePatchRealizationError {
 }
 
 /// Resolves one scene patch into the shell-facing draw, clear, or noop input.
+#[cfg(test)]
 pub(crate) fn project_scene_patch(
     patch: &ScenePatch,
 ) -> Result<ScenePatchRealization<'_>, ScenePatchRealizationError> {

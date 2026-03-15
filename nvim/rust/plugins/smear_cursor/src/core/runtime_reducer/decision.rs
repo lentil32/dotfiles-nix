@@ -1,4 +1,5 @@
 use super::geometry::render_side_effects_for_action;
+use crate::core::state::SemanticEvent;
 use crate::state::CursorLocation;
 use crate::types::RenderFrame;
 
@@ -18,6 +19,7 @@ pub(crate) struct CursorEventContext {
     pub(crate) seed: u32,
     pub(crate) cursor_location: CursorLocation,
     pub(crate) scroll_shift: Option<ScrollShift>,
+    pub(crate) semantic_event: SemanticEvent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -4,14 +4,13 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ExternalDemandKind {
     ExternalCursor,
-    KeyFallback,
     ModeChanged,
     BufferEntered,
 }
 
 impl ExternalDemandKind {
     pub(crate) const fn is_cursor(self) -> bool {
-        matches!(self, Self::ExternalCursor | Self::KeyFallback)
+        matches!(self, Self::ExternalCursor)
     }
 }
 
@@ -60,78 +59,31 @@ impl ExternalDemand {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum QueuedDemand {
-    Ready(ExternalDemand),
-    PendingKeyFallback {
-        seq: IngressSeq,
-        due_at: Millis,
-        requested_target: Option<CursorPosition>,
-    },
-}
+pub(crate) struct QueuedDemand(ExternalDemand);
 
 impl QueuedDemand {
     pub(crate) fn ready(demand: ExternalDemand) -> Self {
-        Self::Ready(demand)
+        Self(demand)
     }
 
-    pub(crate) const fn pending_key_fallback(
-        seq: IngressSeq,
-        due_at: Millis,
-        requested_target: Option<CursorPosition>,
-    ) -> Self {
-        Self::PendingKeyFallback {
-            seq,
-            due_at,
-            requested_target,
-        }
+    pub(crate) const fn as_demand(&self) -> &ExternalDemand {
+        &self.0
     }
 
     pub(crate) const fn seq(&self) -> IngressSeq {
-        match self {
-            Self::Ready(demand) => demand.seq(),
-            Self::PendingKeyFallback { seq, .. } => *seq,
-        }
+        self.0.seq()
     }
 
     pub(crate) const fn kind(&self) -> ExternalDemandKind {
-        match self {
-            Self::Ready(demand) => demand.kind(),
-            Self::PendingKeyFallback { .. } => ExternalDemandKind::KeyFallback,
-        }
-    }
-
-    pub(crate) const fn due_at(&self) -> Option<Millis> {
-        match self {
-            Self::Ready(_) => None,
-            Self::PendingKeyFallback { due_at, .. } => Some(*due_at),
-        }
+        self.0.kind()
     }
 
     pub(crate) const fn is_cursor(&self) -> bool {
         self.kind().is_cursor()
     }
 
-    pub(crate) fn is_ready_at(&self, observed_at: Millis) -> bool {
-        match self {
-            Self::Ready(_) => true,
-            Self::PendingKeyFallback { due_at, .. } => due_at.value() <= observed_at.value(),
-        }
-    }
-
-    pub(crate) fn into_ready(self, observed_at: Millis) -> ExternalDemand {
-        match self {
-            Self::Ready(demand) => demand,
-            Self::PendingKeyFallback {
-                seq,
-                requested_target,
-                ..
-            } => ExternalDemand::new(
-                seq,
-                ExternalDemandKind::KeyFallback,
-                observed_at,
-                requested_target,
-            ),
-        }
+    pub(crate) fn into_ready(self) -> ExternalDemand {
+        self.0
     }
 }
 
@@ -152,42 +104,25 @@ impl DemandQueue {
         (self, false)
     }
 
-    pub(crate) fn dequeue_ready(self, observed_at: Millis) -> (Self, Option<ExternalDemand>) {
-        let ready_ordered_seq = self
-            .ordered
-            .iter()
-            .find(|(_, demand)| demand.is_ready_at(observed_at))
-            .map(|(seq, _)| *seq);
+    pub(crate) fn dequeue_ready(self) -> (Self, Option<ExternalDemand>) {
         match (
-            self.latest_cursor
-                .as_ref()
-                .filter(|demand| demand.is_ready_at(observed_at))
-                .map(QueuedDemand::seq),
-            ready_ordered_seq,
+            self.latest_cursor.as_ref().map(QueuedDemand::seq),
+            self.ordered.keys().next().copied(),
         ) {
             (None, None) => (self, None),
             (Some(_), None) => {
                 let mut next = self;
-                let demand = next
-                    .latest_cursor
-                    .take()
-                    .map(|queued| queued.into_ready(observed_at));
+                let demand = next.latest_cursor.take().map(QueuedDemand::into_ready);
                 (next, demand)
             }
             (None, Some(seq)) => {
                 let mut next = self;
-                let demand = next
-                    .ordered
-                    .remove(&seq)
-                    .map(|queued| queued.into_ready(observed_at));
+                let demand = next.ordered.remove(&seq).map(QueuedDemand::into_ready);
                 (next, demand)
             }
             (Some(cursor_seq), Some(ordered_seq)) if cursor_seq < ordered_seq => {
                 let mut next = self;
-                let demand = next
-                    .latest_cursor
-                    .take()
-                    .map(|queued| queued.into_ready(observed_at));
+                let demand = next.latest_cursor.take().map(QueuedDemand::into_ready);
                 (next, demand)
             }
             (Some(_), Some(ordered_seq)) => {
@@ -195,26 +130,9 @@ impl DemandQueue {
                 let demand = next
                     .ordered
                     .remove(&ordered_seq)
-                    .map(|queued| queued.into_ready(observed_at));
+                    .map(QueuedDemand::into_ready);
                 (next, demand)
             }
-        }
-    }
-
-    pub(crate) fn next_due_at(&self) -> Option<Millis> {
-        let cursor_due = self.latest_cursor.as_ref().and_then(QueuedDemand::due_at);
-        let ordered_due = self.ordered.values().filter_map(QueuedDemand::due_at).min();
-        match (cursor_due, ordered_due) {
-            (Some(cursor_due), Some(ordered_due)) => {
-                Some(if cursor_due.value() <= ordered_due.value() {
-                    cursor_due
-                } else {
-                    ordered_due
-                })
-            }
-            (Some(cursor_due), None) => Some(cursor_due),
-            (None, Some(ordered_due)) => Some(ordered_due),
-            (None, None) => None,
         }
     }
 

@@ -62,6 +62,8 @@ pub(super) struct RuntimeBehaviorMetrics {
     pub(super) timer_schedule: DurationTelemetry,
     pub(super) timer_fire: DurationTelemetry,
     pub(super) scheduled_queue_depth: DepthTelemetry,
+    pub(super) scheduled_drain_items: DepthTelemetry,
+    pub(super) scheduled_drain_reschedules: u64,
     pub(super) cursor_color_probe: ProbeTelemetry,
     pub(super) background_probe: ProbeTelemetry,
 }
@@ -135,6 +137,14 @@ impl RuntimeBehaviorMetrics {
         self.scheduled_queue_depth.record_depth(depth);
     }
 
+    fn record_scheduled_drain_items(&mut self, drained_items: usize) {
+        self.scheduled_drain_items.record_depth(drained_items);
+    }
+
+    fn record_scheduled_drain_reschedule(&mut self) {
+        self.scheduled_drain_reschedules = self.scheduled_drain_reschedules.saturating_add(1);
+    }
+
     fn record_probe_duration(&mut self, kind: ProbeKind, duration_micros: u64) {
         self.probe_telemetry_mut(kind)
             .duration
@@ -198,6 +208,12 @@ impl EventLoopState {
                     total_depth: 0,
                     max_depth: 0,
                 },
+                scheduled_drain_items: DepthTelemetry {
+                    samples: 0,
+                    total_depth: 0,
+                    max_depth: 0,
+                },
+                scheduled_drain_reschedules: 0,
                 cursor_color_probe: ProbeTelemetry::new(),
                 background_probe: ProbeTelemetry::new(),
             },
@@ -294,6 +310,15 @@ impl EventLoopState {
         self.runtime_metrics.record_scheduled_queue_depth(depth);
     }
 
+    pub(super) fn record_scheduled_drain_items(&mut self, drained_items: usize) {
+        self.runtime_metrics
+            .record_scheduled_drain_items(drained_items);
+    }
+
+    pub(super) fn record_scheduled_drain_reschedule(&mut self) {
+        self.runtime_metrics.record_scheduled_drain_reschedule();
+    }
+
     pub(super) fn record_probe_duration(&mut self, kind: ProbeKind, duration_micros: u64) {
         self.runtime_metrics
             .record_probe_duration(kind, duration_micros);
@@ -326,17 +351,32 @@ thread_local! {
     static EVENT_LOOP_STATE: RefCell<EventLoopState> = const { RefCell::new(EventLoopState::new()) };
 }
 
-fn with_event_loop_state<R>(mutator: impl FnOnce(&mut EventLoopState) -> R) -> R {
+fn with_event_loop_state(mutator: impl FnOnce(&mut EventLoopState)) {
+    let _ = EVENT_LOOP_STATE.with(|state| {
+        // Event-loop telemetry is advisory. If a nested callback is already sampling it, drop the
+        // contended sample instead of panicking the plugin on a RefCell borrow failure.
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return None;
+        };
+        mutator(&mut state);
+        Some(())
+    });
+}
+
+fn read_event_loop_state<R>(reader: impl FnOnce(&EventLoopState) -> R) -> Option<R> {
     EVENT_LOOP_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        mutator(&mut state)
+        let Ok(state) = state.try_borrow() else {
+            return None;
+        };
+        Some(reader(&state))
     })
 }
 
-fn read_event_loop_state<R>(reader: impl FnOnce(&EventLoopState) -> R) -> R {
+#[cfg(test)]
+fn with_event_loop_state_for_test<R>(mutator: impl FnOnce(&mut EventLoopState) -> R) -> R {
     EVENT_LOOP_STATE.with(|state| {
-        let state = state.borrow();
-        reader(&state)
+        let mut state = state.borrow_mut();
+        mutator(&mut state)
     })
 }
 
@@ -365,7 +405,7 @@ pub(super) fn clear_cursor_callback_duration_estimate() {
 }
 
 pub(super) fn cursor_callback_duration_estimate_ms() -> f64 {
-    read_event_loop_state(EventLoopState::cursor_callback_duration_estimate_ms)
+    read_event_loop_state(EventLoopState::cursor_callback_duration_estimate_ms).unwrap_or(0.0)
 }
 
 pub(super) fn record_ingress_received() {
@@ -408,6 +448,14 @@ pub(super) fn record_scheduled_queue_depth(depth: usize) {
     with_event_loop_state(|state| state.record_scheduled_queue_depth(depth));
 }
 
+pub(super) fn record_scheduled_drain_items(drained_items: usize) {
+    with_event_loop_state(|state| state.record_scheduled_drain_items(drained_items));
+}
+
+pub(super) fn record_scheduled_drain_reschedule() {
+    with_event_loop_state(EventLoopState::record_scheduled_drain_reschedule);
+}
+
 pub(super) fn record_probe_duration(kind: ProbeKind, duration_micros: u64) {
     with_event_loop_state(|state| state.record_probe_duration(kind, duration_micros));
 }
@@ -422,6 +470,7 @@ pub(super) fn record_probe_refresh_budget_exhausted(kind: ProbeKind) {
 
 pub(super) fn diagnostics_snapshot() -> EventLoopDiagnostics {
     read_event_loop_state(EventLoopState::diagnostics_snapshot)
+        .unwrap_or_else(|| EventLoopState::new().diagnostics_snapshot())
 }
 
 #[cfg(test)]
@@ -429,13 +478,14 @@ mod tests {
     use super::{
         EventLoopState, diagnostics_snapshot, record_probe_duration,
         record_probe_refresh_budget_exhausted, record_probe_refresh_retried,
+        record_scheduled_drain_items, record_scheduled_drain_reschedule,
         record_scheduled_queue_depth, record_timer_fire_duration, record_timer_schedule_duration,
-        with_event_loop_state,
+        with_event_loop_state_for_test,
     };
     use crate::core::state::ProbeKind;
 
     fn reset_event_loop_state() {
-        with_event_loop_state(|state| *state = EventLoopState::new());
+        with_event_loop_state_for_test(|state| *state = EventLoopState::new());
     }
 
     #[test]
@@ -487,6 +537,9 @@ mod tests {
         record_timer_fire_duration(750);
         record_scheduled_queue_depth(1);
         record_scheduled_queue_depth(3);
+        record_scheduled_drain_items(2);
+        record_scheduled_drain_items(5);
+        record_scheduled_drain_reschedule();
 
         let diagnostics = diagnostics_snapshot();
 
@@ -499,5 +552,25 @@ mod tests {
         assert_eq!(diagnostics.metrics.scheduled_queue_depth.samples, 2);
         assert_eq!(diagnostics.metrics.scheduled_queue_depth.total_depth, 4);
         assert_eq!(diagnostics.metrics.scheduled_queue_depth.max_depth, 3);
+        assert_eq!(diagnostics.metrics.scheduled_drain_items.samples, 2);
+        assert_eq!(diagnostics.metrics.scheduled_drain_items.total_depth, 7);
+        assert_eq!(diagnostics.metrics.scheduled_drain_items.max_depth, 5);
+        assert_eq!(diagnostics.metrics.scheduled_drain_reschedules, 1);
+    }
+
+    #[test]
+    fn nested_telemetry_update_drops_contended_sample_without_panicking() {
+        use super::record_ingress_received;
+
+        reset_event_loop_state();
+
+        with_event_loop_state_for_test(|state| {
+            state.note_autocmd_event(42.0);
+            record_ingress_received();
+        });
+
+        let diagnostics = diagnostics_snapshot();
+        assert_eq!(diagnostics.last_autocmd_event_ms, 42.0);
+        assert_eq!(diagnostics.metrics.ingress_received, 0);
     }
 }

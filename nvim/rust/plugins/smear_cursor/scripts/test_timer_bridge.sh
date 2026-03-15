@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build the smear cursor cdylib and run a headless Neovim regression check for
-# the timer bridge and on_key host boundary wiring.
+# the timer bridge and host boundary wiring.
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd)"

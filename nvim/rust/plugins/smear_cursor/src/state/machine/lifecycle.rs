@@ -156,8 +156,10 @@ impl RuntimeState {
             AnimationPhase::Draining(phase) => match phase.remaining_steps.get() - 1 {
                 0 => true,
                 next_steps => {
-                    phase.remaining_steps =
-                        std::num::NonZeroU32::new(next_steps).expect("drain phase stays positive");
+                    let Some(next_steps) = std::num::NonZeroU32::new(next_steps) else {
+                        return true;
+                    };
+                    phase.remaining_steps = next_steps;
                     false
                 }
             },

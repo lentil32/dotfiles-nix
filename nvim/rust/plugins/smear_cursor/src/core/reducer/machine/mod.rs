@@ -25,8 +25,8 @@ use apply::{
     reduce_render_plan_computed, reduce_render_plan_failed,
 };
 use observation::{
-    reduce_external_demand_queued, reduce_initialize, reduce_key_fallback_queued,
-    reduce_observation_base_collected, reduce_probe_reported,
+    reduce_external_demand_queued, reduce_initialize, reduce_observation_base_collected,
+    reduce_probe_reported,
 };
 pub(crate) use planning::build_planned_render;
 use timers::{reduce_timer_fired_with_token, reduce_timer_lost_with_token};
@@ -35,7 +35,6 @@ pub(crate) fn reduce(state: &CoreState, event: Event) -> Transition {
     match event {
         Event::Initialize(payload) => reduce_initialize(state, payload),
         Event::ExternalDemandQueued(payload) => reduce_external_demand_queued(state, &payload),
-        Event::KeyFallbackQueued(payload) => reduce_key_fallback_queued(state, payload),
         Event::ObservationBaseCollected(payload) => {
             reduce_observation_base_collected(state, payload)
         }

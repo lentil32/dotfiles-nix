@@ -62,15 +62,6 @@ fn rs_smear_cursor() -> Dictionary {
         }),
     );
     api.insert(
-        "on_key",
-        Function::<(), ()>::from_fn(|()| {
-            guard_plugin_call("on_key", || {
-                events::on_key_listener_event();
-                Ok(())
-            })
-        }),
-    );
-    api.insert(
         "on_core_timer",
         Function::<i64, ()>::from_fn(|timer_id| {
             guard_plugin_call("on_core_timer", || {

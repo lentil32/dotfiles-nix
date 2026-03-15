@@ -1,4 +1,5 @@
 use super::{EventSource, select_core_event_source};
+use crate::core::state::SemanticEvent;
 use crate::state::{CursorLocation, CursorShape, RuntimeState};
 use crate::types::Point;
 
@@ -21,6 +22,7 @@ fn cmdline_mode_always_routes_to_external_source() {
     let source = select_core_event_source(
         "c",
         &state,
+        SemanticEvent::FrameCommitted,
         Some(Point {
             row: 5.0,
             col: 12.0,

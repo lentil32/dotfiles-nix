@@ -5,8 +5,7 @@ local uv = vim.uv or vim.loop
 -- `SMEAR_WINDOWS`, `SMEAR_LINE_COUNT`, `SMEAR_STRESS_ITERATIONS`, `SMEAR_STRESS_ROUNDS`,
 -- `SMEAR_BETWEEN_BUFFERS`, `SMEAR_MAX_RECOVERY_RATIO`, `SMEAR_MAX_STRESS_RATIO`,
 -- `SMEAR_SETTLE_WAIT_MS`,
--- `SMEAR_DRAIN_EVERY`, `SMEAR_KEYS_PER_SWITCH`, `SMEAR_DELAY_EVENT_TO_SMEAR`,
--- and `SMEAR_DELAY_AFTER_KEY`.
+-- `SMEAR_DRAIN_EVERY` and `SMEAR_DELAY_EVENT_TO_SMEAR`.
 
 local function getenv_string(name, default_value)
   local value = vim.env[name]
@@ -94,29 +93,42 @@ local function prepend_runtimepath(path)
   end
 end
 
-local function append_package_cpath(path)
+local function prepend_package_cpath(path)
   if path == "" then
     return
   end
-  package.cpath = package.cpath .. ";" .. path
+
+  -- Surprising: appending the working-tree cdylib path lets an installed plugin shadow the local
+  -- build. Prepend here so the harness always measures the code under test.
+  if not vim.startswith(package.cpath, path .. ";") and package.cpath ~= path then
+    package.cpath = path .. ";" .. package.cpath
+  end
 end
 
-local function count_floating_windows()
+local function is_counted_floating_window(win_config, visible_only)
+  if win_config.relative == "" then
+    return false
+  end
+
+  return not visible_only or not win_config.hide
+end
+
+local function count_floating_windows(visible_only)
   local floating_windows = 0
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     local win_config = vim.api.nvim_win_get_config(win)
-    if win_config.relative ~= "" then
+    if is_counted_floating_window(win_config, visible_only) then
       floating_windows = floating_windows + 1
     end
   end
   return floating_windows
 end
 
-local function count_smear_floating_windows()
+local function count_smear_floating_windows(visible_only)
   local floating_windows = 0
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     local win_config = vim.api.nvim_win_get_config(win)
-    if win_config.relative == "" then
+    if not is_counted_floating_window(win_config, visible_only) then
       goto continue
     end
 
@@ -176,15 +188,15 @@ local function drain_event_loop_once()
   end, 1)
 end
 
-local function run_switch_phase(label, windows, iterations, drain_every, smear, keys_per_switch)
+local function emit_line(line)
+  io.stdout:write(line .. "\n")
+  io.stdout:flush()
+end
+
+local function run_switch_phase(label, windows, iterations, drain_every)
   local start_ns = uv.hrtime()
   for iteration = 1, iterations do
     local window_index = ((iteration - 1) % #windows) + 1
-    if keys_per_switch > 0 then
-      for _ = 1, keys_per_switch do
-        smear.on_key()
-      end
-    end
     vim.api.nvim_set_current_win(windows[window_index])
     if drain_every > 0 and (iteration % drain_every) == 0 then
       drain_event_loop_once()
@@ -198,19 +210,23 @@ local function run_switch_phase(label, windows, iterations, drain_every, smear, 
   local elapsed_ns = uv.hrtime() - start_ns
   local elapsed_ms = elapsed_ns / 1e6
   local avg_us = (elapsed_ns / iterations) / 1e3
-  local floating_windows = count_floating_windows()
-  local smear_floating_windows = count_smear_floating_windows()
+  local floating_windows = count_floating_windows(false)
+  local visible_floating_windows = count_floating_windows(true)
+  local smear_floating_windows = count_smear_floating_windows(false)
+  local visible_smear_floating_windows = count_smear_floating_windows(true)
   local lua_memory_kib = collectgarbage("count")
 
-  print(
+  emit_line(
     string.format(
-      "PERF_PHASE name=%s iterations=%d elapsed_ms=%.3f avg_us=%.3f floating_windows=%d smear_floating_windows=%d lua_memory_kib=%.1f",
+      "PERF_PHASE name=%s iterations=%d elapsed_ms=%.3f avg_us=%.3f floating_windows=%d visible_floating_windows=%d smear_floating_windows=%d visible_smear_floating_windows=%d lua_memory_kib=%.1f",
       label,
       iterations,
       elapsed_ms,
       avg_us,
       floating_windows,
+      visible_floating_windows,
       smear_floating_windows,
+      visible_smear_floating_windows,
       lua_memory_kib
     )
   )
@@ -219,9 +235,15 @@ local function run_switch_phase(label, windows, iterations, drain_every, smear, 
     elapsed_ns = elapsed_ns,
     avg_us = avg_us,
     floating_windows = floating_windows,
+    visible_floating_windows = visible_floating_windows,
     smear_floating_windows = smear_floating_windows,
+    visible_smear_floating_windows = visible_smear_floating_windows,
     lua_memory_kib = lua_memory_kib,
   }
+end
+
+local function print_diagnostics(label, smear)
+  emit_line(string.format("PERF_DIAGNOSTICS phase=%s %s", label, smear.diagnostics()))
 end
 
 local function wait_for_cleanup(delay_ms)
@@ -235,12 +257,13 @@ end
 
 local function main()
   prepend_runtimepath(getenv_string("SMEAR_CURSOR_RTP", ""))
-  append_package_cpath(getenv_string("SMEAR_CURSOR_CPATH", ""))
+  prepend_package_cpath(getenv_string("SMEAR_CURSOR_CPATH", ""))
 
   local ok, smear = pcall(require, "rs_smear_cursor")
   if not ok then
     error("failed to require rs_smear_cursor: " .. tostring(smear))
   end
+  local loaded_module_path = package.searchpath("rs_smear_cursor", package.cpath) or "unknown"
 
   local windows_count = getenv_positive_integer("SMEAR_WINDOWS", 8)
   local warmup_iterations = getenv_positive_integer("SMEAR_WARMUP_ITERATIONS", 500)
@@ -256,9 +279,7 @@ local function main()
   local particles_enabled = getenv_bool("SMEAR_PARTICLES_ENABLED", false)
   local particles_over_text = getenv_bool("SMEAR_PARTICLES_OVER_TEXT", false)
   local drain_every = getenv_non_negative_integer("SMEAR_DRAIN_EVERY", 16)
-  local keys_per_switch = getenv_non_negative_integer("SMEAR_KEYS_PER_SWITCH", 0)
   local delay_event_to_smear = getenv_non_negative_number("SMEAR_DELAY_EVENT_TO_SMEAR", 1)
-  local delay_after_key = getenv_non_negative_number("SMEAR_DELAY_AFTER_KEY", 5)
   local workload_line_count = getenv_positive_integer("SMEAR_LINE_COUNT", 2000)
 
   smear.setup({
@@ -268,9 +289,10 @@ local function main()
     smear_between_buffers = smear_between_buffers,
     smear_between_neighbor_lines = true,
     delay_event_to_smear = delay_event_to_smear,
-    delay_after_key = delay_after_key,
     fps = 120,
   })
+
+  emit_line(string.format("PERF_LIBRARY module_path=%s", loaded_module_path))
 
   local workload_buffer = create_workload_buffer(workload_line_count)
   local windows = create_split_windows(workload_buffer, windows_count)
@@ -278,9 +300,9 @@ local function main()
     error("need at least 2 windows for this harness")
   end
 
-  print(
+  emit_line(
     string.format(
-      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d settle_wait_ms=%.0f smear_between_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d keys_per_switch=%d delay_event_to_smear=%.3f delay_after_key=%.3f",
+      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d settle_wait_ms=%.0f smear_between_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d delay_event_to_smear=%.3f",
       #windows,
       workload_line_count,
       warmup_iterations,
@@ -295,14 +317,12 @@ local function main()
       max_recovery_ratio,
       max_stress_ratio,
       drain_every,
-      keys_per_switch,
-      delay_event_to_smear,
-      delay_after_key
+      delay_event_to_smear
     )
   )
 
-  run_switch_phase("warmup", windows, warmup_iterations, drain_every, smear, keys_per_switch)
-  local baseline = run_switch_phase("baseline", windows, baseline_iterations, drain_every, smear, keys_per_switch)
+  run_switch_phase("warmup", windows, warmup_iterations, drain_every)
+  local baseline = run_switch_phase("baseline", windows, baseline_iterations, drain_every)
 
   local stress_results = {}
   for round = 1, stress_rounds do
@@ -310,18 +330,20 @@ local function main()
       string.format("stress_%d", round),
       windows,
       stress_iterations,
-      drain_every,
-      smear,
-      keys_per_switch
+      drain_every
     )
     stress_results[#stress_results + 1] = result
   end
 
   wait_for_cleanup(settle_wait_ms)
 
-  local post_wait_floating_windows = count_floating_windows()
-  local post_wait_smear_floating_windows = count_smear_floating_windows()
-  local recovery = run_switch_phase("recovery", windows, recovery_iterations, drain_every, smear, keys_per_switch)
+  local post_wait_floating_windows = count_floating_windows(false)
+  local post_wait_visible_floating_windows = count_floating_windows(true)
+  local post_wait_smear_floating_windows = count_smear_floating_windows(false)
+  local post_wait_visible_smear_floating_windows = count_smear_floating_windows(true)
+  print_diagnostics("post_settle", smear)
+  local recovery = run_switch_phase("recovery", windows, recovery_iterations, drain_every)
+  print_diagnostics("post_recovery", smear)
   local recovery_ratio = recovery.avg_us / baseline.avg_us
 
   local stress_max_avg_us = baseline.avg_us
@@ -335,7 +357,7 @@ local function main()
   local stress_max_ratio = stress_max_avg_us / baseline.avg_us
   local stress_tail_ratio = stress_tail_avg_us / baseline.avg_us
 
-  print(
+  emit_line(
     string.format(
       "PERF_STRESS_SUMMARY max_avg_us=%.3f tail_avg_us=%.3f max_ratio=%.3f tail_ratio=%.3f",
       stress_max_avg_us,
@@ -345,33 +367,35 @@ local function main()
     )
   )
 
-  print(
+  emit_line(
     string.format(
-      "PERF_SUMMARY baseline_avg_us=%.3f recovery_avg_us=%.3f recovery_ratio=%.3f post_wait_floating_windows=%d post_wait_smear_floating_windows=%d",
+      "PERF_SUMMARY baseline_avg_us=%.3f recovery_avg_us=%.3f recovery_ratio=%.3f post_wait_floating_windows=%d post_wait_visible_floating_windows=%d post_wait_smear_floating_windows=%d post_wait_visible_smear_floating_windows=%d",
       baseline.avg_us,
       recovery.avg_us,
       recovery_ratio,
       post_wait_floating_windows,
-      post_wait_smear_floating_windows
+      post_wait_visible_floating_windows,
+      post_wait_smear_floating_windows,
+      post_wait_visible_smear_floating_windows
     )
   )
 
-  if post_wait_floating_windows > max_floating_windows then
+  if post_wait_visible_floating_windows > max_floating_windows then
     error(
       string.format(
-        "floating windows still high after settle wait: expected <= %d, got %d",
+        "visible floating windows still high after settle wait: expected <= %d, got %d",
         max_floating_windows,
-        post_wait_floating_windows
+        post_wait_visible_floating_windows
       )
     )
   end
 
-  if post_wait_smear_floating_windows > max_floating_windows then
+  if post_wait_visible_smear_floating_windows > max_floating_windows then
     error(
       string.format(
-        "smear floating windows still high after settle wait: expected <= %d, got %d",
+        "visible smear floating windows still high after settle wait: expected <= %d, got %d",
         max_floating_windows,
-        post_wait_smear_floating_windows
+        post_wait_visible_smear_floating_windows
       )
     )
   end

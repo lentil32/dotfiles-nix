@@ -14,7 +14,8 @@ use crate::core::effect::{
 use crate::core::event::{Event as CoreEvent, ObservationBaseCollectedEvent, ProbeReportedEvent};
 use crate::core::state::{
     BackgroundProbeBatch, BackgroundProbeChunk, CursorColorProbeWitness, CursorColorSample,
-    ObservationBasis, ObservationMotion, ProbeFailure, ProbeKind, ProbeReuse,
+    CursorTextContext, ObservationBasis, ObservationMotion, ObservedTextRow, ProbeFailure,
+    ProbeKind, ProbeReuse,
 };
 use crate::core::types::{CursorCol, CursorPosition, CursorRow, ViewportSnapshot};
 use crate::draw::{
@@ -110,6 +111,92 @@ fn current_buffer_changedtick(buffer_handle: i64) -> Result<u64> {
     Ok(changedtick as u64)
 }
 
+fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Vec<ObservedTextRow>> {
+    if center_line < 1 {
+        return Ok(Vec::new());
+    }
+
+    let start_line = center_line.saturating_sub(1).max(1);
+    let end_line = center_line.saturating_add(1);
+    let start_index = usize::try_from(start_line.saturating_sub(1)).ok();
+    let end_index = usize::try_from(end_line).ok();
+    let (Some(start_index), Some(end_index)) = (start_index, end_index) else {
+        return Ok(Vec::new());
+    };
+
+    buffer
+        .get_lines(start_index..end_index, false)?
+        .enumerate()
+        .map(|(offset, line)| {
+            let relative_line = match i64::try_from(offset) {
+                Ok(offset_line) => start_line.saturating_add(offset_line),
+                Err(_) => start_line,
+            };
+            Ok(ObservedTextRow::new(
+                relative_line,
+                line.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn current_cursor_text_context(
+    cursor_line: i64,
+    tracked_location: Option<&crate::state::CursorLocation>,
+) -> Result<Option<CursorTextContext>> {
+    if cursor_line < 1 {
+        return Ok(None);
+    }
+
+    let buffer = api::get_current_buf();
+    if !buffer.is_valid() {
+        return Ok(None);
+    }
+
+    let buffer_handle = i64::from(buffer.handle());
+    let changedtick = current_buffer_changedtick(buffer_handle)?;
+    // Surprising: embedded Neovim does not expose Neovide's redraw grid here, so semantic
+    // mutation detection uses narrow buffer-line snapshots plus changedtick instead of UI cells.
+    let nearby_rows = observed_text_rows(&buffer, cursor_line)?;
+    if nearby_rows.is_empty() {
+        return Ok(None);
+    }
+
+    let (tracked_cursor_line, tracked_nearby_rows) = match tracked_location {
+        Some(location)
+            if location.buffer_handle == buffer_handle
+                && location.line >= 1
+                && location.line != cursor_line =>
+        {
+            // Surprising: edits above the cursor renumber absolute lines, so we also sample the
+            // previously tracked cursor footprint and compare by relative row order.
+            let tracked_rows = observed_text_rows(&buffer, location.line)?;
+            if tracked_rows.is_empty() {
+                (None, None)
+            } else {
+                (Some(location.line), Some(tracked_rows))
+            }
+        }
+        Some(location)
+            if location.buffer_handle == buffer_handle
+                && location.line >= 1
+                && location.line == cursor_line =>
+        {
+            (Some(cursor_line), Some(nearby_rows.clone()))
+        }
+        _ => (None, None),
+    };
+
+    Ok(Some(CursorTextContext::new(
+        buffer_handle,
+        changedtick,
+        cursor_line,
+        nearby_rows,
+        tracked_cursor_line,
+        tracked_nearby_rows,
+    )))
+}
+
 #[derive(Debug, Error)]
 enum BackgroundProbeMaskError {
     #[error("background probe luaeval failed: {0}")]
@@ -135,7 +222,7 @@ fn current_cursor_color_probe_witness(
 
     let buffer_handle = i64::from(buffer.handle());
     let changedtick = current_buffer_changedtick(buffer_handle)?;
-    let colorscheme_generation = cursor_color_colorscheme_generation();
+    let colorscheme_generation = cursor_color_colorscheme_generation()?;
     // cursor-color sampling can also drift via extmarks or semantic-token overlays
     // without a changedtick bump. Keep the cache tied to the cheap shell reads we can afford on
     // every probe edge for now; if telemetry still shows stale reuse, widen the key instead of
@@ -175,10 +262,19 @@ fn collect_observation_basis(
 ) -> Result<(ObservationBasis, ObservationMotion)> {
     let observed_at = to_core_millis(now_ms());
     let mode = mode_string();
-    let cursor_location = cursor_location_for_core_render(payload.context.tracked_location());
+    let tracked_location = payload.context.tracked_location();
+    let cursor_location = cursor_location_for_core_render(tracked_location.clone());
     let viewport = current_viewport_snapshot()?;
     let cursor_position =
         current_core_cursor_position(&mode, payload.context.cursor_position_policy())?;
+    let cursor_text_context =
+        match current_cursor_text_context(cursor_location.line, tracked_location.as_ref()) {
+            Ok(context) => context,
+            Err(err) => {
+                warn(&format!("cursor text context read failed: {err}"));
+                None
+            }
+        };
     let cursor_color_witness = if payload.request.probes().cursor_color() {
         match current_cursor_color_probe_witness(&mode, cursor_position) {
             Ok(witness) => Some(witness),
@@ -208,7 +304,8 @@ fn collect_observation_basis(
             cursor_location,
             viewport,
         )
-        .with_cursor_color_witness(cursor_color_witness),
+        .with_cursor_color_witness(cursor_color_witness)
+        .with_cursor_text_context(cursor_text_context),
         ObservationMotion::new(scroll_shift),
     ))
 }
@@ -307,16 +404,22 @@ fn collect_cursor_color_report(payload: &RequestProbeEffect) -> CoreEvent {
     }
 
     match cached_cursor_color_sample(expected_witness) {
-        CursorColorCacheLookup::Hit(sample) => {
+        Ok(CursorColorCacheLookup::Hit(sample)) => {
             return cursor_color_ready_event(payload, ProbeReuse::Exact, sample);
         }
-        CursorColorCacheLookup::Miss => {}
+        Ok(CursorColorCacheLookup::Miss) => {}
+        Err(err) => {
+            warn(&format!("cursor color cache read failed: {err}"));
+            return cursor_color_failed_event(payload);
+        }
     }
 
     match sampled_cursor_color_at_current_position() {
         Ok(sample) => {
             let sample = sample.map(CursorColorSample::new);
-            store_cursor_color_sample(current_witness, sample.clone());
+            if let Err(err) = store_cursor_color_sample(current_witness, sample.clone()) {
+                warn(&format!("cursor color cache write failed: {err}"));
+            }
             cursor_color_ready_event(payload, ProbeReuse::Exact, sample)
         }
         Err(err) => {

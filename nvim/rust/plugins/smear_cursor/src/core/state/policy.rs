@@ -34,16 +34,6 @@ impl IngressPolicyState {
             last_cursor_autocmd_at: Some(next_cursor_autocmd_at),
         }
     }
-
-    pub(crate) fn admits_key_fallback(self, observed_at: Millis, freshness_window_ms: u64) -> bool {
-        let Some(last_cursor_autocmd_at) = self.last_cursor_autocmd_at else {
-            return true;
-        };
-        observed_at
-            .value()
-            .saturating_sub(last_cursor_autocmd_at.value())
-            > freshness_window_ms
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
