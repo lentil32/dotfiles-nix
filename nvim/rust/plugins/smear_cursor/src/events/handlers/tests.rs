@@ -14,7 +14,7 @@ fn cmdline_mode_always_routes_to_external_source() {
         Point { row: 5.0, col: 6.0 },
         CursorShape::new(false, false),
         7,
-        tracked,
+        &tracked,
     );
     state.start_animation();
 
@@ -25,7 +25,7 @@ fn cmdline_mode_always_routes_to_external_source() {
             row: 5.0,
             col: 12.0,
         }),
-        tracked,
+        &tracked,
     );
     assert_eq!(source, EventSource::External);
 }

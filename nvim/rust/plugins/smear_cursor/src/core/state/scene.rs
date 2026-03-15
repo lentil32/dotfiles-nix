@@ -124,7 +124,7 @@ impl CursorTrailGeometry {
     }
 
     pub(crate) fn planner_frame(&self, policy: &CursorTrailProjectionPolicy) -> RenderFrame {
-        // Comment: phase 3 keeps palette resolution out of semantic identity, so the projector
+        // phase 3 keeps palette resolution out of semantic identity, so the projector
         // rebuilds a planner-only frame from semantic geometry plus explicit projection policy
         // instead of retaining planner config inside semantic identity.
         RenderFrame {
@@ -155,7 +155,7 @@ pub(crate) struct CursorTrailSemantic {
 }
 
 impl CursorTrailSemantic {
-    // Comment: target-cell presentation is currently derivable from the frame inputs, but
+    // target-cell presentation is currently derivable from the frame inputs, but
     // projection identity depends on it as an explicit reducer fact rather than an implicit
     // render-plan convention.
     pub(crate) fn new(
@@ -363,7 +363,7 @@ impl ProjectionSnapshot {
     }
 
     pub(crate) fn same_render_output_as(&self, other: &Self) -> bool {
-        // Comment: shell redraw authority is observation-bound, not just raster-bound.
+        // shell redraw authority is observation-bound, not just raster-bound.
         // If the reducer accepted a new projection witness, the shell must treat that as
         // replace work so animation can redraw after jumps, window changes, or other
         // observation churn even when the retained raster happens to be identical.
@@ -474,7 +474,7 @@ impl ScenePatchKind {
             }
             (_, None) => Self::Clear,
             _ => {
-                // Comment: phase 4 keeps patch shape intentionally coarse. The authoritative basis
+                // phase 4 keeps patch shape intentionally coarse. The authoritative basis
                 // is explicit now; phase 5 can refine replace work into realization-specific
                 // projection without reopening protocol ownership.
                 Self::Replace
@@ -502,7 +502,7 @@ impl ScenePatch {
 pub(crate) struct SceneState {
     revision: SceneRevision,
     semantics: SemanticScene,
-    // Comment: the motion model is now scene-owned render truth rather than a sibling authority
+    // the motion model is now scene-owned render truth rather than a sibling authority
     // beside the semantic scene.
     motion: RuntimeState,
     projection: ProjectionCache,

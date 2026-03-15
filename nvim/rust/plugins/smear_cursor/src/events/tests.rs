@@ -713,7 +713,7 @@ mod handler_decision_tests {
             },
             CursorShape::new(false, false),
             7,
-            CursorLocation::new(1, 1, 1, 10),
+            &CursorLocation::new(1, 1, 1, 10),
         );
         state
     }
@@ -734,7 +734,7 @@ mod handler_decision_tests {
                 row: 10.0,
                 col: 20.0,
             }),
-            CursorLocation::new(1, 1, 1, 10),
+            &CursorLocation::new(1, 1, 1, 10),
         );
         assert_eq!(source, EventSource::External);
     }
@@ -749,7 +749,7 @@ mod handler_decision_tests {
                 row: 18.0,
                 col: 28.0,
             }),
-            CursorLocation::new(1, 1, 1, 10),
+            &CursorLocation::new(1, 1, 1, 10),
         );
         assert_eq!(source, EventSource::External);
     }
@@ -764,7 +764,7 @@ mod handler_decision_tests {
                 row: 14.0,
                 col: 26.0,
             }),
-            CursorLocation::new(1, 1, 1, 12),
+            &CursorLocation::new(1, 1, 1, 12),
         );
         assert_eq!(source, EventSource::AnimationTick);
     }
@@ -779,7 +779,7 @@ mod handler_decision_tests {
                 row: 14.0,
                 col: 26.0,
             }),
-            CursorLocation::new(2, 1, 1, 12),
+            &CursorLocation::new(2, 1, 1, 12),
         );
         assert_eq!(source, EventSource::External);
     }
@@ -794,7 +794,7 @@ mod handler_decision_tests {
                 row: 10.0,
                 col: 20.0,
             }),
-            CursorLocation::new(1, 1, 5, 15),
+            &CursorLocation::new(1, 1, 5, 15),
         );
         assert_eq!(source, EventSource::External);
     }
@@ -809,7 +809,7 @@ mod handler_decision_tests {
                 row: 10.0,
                 col: 20.0,
             }),
-            CursorLocation::new(1, 1, 1, 10),
+            &CursorLocation::new(1, 1, 1, 10),
         );
         assert_eq!(source, EventSource::AnimationTick);
     }

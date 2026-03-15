@@ -86,7 +86,7 @@ impl Glyph {
     }
 }
 
-// Comment: cache boxed braille strings once so `Glyph::Braille` can hand extmark writes a
+// cache boxed braille strings once so `Glyph::Braille` can hand extmark writes a
 // stable `&str` without turning the lookup table into a process-lifetime leak.
 static BRAILLE_GLYPHS: LazyLock<Box<[Box<str>]>> = LazyLock::new(|| {
     (1_u32..=255_u32)

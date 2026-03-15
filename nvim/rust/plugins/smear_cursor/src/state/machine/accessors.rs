@@ -126,9 +126,9 @@ impl RuntimeState {
     pub(crate) fn record_jump_cue(
         &mut self,
         from_position: Point,
-        from_location: CursorLocation,
+        from_location: &CursorLocation,
         to_position: Point,
-        to_location: CursorLocation,
+        to_location: &CursorLocation,
         started_at_ms: f64,
     ) {
         if !self.config.jump_cues_enabled {
@@ -149,7 +149,7 @@ impl RuntimeState {
 
         let cue = JumpCue {
             cue_id: self.transient.next_jump_cue_id,
-            // Comment: reducer records the cue before applying the cursor transition so the cue
+            // reducer records the cue before applying the cursor transition so the cue
             // carries the acknowledgement epoch that the upcoming state change will expose.
             epoch: self.transient.retarget_epoch.wrapping_add(1),
             from_pose: GlobalDisplayPose::new(from_position, from_location),

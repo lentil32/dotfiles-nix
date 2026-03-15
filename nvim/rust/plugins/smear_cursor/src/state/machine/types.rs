@@ -49,18 +49,18 @@ impl AnimationState {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct CursorTracking {
     pub(super) location: Option<CursorLocation>,
 }
 
 impl CursorTracking {
-    pub(super) fn update(&mut self, location: CursorLocation) {
-        self.location = Some(location);
+    pub(super) fn update(&mut self, location: &CursorLocation) {
+        self.location = Some(location.clone());
     }
 
-    pub(super) fn tracked_location(self) -> Option<CursorLocation> {
-        self.location
+    pub(super) fn tracked_location(&self) -> Option<&CursorLocation> {
+        self.location.as_ref()
     }
 }
 
@@ -86,8 +86,8 @@ pub(crate) struct GlobalDisplayPose {
 }
 
 impl GlobalDisplayPose {
-    pub(super) fn new(position: Point, location: CursorLocation) -> Self {
-        // Comment: cue bookkeeping stores display-metric coordinates only for now. Window-origin
+    pub(super) fn new(position: Point, location: &CursorLocation) -> Self {
+        // cue bookkeeping stores display-metric coordinates only for now. Window-origin
         // projection into a global screen plane lands in the follow-up render-plan work.
         Self {
             row_display: position.row,
@@ -129,13 +129,13 @@ pub(crate) struct PendingTarget {
 impl PendingTarget {
     pub(super) fn new(
         position: Point,
-        cursor_location: CursorLocation,
+        cursor_location: &CursorLocation,
         stable_since_ms: f64,
         settle_deadline_ms: f64,
     ) -> Self {
         Self {
             position,
-            cursor_location,
+            cursor_location: cursor_location.clone(),
             stable_since_ms,
             settle_deadline_ms,
         }
@@ -144,9 +144,9 @@ impl PendingTarget {
     pub(super) fn matches_observation(
         &self,
         position: Point,
-        cursor_location: CursorLocation,
+        cursor_location: &CursorLocation,
     ) -> bool {
-        self.position == position && self.cursor_location == cursor_location
+        self.position == position && &self.cursor_location == cursor_location
     }
 }
 

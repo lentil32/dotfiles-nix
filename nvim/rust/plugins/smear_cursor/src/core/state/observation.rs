@@ -609,8 +609,8 @@ impl ObservationBasis {
         self.cursor_position
     }
 
-    pub(crate) const fn cursor_location(&self) -> CursorLocation {
-        self.cursor_location
+    pub(crate) fn cursor_location(&self) -> CursorLocation {
+        self.cursor_location.clone()
     }
 
     pub(crate) const fn viewport(&self) -> ViewportSnapshot {

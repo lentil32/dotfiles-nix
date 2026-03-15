@@ -49,7 +49,7 @@ fn jump_to_current_cursor() -> Result<()> {
             runtime.config.cursor_is_vertical_bar(&mode),
             runtime.config.cursor_is_horizontal_bar(&mode),
         );
-        runtime.sync_to_current_cursor(Point { row, col }, cursor_shape, location);
+        runtime.sync_to_current_cursor(Point { row, col }, cursor_shape, &location);
         let hide_target_hack = runtime.config.hide_target_hack;
         let next_core = state.core_state().with_runtime(runtime);
         state.set_core_state(next_core);

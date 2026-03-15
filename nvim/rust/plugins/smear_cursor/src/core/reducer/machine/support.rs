@@ -367,7 +367,7 @@ pub(super) fn redraw_effect_for_proposal(
             Some(Effect::RedrawCmdline)
         }
         RealizationPlan::Clear(_) => {
-            // Comment: hiding smear windows at settle/clear time must flush the UI even outside
+            // hiding smear windows at settle/clear time must flush the UI even outside
             // cmdline mode or the old frame can remain visible until the next user input.
             Some(Effect::RedrawCmdline)
         }

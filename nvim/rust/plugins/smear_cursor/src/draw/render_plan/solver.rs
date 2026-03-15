@@ -482,7 +482,7 @@ fn select_decode_path(
     if active_support_is_disconnected(baseline)
         && !ribbon_support_preserves_sparse_bridge_continuity(slices)
     {
-        // Comment: sparse separator/empty cells can drop out of the local baseline entirely while
+        // sparse separator/empty cells can drop out of the local baseline entirely while
         // the ribbon slices still encode one coherent bridge corridor. Keep those cases on the DP
         // path so the comet stays legible across undecodable gaps instead of snapping to fallback.
         return DecodePathTrace::PairwiseFallbackDisconnected;
@@ -573,7 +573,7 @@ fn destination_catch_penalty(slice: &RibbonSlice, state: Option<DecodedCellState
         .round()
         .clamp(0.0, 1024.0) as u32;
     let dim_delta = slice_peak_highlight_level(slice).saturating_sub(decoded.level.value());
-    // Comment: head-side catch slices need an explicit dim-state penalty or a long bridge can
+    // head-side catch slices need an explicit dim-state penalty or a long bridge can
     // flatten into a uniformly dull filament whenever the brighter destination option costs a bit
     // more than continuing the tail.
     scale_penalty(
@@ -941,7 +941,7 @@ fn active_support_is_disconnected(active_cells: &BTreeMap<(i64, i64), DecodedCel
         }
     }
 
-    // Comment: straight row/column motion often decodes locally as a thick single component before
+    // straight row/column motion often decodes locally as a thick single component before
     // ribbon solve refines it. Treating every high-degree cell as "non-ribbon" sends those cases
     // down the fallback path and skips the comet taper that already works for diagonals. The
     // fallback is still reserved for truly disconnected support.
@@ -1028,7 +1028,7 @@ fn decode_compiled_field_with_solver(
         }
         path @ (DecodePathTrace::PairwiseFallbackDisconnected
         | DecodePathTrace::PairwiseFallbackOversized) => {
-            // Comment: preserve full slice support until decode-path selection so oversized ribbon
+            // preserve full slice support until decode-path selection so oversized ribbon
             // support can take the explicit fallback path instead of silently collapsing to local
             // decode.
             return DecodedField {
@@ -1292,7 +1292,7 @@ fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
         latest_pose = Some(current_pose);
     }
 
-    // Comment: presentation ticks can advance latent support windows even when the motion
+    // presentation ticks can advance latent support windows even when the motion
     // reducer has stopped depositing new samples. That keeps settle-time disappearance inside
     // the normal render pipeline instead of falling back to shell-side cleanup truth.
     for _ in 0..frame.planner_idle_steps {

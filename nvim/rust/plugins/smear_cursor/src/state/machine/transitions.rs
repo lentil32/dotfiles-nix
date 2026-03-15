@@ -26,7 +26,7 @@ impl RuntimeState {
         &mut self,
         position: Point,
         shape: CursorShape,
-        location: CursorLocation,
+        location: &CursorLocation,
         policy: CursorTransitionPolicy,
     ) {
         self.sync_cursor_geometry(position, shape);
@@ -93,7 +93,7 @@ impl RuntimeState {
         position: Point,
         shape: CursorShape,
         seed: u32,
-        location: CursorLocation,
+        location: &CursorLocation,
     ) {
         self.apply_cursor_transition(
             position,
@@ -107,7 +107,7 @@ impl RuntimeState {
         &mut self,
         position: Point,
         shape: CursorShape,
-        location: CursorLocation,
+        location: &CursorLocation,
     ) {
         self.apply_cursor_transition(
             position,
@@ -121,7 +121,7 @@ impl RuntimeState {
         &mut self,
         position: Point,
         shape: CursorShape,
-        location: CursorLocation,
+        location: &CursorLocation,
     ) {
         self.apply_cursor_transition(
             position,
@@ -135,7 +135,7 @@ impl RuntimeState {
         &mut self,
         position: Point,
         shape: CursorShape,
-        location: CursorLocation,
+        location: &CursorLocation,
     ) {
         self.apply_cursor_transition(
             position,

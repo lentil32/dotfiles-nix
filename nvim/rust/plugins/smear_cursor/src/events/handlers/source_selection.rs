@@ -11,7 +11,7 @@ pub(crate) fn select_core_event_source(
     mode: &str,
     state: &RuntimeState,
     requested_target: Option<Point>,
-    cursor_location: CursorLocation,
+    cursor_location: &CursorLocation,
 ) -> EventSource {
     select_event_source(mode, state, requested_target, cursor_location)
 }

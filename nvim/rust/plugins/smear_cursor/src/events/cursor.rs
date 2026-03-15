@@ -246,7 +246,7 @@ fn resolve_buffer_cursor_position(
             continue;
         };
         if start_row != end_row {
-            // Comment: this conceal correction is proven for same-row drift. If a concealed region
+            // this conceal correction is proven for same-row drift. If a concealed region
             // crosses a soft-wrap boundary, keep the shell-authoritative raw screenpos until we
             // model wrapped line offsets explicitly.
             return Ok(screen_cell_to_point(raw_cell));
@@ -264,7 +264,7 @@ fn buffer_screen_cursor_position(window: &api::Window) -> Result<BufferCursorRea
     let (line, column) = window.get_cursor()?;
     let screenpos = screenpos_for_buffer_column(window, line, buffer_column_to_col1(column))?;
     let screenpos = screenpos_dictionary(screenpos)?;
-    // Comment: `screenpos.curscol` points at the cursor landing column, which is the end of a
+    // `screenpos.curscol` points at the cursor landing column, which is the end of a
     // Tab expansion. The smear target needs the first screen cell that renders the buffer
     // character under the cursor, which is `screenpos.col`.
     let raw_cell = parse_screenpos_cell_from_dict(&screenpos)?;
@@ -283,7 +283,7 @@ fn buffer_screen_cursor_position(window: &api::Window) -> Result<BufferCursorRea
 
 fn screen_cursor_position(window: &api::Window) -> Result<Option<ScreenPoint>> {
     let buffer_read = buffer_screen_cursor_position(window)?;
-    // Comment: `screenpos()` is the stable callback-safe base here. The `gg` trace showed
+    // `screenpos()` is the stable callback-safe base here. The `gg` trace showed
     // `screenrow()`/`screencol()` reporting stale or command-line cells on scheduled edges, so we
     // keep the timing-sensitive live probe out of production selection and correct conceal drift
     // from the stable `screenpos()` sample instead.
@@ -308,7 +308,7 @@ fn should_use_real_cmdline_cursor(cmdtype: &str) -> bool {
 fn cmdline_cursor_position(window: &api::Window) -> Result<Option<(f64, f64)>> {
     let cmdtype = command_type_string()?;
     if !should_use_real_cmdline_cursor(&cmdtype) {
-        // Comment: showcmd and normal-mode prefix keys can transiently report `mode=c` while the
+        // showcmd and normal-mode prefix keys can transiently report `mode=c` while the
         // rendered cursor is still in the buffer. Falling back to the buffer cursor avoids
         // animating bottom-row showcmd columns for motions like `gg`.
         return Ok(buffer_screen_cursor_position(window)?.selected_position());

@@ -48,7 +48,7 @@ impl RuntimeState {
         &mut self,
         position: Point,
         shape: CursorShape,
-        location: CursorLocation,
+        location: &CursorLocation,
         now_ms: f64,
     ) {
         self.transient.drain_steps_remaining = 0;
@@ -64,15 +64,17 @@ impl RuntimeState {
         &mut self,
         position: Point,
         shape: CursorShape,
-        location: CursorLocation,
+        location: &CursorLocation,
         now_ms: f64,
     ) {
         self.transient.drain_steps_remaining = 0;
         let delay_ms = self.config.delay_event_to_smear.max(0.0);
         let pending = match self.transient.pending_target.as_ref() {
             Some(existing) if existing.matches_observation(position, location) => PendingTarget {
+                position: existing.position,
+                cursor_location: existing.cursor_location.clone(),
+                stable_since_ms: existing.stable_since_ms,
                 settle_deadline_ms: now_ms + delay_ms,
-                ..existing.clone()
             },
             _ => PendingTarget::new(position, location, now_ms, now_ms + delay_ms),
         };
@@ -86,7 +88,7 @@ impl RuntimeState {
         &self,
         now_ms: f64,
         observed_position: Point,
-        observed_location: CursorLocation,
+        observed_location: &CursorLocation,
     ) -> bool {
         let Some(pending) = self.transient.pending_target.as_ref() else {
             return false;
@@ -200,18 +202,18 @@ impl RuntimeState {
     }
 
     pub(crate) fn tracked_location(&self) -> Option<CursorLocation> {
+        self.tracked_location_ref().cloned()
+    }
+
+    pub(crate) fn tracked_location_ref(&self) -> Option<&CursorLocation> {
         self.transient.tracking.tracked_location()
     }
 
-    pub(crate) fn update_tracking(&mut self, location: CursorLocation) {
-        let surface_changed = self
-            .transient
-            .tracking
-            .tracked_location()
-            .is_some_and(|tracked| {
-                tracked.window_handle != location.window_handle
-                    || tracked.buffer_handle != location.buffer_handle
-            });
+    pub(crate) fn update_tracking(&mut self, location: &CursorLocation) {
+        let surface_changed = self.tracked_location_ref().is_some_and(|tracked| {
+            tracked.window_handle != location.window_handle
+                || tracked.buffer_handle != location.buffer_handle
+        });
         if surface_changed {
             self.transient.retarget_epoch = self.transient.retarget_epoch.wrapping_add(1);
         }

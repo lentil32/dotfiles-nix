@@ -116,7 +116,7 @@ fn queue_external_demand(
     let queued_state = if invalidates_cleanup {
         invalidate_cleanup_state(queued_state)
     } else {
-        // Comment: a debounced key-fallback demand is only advisory until it matures into an
+        // a debounced key-fallback demand is only advisory until it matures into an
         // actual observation. Canceling render cleanup here lets a later-suppressed fallback
         // strand the last smear frame with no retry path.
         queued_state
@@ -438,7 +438,7 @@ pub(super) fn reduce_probe_reported(state: &CoreState, payload: &ProbeReportedEv
             let (next_refresh_state, exhausted) = current_refresh_state.note_refresh_required(kind);
 
             if exhausted {
-                // Comment: a moving cursor or viewport can keep invalidating one observation.
+                // a moving cursor or viewport can keep invalidating one observation.
                 // Drop that request after a bounded number of retries so queued ingress regains
                 // ownership instead of waiting behind an obsolete observation forever.
                 let observed_at = active_request.demand().observed_at();

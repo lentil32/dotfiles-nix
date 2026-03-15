@@ -11,8 +11,12 @@ pub(super) fn cursor_location_for_core_render(
     let window = api::get_current_win();
     let buffer = api::get_current_buf();
     if window.is_valid() && buffer.is_valid() {
-        let default_top_row = tracked_location.map_or(0_i64, |location| location.top_row);
-        let default_line = tracked_location.map_or(0_i64, |location| location.line);
+        let default_top_row = tracked_location
+            .as_ref()
+            .map_or(0_i64, |location| location.top_row);
+        let default_line = tracked_location
+            .as_ref()
+            .map_or(0_i64, |location| location.line);
         let top_row = line_value("w0").unwrap_or(default_top_row);
         let line = line_value(".").unwrap_or(default_line);
         return CursorLocation::new(
@@ -63,8 +67,8 @@ fn screen_distance(window: &api::Window, row_start: i64, row_end: i64) -> Result
 
 pub(super) fn maybe_scroll_shift_for_core_event(
     window: &api::Window,
-    context: ObservationRuntimeContext,
-    current_location: CursorLocation,
+    context: &ObservationRuntimeContext,
+    current_location: &CursorLocation,
 ) -> Result<Option<ScrollShift>> {
     if !context.scroll_buffer_space() {
         return Ok(None);

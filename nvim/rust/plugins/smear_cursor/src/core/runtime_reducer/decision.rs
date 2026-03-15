@@ -10,7 +10,7 @@ pub(crate) enum MotionClass {
     SurfaceRetarget,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CursorEventContext {
     pub(crate) row: f64,
     pub(crate) col: f64,
@@ -74,7 +74,7 @@ pub(crate) struct RenderSideEffects {
     pub(crate) redraw_after_clear_if_cmdline: bool,
     pub(crate) target_cell_presentation: TargetCellPresentation,
     pub(crate) cursor_visibility: CursorVisibilityEffect,
-    // Comment: apply consumes this reducer-owned policy directly instead of re-reading
+    // apply consumes this reducer-owned policy directly instead of re-reading
     // `hide_target_hack` from live runtime config.
     pub(crate) allow_real_cursor_updates: bool,
 }

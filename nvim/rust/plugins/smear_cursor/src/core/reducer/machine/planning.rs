@@ -71,7 +71,7 @@ fn planner_seed(
     scene: &SceneState,
     policy: &CursorTrailProjectionPolicy,
 ) -> ProjectionPlannerState {
-    // Comment: projection snapshots are witness-bound shell inputs, but planner history is part
+    // projection snapshots are witness-bound shell inputs, but planner history is part
     // of semantic motion continuity. Reusing planner state across observation/revision drift keeps
     // the ribbon history alive between frames while policy drift still resets the planner.
     scene
@@ -95,7 +95,7 @@ fn projection_reuse_planner_clock(
     frame: &RenderFrame,
     planner_state: &ProjectionPlannerState,
 ) -> Option<ProjectionPlannerClock> {
-    // Comment: planner aging is projection-owned, not semantic-geometry-owned. Advancing frames
+    // planner aging is projection-owned, not semantic-geometry-owned. Advancing frames
     // are only reusable when replayed from the same planner clock; otherwise retained projection
     // reuse would skip latent-field advancement and freeze the tail.
     frame_advances_planner(frame).then(|| planner_clock(planner_state))
@@ -155,7 +155,7 @@ fn project_draw_frame(
 ) -> Result<ProjectionCacheEntry, ApplyFailureKind> {
     let background_probe = if frame_requires_background_probe(geometry, policy) {
         let Some(background_probe) = observation.background_probe() else {
-            // Comment: probe-gated particles may not silently degrade into a
+            // probe-gated particles may not silently degrade into a
             // "successful" projection. Force an explicit retry path instead.
             return Err(ApplyFailureKind::MissingRequiredProbe);
         };
@@ -213,7 +213,7 @@ fn reusable_projection_entry(
         projection_reuse_planner_clock(&planner_frame, &current_planner_seed);
 
     if frame_requires_background_probe(geometry, policy) {
-        // Comment: the typed probe loop now keeps observation ownership explicit, but background
+        // the typed probe loop now keeps observation ownership explicit, but background
         // reuse still stays conservative because the retained cache is viewport-wide rather than
         // witness-bound to exact probe cells.
         return None;
@@ -344,7 +344,7 @@ fn update_scene_from_render_decision(
             let next_scene = current_scene
                 .with_semantics(next_semantics)
                 .with_dirty(DirtyEntitySet::default());
-            // Comment: the scene projection cache is planner reuse state, not shell authority.
+            // the scene projection cache is planner reuse state, not shell authority.
             // A noop proposal may only target the trusted acknowledged render; otherwise cleanup
             // or divergence can leak stale cached draw input into apply as a replace patch.
             (next_scene, projection, None)
@@ -386,7 +386,7 @@ fn realization_plan_for_render_decision(
         }
         RenderAction::ClearAll => {
             let _ = patch_kind;
-            // Comment: shell-visible smear occupancy is authoritative for clear intents.
+            // shell-visible smear occupancy is authoritative for clear intents.
             // Even if projection trust has already degraded to a noop patch basis, a reducer
             // `ClearAll` must still force shell clear work or the last visible trail can survive
             // until unrelated ingress repaints the UI.
@@ -417,11 +417,11 @@ fn plan_runtime_transition(
         .cursor_position()
         .map(point_from_cursor_position);
     let fallback_target = runtime.target_position();
-    let source = select_event_source(mode, &runtime, requested_target, cursor_location);
+    let source = select_event_source(mode, &runtime, requested_target, &cursor_location);
     let event_now_ms = match source {
         EventSource::External => observation.basis().observed_at().value() as f64,
         EventSource::AnimationTick => {
-            // Comment: animation ticks can reuse a stable observation snapshot after ingress
+            // animation ticks can reuse a stable observation snapshot after ingress
             // quiets down. Advancing the reducer with that frozen observation clock stalls tail
             // drain forever, so tick-driven reductions must use the timer event timestamp.
             observed_at.value() as f64

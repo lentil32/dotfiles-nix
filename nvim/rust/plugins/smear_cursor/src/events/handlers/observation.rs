@@ -106,7 +106,7 @@ fn current_cursor_color_probe_witness(
     let buffer_handle = i64::from(buffer.handle());
     let changedtick = current_buffer_changedtick(buffer_handle)?;
     let colorscheme_generation = cursor_color_colorscheme_generation();
-    // Comment: cursor-color sampling can also drift via extmarks or semantic-token overlays
+    // cursor-color sampling can also drift via extmarks or semantic-token overlays
     // without a changedtick bump. Keep the cache tied to the cheap shell reads we can afford on
     // every probe edge for now; if telemetry still shows stale reuse, widen the key instead of
     // collapsing the deferred effect boundary back into a synchronous shell read.
@@ -165,7 +165,7 @@ fn collect_observation_basis(
         if !window.is_valid() {
             None
         } else {
-            maybe_scroll_shift_for_core_event(&window, payload.context, cursor_location)?
+            maybe_scroll_shift_for_core_event(&window, &payload.context, &cursor_location)?
         }
     };
 

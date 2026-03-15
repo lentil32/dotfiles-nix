@@ -559,7 +559,7 @@ pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()
             Ok(())
         }
         PaletteRefreshDisposition::BootstrapSynchronously => {
-            // Comment: first draw has no committed smear highlight groups yet, so keep a one-time
+            // first draw has no committed smear highlight groups yet, so keep a one-time
             // synchronous bootstrap until palette refresh can be primed earlier in the lifecycle.
             refresh_highlight_palette_for_spec(spec, raw_input_key)?;
             Ok(())

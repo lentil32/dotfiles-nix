@@ -501,7 +501,7 @@ fn observation_request_captures_runtime_tracking_context() {
         },
         CursorShape::new(false, false),
         7,
-        CursorLocation::new(44, 55, 9, 10),
+        &CursorLocation::new(44, 55, 9, 10),
     );
     let ready = ready_state().with_runtime(runtime);
 
@@ -1462,7 +1462,7 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
         Point { row: 9.0, col: 9.0 },
         CursorShape::new(false, false),
         7,
-        CursorLocation::new(11, 22, 3, 4),
+        &CursorLocation::new(11, 22, 3, 4),
     );
     runtime.start_tail_drain(2);
     runtime.set_last_tick_ms(Some(100.0));

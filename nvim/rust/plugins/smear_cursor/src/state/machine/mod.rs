@@ -8,12 +8,13 @@ mod lifecycle;
 mod transitions;
 mod types;
 
+#[cfg(test)]
 pub(crate) use self::types::JumpCuePhase;
 use self::types::{AnimationState, PluginState, TransientRuntimeState};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimeState {
-    // Comment: phase 5 moves the legacy motion/planning model into core-owned
+    // phase 5 moves the legacy motion/planning model into core-owned
     // runtime state so reducers no longer depend on a shell-local render bridge.
     pub(crate) config: RuntimeConfig,
     render_static_config: Arc<StaticRenderConfig>,

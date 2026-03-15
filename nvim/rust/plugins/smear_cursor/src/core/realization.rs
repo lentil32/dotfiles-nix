@@ -339,7 +339,7 @@ pub(crate) fn project_render_plan(
         linear_cells.push(overlay_cell(overlay));
     }
 
-    // Comment: background-dependent particle admission is resolved from the explicit
+    // background-dependent particle admission is resolved from the explicit
     // observation probe before snapshot retention. The snapshot keeps only logical
     // raster cells, and shell apply derives spans later.
     LogicalRaster::new(plan.clear, Arc::from(linear_cells))

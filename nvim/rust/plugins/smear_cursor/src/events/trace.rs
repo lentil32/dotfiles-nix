@@ -54,7 +54,7 @@ fn cursor_position_summary(position: Option<CursorPosition>) -> String {
     )
 }
 
-fn cursor_location_summary(location: CursorLocation) -> String {
+fn cursor_location_summary(location: &CursorLocation) -> String {
     format!(
         "win={} buf={} top={} line={}",
         location.window_handle, location.buffer_handle, location.top_row, location.line
@@ -146,7 +146,7 @@ fn observation_basis_summary(basis: &ObservationBasis) -> String {
         millis_summary(basis.observed_at()),
         basis.mode(),
         cursor_position_summary(basis.cursor_position()),
-        cursor_location_summary(basis.cursor_location()),
+        cursor_location_summary(&basis.cursor_location()),
         viewport_summary(basis.viewport()),
         cursor_color_witness,
     )

@@ -55,7 +55,7 @@ fn support_steps_for_lifetime(lifetime_ms: f64, min_support_steps: u32, simulati
 }
 
 fn planner_tail_drain_steps(state: &RuntimeState) -> u32 {
-    // Comment: settle-time drain must follow the same support-window envelope as the planner's
+    // settle-time drain must follow the same support-window envelope as the planner's
     // latent-field aging. If these diverge, reducer lifecycle truth and render decay truth drift.
     let support_scale = tail_duration_support_scale(state.config.tail_duration_ms);
     [
@@ -189,7 +189,7 @@ fn draw_drain_frame(
             false,
             particles,
         );
-        // Comment: tail drain should age already-emitted particles, but it must not emit new
+        // tail drain should age already-emitted particles, but it must not emit new
         // particles after motion has settled or the visual tail can linger as a frozen cloud.
         drain_input.particles_enabled = false;
         let step_output = simulate_step(drain_input);
@@ -277,14 +277,16 @@ pub(crate) fn reduce_cursor_event(
         EventSource::External => event_target,
     };
     let (window_changed, buffer_changed) =
-        state.tracked_location().map_or((false, false), |tracked| {
-            (
-                tracked.window_handle != event.cursor_location.window_handle,
-                tracked.buffer_handle != event.cursor_location.buffer_handle,
-            )
-        });
+        state
+            .tracked_location_ref()
+            .map_or((false, false), |tracked| {
+                (
+                    tracked.window_handle != event.cursor_location.window_handle,
+                    tracked.buffer_handle != event.cursor_location.buffer_handle,
+                )
+            });
     let previous_target = state.target_position();
-    let previous_location = state.tracked_location();
+    let previous_location = state.tracked_location_ref().cloned();
     let mut motion_class = MotionClass::Continuous;
 
     match source {
@@ -301,16 +303,20 @@ pub(crate) fn reduce_cursor_event(
             ) {
                 motion_class = MotionClass::DiscontinuousJump;
                 let jump_origin = previous_target;
-                if let Some(from_location) = previous_location {
+                if let Some(from_location) = previous_location.as_ref() {
                     state.record_jump_cue(
                         jump_origin,
                         from_location,
                         target_position,
-                        event.cursor_location,
+                        &event.cursor_location,
                         event.now_ms,
                     );
                 }
-                state.jump_and_stop_animation(target_position, cursor_shape, event.cursor_location);
+                state.jump_and_stop_animation(
+                    target_position,
+                    cursor_shape,
+                    &event.cursor_location,
+                );
                 return draw_discontinuous_jump_frame(
                     state,
                     mode,
@@ -326,16 +332,16 @@ pub(crate) fn reduce_cursor_event(
                 // Mode-forced jumps update position/target but preserve in-flight motion.
                 motion_class = MotionClass::DiscontinuousJump;
                 let jump_origin = previous_target;
-                if let Some(from_location) = previous_location {
+                if let Some(from_location) = previous_location.as_ref() {
                     state.record_jump_cue(
                         jump_origin,
                         from_location,
                         target_position,
-                        event.cursor_location,
+                        &event.cursor_location,
                         event.now_ms,
                     );
                 }
-                state.jump_preserving_motion(target_position, cursor_shape, event.cursor_location);
+                state.jump_preserving_motion(target_position, cursor_shape, &event.cursor_location);
                 return draw_discontinuous_jump_frame(
                     state,
                     mode,
@@ -356,7 +362,7 @@ pub(crate) fn reduce_cursor_event(
             target_position,
             cursor_shape,
             event.seed,
-            event.cursor_location,
+            &event.cursor_location,
         );
         let frame = build_render_frame(
             state,
@@ -398,21 +404,21 @@ pub(crate) fn reduce_cursor_event(
         );
         motion_class = path_segmentation.motion_class;
         if matches!(motion_class, MotionClass::DiscontinuousJump) {
-            if let Some(from_location) = previous_location {
+            if let Some(from_location) = previous_location.as_ref() {
                 state.record_jump_cue(
                     previous_target,
                     from_location,
                     target_position,
-                    event.cursor_location,
+                    &event.cursor_location,
                     event.now_ms,
                 );
             }
-            // Comment: large discontinuous moves still reset trail semantics, but they should
+            // large discontinuous moves still reset trail semantics, but they should
             // stay on the regular spring/comet pipeline unless policy requires an actual snap.
         }
 
         if path_segmentation.should_jump {
-            state.jump_and_stop_animation(target_position, cursor_shape, event.cursor_location);
+            state.jump_and_stop_animation(target_position, cursor_shape, &event.cursor_location);
             return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
                 .with_motion_class(motion_class)
                 .with_render_cleanup_action(RenderCleanupAction::Schedule);
@@ -422,7 +428,7 @@ pub(crate) fn reduce_cursor_event(
             state.start_new_trail_stroke();
         }
         state.set_target(target_position, cursor_shape);
-        state.update_tracking(event.cursor_location);
+        state.update_tracking(&event.cursor_location);
     }
 
     let mut just_started = false;
@@ -439,14 +445,14 @@ pub(crate) fn reduce_cursor_event(
                 state.refresh_settling_target(
                     target_position,
                     cursor_shape,
-                    event.cursor_location,
+                    &event.cursor_location,
                     event.now_ms,
                 );
             } else {
                 state.begin_settling(
                     target_position,
                     cursor_shape,
-                    event.cursor_location,
+                    &event.cursor_location,
                     event.now_ms,
                 );
             }
@@ -454,7 +460,7 @@ pub(crate) fn reduce_cursor_event(
             if state.should_promote_settled_target(
                 event.now_ms,
                 target_position,
-                event.cursor_location,
+                &event.cursor_location,
             ) {
                 state.start_animation_towards_target();
                 state.set_last_tick_ms(Some(event.now_ms));
@@ -476,7 +482,7 @@ pub(crate) fn reduce_cursor_event(
             state.settle_at_target();
             state.stop_animation();
             reset_animation_timing(state);
-            // Comment: a same-target external ingress after drain does not supersede the last
+            // a same-target external ingress after drain does not supersede the last
             // rendered trail. Keep cleanup intent alive so the final smear frame still clears.
             return CursorTransitions::noop(mode, allow_real_cursor_updates)
                 .with_motion_class(motion_class)
@@ -493,8 +499,11 @@ pub(crate) fn reduce_cursor_event(
                 .with_cursor_visibility(CursorVisibilityEffect::Show)
                 .with_render_cleanup_action(RenderCleanupAction::NoAction);
         }
-        if state.should_promote_settled_target(event.now_ms, target_position, event.cursor_location)
-        {
+        if state.should_promote_settled_target(
+            event.now_ms,
+            target_position,
+            &event.cursor_location,
+        ) {
             state.start_animation_towards_target();
             state.set_last_tick_ms(Some(event.now_ms));
             state.reset_settle_probe();
@@ -503,7 +512,7 @@ pub(crate) fn reduce_cursor_event(
             state.refresh_settling_target(
                 target_position,
                 cursor_shape,
-                event.cursor_location,
+                &event.cursor_location,
                 event.now_ms,
             );
             return CursorTransitions::noop(mode, allow_real_cursor_updates)

@@ -205,7 +205,7 @@ impl BucketCell {
         let mut total_mass_q12 = 0_u64;
         for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
             let sample_u64 = u64::from(sample);
-            // Comment: removal should mirror prior insertion exactly; saturating arithmetic keeps the
+            // removal should mirror prior insertion exactly; saturating arithmetic keeps the
             // derived cache non-panicking if that invariant is ever violated.
             debug_assert!(self.samples_q12_sum[index] >= sample_u64);
             self.samples_q12_sum[index] = self.samples_q12_sum[index].saturating_sub(sample_u64);

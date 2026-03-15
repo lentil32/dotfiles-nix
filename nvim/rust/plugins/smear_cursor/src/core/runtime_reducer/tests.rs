@@ -67,7 +67,7 @@ fn event_with_location(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TrajectoryStep {
     source: EventSource,
     event: CursorEventContext,
@@ -188,7 +188,7 @@ fn trajectory_fingerprint(state: &mut RuntimeState, mode: &str, steps: &[Traject
     let mut hash = 1_469_598_103_934_665_603_u64;
 
     for step in steps {
-        let transition = reduce_cursor_event(state, mode, step.event, step.source);
+        let transition = reduce_cursor_event(state, mode, step.event.clone(), step.source);
         let center = trajectory_center(state);
         let target = state.target_position();
         hash = mix_fingerprint(hash, quantize_milli(step.event.now_ms));
@@ -361,7 +361,7 @@ fn build_render_frame_preserves_core_cursor_geometry() {
     let location = CursorLocation::new(10, 20, 1, 1);
     let shape = CursorShape::new(false, false);
     let position = Point { row: 5.0, col: 7.0 };
-    state.initialize_cursor(position, shape, 3, location);
+    state.initialize_cursor(position, shape, 3, &location);
 
     let frame = super::build_render_frame(
         &state,
@@ -560,7 +560,7 @@ fn stop_hysteresis_requires_consecutive_enter_frames_before_tail_drain_starts() 
         Point { row: 5.0, col: 6.0 },
         CursorShape::new(false, false),
         7,
-        CursorLocation::new(10, 20, 1, 1),
+        &CursorLocation::new(10, 20, 1, 1),
     );
     state.set_target(
         Point {
@@ -638,7 +638,7 @@ fn tail_drain_emits_idle_planner_steps_then_clears_explicitly() {
         Point { row: 5.0, col: 6.0 },
         CursorShape::new(false, false),
         7,
-        CursorLocation::new(10, 20, 1, 1),
+        &CursorLocation::new(10, 20, 1, 1),
     );
     state.set_target(
         Point {
@@ -703,7 +703,7 @@ fn settled_external_noop_after_tail_drain_keeps_cleanup_scheduled() {
         Point { row: 5.0, col: 6.0 },
         CursorShape::new(false, false),
         11,
-        CursorLocation::new(10, 20, 1, 1),
+        &CursorLocation::new(10, 20, 1, 1),
     );
     state.set_target(
         Point {
@@ -766,7 +766,7 @@ fn tail_drain_advances_existing_particles_without_emitting_new_ones() {
         Point { row: 5.0, col: 6.0 },
         CursorShape::new(false, false),
         7,
-        CursorLocation::new(10, 20, 1, 1),
+        &CursorLocation::new(10, 20, 1, 1),
     );
     state.apply_step_output(StepOutput {
         current_corners: state.current_corners(),
@@ -1878,7 +1878,7 @@ proptest! {
             );
             prop_assert!(state.is_initialized());
             prop_assert!(!state.is_animating());
-            prop_assert_eq!(state.tracked_location(), tracked_before);
+            prop_assert_eq!(state.tracked_location(), tracked_before.clone());
             prop_assert_eq!(state.last_tick_ms(), last_tick_before);
             now_ms += 16.0;
         }

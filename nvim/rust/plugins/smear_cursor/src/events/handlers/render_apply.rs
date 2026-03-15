@@ -22,7 +22,7 @@ use crate::draw::{
 };
 use nvim_oxi::Result;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct RenderExecutionMetrics {
     ops_planned: usize,
     ops_applied: usize,
@@ -110,7 +110,7 @@ impl RenderExecutionMetrics {
             || self.windows_recovered > 0
     }
 
-    pub(super) fn degraded_apply_metrics(self) -> DegradedApplyMetrics {
+    pub(super) fn degraded_apply_metrics(&self) -> DegradedApplyMetrics {
         DegradedApplyMetrics::new(
             self.ops_planned,
             self.ops_applied,
@@ -122,7 +122,7 @@ impl RenderExecutionMetrics {
         )
     }
 
-    pub(super) fn perf_details(self) -> String {
+    pub(super) fn perf_details(&self) -> String {
         format!(
             "ops_planned={} ops_applied={} ops_skipped_capacity={} windows_created={} windows_reused={} reuse_failed_missing_window={} reuse_failed_reconfigure={} reuse_failed_missing_buffer={} windows_pruned={} windows_hidden={} windows_invalid_removed={} windows_recovered={} pool_total_windows={} pool_available_windows={} pool_in_use_windows={} pool_cached_budget={} pool_last_frame_demand={}",
             self.ops_planned,
@@ -225,7 +225,7 @@ pub(crate) fn execute_redraw_cmdline_effect() {
 }
 
 fn flush_shell_redraw(effect_name: &'static str) {
-    // Comment: render apply already executes on Neovim's scheduled shell edge.
+    // render apply already executes on Neovim's scheduled shell edge.
     // Re-scheduling redraw from here defers visible float removal to a later
     // event-loop turn, which can leave the last smear tail on screen until
     // unrelated ingress wakes the UI again.
@@ -291,7 +291,7 @@ pub(crate) fn execute_core_apply_render_cleanup_effect(
     };
 
     if outcome.had_visual_change() {
-        // Comment: cleanup already runs on the scheduled shell edge, so redraw must
+        // cleanup already runs on the scheduled shell edge, so redraw must
         // flush inline here. Scheduling it again defers the final disappearance to
         // a later loop turn.
         flush_shell_redraw("render_cleanup_redraw");
@@ -367,7 +367,7 @@ fn draw_realization_target_projection(
     match project_scene_patch(patch) {
         Ok(ScenePatchRealization::Draw(projection)) => Ok(projection),
         Ok(ScenePatchRealization::Noop) => {
-            // Comment: reducer `Draw` is a shell-authoritative frame boundary, not merely a
+            // reducer `Draw` is a shell-authoritative frame boundary, not merely a
             // projection diff. If the target projection equals the acknowledged one, the patch
             // kind collapses to `Noop`, but shell apply must still consume the target snapshot so
             // pooled smear windows can roll epochs and release/hide the previous frame.
@@ -507,7 +507,7 @@ pub(super) fn apply_render_action(
             );
         }
         RealizationPlan::Failure(_) => {
-            // Comment: the proposal executor converts typed failure plans into
+            // the proposal executor converts typed failure plans into
             // `ApplyReported::ApplyFailed` before calling shell apply.
             return Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
                 nvim_oxi::api::Error::Other("typed realization failure reached shell apply".into()),

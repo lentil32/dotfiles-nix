@@ -76,7 +76,7 @@ impl BufferEventPolicy {
     ) -> IngressCursorPresentationPolicy {
         let _ = self;
 
-        // Comment: `hide_target_hack` keeps its legacy inverted meaning here.
+        // `hide_target_hack` keeps its legacy inverted meaning here.
         // When it is enabled, ingress-time cursor masking stays fully disabled.
         if !context.enabled
             || context.animating

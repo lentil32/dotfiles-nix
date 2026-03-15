@@ -275,7 +275,7 @@ fn draw_span(
             payload_hash,
         } => (window_id, buffer, payload_hash),
         SpanApplyDecision::AlreadySatisfied => {
-            // Comment: cached payload reuse already satisfies the planned span. Counting it as
+            // cached payload reuse already satisfies the planned span. Counting it as
             // unapplied pushes the shell into a false degraded-apply recovery loop on hot reuse
             // frames, which is exactly what the `gg` trace showed.
             mark_span_satisfied(metrics);
@@ -298,7 +298,7 @@ fn draw_span(
         .virt_text_win_col(0)
         .build();
 
-    // Comment: the window pool reservation already lives in draw state. Apply the extmark outside
+    // the window pool reservation already lives in draw state. Apply the extmark outside
     // the global draw mutex so one long frame does not block unrelated prepaint/cleanup bookkeeping.
     if let Err(err) = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts) {
         let recovered = with_render_tab(tab_handle, |tab_windows| {

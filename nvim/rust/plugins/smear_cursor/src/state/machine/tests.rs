@@ -30,7 +30,7 @@ fn animation_phase_transitions_preserve_invariants() {
 fn transient_reset_clears_only_transient_fields() {
     let mut state = RuntimeState::default();
     state.set_target(Point { row: 4.0, col: 9.0 }, CursorShape::new(false, false));
-    state.update_tracking(CursorLocation::new(11, 22, 33, 44));
+    state.update_tracking(&CursorLocation::new(11, 22, 33, 44));
     state.set_color_at_cursor(Some("#ffffff".to_string()));
     state.set_last_tick_ms(Some(99.0));
 
@@ -49,7 +49,7 @@ fn retarget_epoch_advances_only_on_target_position_changes() {
     let origin = Point { row: 5.0, col: 6.0 };
     assert_eq!(state.retarget_epoch(), 0);
 
-    state.initialize_cursor(origin, CursorShape::new(false, false), 7, location);
+    state.initialize_cursor(origin, CursorShape::new(false, false), 7, &location);
     let after_initialize = state.retarget_epoch();
     assert!(after_initialize > 0);
 
@@ -60,7 +60,7 @@ fn retarget_epoch_advances_only_on_target_position_changes() {
     state.set_target(moved, CursorShape::new(false, false));
     assert_eq!(state.retarget_epoch(), after_initialize.wrapping_add(1));
 
-    state.jump_and_stop_animation(moved, CursorShape::new(false, false), location);
+    state.jump_and_stop_animation(moved, CursorShape::new(false, false), &location);
     assert_eq!(state.retarget_epoch(), after_initialize.wrapping_add(1));
 }
 
@@ -72,17 +72,17 @@ fn retarget_epoch_advances_when_tracking_surface_changes() {
         Point { row: 5.0, col: 6.0 },
         CursorShape::new(false, false),
         7,
-        initial_location,
+        &initial_location,
     );
     let baseline_epoch = state.retarget_epoch();
 
-    state.update_tracking(initial_location);
+    state.update_tracking(&initial_location);
     assert_eq!(state.retarget_epoch(), baseline_epoch);
 
-    state.update_tracking(CursorLocation::new(9, 2, 3, 4));
+    state.update_tracking(&CursorLocation::new(9, 2, 3, 4));
     assert_eq!(state.retarget_epoch(), baseline_epoch.wrapping_add(1));
 
-    state.update_tracking(CursorLocation::new(9, 88, 3, 4));
+    state.update_tracking(&CursorLocation::new(9, 88, 3, 4));
     assert_eq!(state.retarget_epoch(), baseline_epoch.wrapping_add(2));
 }
 
@@ -95,18 +95,18 @@ fn trail_stroke_id_advances_on_jump_like_transitions_but_not_plain_retargets() {
 
     assert_eq!(state.trail_stroke_id().value(), 0);
 
-    state.initialize_cursor(origin, shape, 7, location);
+    state.initialize_cursor(origin, shape, 7, &location);
     let after_initialize = state.trail_stroke_id();
     assert!(after_initialize.value() > 0);
 
     state.set_target(Point { row: 5.0, col: 9.0 }, shape);
     assert_eq!(state.trail_stroke_id(), after_initialize);
 
-    state.jump_preserving_motion(Point { row: 8.0, col: 9.0 }, shape, location);
+    state.jump_preserving_motion(Point { row: 8.0, col: 9.0 }, shape, &location);
     let after_preserving_jump = state.trail_stroke_id();
     assert!(after_preserving_jump > after_initialize);
 
-    state.jump_and_stop_animation(Point { row: 9.0, col: 9.0 }, shape, location);
+    state.jump_and_stop_animation(Point { row: 9.0, col: 9.0 }, shape, &location);
     assert!(state.trail_stroke_id() > after_preserving_jump);
 }
 
@@ -124,7 +124,7 @@ fn initialize_cursor_resets_motion_and_tracks_cursor() {
     let location = CursorLocation::new(10, 20, 30, 40);
     let shape = CursorShape::new(false, false);
     let position = Point { row: 8.0, col: 9.0 };
-    state.initialize_cursor(position, shape, 123, location);
+    state.initialize_cursor(position, shape, 123, &location);
 
     let expected_corners = corners_for_cursor(position.row, position.col, false, false);
     assert!(state.is_initialized());
@@ -148,7 +148,7 @@ fn jump_preserving_motion_keeps_animation_running() {
     state.jump_preserving_motion(
         Point { row: 4.0, col: 5.0 },
         CursorShape::new(false, false),
-        CursorLocation::new(1, 2, 3, 4),
+        &CursorLocation::new(1, 2, 3, 4),
     );
 
     assert!(state.is_animating());
@@ -160,7 +160,7 @@ fn sync_to_current_cursor_tracks_current_geometry() {
     let mut state = RuntimeState::default();
     let target = Point { row: 6.0, col: 7.0 };
     let location = CursorLocation::new(1, 2, 3, 4);
-    state.sync_to_current_cursor(target, CursorShape::new(false, false), location);
+    state.sync_to_current_cursor(target, CursorShape::new(false, false), &location);
 
     assert_eq!(state.target_position(), target);
     assert_eq!(state.tracked_location(), Some(location));
@@ -173,7 +173,7 @@ fn apply_scroll_shift_clamps_cursor_row_and_shifts_particles() {
         Point { row: 5.0, col: 9.0 },
         CursorShape::new(false, false),
         11,
-        CursorLocation::new(1, 2, 3, 4),
+        &CursorLocation::new(1, 2, 3, 4),
     );
     state.particles.push(Particle {
         position: Point {
@@ -200,7 +200,7 @@ fn start_animation_towards_target_initializes_velocity_from_target_delta() {
         Point { row: 3.0, col: 4.0 },
         CursorShape::new(false, false),
         7,
-        CursorLocation::new(1, 2, 3, 4),
+        &CursorLocation::new(1, 2, 3, 4),
     );
     state.set_target(Point { row: 8.0, col: 9.0 }, CursorShape::new(false, false));
 
@@ -266,13 +266,13 @@ fn settling_requires_deadline_and_matching_observation() {
     let target = Point { row: 8.0, col: 9.0 };
 
     state.mark_initialized();
-    state.begin_settling(target, shape, location, 100.0);
+    state.begin_settling(target, shape, &location, 100.0);
     assert!(state.is_settling());
-    assert!(!state.should_promote_settled_target(124.0, target, location));
-    assert!(state.should_promote_settled_target(125.0, target, location));
+    assert!(!state.should_promote_settled_target(124.0, target, &location));
+    assert!(state.should_promote_settled_target(125.0, target, &location));
 
     let mismatched_location = CursorLocation::new(1, 2, 5, 6);
-    assert!(!state.should_promote_settled_target(130.0, target, mismatched_location));
+    assert!(!state.should_promote_settled_target(130.0, target, &mismatched_location));
 }
 
 #[test]

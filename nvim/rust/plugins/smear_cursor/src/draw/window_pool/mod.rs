@@ -468,7 +468,7 @@ impl TabWindows {
     }
 
     fn available_window_count(&self) -> usize {
-        // Comment: cleanup/capacity decisions must follow authoritative window lifecycle truth.
+        // cleanup/capacity decisions must follow authoritative window lifecycle truth.
         // The tracked counters are an optimization only; if they ever drift, rendering must still
         // recover by scanning the retained windows instead of suppressing clear work.
         self.windows

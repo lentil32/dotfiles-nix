@@ -41,7 +41,7 @@ pub(crate) enum ProtocolState {
     Idle {
         shared: ProtocolSharedState,
     },
-    // Comment: initialization now owns only the protocol bootstrap edge; all planning reads
+    // initialization now owns only the protocol bootstrap edge; all planning reads
     // enter through the observation shell after the first external demand arrives.
     Primed {
         shared: ProtocolSharedState,
@@ -390,7 +390,7 @@ impl CoreState {
         mut self,
         map: impl FnOnce(DemandQueue) -> (DemandQueue, R),
     ) -> (Self, R) {
-        // Comment: reducers that already own `CoreState` should move the demand queue through the
+        // reducers that already own `CoreState` should move the demand queue through the
         // transition edge instead of cloning protocol-shared ingress state.
         let demand = std::mem::take(&mut self.protocol.shared_mut().demand);
         let (demand, result) = map(demand);

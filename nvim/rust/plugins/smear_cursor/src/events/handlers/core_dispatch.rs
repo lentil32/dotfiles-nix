@@ -165,7 +165,7 @@ struct ScheduledWorkExecutionError {
     error: nvim_oxi::Error,
 }
 
-fn handle_scheduled_work_drain_failure(work_name: &'static str, error: nvim_oxi::Error) {
+fn handle_scheduled_work_drain_failure(work_name: &'static str, error: &nvim_oxi::Error) {
     warn(&format!("scheduled core work failed: {work_name}: {error}"));
     reset_scheduled_effect_queue();
     let observed_at = to_core_millis(now_ms());
@@ -220,7 +220,7 @@ fn execute_scheduled_effect_batch(
 
     for follow_up in follow_ups {
         if should_schedule_follow_up_event(&follow_up) {
-            // Comment: retry-class probe reports stay typed reducer inputs, but they hop back onto
+            // retry-class probe reports stay typed reducer inputs, but they hop back onto
             // the scheduled queue so one probe edge cannot immediately replay the next observation.
             stage_core_event_on_default_queue(follow_up);
             continue;
@@ -297,7 +297,7 @@ fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
     let mut executor = match NeovimEffectExecutor::new() {
         Ok(executor) => executor,
         Err(err) => {
-            handle_scheduled_work_drain_failure(entrypoint.context(), err);
+            handle_scheduled_work_drain_failure(entrypoint.context(), &err);
             return;
         }
     };
@@ -309,7 +309,7 @@ fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
         Ok(true) => schedule_scheduled_effect_drain(entrypoint),
         Ok(false) => {}
         Err(err) => {
-            handle_scheduled_work_drain_failure(err.work_name, err.error);
+            handle_scheduled_work_drain_failure(err.work_name, &err.error);
         }
     }
 }

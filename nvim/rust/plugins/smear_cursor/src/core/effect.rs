@@ -67,7 +67,7 @@ impl CursorPositionReadPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObservationRuntimeContext {
     cursor_position_policy: CursorPositionReadPolicy,
     scroll_buffer_space: bool,
@@ -90,19 +90,19 @@ impl ObservationRuntimeContext {
         }
     }
 
-    pub(crate) const fn cursor_position_policy(self) -> CursorPositionReadPolicy {
+    pub(crate) const fn cursor_position_policy(&self) -> CursorPositionReadPolicy {
         self.cursor_position_policy
     }
 
-    pub(crate) const fn scroll_buffer_space(self) -> bool {
+    pub(crate) const fn scroll_buffer_space(&self) -> bool {
         self.scroll_buffer_space
     }
 
-    pub(crate) const fn tracked_location(self) -> Option<CursorLocation> {
-        self.tracked_location
+    pub(crate) fn tracked_location(&self) -> Option<CursorLocation> {
+        self.tracked_location.clone()
     }
 
-    pub(crate) const fn current_corners(self) -> [Point; 4] {
+    pub(crate) const fn current_corners(&self) -> [Point; 4] {
         self.current_corners
     }
 }
@@ -226,7 +226,7 @@ pub(crate) enum Effect {
     RedrawCmdline,
 }
 
-fn cursor_location_fingerprint(location: CursorLocation) -> u64 {
+fn cursor_location_fingerprint(location: &CursorLocation) -> u64 {
     u64::from_ne_bytes(location.window_handle.to_ne_bytes())
         ^ u64::from_ne_bytes(location.buffer_handle.to_ne_bytes()).rotate_left(7)
         ^ u64::from_ne_bytes(location.top_row.to_ne_bytes()).rotate_left(13)
@@ -242,7 +242,7 @@ fn screen_cell_fingerprint(cell: ScreenCell) -> u64 {
         ^ u64::from_ne_bytes(cell.col().to_ne_bytes()).rotate_left(7)
 }
 
-fn observation_context_fingerprint(context: ObservationRuntimeContext) -> u64 {
+fn observation_context_fingerprint(context: &ObservationRuntimeContext) -> u64 {
     let cursor_position_seed = if context.cursor_position_policy().smear_to_cmd() {
         1_u64
     } else {
@@ -255,7 +255,7 @@ fn observation_context_fingerprint(context: ObservationRuntimeContext) -> u64 {
     };
     let tracked_seed = context
         .tracked_location()
-        .map_or(0_u64, cursor_location_fingerprint);
+        .map_or(0_u64, |location| cursor_location_fingerprint(&location));
     let corner_seed = context
         .current_corners()
         .into_iter()
@@ -314,7 +314,7 @@ impl Effect {
                     ^ payload.request.demand().seq().value()
                     ^ payload.request.demand().observed_at().value()
                     ^ probe_seed.rotate_left(11)
-                    ^ observation_context_fingerprint(payload.context).rotate_left(17)
+                    ^ observation_context_fingerprint(&payload.context).rotate_left(17)
                     ^ payload
                         .request
                         .demand()

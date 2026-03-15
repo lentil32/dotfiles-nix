@@ -1,7 +1,7 @@
 use crate::animation::corners_for_cursor;
 use crate::types::Point;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CursorLocation {
     pub(crate) window_handle: i64,
     pub(crate) buffer_handle: i64,
