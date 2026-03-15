@@ -5,7 +5,9 @@ use crate::core::types::{
 };
 use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
 use crate::state::RuntimeState;
-use crate::types::{Particle, Point, RenderFrame, RenderStepSample, StaticRenderConfig};
+use crate::types::{
+    Point, RenderFrame, SharedParticles, SharedRenderStepSamples, StaticRenderConfig,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -69,14 +71,14 @@ impl CursorTrailProjectionPolicy {
 pub(crate) struct CursorTrailGeometry {
     mode: String,
     corners: [Point; 4],
-    step_samples: Vec<RenderStepSample>,
+    step_samples: SharedRenderStepSamples,
     planner_idle_steps: u32,
     target: Point,
     target_corners: [Point; 4],
     vertical_bar: bool,
     trail_stroke_id: StrokeId,
     retarget_epoch: u64,
-    particles: Vec<Particle>,
+    particles: SharedParticles,
 }
 
 impl CursorTrailGeometry {

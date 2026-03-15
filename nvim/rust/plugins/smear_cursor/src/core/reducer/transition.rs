@@ -1,3 +1,13 @@
+// Surprising: transition fingerprinting is staged in before the final trace hook so the reducer
+// can keep a stable shape while we wire the last consumer.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "transition fingerprint scaffolding is intentionally retained ahead of trace integration"
+    )
+)]
+
 use crate::core::effect::Effect;
 use crate::core::realization::{LogicalRaster, PaletteSpec};
 use crate::core::runtime_reducer::{
@@ -6,10 +16,10 @@ use crate::core::runtime_reducer::{
 };
 use crate::core::state::{
     ApplyFailureKind, CoreState, DegradedApplyMetrics, ExternalDemand, ExternalDemandKind,
-    InFlightProposal, PatchBasis, ProbeRequestSet, ProbeSet, ProbeState, ProjectionCacheEntry,
-    ProjectionReuseKey, ProjectionSnapshot, ProtocolState, QueuedDemand, RealizationDivergence,
-    RealizationLedger, RealizationPlan, ScenePatch, ScenePatchKind, SemanticEntity,
-    SemanticEntityId,
+    InFlightProposal, PatchBasis, ProbeRequestSet, ProbeSet, ProbeSlot, ProbeState,
+    ProjectionCacheEntry, ProjectionReuseKey, ProjectionSnapshot, ProtocolState, QueuedDemand,
+    RealizationDivergence, RealizationLedger, RealizationPlan, ScenePatch, ScenePatchKind,
+    SemanticEntity, SemanticEntityId,
 };
 use crate::core::types::{Lifecycle, TimerId, TimerToken};
 use crate::draw::render_plan;
@@ -128,7 +138,6 @@ fn probe_request_set_fingerprint(requests: ProbeRequestSet) -> u64 {
 
 fn probe_state_fingerprint<T>(probe: &ProbeState<T>, value_fingerprint: impl Fn(&T) -> u64) -> u64 {
     match probe {
-        ProbeState::Missing => 0_u64,
         ProbeState::Pending { request_id } => 1_u64 ^ request_id.value().rotate_left(5),
         ProbeState::Ready {
             request_id,
@@ -149,19 +158,25 @@ fn probe_state_fingerprint<T>(probe: &ProbeState<T>, value_fingerprint: impl Fn(
     }
 }
 
+fn probe_slot_fingerprint<T>(probe: &ProbeSlot<T>, value_fingerprint: impl Fn(&T) -> u64) -> u64 {
+    match probe {
+        ProbeSlot::Unrequested => 0_u64,
+        ProbeSlot::Requested(state) => probe_state_fingerprint(state, value_fingerprint),
+    }
+}
+
 fn probe_set_fingerprint(probes: &ProbeSet) -> u64 {
-    let cursor_color_seed = probe_state_fingerprint(probes.cursor_color(), |sample| {
+    let cursor_color_seed = probe_slot_fingerprint(probes.cursor_color(), |sample| {
         sample
             .as_ref()
             .map_or(0_u64, |color| debug_fingerprint(color.as_str()))
     });
-    let background_seed = probe_state_fingerprint(probes.background(), |batch| {
+    let background_seed = probe_slot_fingerprint(probes.background(), |batch| {
         let viewport = batch.viewport();
         let allowed_seed = batch
-            .allowed_mask()
-            .iter()
+            .allowed_mask_iter()
             .enumerate()
-            .filter(|(_, allowed)| **allowed)
+            .filter(|(_, allowed)| *allowed)
             .map(|(index, _)| u64::try_from(index).unwrap_or(u64::MAX).rotate_left(11))
             .fold(0_u64, u64::wrapping_add);
         u64::from(viewport.max_row.value())
@@ -179,19 +194,31 @@ fn background_progress_fingerprint(
         return 0_u64;
     };
     let viewport = progress.viewport();
+    let row_width = usize::try_from(viewport.max_col.value()).unwrap_or(0);
+    let mut next_row_index = 0usize;
     let sampled_rows_seed = progress
-        .sampled_rows()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| {
-            row.as_ref().map(|row| {
-                let row_seed = row
+        .sampled_chunks()
+        .flat_map(|chunk| {
+            let row_count = if row_width == 0 {
+                0
+            } else {
+                chunk.len() / row_width
+            };
+            let chunk_start_row = next_row_index;
+            next_row_index = next_row_index.saturating_add(row_count);
+            (0..row_count).map(move |row_offset| {
+                let row_start = row_offset.saturating_mul(row_width);
+                let row_end = row_start.saturating_add(row_width).min(chunk.len());
+                let row_seed = chunk[row_start..row_end]
                     .iter()
                     .enumerate()
                     .filter(|(_, allowed)| **allowed)
                     .map(|(col, _)| u64::try_from(col).unwrap_or(u64::MAX).rotate_left(11))
                     .fold(0_u64, u64::wrapping_add);
-                u64::try_from(index).unwrap_or(u64::MAX).rotate_left(17) ^ row_seed
+                u64::try_from(chunk_start_row.saturating_add(row_offset))
+                    .unwrap_or(u64::MAX)
+                    .rotate_left(17)
+                    ^ row_seed
             })
         })
         .fold(0_u64, u64::wrapping_add);
@@ -387,20 +414,20 @@ fn realization_plan_fingerprint(plan: &RealizationPlan) -> u64 {
 }
 
 fn in_flight_proposal_fingerprint(proposal: &InFlightProposal) -> u64 {
-    let animation_seed = if proposal.should_schedule_next_animation() {
-        1_u64
-    } else {
-        0_u64
+    let animation_seed = match proposal.animation_schedule() {
+        crate::core::state::AnimationSchedule::Idle => 0_u64,
+        crate::core::state::AnimationSchedule::DefaultDelay => 1_u64,
+        crate::core::state::AnimationSchedule::Deadline(deadline) => {
+            2_u64 ^ deadline.value().rotate_left(13)
+        }
     };
+    let realization = proposal.realization();
     proposal.proposal_id().value()
         ^ scene_patch_fingerprint(proposal.patch())
-        ^ realization_plan_fingerprint(proposal.realization())
+        ^ realization_plan_fingerprint(&realization)
         ^ render_cleanup_action_fingerprint(proposal.cleanup_action()).rotate_left(5)
         ^ render_side_effects_fingerprint(proposal.side_effects()).rotate_left(9)
-        ^ animation_seed.rotate_left(13)
-        ^ proposal
-            .next_animation_at_ms()
-            .map_or(0_u64, crate::core::types::Millis::value)
+        ^ animation_seed.rotate_left(17)
 }
 
 fn degraded_apply_metrics_fingerprint(metrics: DegradedApplyMetrics) -> u64 {
@@ -426,10 +453,7 @@ fn realization_ledger_fingerprint(ledger: &RealizationLedger) -> u64 {
     match ledger {
         RealizationLedger::Cleared => 1_u64,
         RealizationLedger::Consistent { acknowledged } => {
-            2_u64
-                ^ acknowledged
-                    .as_ref()
-                    .map_or(0_u64, projection_snapshot_fingerprint)
+            2_u64 ^ projection_snapshot_fingerprint(acknowledged)
         }
         RealizationLedger::Diverged {
             last_consistent,
@@ -463,9 +487,8 @@ fn protocol_fingerprint(protocol: &ProtocolState) -> u64 {
     match protocol {
         ProtocolState::Idle { .. } => 101_u64 ^ demand_seed,
         ProtocolState::Primed { .. } => 102_u64 ^ demand_seed,
-        ProtocolState::Observing {
+        ProtocolState::ObservingRequest {
             request,
-            observation,
             probe_refresh,
             ..
         } => {
@@ -474,10 +497,27 @@ fn protocol_fingerprint(protocol: &ProtocolState) -> u64 {
                 ^ request.observation_id().value()
                 ^ demand_fingerprint(request.demand())
                 ^ probe_request_set_fingerprint(request.probes()).rotate_left(11)
-                ^ observation
-                    .as_ref()
+                ^ protocol
+                    .retained_observation()
                     .map_or(0_u64, observation_snapshot_fingerprint)
                     .rotate_left(17)
+                ^ u64::from(probe_refresh.retry_count(crate::core::state::ProbeKind::CursorColor))
+                    .rotate_left(23)
+                ^ u64::from(probe_refresh.retry_count(crate::core::state::ProbeKind::Background))
+                    .rotate_left(29)
+        }
+        ProtocolState::ObservingActive {
+            request,
+            observation,
+            probe_refresh,
+            ..
+        } => {
+            104_u64
+                ^ demand_seed
+                ^ request.observation_id().value()
+                ^ demand_fingerprint(request.demand())
+                ^ probe_request_set_fingerprint(request.probes()).rotate_left(11)
+                ^ observation_snapshot_fingerprint(observation).rotate_left(17)
                 ^ u64::from(probe_refresh.retry_count(crate::core::state::ProbeKind::CursorColor))
                     .rotate_left(23)
                 ^ u64::from(probe_refresh.retry_count(crate::core::state::ProbeKind::Background))

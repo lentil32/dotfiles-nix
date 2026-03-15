@@ -1,5 +1,7 @@
+#[cfg(test)]
 use std::sync::{Mutex, MutexGuard};
 
+#[cfg(test)]
 pub(crate) fn lock_with_poison_recovery<T, Recover, PostRecover, Payload>(
     mutex: &Mutex<T>,
     mut recover: Recover,

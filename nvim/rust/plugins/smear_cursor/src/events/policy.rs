@@ -87,13 +87,14 @@ impl BufferEventPolicy {
             return IngressCursorPresentationPolicy::NoAction;
         }
 
-        match context.prepaint_cell {
-            Some(cell) => IngressCursorPresentationPolicy::HideCursorAndPrepaint {
-                cell,
-                zindex: context.windows_zindex,
-            },
-            None => IngressCursorPresentationPolicy::HideCursor,
-        }
+        context
+            .prepaint_cell
+            .map_or(IngressCursorPresentationPolicy::HideCursor, |cell| {
+                IngressCursorPresentationPolicy::HideCursorAndPrepaint {
+                    cell,
+                    zindex: context.windows_zindex,
+                }
+            })
     }
 }
 

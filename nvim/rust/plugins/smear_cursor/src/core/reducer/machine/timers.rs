@@ -11,13 +11,12 @@ use crate::core::types::{Millis, TimerToken};
 
 fn reduce_timer_signal_with_token(
     state: &CoreState,
-    kind: TimerKind,
     token: TimerToken,
     observed_at: Millis,
     timer_lost_fallback: bool,
 ) -> Transition {
-    let expected_timer_id = kind.timer_id();
-    if token.id() != expected_timer_id || !state.timers().is_active(token) {
+    let kind = TimerKind::from_timer_id(token.id());
+    if !state.timers().is_active(token) {
         if kind == TimerKind::Cleanup {
             return Transition::stay(state);
         }
@@ -54,7 +53,7 @@ fn reduce_timer_signal_with_token(
             if disarmed_state.lifecycle() != crate::core::types::Lifecycle::Recovering {
                 Transition::stay(&disarmed_state)
             } else {
-                let settled = match disarmed_state.observation().cloned() {
+                let settled = match disarmed_state.retained_observation().cloned() {
                     Some(observation) => reset_recovery_attempt(
                         disarmed_state.into_ready_with_observation(observation),
                     ),
@@ -83,24 +82,12 @@ pub(super) fn reduce_timer_fired_with_token(
     state: &CoreState,
     payload: TimerFiredWithTokenEvent,
 ) -> Transition {
-    reduce_timer_signal_with_token(
-        state,
-        payload.kind,
-        payload.token,
-        payload.observed_at,
-        false,
-    )
+    reduce_timer_signal_with_token(state, payload.token, payload.observed_at, false)
 }
 
 pub(super) fn reduce_timer_lost_with_token(
     state: &CoreState,
     payload: TimerLostWithTokenEvent,
 ) -> Transition {
-    reduce_timer_signal_with_token(
-        state,
-        payload.kind,
-        payload.token,
-        payload.observed_at,
-        true,
-    )
+    reduce_timer_signal_with_token(state, payload.token, payload.observed_at, true)
 }

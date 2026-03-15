@@ -1,8 +1,7 @@
 use crate::core::state::{CoreState, CursorColorProbeWitness, CursorColorSample};
 use crate::core::types::Generation;
 use nvim_oxi::LuaRef;
-use std::sync::atomic::AtomicI64;
-use std::sync::{LazyLock, Mutex};
+use std::cell::{Cell, RefCell};
 
 mod cursor;
 mod event_loop;
@@ -207,19 +206,50 @@ impl EngineState {
         self.core_state = next_state;
     }
 }
+
+#[derive(Debug)]
+enum EngineStateSlot {
+    Ready(Box<EngineState>),
+    InUse,
+}
+
+impl Default for EngineStateSlot {
+    fn default() -> Self {
+        Self::Ready(Box::default())
+    }
+}
+
 #[derive(Debug)]
 struct EngineContext {
-    state: Mutex<EngineState>,
-    log_level: AtomicI64,
+    state: RefCell<EngineStateSlot>,
+    log_level: Cell<i64>,
 }
 
 impl EngineContext {
     fn new() -> Self {
         Self {
-            state: Mutex::new(EngineState::default()),
-            log_level: AtomicI64::new(LOG_LEVEL_INFO),
+            state: RefCell::new(EngineStateSlot::Ready(Box::default())),
+            log_level: Cell::new(LOG_LEVEL_INFO),
         }
+    }
+
+    fn take_state(&self) -> EngineState {
+        let mut slot = self.state.borrow_mut();
+        match std::mem::replace(&mut *slot, EngineStateSlot::InUse) {
+            EngineStateSlot::Ready(state) => *state,
+            EngineStateSlot::InUse => panic!("engine state re-entered while already in use"),
+        }
+    }
+
+    fn restore_state(&self, state: EngineState) {
+        let mut slot = self.state.borrow_mut();
+        let previous = std::mem::replace(&mut *slot, EngineStateSlot::Ready(Box::new(state)));
+        debug_assert!(matches!(previous, EngineStateSlot::InUse));
     }
 }
 
-static ENGINE_CONTEXT: LazyLock<EngineContext> = LazyLock::new(EngineContext::new);
+thread_local! {
+    // CONTEXT: smear_cursor funnels host callbacks back through Neovim's scheduled
+    // main-thread path, so engine state only needs single-thread interior mutability.
+    static ENGINE_CONTEXT: EngineContext = EngineContext::new();
+}

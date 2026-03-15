@@ -23,6 +23,7 @@ use crate::core::types::Millis;
 use crate::draw::clear_highlight_cache;
 use crate::types::ScreenCell;
 use nvim_oxi::{Result, api};
+use thiserror::Error;
 
 fn build_cursor_autocmd_events(
     ingress: AutocmdIngress,
@@ -88,7 +89,7 @@ fn on_key_ingress() -> Result<bool> {
         KeyEventAction::QueueKeyFallback { delay_ms } => {
             let observed_at = to_core_millis(now_ms());
             let due_at = Millis::new(observed_at.value().saturating_add(delay_ms));
-            dispatch_core_key_fallback_queued(snapshot.needs_initialize(), observed_at, due_at)?;
+            dispatch_core_key_fallback_queued(snapshot.needs_initialize(), observed_at, due_at);
             Ok(true)
         }
     }
@@ -138,30 +139,20 @@ fn on_cursor_event_core_for_autocmd(ingress: AutocmdIngress) -> bool {
         }
     };
 
-    let result = (|| -> Result<bool> {
-        let observed_at = to_core_millis(now_ms());
-        let events = build_cursor_autocmd_events(
-            ingress,
-            observed_at,
-            snapshot.needs_initialize(),
-            ingress_cursor_presentation,
-        );
+    let observed_at = to_core_millis(now_ms());
+    let events = build_cursor_autocmd_events(
+        ingress,
+        observed_at,
+        snapshot.needs_initialize(),
+        ingress_cursor_presentation,
+    );
 
-        if events.is_empty() {
-            return Ok(false);
-        }
-
-        dispatch_core_events_with_default_scheduler(events)?;
-        Ok(true)
-    })();
-
-    match result {
-        Ok(applied) => applied,
-        Err(err) => {
-            warn(&format!("core cursor event bridge failed: {err}"));
-            false
-        }
+    if events.is_empty() {
+        return false;
     }
+
+    dispatch_core_events_with_default_scheduler(events);
+    true
 }
 
 fn on_buf_enter_impl() -> bool {
@@ -174,17 +165,14 @@ fn on_buf_enter_impl() -> bool {
         return false;
     }
 
-    if let Err(err) = dispatch_core_event_with_default_scheduler(CoreEvent::ExternalDemandQueued(
+    dispatch_core_event_with_default_scheduler(CoreEvent::ExternalDemandQueued(
         ExternalDemandQueuedEvent {
             kind: ExternalDemandKind::BufferEntered,
             observed_at: to_core_millis(now_ms()),
             requested_target: None,
             ingress_cursor_presentation: None,
         },
-    )) {
-        warn(&format!("core buffer-enter bridge failed: {err}"));
-        return false;
-    }
+    ));
 
     true
 }
@@ -231,18 +219,24 @@ fn dispatch_ingress(ingress: Ingress) -> Result<()> {
     }
 }
 
+#[derive(Debug, Error)]
+enum IngressInvocationFailure {
+    #[error("dispatch failed: {0}")]
+    Dispatch(#[source] nvim_oxi::Error),
+}
+
 enum InfallibleIngressInvocation {
     Completed,
-    Failed { message: String },
+    Failed(IngressInvocationFailure),
     Panicked,
 }
 
 fn invoke_infallible_ingress(callback: impl FnOnce() -> Result<()>) -> InfallibleIngressInvocation {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
         Ok(Ok(())) => InfallibleIngressInvocation::Completed,
-        Ok(Err(err)) => InfallibleIngressInvocation::Failed {
-            message: err.to_string(),
-        },
+        Ok(Err(err)) => {
+            InfallibleIngressInvocation::Failed(IngressInvocationFailure::Dispatch(err))
+        }
         Err(_) => InfallibleIngressInvocation::Panicked,
     }
 }
@@ -250,8 +244,8 @@ fn invoke_infallible_ingress(callback: impl FnOnce() -> Result<()>) -> Infallibl
 pub(crate) fn on_key_listener_event() {
     match invoke_infallible_ingress(on_key_event) {
         InfallibleIngressInvocation::Completed => {}
-        InfallibleIngressInvocation::Failed { message } => {
-            warn(&format!("on_key ingress failed: {message}"));
+        InfallibleIngressInvocation::Failed(error) => {
+            warn(&format!("on_key ingress failed: {error}"));
             record_effect_failure(EffectFailureSource::KeyListener, "on_key");
         }
         InfallibleIngressInvocation::Panicked => {
@@ -347,8 +341,9 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            super::InfallibleIngressInvocation::Failed { message }
-            if message.contains("ingress failed")
+            super::InfallibleIngressInvocation::Failed(
+                super::IngressInvocationFailure::Dispatch(error)
+            ) if error.to_string().contains("ingress failed")
         ));
     }
 

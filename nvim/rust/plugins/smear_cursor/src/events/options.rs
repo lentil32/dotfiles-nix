@@ -59,8 +59,6 @@ enum OptionKey {
     MaxLength,
     MaxLengthInsertMode,
     TrailDurationMs,
-    TrailShortDurationMs,
-    TrailSize,
     TrailMinDistance,
     TrailThickness,
     TrailThicknessX,
@@ -138,8 +136,6 @@ impl OptionKey {
             Self::MaxLength => "max_length",
             Self::MaxLengthInsertMode => "max_length_insert_mode",
             Self::TrailDurationMs => "trail_duration_ms",
-            Self::TrailShortDurationMs => "trail_short_duration_ms",
-            Self::TrailSize => "trail_size",
             Self::TrailMinDistance => "trail_min_distance",
             Self::TrailThickness => "trail_thickness",
             Self::TrailThicknessX => "trail_thickness_x",
@@ -442,17 +438,6 @@ fn parse_optional_time_interval(raw: Option<Object>, key: &'static str) -> Resul
 
 fn parse_optional_fps(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
     parse_optional_with(raw, key, validated_positive_f64)
-}
-
-fn parse_optional_trail_size(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
-    parse_optional_with(raw, key, validated_f64)?
-        .map(|parsed| {
-            if !(0.0..=1.0).contains(&parsed) {
-                return Err(invalid_key(key, "number between 0.0 and 1.0"));
-            }
-            Ok(parsed)
-        })
-        .transpose()
 }
 
 macro_rules! define_option_spec {
@@ -800,20 +785,6 @@ define_option_spec!(
     motion.trail_duration_ms
 );
 define_option_spec!(
-    spec_trail_short_duration_ms_apply,
-    SPEC_TRAIL_SHORT_DURATION_MS,
-    TrailShortDurationMs,
-    parse_optional_positive_f64,
-    motion.trail_short_duration_ms
-);
-define_option_spec!(
-    spec_trail_size_apply,
-    SPEC_TRAIL_SIZE,
-    TrailSize,
-    parse_optional_trail_size,
-    motion.trail_size
-);
-define_option_spec!(
     spec_trail_min_distance_apply,
     SPEC_TRAIL_MIN_DISTANCE,
     TrailMinDistance,
@@ -1037,8 +1008,6 @@ const OPTION_SPECS: &[OptionSpec] = &[
     SPEC_MAX_LENGTH,
     SPEC_MAX_LENGTH_INSERT_MODE,
     SPEC_TRAIL_DURATION_MS,
-    SPEC_TRAIL_SHORT_DURATION_MS,
-    SPEC_TRAIL_SIZE,
     SPEC_TRAIL_MIN_DISTANCE,
     SPEC_TRAIL_THICKNESS,
     SPEC_TRAIL_THICKNESS_X,
@@ -1066,24 +1035,9 @@ const OPTION_SPECS: &[OptionSpec] = &[
     SPEC_TOP_K_PER_CELL,
 ];
 
-fn removed_option_message(key: &str) -> Option<&'static str> {
-    match key {
-        "aa_band_min"
-        | "aa_band_max"
-        | "edge_gate_low"
-        | "edge_gate_high"
-        | "temporal_hysteresis_enter"
-        | "temporal_hysteresis_exit" => Some("removed render heuristic in smear-cursor v2"),
-        _ => None,
-    }
-}
-
 fn validate_known_option_keys(opts: &Dictionary) -> Result<()> {
     for key in opts.keys() {
         let key_str = key.to_string_lossy();
-        if let Some(message) = removed_option_message(key_str.as_ref()) {
-            return Err(invalid_key(key_str.as_ref(), message));
-        }
         let known = OPTION_SPECS
             .iter()
             .any(|spec| spec.key.as_str() == key_str.as_ref());

@@ -1,15 +1,15 @@
 use crate::core::realization::{PaletteSpec, realize_logical_raster};
 use crate::core::state::ProjectionSnapshot;
 use crate::core::types::RenderOutcome;
-use crate::mutex::lock_with_poison_recovery;
 use crate::types::ScreenCell;
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{OptionOpts, OptionScope, SetExtmarkOpts};
 use nvim_oxi::api::types::{ExtmarkVirtTextPosition, WindowConfig, WindowRelativeTo, WindowStyle};
 use nvim_oxi_utils::handles;
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 mod apply;
 mod palette;
@@ -213,20 +213,22 @@ pub(crate) fn initialize_floating_window_options(
 
 #[derive(Debug)]
 struct DrawContext {
-    render_tabs: Mutex<HashMap<i32, Arc<Mutex<window_pool::TabWindows>>>>,
-    prepaint_by_tab: Mutex<HashMap<i32, PrepaintOverlay>>,
+    render_tabs: HashMap<i32, window_pool::TabWindows>,
+    prepaint_by_tab: HashMap<i32, PrepaintOverlay>,
 }
 
 impl DrawContext {
     fn new() -> Self {
         Self {
-            render_tabs: Mutex::new(HashMap::with_capacity(4)),
-            prepaint_by_tab: Mutex::new(HashMap::with_capacity(2)),
+            render_tabs: HashMap::with_capacity(4),
+            prepaint_by_tab: HashMap::with_capacity(2),
         }
     }
 }
 
-static DRAW_CONTEXT: LazyLock<DrawContext> = LazyLock::new(DrawContext::new);
+thread_local! {
+    static DRAW_CONTEXT: RefCell<DrawContext> = RefCell::new(DrawContext::new());
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DrawApplyResult {
@@ -251,72 +253,99 @@ pub(crate) fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
     apply::err_writeln(&format!("[smear_cursor][draw] {context} failed: {err}"));
 }
 
-fn render_tabs_lock()
--> std::sync::MutexGuard<'static, HashMap<i32, Arc<Mutex<window_pool::TabWindows>>>> {
-    lock_with_poison_recovery(
-        &DRAW_CONTEXT.render_tabs,
-        |render_tabs| {
-            *render_tabs = HashMap::with_capacity(4);
-        },
-        |_| {},
-    )
+fn take_render_tabs() -> HashMap<i32, window_pool::TabWindows> {
+    DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().render_tabs))
 }
 
-fn prepaint_lock() -> std::sync::MutexGuard<'static, HashMap<i32, PrepaintOverlay>> {
-    lock_with_poison_recovery(
-        &DRAW_CONTEXT.prepaint_by_tab,
-        |prepaint_by_tab| {
-            *prepaint_by_tab = HashMap::with_capacity(2);
-        },
-        |_| {},
-    )
+fn restore_render_tabs(render_tabs: HashMap<i32, window_pool::TabWindows>) {
+    DRAW_CONTEXT.with(|context| {
+        context.borrow_mut().render_tabs = render_tabs;
+    });
 }
 
-fn render_tab_state(tab_handle: i32) -> Arc<Mutex<window_pool::TabWindows>> {
-    let mut render_tabs = render_tabs_lock();
-    Arc::clone(
-        render_tabs
-            .entry(tab_handle)
-            .or_insert_with(|| Arc::new(Mutex::new(window_pool::TabWindows::default()))),
-    )
+fn with_render_tabs<R>(mutator: impl FnOnce(&mut HashMap<i32, window_pool::TabWindows>) -> R) -> R {
+    let mut render_tabs = take_render_tabs();
+    match catch_unwind(AssertUnwindSafe(|| mutator(&mut render_tabs))) {
+        Ok(output) => {
+            restore_render_tabs(render_tabs);
+            output
+        }
+        Err(panic_payload) => {
+            restore_render_tabs(HashMap::with_capacity(4));
+            resume_unwind(panic_payload);
+        }
+    }
 }
 
-fn lock_render_tab(
-    render_tab: &Arc<Mutex<window_pool::TabWindows>>,
-) -> std::sync::MutexGuard<'_, window_pool::TabWindows> {
-    lock_with_poison_recovery(
-        render_tab.as_ref(),
-        |tab_windows| {
-            *tab_windows = window_pool::TabWindows::default();
-        },
-        |_| {},
-    )
+fn with_prepaint_by_tab<R>(mutator: impl FnOnce(&mut HashMap<i32, PrepaintOverlay>) -> R) -> R {
+    let mut prepaint_by_tab =
+        DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().prepaint_by_tab));
+    match catch_unwind(AssertUnwindSafe(|| mutator(&mut prepaint_by_tab))) {
+        Ok(output) => {
+            DRAW_CONTEXT.with(|context| {
+                context.borrow_mut().prepaint_by_tab = prepaint_by_tab;
+            });
+            output
+        }
+        Err(panic_payload) => {
+            DRAW_CONTEXT.with(|context| {
+                context.borrow_mut().prepaint_by_tab = HashMap::with_capacity(2);
+            });
+            resume_unwind(panic_payload);
+        }
+    }
+}
+
+#[cfg(test)]
+fn render_tab_handles() -> Vec<i32> {
+    DRAW_CONTEXT.with(|context| {
+        let context = context.borrow();
+        let mut handles = context.render_tabs.keys().copied().collect::<Vec<_>>();
+        handles.sort_unstable();
+        handles
+    })
+}
+
+#[cfg(test)]
+fn take_render_tabs_for_test() -> Vec<(i32, window_pool::TabWindows)> {
+    let mut render_tabs = take_render_tabs().into_iter().collect::<Vec<_>>();
+    render_tabs.sort_unstable_by_key(|(tab_handle, _)| *tab_handle);
+    render_tabs
+}
+
+#[cfg(test)]
+fn insert_prepaint_overlay_for_test(tab_handle: i32, overlay: PrepaintOverlay) {
+    with_prepaint_by_tab(|prepaint_by_tab| {
+        prepaint_by_tab.insert(tab_handle, overlay);
+    });
+}
+
+#[cfg(test)]
+fn prepaint_count_for_test() -> usize {
+    DRAW_CONTEXT.with(|context| context.borrow().prepaint_by_tab.len())
+}
+
+#[cfg(test)]
+fn prepaint_snapshot_for_test() -> HashMap<i32, PrepaintOverlay> {
+    DRAW_CONTEXT.with(|context| context.borrow().prepaint_by_tab.clone())
+}
+
+#[cfg(test)]
+fn clear_draw_context_for_test() {
+    restore_render_tabs(HashMap::with_capacity(4));
+    DRAW_CONTEXT.with(|context| {
+        context.borrow_mut().prepaint_by_tab = HashMap::with_capacity(2);
+    });
 }
 
 pub(crate) fn with_render_tab<T>(
     tab_handle: i32,
     mutator: impl FnOnce(&mut window_pool::TabWindows) -> T,
 ) -> T {
-    let render_tab = render_tab_state(tab_handle);
-    let mut tab_windows = lock_render_tab(&render_tab);
-    mutator(&mut tab_windows)
-}
-
-fn render_tab_states() -> Vec<(i32, Arc<Mutex<window_pool::TabWindows>>)> {
-    let mut render_tabs = render_tabs_lock()
-        .iter()
-        .map(|(tab_handle, render_tab)| (*tab_handle, Arc::clone(render_tab)))
-        .collect::<Vec<_>>();
-    render_tabs.sort_unstable_by_key(|(tab_handle, _)| *tab_handle);
-    render_tabs
-}
-
-fn drain_render_tab_states() -> Vec<(i32, Arc<Mutex<window_pool::TabWindows>>)> {
-    let mut render_tabs = render_tabs_lock()
-        .drain()
-        .collect::<Vec<(i32, Arc<Mutex<window_pool::TabWindows>>)>>();
-    render_tabs.sort_unstable_by_key(|(tab_handle, _)| *tab_handle);
-    render_tabs
+    with_render_tabs(|render_tabs| {
+        let tab_windows = render_tabs.entry(tab_handle).or_default();
+        mutator(tab_windows)
+    })
 }
 
 pub(crate) fn clear_highlight_cache() {
@@ -478,87 +507,83 @@ fn hide_prepaint_overlay(namespace_id: u32, overlay: &mut PrepaintOverlay) -> bo
     true
 }
 
-pub(crate) fn prepaint_cursor_block(
-    namespace_id: u32,
-    cell: ScreenCell,
-    zindex: u32,
-) -> Result<()> {
+pub(crate) fn prepaint_cursor_block(namespace_id: u32, cell: ScreenCell, zindex: u32) {
     if namespace_id == 0 {
-        return Ok(());
+        return;
     }
 
     let tab_handle = apply::current_tab_handle();
-    let mut prepaint_by_tab = prepaint_lock();
     let requested_placement = PrepaintPlacement { cell, zindex };
 
-    let previous = prepaint_by_tab.remove(&tab_handle);
-    let mut overlay = previous;
-    let mut handles_pair = previous.and_then(valid_prepaint_handles);
+    with_prepaint_by_tab(|prepaint_by_tab| {
+        let previous = prepaint_by_tab.remove(&tab_handle);
+        let mut overlay = previous;
+        let mut handles_pair = previous.and_then(valid_prepaint_handles);
 
-    if handles_pair.is_none() {
-        if let Some(stale) = previous {
-            close_prepaint_overlay(namespace_id, stale);
-        }
-
-        match create_prepaint_overlay(requested_placement) {
-            Ok((created_overlay, window, buffer)) => {
-                overlay = Some(created_overlay);
-                handles_pair = Some((window, buffer));
+        if handles_pair.is_none() {
+            if let Some(stale) = previous {
+                close_prepaint_overlay(namespace_id, stale);
             }
-            Err(err) => {
-                // Prepaint is non-critical: keep cursor callback non-fatal.
-                log_draw_error("create prepaint overlay", &err);
-                return Ok(());
-            }
-        }
-    }
 
-    let Some((mut window, mut buffer)) = handles_pair else {
-        return Ok(());
-    };
-
-    if overlay.is_some_and(|entry| entry.placement != Some(requested_placement))
-        && let Err(err) = set_existing_floating_window_config(
-            &mut window,
-            prepaint_reconfigure_window_config(requested_placement, false),
-        )
-    {
-        log_draw_error("reconfigure prepaint overlay window", &err);
-
-        if let Some(stale) = overlay {
-            close_prepaint_overlay(namespace_id, stale);
-        }
-        match create_prepaint_overlay(requested_placement) {
-            Ok((created_overlay, _recreated_window, recreated_buffer)) => {
-                overlay = Some(created_overlay);
-                buffer = recreated_buffer;
-            }
-            Err(recreate_err) => {
-                log_draw_error(
-                    "recreate prepaint overlay after reconfigure failure",
-                    &recreate_err,
-                );
-                return Ok(());
+            match create_prepaint_overlay(requested_placement) {
+                Ok((created_overlay, window, buffer)) => {
+                    overlay = Some(created_overlay);
+                    handles_pair = Some((window, buffer));
+                }
+                Err(err) => {
+                    // Prepaint is non-critical: keep cursor callback non-fatal.
+                    log_draw_error("create prepaint overlay", &err);
+                    return;
+                }
             }
         }
-    }
 
-    let extmark_opts = SetExtmarkOpts::builder()
-        .id(PREPAINT_EXTMARK_ID)
-        .virt_text([(PREPAINT_CHARACTER, PREPAINT_HIGHLIGHT_GROUP)])
-        .virt_text_pos(ExtmarkVirtTextPosition::Overlay)
-        .virt_text_win_col(0)
-        .build();
-    if let Err(err) = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts) {
-        log_draw_error("set prepaint overlay payload", &err);
-        return Ok(());
-    }
+        let Some((mut window, mut buffer)) = handles_pair else {
+            return;
+        };
 
-    if let Some(mut entry) = overlay {
-        entry.placement = Some(requested_placement);
-        prepaint_by_tab.insert(tab_handle, entry);
-    }
-    Ok(())
+        if overlay.is_some_and(|entry| entry.placement != Some(requested_placement))
+            && let Err(err) = set_existing_floating_window_config(
+                &mut window,
+                prepaint_reconfigure_window_config(requested_placement, false),
+            )
+        {
+            log_draw_error("reconfigure prepaint overlay window", &err);
+
+            if let Some(stale) = overlay {
+                close_prepaint_overlay(namespace_id, stale);
+            }
+            match create_prepaint_overlay(requested_placement) {
+                Ok((created_overlay, _recreated_window, recreated_buffer)) => {
+                    overlay = Some(created_overlay);
+                    buffer = recreated_buffer;
+                }
+                Err(recreate_err) => {
+                    log_draw_error(
+                        "recreate prepaint overlay after reconfigure failure",
+                        &recreate_err,
+                    );
+                    return;
+                }
+            }
+        }
+
+        let extmark_opts = SetExtmarkOpts::builder()
+            .id(PREPAINT_EXTMARK_ID)
+            .virt_text([(PREPAINT_CHARACTER, PREPAINT_HIGHLIGHT_GROUP)])
+            .virt_text_pos(ExtmarkVirtTextPosition::Overlay)
+            .virt_text_win_col(0)
+            .build();
+        if let Err(err) = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts) {
+            log_draw_error("set prepaint overlay payload", &err);
+            return;
+        }
+
+        if let Some(mut entry) = overlay {
+            entry.placement = Some(requested_placement);
+            prepaint_by_tab.insert(tab_handle, entry);
+        }
+    });
 }
 
 pub(crate) fn clear_prepaint_for_current_tab(namespace_id: u32) {
@@ -567,16 +592,17 @@ pub(crate) fn clear_prepaint_for_current_tab(namespace_id: u32) {
     }
 
     let tab_handle = apply::current_tab_handle();
-    let mut prepaint_by_tab = prepaint_lock();
-    let Some(entry) = prepaint_by_tab.get_mut(&tab_handle) else {
-        return;
-    };
-    if !hide_prepaint_overlay(namespace_id, entry) {
-        let _ = prepaint_by_tab.remove(&tab_handle);
-    }
+    with_prepaint_by_tab(|prepaint_by_tab| {
+        let Some(entry) = prepaint_by_tab.get_mut(&tab_handle) else {
+            return;
+        };
+        if !hide_prepaint_overlay(namespace_id, entry) {
+            let _ = prepaint_by_tab.remove(&tab_handle);
+        }
+    });
 }
 
-fn clear_all_prepaint_locked(
+fn clear_all_prepaint_tracked(
     prepaint_by_tab: &mut HashMap<i32, PrepaintOverlay>,
     namespace_id: u32,
 ) -> (usize, bool) {
@@ -592,7 +618,7 @@ fn clear_all_prepaint_locked(
 }
 
 fn summarize_tracked_purge_state(
-    render_tabs: &[(i32, Arc<Mutex<window_pool::TabWindows>>)],
+    render_tabs: &HashMap<i32, window_pool::TabWindows>,
     prepaint_by_tab: &HashMap<i32, PrepaintOverlay>,
 ) -> PurgeRenderWindowsSummary {
     let mut summary = PurgeRenderWindowsSummary {
@@ -603,14 +629,13 @@ fn summarize_tracked_purge_state(
         ..PurgeRenderWindowsSummary::default()
     };
 
-    for (_tab_handle, render_tab) in render_tabs {
-        let tab_windows = lock_render_tab(render_tab);
+    for tab_windows in render_tabs.values() {
         summary.had_visible_render_windows_before_purge = summary
             .had_visible_render_windows_before_purge
-            || window_pool::tab_has_visible_windows(&tab_windows);
+            || window_pool::tab_has_visible_windows(tab_windows);
         summary.purged_windows = summary
             .purged_windows
-            .saturating_add(window_pool::tab_pool_snapshot_from_tab(&tab_windows).total_windows);
+            .saturating_add(window_pool::tab_pool_snapshot_from_tab(tab_windows).total_windows);
     }
 
     summary
@@ -620,66 +645,71 @@ pub(crate) fn clear_active_render_windows(
     namespace_id: u32,
     max_kept_windows: usize,
 ) -> ClearActiveRenderWindowsSummary {
-    let mut summary = ClearActiveRenderWindowsSummary::default();
+    with_render_tabs(|render_tabs| {
+        let mut summary = ClearActiveRenderWindowsSummary::default();
+        let mut tab_handles = render_tabs.keys().copied().collect::<Vec<_>>();
+        tab_handles.sort_unstable();
 
-    for (_tab_handle, render_tab) in render_tab_states() {
-        let tab_summary = {
-            let mut tab_windows = lock_render_tab(&render_tab);
-            let had_visible_windows_before_clear =
-                window_pool::tab_has_visible_windows(&tab_windows);
-            if !window_pool::tab_has_pending_clear_work(&tab_windows, max_kept_windows) {
-                ClearActiveRenderWindowsSummary {
-                    had_visible_windows_before_clear,
-                    ..ClearActiveRenderWindowsSummary::default()
+        for tab_handle in tab_handles {
+            let Some(tab_windows) = render_tabs.get_mut(&tab_handle) else {
+                continue;
+            };
+            let tab_summary = {
+                let had_visible_windows_before_clear =
+                    window_pool::tab_has_visible_windows(tab_windows);
+                if !window_pool::tab_has_pending_clear_work(tab_windows, max_kept_windows) {
+                    ClearActiveRenderWindowsSummary {
+                        had_visible_windows_before_clear,
+                        ..ClearActiveRenderWindowsSummary::default()
+                    }
+                } else {
+                    window_pool::begin_cleanup_frame(tab_windows);
+                    let pruned_windows =
+                        window_pool::prune_tab(tab_windows, namespace_id, max_kept_windows);
+                    // Surprising: some frontends can keep compositing a just-hidden float until later UI
+                    // activity. Cleanup must therefore close shell-visible smear windows authoritatively instead
+                    // of only transitioning pooled lifecycle state to hidden.
+                    let closed_windows = window_pool::close_visible_tab(tab_windows, namespace_id);
+                    let release_summary =
+                        window_pool::release_unused_in_tab(tab_windows, namespace_id);
+                    ClearActiveRenderWindowsSummary {
+                        had_visible_windows_before_clear,
+                        pruned_windows: pruned_windows.saturating_add(closed_windows),
+                        hidden_windows: release_summary.hidden_windows,
+                        invalid_removed_windows: release_summary.invalid_removed_windows,
+                    }
                 }
-            } else {
-                window_pool::begin_cleanup_frame(&mut tab_windows);
-                let pruned_windows =
-                    window_pool::prune_tab(&mut tab_windows, namespace_id, max_kept_windows);
-                // Surprising: some frontends can keep compositing a just-hidden float until later UI
-                // activity. Cleanup must therefore close shell-visible smear windows authoritatively instead
-                // of only transitioning pooled lifecycle state to hidden.
-                let closed_windows = window_pool::close_visible_tab(&mut tab_windows, namespace_id);
-                let release_summary =
-                    window_pool::release_unused_in_tab(&mut tab_windows, namespace_id);
-                ClearActiveRenderWindowsSummary {
-                    had_visible_windows_before_clear,
-                    pruned_windows: pruned_windows.saturating_add(closed_windows),
-                    hidden_windows: release_summary.hidden_windows,
-                    invalid_removed_windows: release_summary.invalid_removed_windows,
-                }
-            }
-        };
-        summary.had_visible_windows_before_clear = summary.had_visible_windows_before_clear
-            || tab_summary.had_visible_windows_before_clear;
-        summary.pruned_windows = summary
-            .pruned_windows
-            .saturating_add(tab_summary.pruned_windows);
-        summary.hidden_windows = summary
-            .hidden_windows
-            .saturating_add(tab_summary.hidden_windows);
-        summary.invalid_removed_windows = summary
-            .invalid_removed_windows
-            .saturating_add(tab_summary.invalid_removed_windows);
-    }
+            };
+            summary.had_visible_windows_before_clear = summary.had_visible_windows_before_clear
+                || tab_summary.had_visible_windows_before_clear;
+            summary.pruned_windows = summary
+                .pruned_windows
+                .saturating_add(tab_summary.pruned_windows);
+            summary.hidden_windows = summary
+                .hidden_windows
+                .saturating_add(tab_summary.hidden_windows);
+            summary.invalid_removed_windows = summary
+                .invalid_removed_windows
+                .saturating_add(tab_summary.invalid_removed_windows);
+        }
 
-    summary
+        summary
+    })
 }
 
 pub(crate) fn purge_render_windows(namespace_id: u32) -> PurgeRenderWindowsSummary {
-    let summary = {
-        let prepaint_by_tab = prepaint_lock();
-        let render_tabs = render_tab_states();
-        summarize_tracked_purge_state(render_tabs.as_slice(), &prepaint_by_tab)
-    };
-    {
-        let mut prepaint_by_tab = prepaint_lock();
-        let _ = clear_all_prepaint_locked(&mut prepaint_by_tab, namespace_id);
-    }
+    let mut render_tabs = take_render_tabs();
+    let mut prepaint_by_tab =
+        DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().prepaint_by_tab));
+    let summary = summarize_tracked_purge_state(&render_tabs, &prepaint_by_tab);
+    let _ = clear_all_prepaint_tracked(&mut prepaint_by_tab, namespace_id);
 
-    for (_tab_handle, render_tab) in drain_render_tab_states() {
-        let mut tab_windows = lock_render_tab(&render_tab);
-        window_pool::purge_tab(&mut tab_windows, namespace_id);
+    let mut tab_handles = render_tabs.keys().copied().collect::<Vec<_>>();
+    tab_handles.sort_unstable();
+    for tab_handle in tab_handles {
+        if let Some(tab_windows) = render_tabs.get_mut(&tab_handle) {
+            window_pool::purge_tab(tab_windows, namespace_id);
+        }
     }
     summary
 }
@@ -712,9 +742,10 @@ mod tests {
     use super::{
         ApplyMetrics, PrepaintOverlay, PurgeRenderWindowsSummary, RecoveryNamespaceCleanupSummary,
         RenderOutcome, classify_draw_outcome, clear_active_render_windows,
-        clear_all_prepaint_locked, drain_render_tab_states, lock_render_tab, prepaint_lock,
-        render_tab_states, summarize_recovery_namespace_cleanup, summarize_tracked_purge_state,
-        with_render_tab,
+        clear_all_prepaint_tracked, clear_draw_context_for_test, insert_prepaint_overlay_for_test,
+        prepaint_count_for_test, prepaint_snapshot_for_test, render_tab_handles,
+        restore_render_tabs, summarize_recovery_namespace_cleanup, summarize_tracked_purge_state,
+        take_render_tabs_for_test, with_prepaint_by_tab, with_render_tab,
     };
     use crate::core::types::StrokeId;
     use crate::draw::window_pool::WindowBufferHandle;
@@ -726,8 +757,7 @@ mod tests {
     static DRAW_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn reset_draw_context_for_test() {
-        prepaint_lock().clear();
-        let _ = drain_render_tab_states();
+        clear_draw_context_for_test();
     }
 
     fn base_frame() -> RenderFrame {
@@ -752,7 +782,7 @@ mod tests {
         RenderFrame {
             mode: "n".to_string(),
             corners,
-            step_samples: vec![RenderStepSample::new(corners, BASE_TIME_INTERVAL)],
+            step_samples: vec![RenderStepSample::new(corners, BASE_TIME_INTERVAL)].into(),
             planner_idle_steps: 0,
             target: Point {
                 row: 10.0,
@@ -762,7 +792,7 @@ mod tests {
             vertical_bar: false,
             trail_stroke_id: StrokeId::new(1),
             retarget_epoch: 0,
-            particles: Vec::new(),
+            particles: Vec::new().into(),
             color_at_cursor: None,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: None,
@@ -849,13 +879,7 @@ mod tests {
             .cached_payload_matches(91, 222)));
         assert!(with_render_tab(22, |tab_windows| tab_windows
             .cached_payload_matches(91, 222)));
-        assert_eq!(
-            render_tab_states()
-                .into_iter()
-                .map(|(tab_handle, _)| tab_handle)
-                .collect::<Vec<_>>(),
-            vec![11, 22]
-        );
+        assert_eq!(render_tab_handles(), vec![11, 22]);
 
         reset_draw_context_for_test();
     }
@@ -870,7 +894,7 @@ mod tests {
         with_render_tab(9, |tab_windows| tab_windows.cache_payload(41, 401));
         with_render_tab(3, |tab_windows| tab_windows.cache_payload(42, 402));
 
-        let drained = drain_render_tab_states();
+        let drained = take_render_tabs_for_test();
         let drained_handles = drained
             .iter()
             .map(|(tab_handle, _)| *tab_handle)
@@ -879,8 +903,7 @@ mod tests {
 
         let drained_payloads = drained
             .iter()
-            .map(|(tab_handle, render_tab)| {
-                let tab_windows = lock_render_tab(render_tab);
+            .map(|(tab_handle, tab_windows)| {
                 let cached_payload = match *tab_handle {
                     3 => tab_windows.cached_payload_matches(42, 402),
                     9 => tab_windows.cached_payload_matches(41, 401),
@@ -890,7 +913,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(drained_payloads, vec![(3, true), (9, true)]);
-        assert!(render_tab_states().is_empty());
+        assert!(render_tab_handles().is_empty());
 
         reset_draw_context_for_test();
     }
@@ -903,31 +926,30 @@ mod tests {
         reset_draw_context_for_test();
 
         with_render_tab(17, |tab_windows| tab_windows.cache_payload(77, 707));
-        {
-            let mut prepaint_by_tab = prepaint_lock();
-            prepaint_by_tab.insert(
-                17,
-                PrepaintOverlay {
-                    window_id: -1,
-                    buffer_id: -1,
-                    placement: None,
-                },
-            );
-            prepaint_by_tab.insert(
-                23,
-                PrepaintOverlay {
-                    window_id: -2,
-                    buffer_id: -2,
-                    placement: None,
-                },
-            );
-            clear_all_prepaint_locked(&mut prepaint_by_tab, 99);
-            assert!(prepaint_by_tab.is_empty());
-        }
+        insert_prepaint_overlay_for_test(
+            17,
+            PrepaintOverlay {
+                window_id: -1,
+                buffer_id: -1,
+                placement: None,
+            },
+        );
+        insert_prepaint_overlay_for_test(
+            23,
+            PrepaintOverlay {
+                window_id: -2,
+                buffer_id: -2,
+                placement: None,
+            },
+        );
+        with_prepaint_by_tab(|prepaint_by_tab| {
+            clear_all_prepaint_tracked(prepaint_by_tab, 99);
+        });
+        assert_eq!(prepaint_count_for_test(), 0);
 
         assert!(with_render_tab(17, |tab_windows| tab_windows
             .cached_payload_matches(77, 707)));
-        assert_eq!(render_tab_states().len(), 1);
+        assert_eq!(render_tab_handles().len(), 1);
 
         reset_draw_context_for_test();
     }
@@ -969,26 +991,25 @@ mod tests {
                 7,
             );
         });
-        {
-            let mut prepaint_by_tab = prepaint_lock();
-            prepaint_by_tab.insert(
-                17,
-                PrepaintOverlay {
-                    window_id: -19,
-                    buffer_id: -119,
-                    placement: Some(super::PrepaintPlacement {
-                        cell: crate::types::ScreenCell::new(3, 4)
-                            .expect("test prepaint cell should be in bounds"),
-                        zindex: 120,
-                    }),
-                },
-            );
-        }
+        insert_prepaint_overlay_for_test(
+            17,
+            PrepaintOverlay {
+                window_id: -19,
+                buffer_id: -119,
+                placement: Some(super::PrepaintPlacement {
+                    cell: crate::types::ScreenCell::new(3, 4)
+                        .expect("test prepaint cell should be in bounds"),
+                    zindex: 120,
+                }),
+            },
+        );
 
-        let render_tabs = render_tab_states();
-        let prepaint_by_tab = prepaint_lock();
-        let summary = summarize_tracked_purge_state(render_tabs.as_slice(), &prepaint_by_tab);
-        drop(prepaint_by_tab);
+        let render_tabs = take_render_tabs_for_test()
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        let prepaint_by_tab = prepaint_snapshot_for_test();
+        let summary = summarize_tracked_purge_state(&render_tabs, &prepaint_by_tab);
+        restore_render_tabs(render_tabs);
 
         assert_eq!(
             summary,

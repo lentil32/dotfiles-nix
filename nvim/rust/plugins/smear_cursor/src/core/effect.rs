@@ -1,7 +1,17 @@
+// Surprising: the deterministic fingerprint path landed ahead of the trace consumer that will use
+// it, so these helpers stay compiled until the phased integration is complete.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "phase-scoped effect fingerprint scaffolding is intentionally retained ahead of trace wiring"
+    )
+)]
+
 use crate::core::runtime_reducer::RenderDecision;
 use crate::core::state::{
-    BackgroundProbeChunk, CoreState, InFlightProposal, ObservationBasis, ObservationRequest,
-    ObservationSnapshot, ProbeKind,
+    AnimationSchedule, BackgroundProbeChunk, CoreState, InFlightProposal, ObservationBasis,
+    ObservationRequest, ObservationSnapshot, ProbeKind,
 };
 use crate::core::types::{
     CursorPosition, DelayBudgetMs, Millis, ProbeRequestId, ProposalId, TimerGeneration, TimerId,
@@ -19,6 +29,15 @@ pub(crate) enum TimerKind {
 }
 
 impl TimerKind {
+    pub(crate) const fn from_timer_id(timer_id: TimerId) -> Self {
+        match timer_id {
+            TimerId::Animation => Self::Animation,
+            TimerId::Ingress => Self::Ingress,
+            TimerId::Recovery => Self::Recovery,
+            TimerId::Cleanup => Self::Cleanup,
+        }
+    }
+
     pub(crate) const fn timer_id(self) -> TimerId {
         match self {
             Self::Animation => TimerId::Animation,
@@ -40,7 +59,6 @@ impl TimerKind {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct ScheduleTimerEffect {
-    pub(crate) kind: TimerKind,
     pub(crate) token: TimerToken,
     pub(crate) delay: DelayBudgetMs,
     pub(crate) requested_at: Millis,
@@ -128,8 +146,7 @@ pub(crate) struct RequestRenderPlanEffect {
     pub(crate) planning_state: CoreState,
     pub(crate) observation: ObservationSnapshot,
     pub(crate) render_decision: RenderDecision,
-    pub(crate) should_schedule_next_animation: bool,
-    pub(crate) next_animation_at_ms: Option<Millis>,
+    pub(crate) animation_schedule: AnimationSchedule,
     pub(crate) requested_at: Millis,
 }
 
@@ -293,8 +310,9 @@ impl Effect {
     pub(crate) fn fingerprint(&self) -> u64 {
         match self {
             Self::ScheduleTimer(payload) => {
+                let kind = TimerKind::from_timer_id(payload.token.id());
                 101_u64
-                    ^ payload.kind.fingerprint()
+                    ^ kind.fingerprint()
                     ^ payload.token.fingerprint()
                     ^ payload.delay.value()
                     ^ payload.requested_at.value()
@@ -373,17 +391,18 @@ impl Effect {
                     snapshot.witness().scene_revision().value()
                         ^ snapshot.witness().observation_id().value()
                 });
-                let animation_seed = if proposal.should_schedule_next_animation() {
-                    1_u64
-                } else {
-                    0_u64
+                let animation_seed = match proposal.animation_schedule() {
+                    AnimationSchedule::Idle => 0_u64,
+                    AnimationSchedule::DefaultDelay => 1_u64,
+                    AnimationSchedule::Deadline(deadline) => {
+                        2_u64 ^ deadline.value().rotate_left(11)
+                    }
                 };
                 113_u64
                     ^ proposal.proposal_id().value()
                     ^ acknowledged_seed
                     ^ target_seed
                     ^ animation_seed
-                    ^ proposal.next_animation_at_ms().map_or(0_u64, Millis::value)
                     ^ payload.requested_at.value()
             }
             Self::ApplyRenderCleanup(payload) => {
@@ -403,20 +422,13 @@ impl Effect {
 
 pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
     let at = Millis::new(1);
-    let schedule_kind = TimerKind::Animation;
     let schedule_token = TimerToken::new(TimerId::Animation, TimerGeneration::new(1));
-    let ingress_kind = TimerKind::Ingress;
     let ingress_token = TimerToken::new(TimerId::Ingress, TimerGeneration::new(2));
-    let cleanup_kind = TimerKind::Cleanup;
     let cleanup_token = TimerToken::new(TimerId::Cleanup, TimerGeneration::new(3));
-    let ingress_delay = match DelayBudgetMs::try_new(9) {
-        Ok(delay) => delay,
-        Err(_) => DelayBudgetMs::DEFAULT_ANIMATION,
-    };
-    let cleanup_delay = match DelayBudgetMs::try_new(220) {
-        Ok(delay) => delay,
-        Err(_) => DelayBudgetMs::DEFAULT_ANIMATION,
-    };
+    let ingress_delay =
+        DelayBudgetMs::try_new(9).map_or(DelayBudgetMs::DEFAULT_ANIMATION, |delay| delay);
+    let cleanup_delay =
+        DelayBudgetMs::try_new(220).map_or(DelayBudgetMs::DEFAULT_ANIMATION, |delay| delay);
     let proposal_id = ProposalId::new(3);
     let request = ObservationRequest::new(
         crate::core::state::ExternalDemand::new(
@@ -443,25 +455,21 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
                 crate::core::types::CursorCol(120),
             ),
         ),
-        crate::core::state::ProbeSet::default(),
         crate::core::state::ObservationMotion::default(),
     );
 
     let effects = [
         Effect::ScheduleTimer(ScheduleTimerEffect {
-            kind: schedule_kind,
             token: schedule_token,
             delay: DelayBudgetMs::DEFAULT_ANIMATION,
             requested_at: at,
         }),
         Effect::ScheduleTimer(ScheduleTimerEffect {
-            kind: ingress_kind,
             token: ingress_token,
             delay: ingress_delay,
             requested_at: at,
         }),
         Effect::ScheduleTimer(ScheduleTimerEffect {
-            kind: cleanup_kind,
             token: cleanup_token,
             delay: cleanup_delay,
             requested_at: at,
@@ -517,22 +525,20 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
                     crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
                 render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
             },
-            should_schedule_next_animation: false,
-            next_animation_at_ms: None,
+            animation_schedule: crate::core::state::AnimationSchedule::Idle,
             requested_at: at,
         })),
         Effect::ApplyProposal(Box::new(ApplyProposalEffect {
-            proposal: crate::core::state::InFlightProposal::new(
+            proposal: crate::core::state::InFlightProposal::noop(
                 proposal_id,
                 crate::core::state::ScenePatch::derive(crate::core::state::PatchBasis::new(
                     None, None,
                 )),
-                crate::core::state::RealizationPlan::Noop,
                 crate::core::runtime_reducer::RenderCleanupAction::NoAction,
                 crate::core::runtime_reducer::RenderSideEffects::default(),
-                false,
-                None,
-            ),
+                crate::core::state::AnimationSchedule::Idle,
+            )
+            .expect("noop proposal fingerprint fixture should be constructible"),
             requested_at: at,
         })),
         Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {

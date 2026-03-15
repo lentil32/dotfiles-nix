@@ -3,8 +3,8 @@ use super::{
     LOG_LEVEL_WARN, LOG_SOURCE_NAME,
 };
 use nvim_oxi::{Array, Object, api};
-use std::sync::atomic::Ordering;
-use std::sync::{LazyLock, Mutex};
+use std::cell::RefCell;
+use std::sync::LazyLock;
 use std::{
     fs::{File, OpenOptions},
     io::Write,
@@ -14,7 +14,6 @@ use std::{
 
 static LOG_FILE_PATH: LazyLock<Option<PathBuf>> =
     LazyLock::new(|| std::env::var_os("SMEAR_CURSOR_LOG_FILE").map(PathBuf::from));
-static LOG_FILE_HANDLE: LazyLock<Mutex<Option<File>>> = LazyLock::new(|| Mutex::new(None));
 static PERF_SLOW_CALLBACK_THRESHOLD_MS: LazyLock<Option<f64>> = LazyLock::new(|| {
     std::env::var("SMEAR_CURSOR_PERF_SLOW_MS")
         .ok()
@@ -22,15 +21,19 @@ static PERF_SLOW_CALLBACK_THRESHOLD_MS: LazyLock<Option<f64>> = LazyLock::new(||
         .filter(|value| value.is_finite() && *value >= 0.0)
 });
 
+thread_local! {
+    static LOG_FILE_HANDLE: RefCell<Option<File>> = const { RefCell::new(None) };
+}
+
 pub(super) fn set_log_level(level: i64) {
     let normalized = if level < 0 { 0 } else { level };
-    ENGINE_CONTEXT
-        .log_level
-        .store(normalized, Ordering::Relaxed);
+    ENGINE_CONTEXT.with(|context| {
+        context.log_level.set(normalized);
+    });
 }
 
 fn should_log(level: i64) -> bool {
-    ENGINE_CONTEXT.log_level.load(Ordering::Relaxed) <= level
+    ENGINE_CONTEXT.with(|context| context.log_level.get() <= level)
 }
 
 fn log_level_name(level: i64) -> &'static str {
@@ -58,38 +61,38 @@ fn append_log_line(level_name: &str, message: &str) {
     let Some(path) = LOG_FILE_PATH.as_ref() else {
         return;
     };
-    let Ok(mut file_guard) = LOG_FILE_HANDLE.lock() else {
-        return;
-    };
+    LOG_FILE_HANDLE.with(|file_handle| {
+        let mut file_guard = file_handle.borrow_mut();
 
-    if file_guard.is_none() {
-        match OpenOptions::new().create(true).append(true).open(path) {
-            Ok(file) => {
-                *file_guard = Some(file);
-            }
-            Err(err) => {
-                api::err_writeln(&format!(
-                    "[{LOG_SOURCE_NAME}] failed to open log file {}: {err}",
-                    path.display()
-                ));
-                return;
+        if file_guard.is_none() {
+            match OpenOptions::new().create(true).append(true).open(path) {
+                Ok(file) => {
+                    *file_guard = Some(file);
+                }
+                Err(err) => {
+                    api::err_writeln(&format!(
+                        "[{LOG_SOURCE_NAME}] failed to open log file {}: {err}",
+                        path.display()
+                    ));
+                    return;
+                }
             }
         }
-    }
 
-    let timestamp_ms = log_timestamp_ms();
-    if let Some(file) = file_guard.as_mut()
-        && let Err(err) = writeln!(
-            file,
-            "[{LOG_SOURCE_NAME}][{level_name}][{timestamp_ms}] {message}"
-        )
-        .and_then(|()| file.flush())
-    {
-        api::err_writeln(&format!(
-            "[{LOG_SOURCE_NAME}] failed to write log file: {err}"
-        ));
-        *file_guard = None;
-    }
+        let timestamp_ms = log_timestamp_ms();
+        if let Some(file) = file_guard.as_mut()
+            && let Err(err) = writeln!(
+                file,
+                "[{LOG_SOURCE_NAME}][{level_name}][{timestamp_ms}] {message}"
+            )
+            .and_then(|()| file.flush())
+        {
+            api::err_writeln(&format!(
+                "[{LOG_SOURCE_NAME}] failed to write log file: {err}"
+            ));
+            *file_guard = None;
+        }
+    });
 }
 
 fn notify_log(level: i64, message: &str) {

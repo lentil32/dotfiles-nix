@@ -9,10 +9,12 @@ use nvim_oxi::api::opts::{GetHighlightOpts, SetHighlightOpts};
 use nvim_oxi::api::types::GetHlInfos;
 use nvim_oxi::{Array, Dictionary, Object};
 use nvim_utils::mode::is_insert_like_mode;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::Arc;
 
 const DEFAULT_CURSOR_COLOR: u32 = 0x00D0_D0D0;
 const DEFAULT_BACKGROUND_COLOR: u32 = 0x0030_3030;
@@ -77,25 +79,20 @@ struct PaletteState {
     group_name_cache: HashMap<u32, HighlightGroupNames>,
 }
 
-#[derive(Debug)]
-struct PaletteContext {
-    state: Mutex<PaletteState>,
-}
-
-impl PaletteContext {
+impl PaletteState {
     fn new() -> Self {
         Self {
-            state: Mutex::new(PaletteState {
-                raw_input_key: None,
-                palette_key: None,
-                pending_refresh_key: None,
-                group_name_cache: HashMap::with_capacity(HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES),
-            }),
+            raw_input_key: None,
+            palette_key: None,
+            pending_refresh_key: None,
+            group_name_cache: HashMap::with_capacity(HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES),
         }
     }
 }
 
-static PALETTE_CONTEXT: LazyLock<PaletteContext> = LazyLock::new(PaletteContext::new);
+thread_local! {
+    static PALETTE_STATE: RefCell<PaletteState> = RefCell::new(PaletteState::new());
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PaletteCacheLookup {
@@ -119,26 +116,33 @@ enum PaletteRefreshOutcome {
     AppliedHighlights,
 }
 
-fn state_lock() -> std::sync::MutexGuard<'static, PaletteState> {
-    loop {
-        match PALETTE_CONTEXT.state.lock() {
-            Ok(guard) => return guard,
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                *guard = PaletteState::default();
-                drop(guard);
-                PALETTE_CONTEXT.state.clear_poison();
+fn with_palette_state<R>(reader: impl FnOnce(&PaletteState) -> R) -> R {
+    PALETTE_STATE.with(|state| {
+        let state = state.borrow();
+        reader(&state)
+    })
+}
+
+fn with_palette_state_mut<R>(mutator: impl FnOnce(&mut PaletteState) -> R) -> R {
+    PALETTE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        match catch_unwind(AssertUnwindSafe(|| mutator(&mut state))) {
+            Ok(output) => output,
+            Err(panic_payload) => {
+                *state = PaletteState::new();
+                resume_unwind(panic_payload);
             }
         }
-    }
+    })
 }
 
 pub(crate) fn clear_highlight_cache() {
-    let mut state = state_lock();
-    state.raw_input_key = None;
-    state.palette_key = None;
-    state.pending_refresh_key = None;
-    state.group_name_cache.clear();
+    with_palette_state_mut(|state| {
+        state.raw_input_key = None;
+        state.palette_key = None;
+        state.pending_refresh_key = None;
+        state.group_name_cache.clear();
+    });
 }
 
 fn lookup_cached_palette(
@@ -192,11 +196,8 @@ fn inverted_hl_group_name(level: u32) -> String {
 
 pub(crate) fn highlight_group_names(color_levels: u32) -> HighlightGroupNames {
     let levels = color_levels.max(1);
-    {
-        let state = state_lock();
-        if let Some(cached) = state.group_name_cache.get(&levels) {
-            return cached.clone();
-        }
+    if let Some(cached) = with_palette_state(|state| state.group_name_cache.get(&levels).cloned()) {
+        return cached;
     }
 
     let normal: Arc<[String]> = Arc::from((0..=levels).map(hl_group_name).collect::<Vec<String>>());
@@ -207,13 +208,14 @@ pub(crate) fn highlight_group_names(color_levels: u32) -> HighlightGroupNames {
     );
     let names = HighlightGroupNames { normal, inverted };
 
-    let mut state = state_lock();
-    if !state.group_name_cache.contains_key(&levels)
-        && state.group_name_cache.len() >= HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES
-    {
-        state.group_name_cache.clear();
-    }
-    state.group_name_cache.insert(levels, names.clone());
+    with_palette_state_mut(|state| {
+        if !state.group_name_cache.contains_key(&levels)
+            && state.group_name_cache.len() >= HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES
+        {
+            state.group_name_cache.clear();
+        }
+        state.group_name_cache.insert(levels, names.clone());
+    });
     names
 }
 
@@ -397,10 +399,11 @@ fn resolve_palette_for_spec(spec: &PaletteSpec) -> ResolvedPalette<'_> {
 }
 
 fn clear_pending_palette_refresh(raw_input_key: RawPaletteInputKey) {
-    let mut state = state_lock();
-    if state.pending_refresh_key == Some(raw_input_key) {
-        state.pending_refresh_key = None;
-    }
+    with_palette_state_mut(|state| {
+        if state.pending_refresh_key == Some(raw_input_key) {
+            state.pending_refresh_key = None;
+        }
+    });
 }
 
 fn cterm_color_at_level(cterm_cursor_colors: Option<&[u16]>, level: u32) -> Option<u16> {
@@ -453,24 +456,37 @@ fn refresh_highlight_palette_for_spec(
 ) -> Result<PaletteRefreshOutcome> {
     let resolved_palette = resolve_palette_for_spec(spec);
     {
-        let mut state = state_lock();
-        if state.pending_refresh_key != Some(raw_input_key)
-            && state.raw_input_key != Some(raw_input_key)
-        {
-            return Ok(PaletteRefreshOutcome::SkippedStale);
-        }
+        let cache_lookup = with_palette_state_mut(|state| {
+            if state.pending_refresh_key != Some(raw_input_key)
+                && state.raw_input_key != Some(raw_input_key)
+            {
+                return None;
+            }
 
-        match lookup_cached_palette(&state, raw_input_key, Some(&resolved_palette)) {
-            PaletteCacheLookup::RawHit => {
-                state.pending_refresh_key = None;
+            Some(
+                match lookup_cached_palette(state, raw_input_key, Some(&resolved_palette)) {
+                    PaletteCacheLookup::RawHit => {
+                        state.pending_refresh_key = None;
+                        PaletteRefreshOutcome::ReusedCommitted
+                    }
+                    PaletteCacheLookup::ResolvedHit => {
+                        state.raw_input_key = Some(raw_input_key);
+                        state.pending_refresh_key = None;
+                        PaletteRefreshOutcome::ReusedCommitted
+                    }
+                    PaletteCacheLookup::Miss => {
+                        return Some(PaletteRefreshOutcome::AppliedHighlights);
+                    }
+                },
+            )
+        });
+        match cache_lookup {
+            None => return Ok(PaletteRefreshOutcome::SkippedStale),
+            Some(PaletteRefreshOutcome::ReusedCommitted) => {
                 return Ok(PaletteRefreshOutcome::ReusedCommitted);
             }
-            PaletteCacheLookup::ResolvedHit => {
-                state.raw_input_key = Some(raw_input_key);
-                state.pending_refresh_key = None;
-                return Ok(PaletteRefreshOutcome::ReusedCommitted);
-            }
-            PaletteCacheLookup::Miss => {}
+            Some(PaletteRefreshOutcome::AppliedHighlights) => {}
+            Some(PaletteRefreshOutcome::SkippedStale) => unreachable!(),
         }
     }
 
@@ -522,10 +538,11 @@ fn refresh_highlight_palette_for_spec(
         )?;
     }
 
-    let mut state = state_lock();
-    state.raw_input_key = Some(raw_input_key);
-    state.palette_key = Some(resolved_palette.into_owned());
-    state.pending_refresh_key = None;
+    with_palette_state_mut(|state| {
+        state.raw_input_key = Some(raw_input_key);
+        state.palette_key = Some(resolved_palette.into_owned());
+        state.pending_refresh_key = None;
+    });
     Ok(PaletteRefreshOutcome::AppliedHighlights)
 }
 
@@ -549,10 +566,7 @@ fn defer_palette_refresh(spec: PaletteSpec, raw_input_key: RawPaletteInputKey) {
 
 pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()> {
     let raw_input_key = raw_palette_input_key_for_spec(spec);
-    let disposition = {
-        let mut state = state_lock();
-        stage_palette_refresh(&mut state, raw_input_key)
-    };
+    let disposition = with_palette_state_mut(|state| stage_palette_refresh(state, raw_input_key));
 
     match disposition {
         PaletteRefreshDisposition::Ready | PaletteRefreshDisposition::RefreshAlreadyPending => {
@@ -581,14 +595,14 @@ mod tests {
         RenderFrame {
             mode: "n".to_string(),
             corners: [Point::ZERO; 4],
-            step_samples: Vec::new(),
+            step_samples: Vec::new().into(),
             planner_idle_steps: 0,
             target: Point::ZERO,
             target_corners: [Point::ZERO; 4],
             vertical_bar: false,
             trail_stroke_id: StrokeId::INITIAL,
             retarget_epoch: 0,
-            particles: Vec::new(),
+            particles: Vec::new().into(),
             color_at_cursor: Some("#ffffff".to_string()),
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: Some("#112233".to_string()),
@@ -729,8 +743,7 @@ mod tests {
     #[test]
     fn clear_highlight_cache_resets_raw_and_resolved_keys() {
         clear_highlight_cache();
-        {
-            let mut state = state_lock();
+        with_palette_state_mut(|state| {
             state.raw_input_key = Some(RawPaletteInputKey { fingerprint: 7 });
             state.palette_key = Some(HighlightPaletteKey {
                 cursor_color: 0x112233,
@@ -743,14 +756,15 @@ mod tests {
                 cterm_bg: Some(235_u16),
             });
             state.pending_refresh_key = Some(RawPaletteInputKey { fingerprint: 9 });
-        }
+        });
 
         clear_highlight_cache();
 
-        let state = state_lock();
-        assert_eq!(state.raw_input_key, None);
-        assert_eq!(state.palette_key, None);
-        assert_eq!(state.pending_refresh_key, None);
+        with_palette_state(|state| {
+            assert_eq!(state.raw_input_key, None);
+            assert_eq!(state.palette_key, None);
+            assert_eq!(state.pending_refresh_key, None);
+        });
     }
 
     #[test]

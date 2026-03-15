@@ -3,58 +3,106 @@ use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Dictionary, Object, ObjectKind, Result, String as NvimString};
 use nvim_oxi_utils::Error as OxiError;
 
-fn to_nvim_error(err: &OxiError) -> nvim_oxi::Error {
+pub(crate) type LuaParseError = OxiError;
+pub(crate) type LuaParseResult<T> = std::result::Result<T, LuaParseError>;
+
+pub(crate) fn to_nvim_error(err: &LuaParseError) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(err.to_string()).into()
 }
 
+fn into_nvim_error(err: LuaParseError) -> nvim_oxi::Error {
+    to_nvim_error(&err)
+}
+
+pub(crate) fn invalid_key_error(key: &str, expected: &'static str) -> LuaParseError {
+    OxiError::invalid_value(key, expected)
+}
+
+pub(crate) fn missing_key_error(key: &str) -> LuaParseError {
+    OxiError::missing_key(key)
+}
+
 pub(crate) fn invalid_key(key: &str, expected: &'static str) -> nvim_oxi::Error {
-    let err = OxiError::invalid_value(key, expected);
-    to_nvim_error(&err)
+    into_nvim_error(invalid_key_error(key, expected))
 }
 
+#[expect(
+    dead_code,
+    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
+)]
 pub(crate) fn missing_key(key: &str) -> nvim_oxi::Error {
-    let err = OxiError::missing_key(key);
-    to_nvim_error(&err)
+    into_nvim_error(missing_key_error(key))
 }
 
+pub(crate) fn require_object_typed(value: Option<Object>, key: &str) -> LuaParseResult<Object> {
+    value.ok_or_else(|| missing_key_error(key))
+}
+
+#[expect(
+    dead_code,
+    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
+)]
 pub(crate) fn require_object(value: Option<Object>, key: &str) -> Result<Object> {
-    value.ok_or_else(|| missing_key(key))
+    require_object_typed(value, key).map_err(into_nvim_error)
 }
 
+pub(crate) fn require_with_typed<T, F>(
+    value: Option<Object>,
+    key: &str,
+    parse: F,
+) -> LuaParseResult<T>
+where
+    F: Fn(&str, Object) -> LuaParseResult<T>,
+{
+    parse(key, require_object_typed(value, key)?)
+}
+
+#[expect(
+    dead_code,
+    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
+)]
 pub(crate) fn require_with<T, F>(value: Option<Object>, key: &str, parse: F) -> Result<T>
 where
-    F: Fn(&str, Object) -> Result<T>,
+    F: Fn(&str, Object) -> LuaParseResult<T>,
 {
-    parse(key, require_object(value, key)?)
+    require_with_typed(value, key, parse).map_err(into_nvim_error)
 }
 
-pub(crate) fn f64_from_object(key: &str, value: Object) -> Result<f64> {
+pub(crate) fn f64_from_object_typed(key: &str, value: Object) -> LuaParseResult<f64> {
     match value.kind() {
-        ObjectKind::Float => f64::from_object(value).map_err(|_| invalid_key(key, "number")),
+        ObjectKind::Float => f64::from_object(value).map_err(|_| invalid_key_error(key, "number")),
         ObjectKind::Integer | ObjectKind::Buffer | ObjectKind::Window | ObjectKind::TabPage => {
             i64::from_object(value)
                 .map(|parsed| parsed as f64)
-                .map_err(|_| invalid_key(key, "number"))
+                .map_err(|_| invalid_key_error(key, "number"))
         }
-        _ => Err(invalid_key(key, "number")),
+        _ => Err(invalid_key_error(key, "number")),
     }
+}
+
+pub(crate) fn f64_from_object(key: &str, value: Object) -> Result<f64> {
+    f64_from_object_typed(key, value).map_err(into_nvim_error)
 }
 
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Most object parse call sites own their Object already; the borrowed fast path lives in i64_from_object_ref_with"
 )]
-pub(crate) fn i64_from_object(key: &str, value: Object) -> Result<i64> {
-    i64_from_object_ref_with(&value, || key.to_owned())
+pub(crate) fn i64_from_object_typed(key: &str, value: Object) -> LuaParseResult<i64> {
+    i64_from_object_ref_with_typed(&value, || key.to_owned())
 }
 
-pub(crate) fn i64_from_object_ref_with<K>(value: &Object, key: K) -> Result<i64>
+pub(crate) fn i64_from_object(key: &str, value: Object) -> Result<i64> {
+    i64_from_object_typed(key, value).map_err(into_nvim_error)
+}
+
+pub(crate) fn i64_from_object_ref_with_typed<K>(value: &Object, key: K) -> LuaParseResult<i64>
 where
     K: Fn() -> String,
 {
     let invalid_integer = || {
         let key = key();
-        invalid_key(&key, "integer")
+        invalid_key_error(&key, "integer")
     };
 
     match value.kind() {
@@ -75,16 +123,35 @@ where
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
+)]
+pub(crate) fn i64_from_object_ref_with<K>(value: &Object, key: K) -> Result<i64>
+where
+    K: Fn() -> String,
+{
+    i64_from_object_ref_with_typed(value, key).map_err(into_nvim_error)
+}
+
+pub(crate) fn bool_from_object_typed(key: &str, value: Object) -> LuaParseResult<bool> {
+    bool::from_object(value).map_err(|_| invalid_key_error(key, "boolean"))
+}
+
 pub(crate) fn bool_from_object(key: &str, value: Object) -> Result<bool> {
-    bool::from_object(value).map_err(|_| invalid_key(key, "boolean"))
+    bool_from_object_typed(key, value).map_err(into_nvim_error)
+}
+
+pub(crate) fn string_from_object_typed(key: &str, value: Object) -> LuaParseResult<String> {
+    if value.kind() != ObjectKind::String {
+        return Err(invalid_key_error(key, "string"));
+    }
+    let parsed = NvimString::from_object(value).map_err(|_| invalid_key_error(key, "string"))?;
+    Ok(parsed.to_string_lossy().into_owned())
 }
 
 pub(crate) fn string_from_object(key: &str, value: Object) -> Result<String> {
-    if value.kind() != ObjectKind::String {
-        return Err(invalid_key(key, "string"));
-    }
-    let parsed = NvimString::from_object(value).map_err(|_| invalid_key(key, "string"))?;
-    Ok(parsed.to_string_lossy().into_owned())
+    string_from_object_typed(key, value).map_err(into_nvim_error)
 }
 
 pub(crate) fn parse_optional_with<T, F>(
@@ -126,19 +193,28 @@ pub(crate) fn parse_indexed_objects(
     value: Object,
     expected_len: Option<usize>,
 ) -> Result<Vec<Object>> {
+    parse_indexed_objects_typed(key, value, expected_len).map_err(into_nvim_error)
+}
+
+pub(crate) fn parse_indexed_objects_typed(
+    key: &str,
+    value: Object,
+    expected_len: Option<usize>,
+) -> LuaParseResult<Vec<Object>> {
     match value.kind() {
         ObjectKind::Array => {
             let values =
-                Vec::<Object>::from_object(value).map_err(|_| invalid_key(key, "array"))?;
+                Vec::<Object>::from_object(value).map_err(|_| invalid_key_error(key, "array"))?;
             if let Some(length) = expected_len
                 && values.len() != length
             {
-                return Err(invalid_key(key, "array"));
+                return Err(invalid_key_error(key, "array"));
             }
             Ok(values)
         }
         ObjectKind::Dictionary => {
-            let dict = Dictionary::from_object(value).map_err(|_| invalid_key(key, "array"))?;
+            let dict =
+                Dictionary::from_object(value).map_err(|_| invalid_key_error(key, "array"))?;
             let length = expected_len.unwrap_or(dict.len());
             let mut values = Vec::with_capacity(length);
             for index in 1..=length {
@@ -146,11 +222,11 @@ pub(crate) fn parse_indexed_objects(
                 let indexed = dict
                     .get(&index_key)
                     .cloned()
-                    .ok_or_else(|| invalid_key(key, "array"))?;
+                    .ok_or_else(|| invalid_key_error(key, "array"))?;
                 values.push(indexed);
             }
             Ok(values)
         }
-        _ => Err(invalid_key(key, "array")),
+        _ => Err(invalid_key_error(key, "array")),
     }
 }

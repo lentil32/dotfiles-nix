@@ -1,3 +1,5 @@
+/// Hashes the stable frame inputs that decide whether planner output can be
+/// reused across draw passes.
 pub(crate) fn frame_draw_signature(frame: &RenderFrame) -> Option<u64> {
     if !frame.particles.is_empty() {
         return None;
@@ -29,7 +31,7 @@ pub(crate) fn frame_draw_signature(frame: &RenderFrame) -> Option<u64> {
         hash_f64(&mut hasher, corner.col);
     }
     frame.step_samples.len().hash(&mut hasher);
-    for sample in &frame.step_samples {
+    for sample in frame.step_samples.iter() {
         hash_f64(&mut hasher, sample.dt_ms);
         for corner in &sample.corners {
             hash_f64(&mut hasher, corner.row);
@@ -40,6 +42,8 @@ pub(crate) fn frame_draw_signature(frame: &RenderFrame) -> Option<u64> {
     Some(hasher.finish())
 }
 
+/// Reserves the target cell for cursor punch-through when the render frame is
+/// allowed to hide the target directly.
 pub(crate) fn plan_target_cell_overlay(
     frame: &RenderFrame,
     viewport: Viewport,
@@ -71,6 +75,7 @@ pub(crate) fn render_frame_to_plan(
     render_frame_to_plan_with_signature(frame, state, viewport, frame_draw_signature(frame))
 }
 
+/// Compiles and decodes one render frame into the next planner output.
 pub(crate) fn render_frame_to_plan_with_signature(
     frame: &RenderFrame,
     state: PlannerState,
@@ -81,6 +86,7 @@ pub(crate) fn render_frame_to_plan_with_signature(
     decode_compiled_frame(frame, compiled, viewport, maybe_signature)
 }
 
+/// Compiles one render frame into the cached planner representation.
 pub(crate) fn compile_render_frame(
     frame: &RenderFrame,
     state: PlannerState,
@@ -149,7 +155,6 @@ pub(crate) fn decode_compiled_frame(
     );
     let decoded =
         decode_compiled_field_trace_with_compiled(&compiled, &cell_candidates, &centerline, frame);
-    next_state.record_decode_path(decoded.path);
     let next_cells = decoded.cells;
 
     let target_row = frame.target.row.round() as i64;
@@ -183,6 +188,5 @@ pub(crate) fn decode_compiled_frame(
         ),
         next_state,
         signature: maybe_signature,
-        decode_path: decoded.path,
     }
 }

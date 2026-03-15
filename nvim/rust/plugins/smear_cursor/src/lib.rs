@@ -1,3 +1,15 @@
+//! Lua-facing entrypoints for the `rs_smear_cursor` Neovim plugin.
+//!
+//! The Rust surface stays intentionally small: setup and event callbacks forward
+//! into the state-machine runtime, while `step` handles the per-frame animation
+//! bridge used by the renderer.
+//!
+//! ```lua
+//! local smear = require("rs_smear_cursor")
+//! smear.setup({ enabled = true, fps = 120 })
+//! smear.on_autocmd("CursorMoved")
+//! ```
+
 mod animation;
 mod config;
 mod core;
@@ -31,15 +43,9 @@ fn guard_plugin_call<T>(
 }
 
 #[nvim_oxi::plugin]
+/// Registers the Lua-facing plugin functions exported to Neovim.
 fn rs_smear_cursor() -> Dictionary {
-    let _ = core::reducer::phase0_smoke_fingerprint as fn() -> u64;
-
     let mut api = Dictionary::new();
-    api.insert("ping", Function::<(), i64>::from_fn(|()| 1_i64));
-    api.insert(
-        "echo",
-        Function::<Dictionary, Dictionary>::from_fn(|args| -> Result<Dictionary> { Ok(args) }),
-    );
     api.insert(
         "step",
         Function::<Dictionary, Dictionary>::from_fn(|args| {
@@ -87,7 +93,9 @@ fn rs_smear_cursor() -> Dictionary {
     );
     api.insert(
         "diagnostics",
-        Function::<(), String>::from_fn(|()| guard_plugin_call("diagnostics", events::diagnostics)),
+        Function::<(), String>::from_fn(|()| {
+            guard_plugin_call("diagnostics", || Ok(events::diagnostics()))
+        }),
     );
     api
 }

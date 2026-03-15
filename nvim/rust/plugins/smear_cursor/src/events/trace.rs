@@ -9,10 +9,10 @@ use crate::core::runtime_reducer::{
     CursorVisibilityEffect, RenderCleanupAction, RenderSideEffects, TargetCellPresentation,
 };
 use crate::core::state::{
-    ApplyFailureKind, CoreState, DemandQueue, ExternalDemand, ExternalDemandKind, InFlightProposal,
-    ObservationBasis, ObservationRequest, PatchBasis, PlannedRender, ProjectionSnapshot,
-    QueuedDemand, RealizationDivergence, RealizationLedger, RealizationPlan, RenderCleanupState,
-    ScenePatch, ScenePatchKind,
+    AnimationSchedule, ApplyFailureKind, CoreState, DemandQueue, ExternalDemand,
+    ExternalDemandKind, InFlightProposal, ObservationBasis, ObservationRequest, PatchBasis,
+    PlannedRender, ProjectionSnapshot, QueuedDemand, RealizationDivergence, RealizationLedger,
+    RealizationPlan, RenderCleanupState, ScenePatch, ScenePatchKind,
 };
 use crate::core::types::{CursorPosition, Millis, TimerId, TimerToken, ViewportSnapshot};
 use crate::state::CursorLocation;
@@ -251,12 +251,9 @@ fn realization_divergence_summary(divergence: RealizationDivergence) -> String {
 fn realization_ledger_summary(ledger: &RealizationLedger) -> String {
     match ledger {
         RealizationLedger::Cleared => "cleared".to_string(),
-        RealizationLedger::Consistent { acknowledged } => format!(
-            "consistent(ack={})",
-            acknowledged
-                .as_ref()
-                .map_or_else(|| "none".to_string(), projection_summary)
-        ),
+        RealizationLedger::Consistent { acknowledged } => {
+            format!("consistent(ack={})", projection_summary(acknowledged))
+        }
         RealizationLedger::Diverged {
             last_consistent,
             divergence,
@@ -313,6 +310,14 @@ pub(super) fn render_side_effects_summary(side_effects: RenderSideEffects) -> St
     )
 }
 
+fn animation_schedule_summary(schedule: AnimationSchedule) -> String {
+    match schedule {
+        AnimationSchedule::Idle => "idle".to_string(),
+        AnimationSchedule::DefaultDelay => "default_delay".to_string(),
+        AnimationSchedule::Deadline(deadline) => format!("deadline({})", deadline.value()),
+    }
+}
+
 pub(super) fn realization_plan_summary(realization: &RealizationPlan) -> String {
     match realization {
         RealizationPlan::Draw(draw) => format!(
@@ -333,18 +338,14 @@ pub(super) fn realization_plan_summary(realization: &RealizationPlan) -> String 
 }
 
 pub(super) fn proposal_summary(proposal: &InFlightProposal) -> String {
-    let next_animation = proposal.next_animation_at_ms().map_or_else(
-        || "none".to_string(),
-        |deadline| deadline.value().to_string(),
-    );
+    let realization = proposal.realization();
     format!(
-        "proposal_id={} realization={} patch={} cleanup={} next_animation_scheduled={} next_animation_at={} side_effects=({})",
+        "proposal_id={} realization={} patch={} cleanup={} animation_schedule={} side_effects=({})",
         proposal.proposal_id().value(),
-        realization_plan_summary(proposal.realization()),
+        realization_plan_summary(&realization),
         scene_patch_summary(proposal.patch()),
         render_cleanup_action_name(proposal.cleanup_action()),
-        proposal.should_schedule_next_animation(),
-        next_animation,
+        animation_schedule_summary(proposal.animation_schedule()),
         render_side_effects_summary(proposal.side_effects()),
     )
 }
@@ -466,7 +467,7 @@ fn probe_report_summary(payload: &ProbeReportedEvent) -> String {
             "background_ready(obs={} request={} reuse={reuse:?} cells={} viewport={})",
             observation_id.value(),
             probe_request_id.value(),
-            batch.allowed_mask().len(),
+            batch.allowed_mask_len(),
             viewport_summary(batch.viewport()),
         ),
         ProbeReportedEvent::BackgroundChunkReady {
@@ -544,13 +545,13 @@ pub(super) fn core_event_summary(event: &CoreEvent) -> String {
         ),
         CoreEvent::TimerFiredWithToken(payload) => format!(
             "kind={} token={} observed_at={}",
-            timer_kind_name(payload.kind),
+            timer_id_name(payload.token.id()),
             timer_token_summary(payload.token),
             millis_summary(payload.observed_at),
         ),
         CoreEvent::TimerLostWithToken(payload) => format!(
             "kind={} token={} observed_at={}",
-            timer_kind_name(payload.kind),
+            timer_id_name(payload.token.id()),
             timer_token_summary(payload.token),
             millis_summary(payload.observed_at),
         ),
@@ -569,7 +570,7 @@ pub(super) fn effect_summary(effect: &Effect) -> String {
     match effect {
         Effect::ScheduleTimer(payload) => format!(
             "kind={} token={} delay_ms={} requested_at={}",
-            timer_kind_name(payload.kind),
+            timer_id_name(payload.token.id()),
             timer_token_summary(payload.token),
             payload.delay.value(),
             millis_summary(payload.requested_at),
@@ -590,15 +591,11 @@ pub(super) fn effect_summary(effect: &Effect) -> String {
             payload.observation_basis.cursor_color_witness(),
         ),
         Effect::RequestRenderPlan(payload) => format!(
-            "proposal_id={} observation_id={} requested_at={} should_schedule_next_animation={} next_animation_at={}",
+            "proposal_id={} observation_id={} requested_at={} animation_schedule={}",
             payload.proposal_id.value(),
             payload.observation.basis().observation_id().value(),
             millis_summary(payload.requested_at),
-            payload.should_schedule_next_animation,
-            payload.next_animation_at_ms.map_or_else(
-                || "none".to_string(),
-                |deadline| deadline.value().to_string()
-            ),
+            animation_schedule_summary(payload.animation_schedule),
         ),
         Effect::ApplyProposal(payload) => {
             format!(

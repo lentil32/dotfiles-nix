@@ -46,10 +46,16 @@ pub(crate) enum ProtocolState {
     Primed {
         shared: ProtocolSharedState,
     },
-    Observing {
+    ObservingRequest {
         shared: ProtocolSharedState,
         request: ObservationRequest,
-        observation: Option<ObservationSnapshot>,
+        retained_observation: Option<ObservationSnapshot>,
+        probe_refresh: ProbeRefreshState,
+    },
+    ObservingActive {
+        shared: ProtocolSharedState,
+        request: ObservationRequest,
+        observation: ObservationSnapshot,
         probe_refresh: ProbeRefreshState,
     },
     Ready {
@@ -85,7 +91,8 @@ impl ProtocolState {
         match self {
             Self::Idle { shared }
             | Self::Primed { shared }
-            | Self::Observing { shared, .. }
+            | Self::ObservingRequest { shared, .. }
+            | Self::ObservingActive { shared, .. }
             | Self::Ready { shared, .. }
             | Self::Planning { shared, .. }
             | Self::Applying { shared, .. }
@@ -97,7 +104,8 @@ impl ProtocolState {
         match self {
             Self::Idle { shared }
             | Self::Primed { shared }
-            | Self::Observing { shared, .. }
+            | Self::ObservingRequest { shared, .. }
+            | Self::ObservingActive { shared, .. }
             | Self::Ready { shared, .. }
             | Self::Planning { shared, .. }
             | Self::Applying { shared, .. }
@@ -109,7 +117,8 @@ impl ProtocolState {
         match self {
             Self::Idle { shared }
             | Self::Primed { shared }
-            | Self::Observing { shared, .. }
+            | Self::ObservingRequest { shared, .. }
+            | Self::ObservingActive { shared, .. }
             | Self::Ready { shared, .. }
             | Self::Planning { shared, .. }
             | Self::Applying { shared, .. }
@@ -117,15 +126,22 @@ impl ProtocolState {
         }
     }
 
-    fn into_shared_and_observation(self) -> (ProtocolSharedState, Option<ObservationSnapshot>) {
+    fn into_shared_and_retained_observation(
+        self,
+    ) -> (ProtocolSharedState, Option<ObservationSnapshot>) {
         match self {
             Self::Idle { shared } | Self::Primed { shared } => (shared, None),
-            Self::Observing {
+            Self::ObservingRequest {
+                shared,
+                retained_observation,
+                ..
+            } => (shared, retained_observation),
+            Self::ObservingActive {
                 shared,
                 observation,
                 ..
-            }
-            | Self::Recovering {
+            } => (shared, Some(observation)),
+            Self::Recovering {
                 shared,
                 observation,
             } => (shared, observation),
@@ -150,7 +166,7 @@ impl ProtocolState {
         match self {
             Self::Idle { .. } => Lifecycle::Idle,
             Self::Primed { .. } => Lifecycle::Primed,
-            Self::Observing { .. } => Lifecycle::Observing,
+            Self::ObservingRequest { .. } | Self::ObservingActive { .. } => Lifecycle::Observing,
             Self::Ready { .. } => Lifecycle::Ready,
             Self::Planning { .. } => Lifecycle::Planning,
             Self::Applying { .. } => Lifecycle::Applying,
@@ -181,12 +197,26 @@ impl ProtocolState {
     pub(crate) fn observation(&self) -> Option<&ObservationSnapshot> {
         match self {
             Self::Idle { .. } | Self::Primed { .. } => None,
-            Self::Observing { observation, .. } | Self::Recovering { observation, .. } => {
-                observation.as_ref()
-            }
-            Self::Ready { observation, .. }
+            Self::ObservingRequest { .. } | Self::Recovering { .. } => None,
+            Self::ObservingActive { observation, .. }
+            | Self::Ready { observation, .. }
             | Self::Planning { observation, .. }
             | Self::Applying { observation, .. } => Some(observation),
+        }
+    }
+
+    pub(crate) fn retained_observation(&self) -> Option<&ObservationSnapshot> {
+        match self {
+            Self::Idle { .. } | Self::Primed { .. } => None,
+            Self::ObservingRequest {
+                retained_observation,
+                ..
+            } => retained_observation.as_ref(),
+            Self::ObservingActive { observation, .. }
+            | Self::Ready { observation, .. }
+            | Self::Planning { observation, .. }
+            | Self::Applying { observation, .. } => Some(observation),
+            Self::Recovering { observation, .. } => observation.as_ref(),
         }
     }
 }
@@ -293,20 +323,26 @@ impl CoreState {
 
     pub(crate) fn active_demand(&self) -> Option<&ExternalDemand> {
         match &self.protocol {
-            ProtocolState::Observing { request, .. } => Some(request.demand()),
+            ProtocolState::ObservingRequest { request, .. }
+            | ProtocolState::ObservingActive { request, .. } => Some(request.demand()),
             _ => None,
         }
     }
 
     pub(crate) fn active_observation_request(&self) -> Option<&ObservationRequest> {
         match &self.protocol {
-            ProtocolState::Observing { request, .. } => Some(request),
+            ProtocolState::ObservingRequest { request, .. }
+            | ProtocolState::ObservingActive { request, .. } => Some(request),
             _ => None,
         }
     }
 
     pub(crate) fn observation(&self) -> Option<&ObservationSnapshot> {
         self.protocol.observation()
+    }
+
+    pub(crate) fn retained_observation(&self) -> Option<&ObservationSnapshot> {
+        self.protocol.retained_observation()
     }
 
     pub(crate) const fn scene(&self) -> &SceneState {
@@ -381,6 +417,7 @@ impl CoreState {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_demand_queue(mut self, demand: DemandQueue) -> Self {
         self.protocol.shared_mut().demand = demand;
         self
@@ -406,11 +443,11 @@ impl CoreState {
 
     pub(crate) fn into_observing(self, request: ObservationRequest) -> Self {
         self.map_protocol(|protocol| {
-            let (shared, observation) = protocol.into_shared_and_observation();
-            ProtocolState::Observing {
+            let (shared, retained_observation) = protocol.into_shared_and_retained_observation();
+            ProtocolState::ObservingRequest {
                 shared,
                 request,
-                observation,
+                retained_observation,
                 probe_refresh: ProbeRefreshState::default(),
             }
         })
@@ -421,16 +458,43 @@ impl CoreState {
         observation: Option<ObservationSnapshot>,
     ) -> Option<Self> {
         self.try_map_protocol(|protocol| match protocol {
-            ProtocolState::Observing {
+            ProtocolState::ObservingRequest {
                 shared,
                 request,
                 probe_refresh,
                 ..
-            } => Some(ProtocolState::Observing {
+            } => Some(match observation {
+                Some(observation) => ProtocolState::ObservingActive {
+                    shared,
+                    request,
+                    observation,
+                    probe_refresh,
+                },
+                None => ProtocolState::ObservingRequest {
+                    shared,
+                    request,
+                    retained_observation: None,
+                    probe_refresh,
+                },
+            }),
+            ProtocolState::ObservingActive {
                 shared,
                 request,
-                observation,
                 probe_refresh,
+                ..
+            } => Some(match observation {
+                Some(observation) => ProtocolState::ObservingActive {
+                    shared,
+                    request,
+                    observation,
+                    probe_refresh,
+                },
+                None => ProtocolState::ObservingRequest {
+                    shared,
+                    request,
+                    retained_observation: None,
+                    probe_refresh,
+                },
             }),
             _ => None,
         })
@@ -438,19 +502,31 @@ impl CoreState {
 
     pub(crate) const fn probe_refresh_state(&self) -> Option<ProbeRefreshState> {
         match self.protocol() {
-            ProtocolState::Observing { probe_refresh, .. } => Some(*probe_refresh),
+            ProtocolState::ObservingRequest { probe_refresh, .. }
+            | ProtocolState::ObservingActive { probe_refresh, .. } => Some(*probe_refresh),
             _ => None,
         }
     }
 
     pub(crate) fn with_probe_refresh_state(self, probe_refresh: ProbeRefreshState) -> Option<Self> {
         self.try_map_protocol(|protocol| match protocol {
-            ProtocolState::Observing {
+            ProtocolState::ObservingRequest {
+                shared,
+                request,
+                retained_observation,
+                ..
+            } => Some(ProtocolState::ObservingRequest {
+                shared,
+                request,
+                retained_observation,
+                probe_refresh,
+            }),
+            ProtocolState::ObservingActive {
                 shared,
                 request,
                 observation,
                 ..
-            } => Some(ProtocolState::Observing {
+            } => Some(ProtocolState::ObservingActive {
                 shared,
                 request,
                 observation,
@@ -469,8 +545,13 @@ impl CoreState {
 
     pub(crate) fn into_planning(self, proposal_id: ProposalId) -> Option<Self> {
         self.try_map_protocol(|protocol| {
-            let (shared, observation) = protocol.into_shared_and_observation();
-            let observation = observation?;
+            let ProtocolState::Ready {
+                shared,
+                observation,
+            } = protocol
+            else {
+                return None;
+            };
             Some(ProtocolState::Planning {
                 shared,
                 observation,
@@ -487,20 +568,42 @@ impl CoreState {
 
     #[cfg(test)]
     pub(crate) fn into_applying(self, proposal: InFlightProposal) -> Option<Self> {
-        self.try_map_protocol(|protocol| {
-            let (shared, observation) = protocol.into_shared_and_observation();
-            let observation = observation?;
-            Some(ProtocolState::Applying {
+        self.try_map_protocol(|protocol| match protocol {
+            ProtocolState::ObservingActive {
+                shared,
+                observation,
+                ..
+            }
+            | ProtocolState::Ready {
+                shared,
+                observation,
+            }
+            | ProtocolState::Planning {
+                shared,
+                observation,
+                ..
+            }
+            | ProtocolState::Recovering {
+                shared,
+                observation: Some(observation),
+            } => Some(ProtocolState::Applying {
                 shared,
                 observation,
                 proposal: Box::new(proposal),
-            })
+            }),
+            ProtocolState::Idle { .. }
+            | ProtocolState::Primed { .. }
+            | ProtocolState::ObservingRequest { .. }
+            | ProtocolState::Applying { .. }
+            | ProtocolState::Recovering {
+                observation: None, ..
+            } => None,
         })
     }
 
     pub(crate) fn into_recovering(self) -> Self {
         self.map_protocol(|protocol| {
-            let (shared, observation) = protocol.into_shared_and_observation();
+            let (shared, observation) = protocol.into_shared_and_retained_observation();
             ProtocolState::Recovering {
                 shared,
                 observation,

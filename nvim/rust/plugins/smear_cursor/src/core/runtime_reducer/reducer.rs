@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use super::decision::CursorTransitions;
 use super::frame::{
     apply_scroll_shift_to_state, build_render_frame, clamp_row_to_window,
@@ -117,15 +119,20 @@ fn jump_bridge_step_samples(
     samples
 }
 
-fn draw_discontinuous_jump_frame(
-    state: &mut RuntimeState,
-    mode: &str,
+#[derive(Clone, Copy)]
+struct JumpFrameSpec {
     event_now_ms: f64,
     from_position: Point,
     to_position: Point,
     vertical_bar: bool,
     horizontal_bar: bool,
     motion_class: MotionClass,
+}
+
+fn draw_discontinuous_jump_frame(
+    state: &mut RuntimeState,
+    mode: &str,
+    spec: JumpFrameSpec,
 ) -> CursorTransition {
     let frame = build_render_frame(
         state,
@@ -133,25 +140,25 @@ fn draw_discontinuous_jump_frame(
         state.current_corners(),
         jump_bridge_step_samples(
             state,
-            from_position,
-            to_position,
-            vertical_bar,
-            horizontal_bar,
+            spec.from_position,
+            spec.to_position,
+            spec.vertical_bar,
+            spec.horizontal_bar,
         ),
         0,
-        to_position,
-        vertical_bar,
+        spec.to_position,
+        spec.vertical_bar,
     );
     state.start_tail_drain(planner_tail_drain_steps(state));
-    state.set_last_tick_ms(Some(event_now_ms));
-    let next_animation_at_ms = next_animation_deadline_from_clock(state, event_now_ms);
+    state.set_last_tick_ms(Some(spec.event_now_ms));
+    let next_animation_at_ms = Some(next_animation_deadline_from_clock(state, spec.event_now_ms));
     CursorTransitions::draw(
         mode,
         frame,
         true,
         RenderAllocationPolicy::BootstrapIfPoolEmpty,
     )
-    .with_motion_class(motion_class)
+    .with_motion_class(spec.motion_class)
     .with_next_animation_at_ms(next_animation_at_ms)
     .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
@@ -199,8 +206,7 @@ fn draw_drain_frame(
     }
     let should_schedule_next_animation = state.is_draining();
     let next_animation_at_ms = should_schedule_next_animation
-        .then(|| next_animation_deadline_from_clock(state, event_now_ms))
-        .flatten();
+        .then(|| next_animation_deadline_from_clock(state, event_now_ms));
 
     if !should_schedule_next_animation {
         // Surprising: keep-warm cleanup intentionally preserves hidden cached windows. Terminal
@@ -243,9 +249,10 @@ fn draw_drain_frame(
 pub(crate) fn reduce_cursor_event(
     state: &mut RuntimeState,
     mode: &str,
-    event: CursorEventContext,
+    event: impl Borrow<CursorEventContext>,
     source: EventSource,
 ) -> CursorTransition {
+    let event = event.borrow();
     let allow_real_cursor_updates = !state.config.hide_target_hack;
     if !state.is_enabled() {
         state.clear_pending_target();
@@ -320,12 +327,14 @@ pub(crate) fn reduce_cursor_event(
                 return draw_discontinuous_jump_frame(
                     state,
                     mode,
-                    event.now_ms,
-                    jump_origin,
-                    target_position,
-                    vertical_bar,
-                    horizontal_bar,
-                    motion_class,
+                    JumpFrameSpec {
+                        event_now_ms: event.now_ms,
+                        from_position: jump_origin,
+                        to_position: target_position,
+                        vertical_bar,
+                        horizontal_bar,
+                        motion_class,
+                    },
                 );
             }
             if external_mode_requires_jump(&state.config, mode) {
@@ -345,12 +354,14 @@ pub(crate) fn reduce_cursor_event(
                 return draw_discontinuous_jump_frame(
                     state,
                     mode,
-                    event.now_ms,
-                    jump_origin,
-                    target_position,
-                    vertical_bar,
-                    horizontal_bar,
-                    motion_class,
+                    JumpFrameSpec {
+                        event_now_ms: event.now_ms,
+                        from_position: jump_origin,
+                        to_position: target_position,
+                        vertical_bar,
+                        horizontal_bar,
+                        motion_class,
+                    },
                 );
             }
         }
@@ -403,16 +414,16 @@ pub(crate) fn reduce_cursor_event(
             target_position.col,
         );
         motion_class = path_segmentation.motion_class;
-        if matches!(motion_class, MotionClass::DiscontinuousJump) {
-            if let Some(from_location) = previous_location.as_ref() {
-                state.record_jump_cue(
-                    previous_target,
-                    from_location,
-                    target_position,
-                    &event.cursor_location,
-                    event.now_ms,
-                );
-            }
+        if matches!(motion_class, MotionClass::DiscontinuousJump)
+            && let Some(from_location) = previous_location.as_ref()
+        {
+            state.record_jump_cue(
+                previous_target,
+                from_location,
+                target_position,
+                &event.cursor_location,
+                event.now_ms,
+            );
             // large discontinuous moves still reset trail semantics, but they should
             // stay on the regular spring/comet pipeline unless policy requires an actual snap.
         }
@@ -492,13 +503,6 @@ pub(crate) fn reduce_cursor_event(
     }
 
     if matches!(source, EventSource::AnimationTick) && state.is_settling() {
-        if state.pending_target().is_none() {
-            state.clear_pending_target();
-            return CursorTransitions::noop(mode, allow_real_cursor_updates)
-                .with_motion_class(motion_class)
-                .with_cursor_visibility(CursorVisibilityEffect::Show)
-                .with_render_cleanup_action(RenderCleanupAction::NoAction);
-        }
         if state.should_promote_settled_target(
             event.now_ms,
             target_position,
@@ -634,7 +638,8 @@ pub(crate) fn reduce_cursor_event(
                 target_position,
                 vertical_bar,
             );
-            let next_animation_at_ms = next_animation_deadline_from_clock(state, event.now_ms);
+            let next_animation_at_ms =
+                Some(next_animation_deadline_from_clock(state, event.now_ms));
             return CursorTransitions::draw(mode, frame, true, RenderAllocationPolicy::ReuseOnly)
                 .with_motion_class(motion_class)
                 .with_next_animation_at_ms(next_animation_at_ms)
@@ -653,7 +658,7 @@ pub(crate) fn reduce_cursor_event(
             target_position,
             vertical_bar,
         );
-        let next_animation_at_ms = next_animation_deadline_from_clock(state, event.now_ms);
+        let next_animation_at_ms = Some(next_animation_deadline_from_clock(state, event.now_ms));
         return CursorTransitions::draw(mode, frame, true, RenderAllocationPolicy::ReuseOnly)
             .with_motion_class(motion_class)
             .with_next_animation_at_ms(next_animation_at_ms)
@@ -666,7 +671,7 @@ pub(crate) fn reduce_cursor_event(
             let next_animation_at_ms = if state.is_settling() {
                 next_animation_deadline_from_settling(state, event.now_ms)
             } else if state.is_animating() && should_schedule_next_animation {
-                next_animation_deadline_from_clock(state, event.now_ms)
+                Some(next_animation_deadline_from_clock(state, event.now_ms))
             } else {
                 None
             };

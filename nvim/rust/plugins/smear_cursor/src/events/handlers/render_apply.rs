@@ -8,13 +8,11 @@ use super::super::trace::{
 use crate::core::effect::{
     ApplyRenderCleanupEffect, IngressCursorPresentationEffect, RenderCleanupExecution,
 };
-use crate::core::realization::{
-    ScenePatchRealization, ScenePatchRealizationError, project_scene_patch, realize_logical_raster,
+use crate::core::realization::realize_logical_raster;
+use crate::core::runtime_reducer::{CursorVisibilityEffect, RenderAllocationPolicy};
+use crate::core::state::{
+    DegradedApplyMetrics, InFlightProposal, ProjectionSnapshot, ProposalExecution,
 };
-use crate::core::runtime_reducer::{
-    CursorVisibilityEffect, RenderAllocationPolicy, RenderSideEffects,
-};
-use crate::core::state::{DegradedApplyMetrics, ProjectionSnapshot, RealizationPlan, ScenePatch};
 use crate::draw::{
     AllocationPolicy, ApplyMetrics, PurgeRenderWindowsSummary, clear_active_render_windows,
     clear_prepaint_for_current_tab, draw_current, editor_bounds, prepaint_cursor_block,
@@ -193,29 +191,22 @@ fn draw_projection_debug_summary(projection: &ProjectionSnapshot) -> String {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum ApplyRenderActionError {
-    Shell(nvim_oxi::Error),
+    #[error("render shell apply failed: {0}")]
+    Shell(#[from] nvim_oxi::Error),
+    #[error("render apply viewport drifted")]
     ViewportDrift,
 }
 
-impl From<nvim_oxi::Error> for ApplyRenderActionError {
-    fn from(error: nvim_oxi::Error) -> Self {
-        Self::Shell(error)
-    }
-}
-
-pub(crate) fn apply_ingress_cursor_presentation_effect(
-    effect: IngressCursorPresentationEffect,
-) -> Result<()> {
+pub(crate) fn apply_ingress_cursor_presentation_effect(effect: IngressCursorPresentationEffect) {
     match effect {
         IngressCursorPresentationEffect::HideCursor => {
             hide_real_cursor();
-            Ok(())
         }
         IngressCursorPresentationEffect::HideCursorAndPrepaint { cell, zindex } => {
             hide_real_cursor();
-            prepaint_cursor_block(ensure_namespace_id(), cell, zindex)
+            prepaint_cursor_block(ensure_namespace_id(), cell, zindex);
         }
     }
 }
@@ -267,7 +258,7 @@ impl RenderCleanupOutcome {
 
 pub(crate) fn execute_core_apply_render_cleanup_effect(
     payload: ApplyRenderCleanupEffect,
-) -> Result<Vec<crate::core::event::Event>> {
+) -> Vec<crate::core::event::Event> {
     let observed_at = to_core_millis(now_ms());
     let namespace_id = ensure_namespace_id();
     let cleanup_summary = render_cleanup_execution_summary(payload.execution);
@@ -308,12 +299,12 @@ pub(crate) fn execute_core_apply_render_cleanup_effect(
         )
     });
 
-    Ok(vec![crate::core::event::Event::RenderCleanupApplied(
+    vec![crate::core::event::Event::RenderCleanupApplied(
         crate::core::event::RenderCleanupAppliedEvent {
             observed_at,
             action,
         },
-    )])
+    )]
 }
 
 fn to_draw_allocation_policy(effect: RenderAllocationPolicy) -> AllocationPolicy {
@@ -361,43 +352,14 @@ fn live_viewport_matches_projection(projection: &ProjectionSnapshot) -> Result<b
     ))
 }
 
-fn draw_realization_target_projection(
-    patch: &ScenePatch,
-) -> std::result::Result<&ProjectionSnapshot, ApplyRenderActionError> {
-    match project_scene_patch(patch) {
-        Ok(ScenePatchRealization::Draw(projection)) => Ok(projection),
-        Ok(ScenePatchRealization::Noop) => {
-            // reducer `Draw` is a shell-authoritative frame boundary, not merely a
-            // projection diff. If the target projection equals the acknowledged one, the patch
-            // kind collapses to `Noop`, but shell apply must still consume the target snapshot so
-            // pooled smear windows can roll epochs and release/hide the previous frame.
-            patch.basis().target().ok_or_else(|| {
-                ApplyRenderActionError::Shell(nvim_oxi::Error::Api(nvim_oxi::api::Error::Other(
-                    "draw realization reached shell apply without target projection".into(),
-                )))
-            })
-        }
-        Ok(ScenePatchRealization::Clear) => Err(ApplyRenderActionError::Shell(
-            nvim_oxi::Error::Api(nvim_oxi::api::Error::Other(
-                "draw realization reached shell apply with clear patch".into(),
-            )),
-        )),
-        Err(ScenePatchRealizationError::MissingTargetProjection) => {
-            Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
-                nvim_oxi::api::Error::Other("replace patch missing target projection".into()),
-            )))
-        }
-    }
-}
-
 pub(super) fn apply_render_action(
     namespace_id: u32,
-    patch: &ScenePatch,
-    realization: &RealizationPlan,
-    render_side_effects: RenderSideEffects,
+    proposal: &InFlightProposal,
 ) -> std::result::Result<RenderExecutionMetrics, ApplyRenderActionError> {
-    let realization_summary = realization_plan_summary(realization);
-    let patch_summary = scene_patch_summary(patch);
+    let realization = proposal.realization();
+    let realization_summary = realization_plan_summary(&realization);
+    let patch_summary = scene_patch_summary(proposal.patch());
+    let render_side_effects = proposal.side_effects();
     let side_effects_summary = render_side_effects_summary(render_side_effects);
     trace_lazy(|| {
         format!(
@@ -406,9 +368,13 @@ pub(super) fn apply_render_action(
     });
     clear_prepaint_for_current_tab(namespace_id);
     let mut metrics = RenderExecutionMetrics::default();
-    match realization {
-        RealizationPlan::Draw(draw) => {
-            let projection = draw_realization_target_projection(patch)?;
+    match proposal.execution() {
+        ProposalExecution::Draw {
+            target_projection,
+            realization: draw,
+            ..
+        } => {
+            let projection = target_projection;
             trace_lazy(|| {
                 format!(
                     "render_projection_debug namespace_id={} {}",
@@ -441,24 +407,9 @@ pub(super) fn apply_render_action(
                     render_side_effects.allow_real_cursor_updates,
                 );
         }
-        RealizationPlan::Clear(clear) => {
-            match project_scene_patch(patch) {
-                Ok(ScenePatchRealization::Clear | ScenePatchRealization::Noop) => {}
-                Ok(ScenePatchRealization::Draw(_)) => {
-                    return Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
-                        nvim_oxi::api::Error::Other(
-                            "clear realization reached shell apply with draw patch".into(),
-                        ),
-                    )));
-                }
-                Err(ScenePatchRealizationError::MissingTargetProjection) => {
-                    return Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
-                        nvim_oxi::api::Error::Other(
-                            "replace patch missing target projection".into(),
-                        ),
-                    )));
-                }
-            }
+        ProposalExecution::Clear {
+            realization: clear, ..
+        } => {
             let clear_summary = clear_active_render_windows(namespace_id, clear.max_kept_windows());
             metrics.windows_pruned = metrics
                 .windows_pruned
@@ -476,42 +427,14 @@ pub(super) fn apply_render_action(
                     render_side_effects.allow_real_cursor_updates,
                 );
         }
-        RealizationPlan::Noop => {
-            match project_scene_patch(patch) {
-                Ok(ScenePatchRealization::Noop) => {}
-                Ok(ScenePatchRealization::Draw(_)) => {
-                    return Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
-                        nvim_oxi::api::Error::Other(
-                            "noop realization reached shell apply with draw patch".into(),
-                        ),
-                    )));
-                }
-                Ok(ScenePatchRealization::Clear) => {
-                    return Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
-                        nvim_oxi::api::Error::Other(
-                            "noop realization reached shell apply with clear patch".into(),
-                        ),
-                    )));
-                }
-                Err(ScenePatchRealizationError::MissingTargetProjection) => {
-                    return Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
-                        nvim_oxi::api::Error::Other(
-                            "replace patch missing target projection".into(),
-                        ),
-                    )));
-                }
-            }
+        ProposalExecution::Noop { .. } => {
             metrics.had_visual_change = apply_cursor_visibility_effect(
                 render_side_effects.cursor_visibility,
                 render_side_effects.allow_real_cursor_updates,
             );
         }
-        RealizationPlan::Failure(_) => {
-            // the proposal executor converts typed failure plans into
-            // `ApplyReported::ApplyFailed` before calling shell apply.
-            return Err(ApplyRenderActionError::Shell(nvim_oxi::Error::Api(
-                nvim_oxi::api::Error::Other("typed realization failure reached shell apply".into()),
-            )));
+        ProposalExecution::Failure { .. } => {
+            unreachable!("failure proposals are converted before shell apply");
         }
     }
 
@@ -532,18 +455,17 @@ pub(super) fn apply_render_action(
 mod tests {
     use super::{
         ApplyMetrics, RenderCleanupOutcome, RenderExecutionMetrics, apply_render_action,
-        draw_realization_target_projection, draw_release_requires_redraw,
-        viewport_matches_projection_witness,
+        draw_release_requires_redraw, viewport_matches_projection_witness,
     };
     use crate::core::realization::LogicalRaster;
     use crate::core::runtime_reducer::RenderSideEffects;
     use crate::core::state::{
-        PatchBasis, ProjectionSnapshot, ProjectionWitness, RealizationClear, RealizationPlan,
+        InFlightProposal, PatchBasis, ProjectionSnapshot, ProjectionWitness, RealizationClear,
         ScenePatch,
     };
     use crate::core::types::{
-        CursorCol, CursorRow, IngressSeq, ObservationId, ProjectorRevision, SceneRevision,
-        ViewportSnapshot,
+        CursorCol, CursorRow, IngressSeq, ObservationId, ProjectorRevision, ProposalId,
+        SceneRevision, ViewportSnapshot,
     };
     use crate::draw::render_plan::{CellOp, Viewport};
     use crate::draw::{ClearActiveRenderWindowsSummary, PurgeRenderWindowsSummary};
@@ -629,24 +551,83 @@ mod tests {
     #[test]
     fn clear_realization_accepts_noop_patch_basis() {
         let patch = ScenePatch::derive(PatchBasis::new(None, None));
-        let realization = RealizationPlan::Clear(RealizationClear::new(1));
+        let proposal = InFlightProposal::clear(
+            ProposalId::new(1),
+            patch,
+            RealizationClear::new(1),
+            crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+            RenderSideEffects::default(),
+            crate::core::state::AnimationSchedule::Idle,
+        )
+        .expect("clear proposal should accept a noop patch basis");
 
-        let result = apply_render_action(0, &patch, &realization, RenderSideEffects::default());
+        let result = apply_render_action(0, &proposal);
 
         assert!(result.is_ok());
     }
 
     #[test]
-    fn draw_realization_uses_target_projection_for_noop_patch_basis() {
+    fn draw_proposal_uses_target_projection_for_noop_patch_basis() {
         let viewport = ViewportSnapshot::new(CursorRow(20), CursorCol(40));
         let projection = projection_snapshot(viewport);
         let patch = ScenePatch::derive(PatchBasis::new(
             Some(projection.clone()),
             Some(projection.clone()),
         ));
+        let proposal = InFlightProposal::draw(
+            ProposalId::new(1),
+            patch,
+            crate::core::state::RealizationDraw::new(
+                crate::core::realization::PaletteSpec::from_frame(&crate::types::RenderFrame {
+                    mode: "n".to_string(),
+                    corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
+                    step_samples: Vec::new().into(),
+                    planner_idle_steps: 0,
+                    target: crate::types::Point { row: 1.0, col: 1.0 },
+                    target_corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
+                    vertical_bar: false,
+                    trail_stroke_id: crate::core::types::StrokeId::new(1),
+                    retarget_epoch: 1,
+                    particles: Vec::new().into(),
+                    color_at_cursor: None,
+                    static_config: std::sync::Arc::new(crate::types::StaticRenderConfig {
+                        cursor_color: None,
+                        cursor_color_insert_mode: None,
+                        normal_bg: None,
+                        transparent_bg_fallback_color: String::new(),
+                        cterm_cursor_colors: None,
+                        cterm_bg: None,
+                        hide_target_hack: false,
+                        max_kept_windows: 32,
+                        never_draw_over_target: false,
+                        particle_max_lifetime: 0.0,
+                        particle_switch_octant_braille: 0.0,
+                        particles_over_text: true,
+                        color_levels: 16,
+                        gamma: 1.0,
+                        block_aspect_ratio: crate::config::DEFAULT_BLOCK_ASPECT_RATIO,
+                        tail_duration_ms: 0.0,
+                        simulation_hz: 0.0,
+                        trail_thickness: 0.0,
+                        trail_thickness_x: 0.0,
+                        spatial_coherence_weight: 0.0,
+                        temporal_stability_weight: 0.0,
+                        top_k_per_cell: 1,
+                        windows_zindex: 1,
+                    }),
+                }),
+                crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
+                32,
+            ),
+            crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+            RenderSideEffects::default(),
+            crate::core::state::AnimationSchedule::Idle,
+        )
+        .expect("noop draw patch should keep the target projection");
 
-        let draw_projection =
-            draw_realization_target_projection(&patch).expect("noop draw should keep target");
+        let Some((draw_projection, _)) = proposal.execution().draw_realization() else {
+            panic!("expected draw proposal execution");
+        };
 
         assert_eq!(draw_projection, &projection);
     }

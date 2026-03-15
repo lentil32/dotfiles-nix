@@ -4,7 +4,7 @@ use super::logging::{set_log_level, trace_lazy, warn};
 use super::probe_cache::CursorColorCacheLookup;
 use super::timers::{NvimTimerId, start_timer_once, stop_timer};
 use super::trace::{timer_kind_name, timer_token_summary};
-use super::{ENGINE_CONTEXT, EngineState, HostBridgeState};
+use super::{ENGINE_CONTEXT, EngineContext, EngineState, HostBridgeState};
 use crate::config::RuntimeConfig;
 use crate::core::effect::{Effect, EventLoopMetricEffect, TimerKind};
 use crate::core::event::{
@@ -15,20 +15,19 @@ use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::{CoreState, CursorColorProbeWitness, CursorColorSample, ProbeKind};
 use crate::core::types::{DelayBudgetMs, Generation, Millis, TimerId, TimerToken};
 use crate::draw::recover_all_namespaces;
-use crate::mutex::lock_with_poison_recovery;
 use crate::types::Point;
 use nvim_oxi::Result;
 use nvim_utils::mode::{
     is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
 };
 use std::cell::RefCell;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct CoreTimerHandle {
     shell_timer_id: NvimTimerId,
-    kind: TimerKind,
     token: TimerToken,
 }
 
@@ -50,8 +49,8 @@ impl CoreTimerHandles {
         }
     }
 
-    fn replace(&mut self, timer_id: TimerId, handle: CoreTimerHandle) -> Option<CoreTimerHandle> {
-        self.slot_mut(timer_id).replace(handle)
+    fn replace(&mut self, handle: CoreTimerHandle) -> Option<CoreTimerHandle> {
+        self.slot_mut(handle.token.id()).replace(handle)
     }
 
     fn clear(&mut self, timer_id: TimerId) -> Option<CoreTimerHandle> {
@@ -165,18 +164,19 @@ pub(super) struct IngressReadSnapshot {
 
 impl IngressReadSnapshot {
     fn capture() -> Self {
-        let state = engine_lock();
-        let runtime = state.core_state.runtime();
-        let config = &runtime.config;
+        read_engine_state(|state| {
+            let runtime = state.core_state.runtime();
+            let config = &runtime.config;
 
-        Self {
-            enabled: runtime.is_enabled(),
-            needs_initialize: state.core_state.needs_initialize(),
-            key_delay_ms: as_delay_ms(config.delay_after_key),
-            current_corners: runtime.current_corners(),
-            mode_policy: IngressModePolicySnapshot::from_runtime_config(config),
-            filetypes_disabled: Arc::clone(&config.filetypes_disabled),
-        }
+            Self {
+                enabled: runtime.is_enabled(),
+                needs_initialize: state.core_state.needs_initialize(),
+                key_delay_ms: as_delay_ms(config.delay_after_key),
+                current_corners: runtime.current_corners(),
+                mode_policy: IngressModePolicySnapshot::from_runtime_config(config),
+                filetypes_disabled: Arc::clone(&config.filetypes_disabled),
+            }
+        })
     }
 
     pub(super) const fn enabled(&self) -> bool {
@@ -234,18 +234,19 @@ impl IngressReadSnapshot {
     }
 }
 
-fn set_core_timer_handle(timer_id: TimerId, handle: CoreTimerHandle) {
+fn set_core_timer_handle(handle: CoreTimerHandle) {
     with_core_timer_handles(|handles| {
-        let _ = handles.replace(timer_id, handle);
+        let _ = handles.replace(handle);
     });
 }
 
 fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
+    let kind = TimerKind::from_timer_id(handle.token.id());
     trace_lazy(|| {
         format!(
             "timer_stop context={} kind={} token={} shell_timer_id={}",
             context,
-            timer_kind_name(handle.kind),
+            timer_kind_name(kind),
             timer_token_summary(handle.token),
             handle.shell_timer_id.get(),
         )
@@ -253,7 +254,7 @@ fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
     if let Err(err) = stop_timer(handle.shell_timer_id) {
         warn(&format!(
             "failed to stop core timer (context={context}, kind={:?}, token={:?}): {err}",
-            handle.kind, handle.token
+            kind, handle.token
         ));
     }
 }
@@ -364,79 +365,74 @@ pub(super) fn event_loop_diagnostics() -> event_loop::EventLoopDiagnostics {
 
 pub(super) fn diagnostics_report() -> String {
     let loop_diag = event_loop_diagnostics();
-    let state = engine_lock();
-    let runtime = state.core_state.runtime();
-    let core = state.core_state();
-    let host_bridge_state = match state.shell.host_bridge_state() {
-        HostBridgeState::Unverified => "unverified".to_string(),
-        HostBridgeState::Verified { revision } => format!("verified:v{}", revision.get()),
-    };
+    read_engine_state(|state| {
+        let runtime = state.core_state.runtime();
+        let core = state.core_state();
+        let host_bridge_state = match state.shell.host_bridge_state() {
+            HostBridgeState::Unverified => "unverified".to_string(),
+            HostBridgeState::Verified { revision } => format!("verified:v{}", revision.get()),
+        };
 
-    let animation_phase = if !runtime.is_initialized() {
-        "uninitialized"
-    } else if runtime.is_settling() {
-        "settling"
-    } else if runtime.is_animating() {
-        "animating"
-    } else {
-        "idle"
-    };
+        let animation_phase = if !runtime.is_initialized() {
+            "uninitialized"
+        } else if runtime.is_settling() {
+            "settling"
+        } else if runtime.is_animating() {
+            "animating"
+        } else if runtime.is_draining() {
+            "draining"
+        } else {
+            "idle"
+        };
 
-    format!(
-        "smear_cursor enabled={} animation_phase={} core_lifecycle={:?} host_bridge={} ingress_received={} ingress_applied={} ingress_dropped={} ingress_coalesced={} ingress_starved={} observation_requests_executed={} degraded_draw_applications={} stale_token_events={} timer_schedule_samples={} timer_schedule_mean_ms={:.3} timer_schedule_max_ms={:.3} timer_fire_samples={} timer_fire_mean_ms={:.3} timer_fire_max_ms={:.3} scheduled_queue_depth_samples={} scheduled_queue_depth_mean={:.3} scheduled_queue_depth_max={} cursor_probe_samples={} cursor_probe_mean_ms={:.3} cursor_probe_max_ms={:.3} cursor_probe_refresh_retries={} cursor_probe_refresh_budget_exhausted={} background_probe_samples={} background_probe_mean_ms={:.3} background_probe_max_ms={:.3} background_probe_refresh_retries={} background_probe_refresh_budget_exhausted={} planner_compile_samples={} planner_compile_mean_ms={:.3} planner_compile_max_ms={:.3} planner_decode_samples={} planner_decode_mean_ms={:.3} planner_decode_max_ms={:.3} callback_ewma_ms={:.3} last_autocmd_ms={:.3} last_observation_request_ms={:.3}",
-        runtime.is_enabled(),
-        animation_phase,
-        core.lifecycle(),
-        host_bridge_state,
-        loop_diag.metrics.ingress_received,
-        loop_diag.metrics.ingress_applied,
-        loop_diag.metrics.ingress_dropped,
-        loop_diag.metrics.ingress_coalesced,
-        loop_diag.metrics.ingress_starved,
-        loop_diag.metrics.observation_requests_executed,
-        loop_diag.metrics.degraded_draw_applications,
-        loop_diag.metrics.stale_token_events,
-        loop_diag.metrics.timer_schedule.samples,
-        loop_diag.metrics.timer_schedule.mean_ms(),
-        loop_diag.metrics.timer_schedule.max_ms(),
-        loop_diag.metrics.timer_fire.samples,
-        loop_diag.metrics.timer_fire.mean_ms(),
-        loop_diag.metrics.timer_fire.max_ms(),
-        loop_diag.metrics.scheduled_queue_depth.samples,
-        loop_diag.metrics.scheduled_queue_depth.mean_depth(),
-        loop_diag.metrics.scheduled_queue_depth.max_depth,
-        loop_diag.metrics.cursor_color_probe.duration.samples,
-        loop_diag.metrics.cursor_color_probe.duration.mean_ms(),
-        loop_diag.metrics.cursor_color_probe.duration.max_ms(),
-        loop_diag.metrics.cursor_color_probe.refresh_retries,
-        loop_diag
-            .metrics
-            .cursor_color_probe
-            .refresh_budget_exhausted,
-        loop_diag.metrics.background_probe.duration.samples,
-        loop_diag.metrics.background_probe.duration.mean_ms(),
-        loop_diag.metrics.background_probe.duration.max_ms(),
-        loop_diag.metrics.background_probe.refresh_retries,
-        loop_diag.metrics.background_probe.refresh_budget_exhausted,
-        loop_diag.metrics.planner_compile.samples,
-        loop_diag.metrics.planner_compile.mean_ms(),
-        loop_diag.metrics.planner_compile.max_ms(),
-        loop_diag.metrics.planner_decode.samples,
-        loop_diag.metrics.planner_decode.mean_ms(),
-        loop_diag.metrics.planner_decode.max_ms(),
-        loop_diag.callback_duration_ewma_ms,
-        loop_diag.last_autocmd_event_ms,
-        loop_diag.last_observation_request_ms,
-    )
+        format!(
+            "smear_cursor enabled={} animation_phase={} core_lifecycle={:?} host_bridge={} ingress_received={} ingress_applied={} ingress_dropped={} ingress_coalesced={} observation_requests_executed={} degraded_draw_applications={} stale_token_events={} timer_schedule_samples={} timer_schedule_mean_ms={:.3} timer_schedule_max_ms={:.3} timer_fire_samples={} timer_fire_mean_ms={:.3} timer_fire_max_ms={:.3} scheduled_queue_depth_samples={} scheduled_queue_depth_mean={:.3} scheduled_queue_depth_max={} cursor_probe_samples={} cursor_probe_mean_ms={:.3} cursor_probe_max_ms={:.3} cursor_probe_refresh_retries={} cursor_probe_refresh_budget_exhausted={} background_probe_samples={} background_probe_mean_ms={:.3} background_probe_max_ms={:.3} background_probe_refresh_retries={} background_probe_refresh_budget_exhausted={} callback_ewma_ms={:.3} last_autocmd_ms={:.3} last_observation_request_ms={:.3}",
+            runtime.is_enabled(),
+            animation_phase,
+            core.lifecycle(),
+            host_bridge_state,
+            loop_diag.metrics.ingress_received,
+            loop_diag.metrics.ingress_applied,
+            loop_diag.metrics.ingress_dropped,
+            loop_diag.metrics.ingress_coalesced,
+            loop_diag.metrics.observation_requests_executed,
+            loop_diag.metrics.degraded_draw_applications,
+            loop_diag.metrics.stale_token_events,
+            loop_diag.metrics.timer_schedule.samples,
+            loop_diag.metrics.timer_schedule.mean_ms(),
+            loop_diag.metrics.timer_schedule.max_ms(),
+            loop_diag.metrics.timer_fire.samples,
+            loop_diag.metrics.timer_fire.mean_ms(),
+            loop_diag.metrics.timer_fire.max_ms(),
+            loop_diag.metrics.scheduled_queue_depth.samples,
+            loop_diag.metrics.scheduled_queue_depth.mean_depth(),
+            loop_diag.metrics.scheduled_queue_depth.max_depth,
+            loop_diag.metrics.cursor_color_probe.duration.samples,
+            loop_diag.metrics.cursor_color_probe.duration.mean_ms(),
+            loop_diag.metrics.cursor_color_probe.duration.max_ms(),
+            loop_diag.metrics.cursor_color_probe.refresh_retries,
+            loop_diag
+                .metrics
+                .cursor_color_probe
+                .refresh_budget_exhausted,
+            loop_diag.metrics.background_probe.duration.samples,
+            loop_diag.metrics.background_probe.duration.mean_ms(),
+            loop_diag.metrics.background_probe.duration.max_ms(),
+            loop_diag.metrics.background_probe.refresh_retries,
+            loop_diag.metrics.background_probe.refresh_budget_exhausted,
+            loop_diag.callback_duration_ewma_ms,
+            loop_diag.last_autocmd_event_ms,
+            loop_diag.last_observation_request_ms,
+        )
+    })
 }
 
 fn reset_transient_event_state_with_policy() {
     clear_all_core_timer_handles();
     super::handlers::reset_scheduled_effect_queue();
-    {
-        let mut state = engine_lock();
+    mutate_engine_state(|state| {
         state.shell.reset_probe_caches();
-    }
+    });
     clear_autocmd_event_timestamp();
     clear_observation_request_timestamp();
     clear_cursor_callback_duration_estimate();
@@ -469,24 +465,39 @@ fn recover_engine_state(state: &mut EngineState) -> Option<u32> {
 
 fn post_engine_state_recovery(namespace_id: Option<u32>) {
     set_log_level(RuntimeConfig::default().logging_level);
-    warn("state mutex poisoned; resetting runtime state");
+    warn("engine state panicked while borrowed; resetting runtime state");
     if let Some(namespace_id) = namespace_id {
         let _ = recover_all_namespaces(namespace_id);
     }
     reset_transient_event_state_without_generation_bump();
 }
 
-pub(super) fn engine_lock() -> std::sync::MutexGuard<'static, EngineState> {
-    lock_with_poison_recovery(
-        &ENGINE_CONTEXT.state,
-        recover_engine_state,
-        post_engine_state_recovery,
-    )
+fn with_engine_state_access<R>(accessor: impl FnOnce(&mut EngineState) -> R) -> R {
+    let mut state = ENGINE_CONTEXT.with(EngineContext::take_state);
+    match catch_unwind(AssertUnwindSafe(|| accessor(&mut state))) {
+        Ok(output) => {
+            ENGINE_CONTEXT.with(|context| context.restore_state(state));
+            output
+        }
+        Err(panic_payload) => {
+            let namespace_id = recover_engine_state(&mut state);
+            ENGINE_CONTEXT.with(|context| context.restore_state(state));
+            post_engine_state_recovery(namespace_id);
+            resume_unwind(panic_payload);
+        }
+    }
+}
+
+pub(super) fn read_engine_state<R>(reader: impl FnOnce(&EngineState) -> R) -> R {
+    with_engine_state_access(|state| reader(state))
+}
+
+pub(super) fn mutate_engine_state<R>(mutator: impl FnOnce(&mut EngineState) -> R) -> R {
+    with_engine_state_access(mutator)
 }
 
 pub(super) fn is_enabled() -> bool {
-    let state = engine_lock();
-    state.core_state.runtime().is_enabled()
+    read_engine_state(|state| state.core_state.runtime().is_enabled())
 }
 
 pub(super) fn ingress_read_snapshot() -> IngressReadSnapshot {
@@ -494,52 +505,54 @@ pub(super) fn ingress_read_snapshot() -> IngressReadSnapshot {
 }
 
 pub(super) fn core_state() -> CoreState {
-    let state = engine_lock();
-    state.core_state()
+    read_engine_state(EngineState::core_state)
 }
 
 pub(super) fn set_core_state(next_state: CoreState) {
-    let mut state = engine_lock();
-    state.set_core_state(next_state);
+    mutate_engine_state(|state| {
+        state.set_core_state(next_state);
+    });
 }
 
 pub(super) fn cursor_color_colorscheme_generation() -> Generation {
-    let state = engine_lock();
-    state.shell.cursor_color_colorscheme_generation()
+    read_engine_state(|state| state.shell.cursor_color_colorscheme_generation())
 }
 
 pub(super) fn cached_cursor_color_sample(
     witness: &CursorColorProbeWitness,
 ) -> CursorColorCacheLookup {
-    let state = engine_lock();
-    state.shell.cached_cursor_color_sample(witness)
+    read_engine_state(|state| state.shell.cached_cursor_color_sample(witness))
 }
 
 pub(super) fn store_cursor_color_sample(
     witness: CursorColorProbeWitness,
     sample: Option<CursorColorSample>,
 ) {
-    let mut state = engine_lock();
-    state.shell.store_cursor_color_sample(witness, sample);
+    mutate_engine_state(|state| {
+        state.shell.store_cursor_color_sample(witness, sample);
+    });
 }
 
 pub(super) fn note_cursor_color_colorscheme_change() {
-    let mut state = engine_lock();
-    state.shell.note_cursor_color_colorscheme_change();
+    mutate_engine_state(|state| {
+        state.shell.note_cursor_color_colorscheme_change();
+    });
 }
 
 pub(crate) fn record_effect_failure(source: EffectFailureSource, context: &'static str) {
     let observed_at = to_core_millis(now_ms());
-    if let Err(err) = super::handlers::dispatch_core_event_with_default_scheduler(
-        Event::EffectFailed(EffectFailedEvent {
+    trace_lazy(|| {
+        format!(
+            "effect_failure_recorded source={source:?} context={context} observed_at={}",
+            observed_at.value(),
+        )
+    });
+    super::handlers::dispatch_core_event_with_default_scheduler(Event::EffectFailed(
+        EffectFailedEvent {
             proposal_id: None,
             observed_at,
-        }),
-    ) {
-        warn(&format!(
-            "failed to dispatch effect failure (source={source:?}, context={context}): {err}"
-        ));
-    }
+        },
+    ));
 }
 
 pub(super) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId) {
@@ -558,7 +571,7 @@ pub(super) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId) {
     trace_lazy(|| {
         format!(
             "timer_fire kind={} token={} shell_timer_id={} observed_at={}",
-            timer_kind_name(handle.kind),
+            timer_kind_name(TimerKind::from_timer_id(handle.token.id())),
             timer_token_summary(handle.token),
             shell_timer_id.get(),
             observed_at.value(),
@@ -566,22 +579,19 @@ pub(super) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId) {
     });
 
     let event = Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
-        kind: handle.kind,
         token: handle.token,
         observed_at,
     });
 
-    let dispatch_result = super::handlers::dispatch_core_event_with_default_scheduler(event);
+    super::handlers::dispatch_core_event_with_default_scheduler(event);
     record_timer_fire_duration(duration_to_micros(started_at.elapsed()));
-    if let Err(err) = dispatch_result {
-        warn(&format!("core timer callback dispatch failed: {err}"));
-    }
 }
 
 fn reset_core_state() {
-    let mut state = engine_lock();
-    let runtime = state.core_state.runtime().clone();
-    state.set_core_state(CoreState::default().with_runtime(runtime));
+    mutate_engine_state(|state| {
+        let runtime = state.core_state.runtime().clone();
+        state.set_core_state(CoreState::default().with_runtime(runtime));
+    });
 }
 
 pub(super) fn to_core_millis(value_ms: f64) -> Millis {
@@ -600,23 +610,12 @@ fn duration_to_micros(duration: Duration) -> u64 {
 
 fn schedule_core_timer_effect(
     host_bridge: InstalledHostBridge,
-    kind: TimerKind,
     token: TimerToken,
     delay_ms: u64,
     requested_at: Millis,
 ) -> Vec<Event> {
-    let expected_timer_id = kind.timer_id();
-    if token.id() != expected_timer_id {
-        // Surprising: reducer emitted mismatched timer kind/token id.
-        warn("core timer schedule received mismatched timer kind/token id");
-        return vec![Event::TimerLostWithToken(TimerLostWithTokenEvent {
-            kind,
-            token,
-            observed_at: requested_at,
-        })];
-    }
-
-    clear_core_timer_handle(expected_timer_id);
+    let kind = TimerKind::from_timer_id(token.id());
+    clear_core_timer_handle(token.id());
     let timeout = Duration::from_millis(delay_ms);
     let timer_schedule_summary = format!(
         "kind={} token={} delay_ms={} requested_at={}",
@@ -637,21 +636,16 @@ fn schedule_core_timer_effect(
                     shell_timer_id.get(),
                 )
             });
-            set_core_timer_handle(
-                expected_timer_id,
-                CoreTimerHandle {
-                    shell_timer_id,
-                    kind,
-                    token,
-                },
-            );
+            set_core_timer_handle(CoreTimerHandle {
+                shell_timer_id,
+                token,
+            });
             Vec::new()
         }
         Err(err) => {
             trace_lazy(|| format!("timer_schedule_failed {timer_schedule_summary} error={err}"));
             warn(&format!("failed to schedule core timer: {err}"));
             vec![Event::TimerLostWithToken(TimerLostWithTokenEvent {
-                kind,
                 token,
                 observed_at: requested_at,
             })]
@@ -661,9 +655,10 @@ fn schedule_core_timer_effect(
 
 fn resolved_timer_delay_ms(kind: TimerKind, delay: DelayBudgetMs) -> u64 {
     if kind == TimerKind::Animation && delay == DelayBudgetMs::DEFAULT_ANIMATION {
-        let state = engine_lock();
-        let configured_interval_ms = state.core_state.runtime().config.time_interval;
-        return as_delay_ms(configured_interval_ms).max(1);
+        return read_engine_state(|state| {
+            let configured_interval_ms = state.core_state.runtime().config.time_interval;
+            as_delay_ms(configured_interval_ms).max(1)
+        });
     }
     delay.value()
 }
@@ -690,9 +685,11 @@ impl EffectExecutor for NeovimEffectExecutor {
         match effect {
             Effect::ScheduleTimer(payload) => Ok(schedule_core_timer_effect(
                 self.host_bridge,
-                payload.kind,
                 payload.token,
-                resolved_timer_delay_ms(payload.kind, payload.delay),
+                resolved_timer_delay_ms(
+                    TimerKind::from_timer_id(payload.token.id()),
+                    payload.delay,
+                ),
                 payload.requested_at,
             )),
             Effect::RequestObservationBase(payload) => {
@@ -707,17 +704,17 @@ impl EffectExecutor for NeovimEffectExecutor {
                 record_probe_duration(kind, duration_to_micros(started_at.elapsed()));
                 Ok(result)
             }
-            Effect::RequestRenderPlan(payload) => {
-                super::handlers::execute_core_request_render_plan_effect(payload.as_ref())
-            }
-            Effect::ApplyProposal(payload) => {
-                super::handlers::execute_core_apply_proposal_effect(*payload)
-            }
-            Effect::ApplyRenderCleanup(payload) => {
-                super::handlers::execute_core_apply_render_cleanup_effect(payload)
-            }
+            Effect::RequestRenderPlan(payload) => Ok(
+                super::handlers::execute_core_request_render_plan_effect(payload.as_ref()),
+            ),
+            Effect::ApplyProposal(payload) => Ok(
+                super::handlers::execute_core_apply_proposal_effect(*payload),
+            ),
+            Effect::ApplyRenderCleanup(payload) => Ok(
+                super::handlers::execute_core_apply_render_cleanup_effect(payload),
+            ),
             Effect::ApplyIngressCursorPresentation(payload) => {
-                super::handlers::apply_ingress_cursor_presentation_effect(payload)?;
+                super::handlers::apply_ingress_cursor_presentation_effect(payload);
                 Ok(Vec::new())
             }
             Effect::RecordEventLoopMetric(metric) => {
@@ -748,13 +745,32 @@ mod ingress_snapshot_tests {
     use std::sync::Arc;
 
     #[test]
-    fn ingress_mode_policy_matches_composite_mode_rules() {
+    fn ingress_mode_policy_rejects_insert_composite_modes_without_insert_flag() {
         let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
-
         assert!(!policy.mode_allowed("ic"));
+    }
+
+    #[test]
+    fn ingress_mode_policy_accepts_replace_visual_modes_with_replace_flag() {
+        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
         assert!(policy.mode_allowed("Rv"));
+    }
+
+    #[test]
+    fn ingress_mode_policy_rejects_terminal_pending_modes_without_terminal_flag() {
+        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
         assert!(!policy.mode_allowed("ntT"));
+    }
+
+    #[test]
+    fn ingress_mode_policy_accepts_cmdline_visual_modes_with_cmdline_flag() {
+        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
         assert!(policy.mode_allowed("cv"));
+    }
+
+    #[test]
+    fn ingress_mode_policy_keeps_normal_mode_enabled() {
+        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
         assert!(policy.mode_allowed("n"));
     }
 
@@ -811,27 +827,23 @@ mod tests {
         NvimTimerId::try_new(value).expect("test shell timer id must be positive")
     }
 
-    fn handle(value: i64, kind: TimerKind, generation: u64) -> CoreTimerHandle {
+    fn handle(value: i64, timer_id: TimerId, generation: u64) -> CoreTimerHandle {
         CoreTimerHandle {
             shell_timer_id: shell_timer_id(value),
-            kind,
-            token: TimerToken::new(kind.timer_id(), TimerGeneration::new(generation)),
+            token: TimerToken::new(timer_id, TimerGeneration::new(generation)),
         }
     }
 
     #[test]
     fn core_timer_handles_replace_is_slot_scoped() {
         let mut handles = CoreTimerHandles::default();
-        let animation = handle(11, TimerKind::Animation, 1);
-        let ingress = handle(12, TimerKind::Ingress, 2);
-        let replacement = handle(13, TimerKind::Animation, 3);
+        let animation = handle(11, TimerId::Animation, 1);
+        let ingress = handle(12, TimerId::Ingress, 2);
+        let replacement = handle(13, TimerId::Animation, 3);
 
-        assert_eq!(handles.replace(TimerId::Animation, animation), None);
-        assert_eq!(handles.replace(TimerId::Ingress, ingress), None);
-        assert_eq!(
-            handles.replace(TimerId::Animation, replacement),
-            Some(animation)
-        );
+        assert_eq!(handles.replace(animation), None);
+        assert_eq!(handles.replace(ingress), None);
+        assert_eq!(handles.replace(replacement), Some(animation));
         assert_eq!(handles.animation, Some(replacement));
         assert_eq!(handles.ingress, Some(ingress));
     }
@@ -839,11 +851,11 @@ mod tests {
     #[test]
     fn core_timer_handles_take_by_shell_timer_id_is_slot_scoped() {
         let mut handles = CoreTimerHandles::default();
-        let animation = handle(11, TimerKind::Animation, 1);
-        let ingress = handle(12, TimerKind::Ingress, 2);
+        let animation = handle(11, TimerId::Animation, 1);
+        let ingress = handle(12, TimerId::Ingress, 2);
 
-        let _ = handles.replace(TimerId::Animation, animation);
-        let _ = handles.replace(TimerId::Ingress, ingress);
+        let _ = handles.replace(animation);
+        let _ = handles.replace(ingress);
 
         assert_eq!(
             handles.take_by_shell_timer_id(shell_timer_id(11)),
@@ -858,11 +870,11 @@ mod tests {
     #[test]
     fn core_timer_handles_clear_all_drains_every_active_timer() {
         let mut handles = CoreTimerHandles::default();
-        let animation = handle(21, TimerKind::Animation, 1);
-        let recovery = handle(22, TimerKind::Recovery, 2);
+        let animation = handle(21, TimerId::Animation, 1);
+        let recovery = handle(22, TimerId::Recovery, 2);
 
-        let _ = handles.replace(TimerId::Animation, animation);
-        let _ = handles.replace(TimerId::Recovery, recovery);
+        let _ = handles.replace(animation);
+        let _ = handles.replace(recovery);
 
         let drained = handles.clear_all();
 

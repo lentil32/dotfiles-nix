@@ -33,7 +33,6 @@ fn update_corners(
     } else {
         input.max_length
     };
-    let _legacy_timing_knobs = (input.trail_short_duration_ms, input.trail_size);
     let origin_center = center(&input.trail_origin_corners);
     let target_center = center(&input.target_corners);
     let aspect = crate::types::display_metric_row_scale(input.block_aspect_ratio);

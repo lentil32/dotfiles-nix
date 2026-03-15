@@ -1,4 +1,4 @@
-use super::types::{GlobalDisplayPose, JumpCue, JumpCuePhase, PendingTarget};
+use super::types::{AnimationPhase, GlobalDisplayPose, JumpCue, JumpCuePhase, PendingTarget};
 use super::{CursorLocation, RuntimeOptionsEffects, RuntimeOptionsPatch, RuntimeState};
 use crate::core::types::StrokeId;
 use crate::types::{EPSILON, Particle, Point, StaticRenderConfig};
@@ -41,33 +41,39 @@ impl RuntimeState {
     }
 
     pub(crate) fn is_initialized(&self) -> bool {
-        self.animation_state.is_initialized()
+        self.animation_phase.state().is_initialized()
     }
 
     pub(crate) fn mark_initialized(&mut self) {
-        if self.animation_state == super::AnimationState::Uninitialized {
-            self.animation_state = super::AnimationState::Idle;
+        if matches!(self.animation_phase, AnimationPhase::Uninitialized) {
+            self.animation_phase = AnimationPhase::Idle;
         }
     }
 
     pub(crate) fn clear_initialization(&mut self) {
-        self.animation_state = super::AnimationState::Uninitialized;
+        self.animation_phase = AnimationPhase::Uninitialized;
     }
 
     pub(crate) fn is_animating(&self) -> bool {
-        self.animation_state.is_animating()
+        self.animation_phase.state().is_animating()
     }
 
     pub(crate) fn is_settling(&self) -> bool {
-        self.animation_state.is_settling()
+        self.animation_phase.state().is_settling()
     }
 
     pub(crate) fn is_draining(&self) -> bool {
-        self.animation_state.is_draining()
+        self.animation_phase.state().is_draining()
     }
 
     pub(crate) fn pending_target(&self) -> Option<&PendingTarget> {
-        self.transient.pending_target.as_ref()
+        match &self.animation_phase {
+            AnimationPhase::Settling(phase) => Some(&phase.pending_target),
+            AnimationPhase::Uninitialized
+            | AnimationPhase::Idle
+            | AnimationPhase::Running(_)
+            | AnimationPhase::Draining(_) => None,
+        }
     }
 
     pub(crate) fn current_corners(&self) -> [Point; 4] {
@@ -94,8 +100,17 @@ impl RuntimeState {
         self.transient.trail_stroke_id
     }
 
+    #[cfg(test)]
     pub(crate) fn active_jump_cues(&self) -> &[JumpCue] {
         &self.transient.active_jump_cues
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_motion_clock(&self) -> bool {
+        matches!(
+            self.animation_phase,
+            AnimationPhase::Running(_) | AnimationPhase::Draining(_)
+        )
     }
 
     pub(crate) fn refresh_jump_cues(&mut self, now_ms: f64) -> bool {

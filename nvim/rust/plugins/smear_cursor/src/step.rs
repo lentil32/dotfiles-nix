@@ -1,65 +1,99 @@
+//! Lua-to-Rust frame-step boundary for the smear cursor animation pipeline.
+//!
+//! The step entrypoint validates a dense dictionary payload from Neovim,
+//! normalizes optional fields such as RNG state, and returns the next animation
+//! frame snapshot that the host bridge can apply.
+
 use crate::animation::simulate_step;
 use crate::lua::{
-    bool_from_object, f64_from_object, i64_from_object, invalid_key, parse_indexed_objects,
-    require_object, require_with, string_from_object,
+    LuaParseError, bool_from_object_typed, f64_from_object_typed, i64_from_object_typed,
+    invalid_key_error, parse_indexed_objects_typed, require_object_typed, require_with_typed,
+    to_nvim_error,
 };
 use crate::types::{DEFAULT_RNG_STATE, Particle, Point, StepInput};
 use nvim_oxi::serde::Deserializer;
 use nvim_oxi::{Array, Dictionary, Object, Result};
 use serde::Deserialize;
+use thiserror::Error;
 
-fn error(message: impl Into<String>) -> nvim_oxi::Error {
-    nvim_oxi::api::Error::Other(message.into()).into()
+type StepResult<T> = std::result::Result<T, StepInputError>;
+
+#[derive(Debug, Error)]
+enum StepInputError {
+    #[error("invalid step args: {message}")]
+    Deserialize { message: String },
+    #[error(transparent)]
+    Validation(#[from] LuaParseError),
+    #[error("{field} overflow")]
+    OneBasedIndexOverflow { field: &'static str },
 }
 
-fn require_f64(value: Option<Object>, key: &str) -> Result<f64> {
-    require_with(value, key, f64_from_object)
+impl From<StepInputError> for nvim_oxi::Error {
+    fn from(error: StepInputError) -> Self {
+        match error {
+            StepInputError::Validation(error) => to_nvim_error(&error),
+            other => nvim_oxi::api::Error::Other(other.to_string()).into(),
+        }
+    }
 }
 
-fn require_i64(value: Option<Object>, key: &str) -> Result<i64> {
-    require_with(value, key, i64_from_object)
+fn invalid_step_value(key: &str, expected: &'static str) -> StepInputError {
+    StepInputError::from(invalid_key_error(key, expected))
 }
 
-fn require_bool(value: Option<Object>, key: &str) -> Result<bool> {
-    require_with(value, key, bool_from_object)
+fn require_f64(value: Option<Object>, key: &str) -> StepResult<f64> {
+    require_with_typed(value, key, f64_from_object_typed).map_err(StepInputError::from)
 }
 
-fn require_string(value: Option<Object>, key: &str) -> Result<String> {
-    require_with(value, key, string_from_object)
+fn require_i64(value: Option<Object>, key: &str) -> StepResult<i64> {
+    require_with_typed(value, key, i64_from_object_typed).map_err(StepInputError::from)
 }
 
-fn require_positive_f64(value: Option<Object>, key: &str) -> Result<f64> {
+fn require_bool(value: Option<Object>, key: &str) -> StepResult<bool> {
+    require_with_typed(value, key, bool_from_object_typed).map_err(StepInputError::from)
+}
+
+fn require_string(value: Option<Object>, key: &str) -> StepResult<String> {
+    require_with_typed(value, key, crate::lua::string_from_object_typed)
+        .map_err(StepInputError::from)
+}
+
+fn require_positive_f64(value: Option<Object>, key: &str) -> StepResult<f64> {
     let parsed = require_f64(value, key)?;
     if !parsed.is_finite() || parsed <= 0.0 {
-        return Err(invalid_key(key, "positive number"));
+        return Err(invalid_step_value(key, "positive number"));
     }
     Ok(parsed)
 }
 
-fn require_non_negative_f64(value: Option<Object>, key: &str) -> Result<f64> {
+fn require_non_negative_f64(value: Option<Object>, key: &str) -> StepResult<f64> {
     let parsed = require_f64(value, key)?;
     if !parsed.is_finite() || parsed < 0.0 {
-        return Err(invalid_key(key, "non-negative number"));
+        return Err(invalid_step_value(key, "non-negative number"));
     }
     Ok(parsed)
 }
 
-fn parse_point_from_value(key: &str, value: Option<Object>) -> Result<Point> {
-    parse_point_from_object(key, require_object(value, key)?)
+fn parse_point_from_value(key: &str, value: Option<Object>) -> StepResult<Point> {
+    parse_point_from_object(
+        key,
+        require_object_typed(value, key).map_err(StepInputError::from)?,
+    )
 }
 
-fn parse_point_from_object(key: &str, value: Object) -> Result<Point> {
-    let [row, col]: [Object; 2] = parse_indexed_objects(key, value, Some(2))?
+fn parse_point_from_object(key: &str, value: Object) -> StepResult<Point> {
+    let [row, col]: [Object; 2] = parse_indexed_objects_typed(key, value, Some(2))
+        .map_err(StepInputError::from)?
         .try_into()
-        .map_err(|_| invalid_key(key, "array[2]"))?;
-    let row = f64_from_object(key, row)?;
-    let col = f64_from_object(key, col)?;
+        .map_err(|_| invalid_step_value(key, "array[2]"))?;
+    let row = f64_from_object_typed(key, row).map_err(StepInputError::from)?;
+    let col = f64_from_object_typed(key, col).map_err(StepInputError::from)?;
     Ok(Point { row, col })
 }
 
-fn parse_corners_from_object(key: &str, value: Object) -> Result<[Point; 4]> {
-    let corners =
-        parse_indexed_objects(key, value, Some(4)).map_err(|_| invalid_key(key, "array[4][2]"))?;
+fn parse_corners_from_object(key: &str, value: Object) -> StepResult<[Point; 4]> {
+    let corners = parse_indexed_objects_typed(key, value, Some(4))
+        .map_err(|_| invalid_step_value(key, "array[4][2]"))?;
 
     let mut parsed = [Point::ZERO; 4];
     for (index, corner) in corners.into_iter().enumerate() {
@@ -69,29 +103,29 @@ fn parse_corners_from_object(key: &str, value: Object) -> Result<[Point; 4]> {
     Ok(parsed)
 }
 
-fn parse_elapsed_ms_from_object(key: &str, value: Object) -> Result<[f64; 4]> {
-    let elapsed_values =
-        parse_indexed_objects(key, value, Some(4)).map_err(|_| invalid_key(key, "array[4]"))?;
+fn parse_elapsed_ms_from_object(key: &str, value: Object) -> StepResult<[f64; 4]> {
+    let elapsed_values = parse_indexed_objects_typed(key, value, Some(4))
+        .map_err(|_| invalid_step_value(key, "array[4]"))?;
 
     let mut parsed = [0.0; 4];
     for (index, elapsed_ms) in elapsed_values.into_iter().enumerate() {
-        let value = f64_from_object(key, elapsed_ms)?;
+        let value = f64_from_object_typed(key, elapsed_ms).map_err(StepInputError::from)?;
         if !value.is_finite() || value < 0.0 {
-            return Err(invalid_key(key, "array[4] of non-negative numbers"));
+            return Err(invalid_step_value(key, "array[4] of non-negative numbers"));
         }
         parsed[index] = value;
     }
     Ok(parsed)
 }
 
-fn parse_particles_from_object(key: &str, value: Object) -> Result<Vec<Particle>> {
-    let entries =
-        parse_indexed_objects(key, value, None).map_err(|_| invalid_key(key, "array[particle]"))?;
+fn parse_particles_from_object(key: &str, value: Object) -> StepResult<Vec<Particle>> {
+    let entries = parse_indexed_objects_typed(key, value, None)
+        .map_err(|_| invalid_step_value(key, "array[particle]"))?;
     let mut particles = Vec::with_capacity(entries.len());
 
     for entry in entries {
         let parsed = RawParticle::deserialize(Deserializer::new(entry))
-            .map_err(|_| invalid_key(key, "array[particle]"))?;
+            .map_err(|_| invalid_step_value(key, "array[particle]"))?;
         let position = parse_point_from_value("particles.position", parsed.position)?;
         let velocity = parse_point_from_value("particles.velocity", parsed.velocity)?;
         let lifetime = require_f64(parsed.lifetime, "particles.lifetime")?;
@@ -105,12 +139,12 @@ fn parse_particles_from_object(key: &str, value: Object) -> Result<Vec<Particle>
     Ok(particles)
 }
 
-fn parse_rng_state(value: Option<Object>) -> Result<u32> {
+fn parse_rng_state(value: Option<Object>) -> StepResult<u32> {
     match value {
         Some(value) if !value.is_nil() => {
-            let parsed = i64_from_object("rng_state", value)?;
+            let parsed = i64_from_object_typed("rng_state", value).map_err(StepInputError::from)?;
             let normalized = parsed.rem_euclid(i64::from(u32::MAX));
-            u32::try_from(normalized).map_err(|_| invalid_key("rng_state", "integer"))
+            u32::try_from(normalized).map_err(|_| invalid_step_value("rng_state", "integer"))
         }
         _ => Ok(DEFAULT_RNG_STATE),
     }
@@ -154,10 +188,6 @@ struct RawStepInput {
     max_length_insert_mode: Option<Object>,
     #[serde(default)]
     trail_duration_ms: Option<Object>,
-    #[serde(default)]
-    trail_short_duration_ms: Option<Object>,
-    #[serde(default)]
-    trail_size: Option<Object>,
     #[serde(default)]
     trail_min_distance: Option<Object>,
     #[serde(default)]
@@ -205,7 +235,7 @@ struct RawStepInput {
 }
 
 impl RawStepInput {
-    fn into_step_input(self) -> Result<StepInput> {
+    fn into_step_input(self) -> StepResult<StepInput> {
         let mode = require_string(self.mode, "mode")?;
         let time_interval = require_f64(self.time_interval, "time_interval")?;
         let config_time_interval = require_f64(self.config_time_interval, "config_time_interval")?;
@@ -213,7 +243,8 @@ impl RawStepInput {
         let damping_ratio = require_positive_f64(self.damping_ratio, "damping_ratio")?;
         let current_corners = parse_corners_from_object(
             "current_corners",
-            require_object(self.current_corners, "current_corners")?,
+            require_object_typed(self.current_corners, "current_corners")
+                .map_err(StepInputError::from)?,
         )?;
         let trail_origin_corners = match self.trail_origin_corners {
             Some(value) if !value.is_nil() => {
@@ -223,7 +254,8 @@ impl RawStepInput {
         };
         let target_corners = parse_corners_from_object(
             "target_corners",
-            require_object(self.target_corners, "target_corners")?,
+            require_object_typed(self.target_corners, "target_corners")
+                .map_err(StepInputError::from)?,
         )?;
         let spring_velocity_corners = match self.spring_velocity_corners {
             Some(value) if !value.is_nil() => {
@@ -241,22 +273,19 @@ impl RawStepInput {
         let max_length_insert_mode =
             require_f64(self.max_length_insert_mode, "max_length_insert_mode")?;
         let trail_duration_ms = require_positive_f64(self.trail_duration_ms, "trail_duration_ms")?;
-        let trail_short_duration_ms =
-            require_positive_f64(self.trail_short_duration_ms, "trail_short_duration_ms")?;
-        let trail_size = require_f64(self.trail_size, "trail_size")?;
-        if !(0.0..=1.0).contains(&trail_size) {
-            return Err(invalid_key("trail_size", "number between 0.0 and 1.0"));
-        }
         let trail_min_distance =
             require_non_negative_f64(self.trail_min_distance, "trail_min_distance")?;
         let trail_thickness = require_non_negative_f64(self.trail_thickness, "trail_thickness")?;
         let trail_thickness_x =
             require_non_negative_f64(self.trail_thickness_x, "trail_thickness_x")?;
-        let particles =
-            parse_particles_from_object("particles", require_object(self.particles, "particles")?)?;
+        let particles = parse_particles_from_object(
+            "particles",
+            require_object_typed(self.particles, "particles").map_err(StepInputError::from)?,
+        )?;
         let previous_center = parse_point_from_object(
             "previous_center",
-            require_object(self.previous_center, "previous_center")?,
+            require_object_typed(self.previous_center, "previous_center")
+                .map_err(StepInputError::from)?,
         )?;
         let particle_damping = require_f64(self.particle_damping, "particle_damping")?;
         let particles_enabled = require_bool(self.particles_enabled, "particles_enabled")?;
@@ -266,7 +295,7 @@ impl RawStepInput {
 
         let particle_max_num_raw = require_i64(self.particle_max_num, "particle_max_num")?;
         let particle_max_num = usize::try_from(particle_max_num_raw)
-            .map_err(|_| invalid_key("particle_max_num", "non-negative integer"))?;
+            .map_err(|_| invalid_step_value("particle_max_num", "non-negative integer"))?;
 
         let particle_spread = require_f64(self.particle_spread, "particle_spread")?;
         let particles_per_second = require_f64(self.particles_per_second, "particles_per_second")?;
@@ -308,8 +337,6 @@ impl RawStepInput {
             max_length,
             max_length_insert_mode,
             trail_duration_ms,
-            trail_short_duration_ms,
-            trail_size,
             trail_min_distance,
             trail_thickness,
             trail_thickness_x,
@@ -336,18 +363,21 @@ impl RawStepInput {
     }
 }
 
-fn parse_step_input_object(args: Object) -> Result<StepInput> {
-    let raw = RawStepInput::deserialize(Deserializer::new(args))
-        .map_err(|err| error(format!("invalid step args: {err}")))?;
+fn parse_step_input_object(args: Object) -> StepResult<StepInput> {
+    let raw = RawStepInput::deserialize(Deserializer::new(args)).map_err(|err| {
+        StepInputError::Deserialize {
+            message: err.to_string(),
+        }
+    })?;
     raw.into_step_input()
 }
 
 #[cfg(test)]
-fn parse_step_input(args: &Dictionary) -> Result<StepInput> {
+fn parse_step_input(args: &Dictionary) -> StepResult<StepInput> {
     parse_step_input_object(Object::from(args.clone()))
 }
 
-fn parse_step_input_owned(args: Dictionary) -> Result<StepInput> {
+fn parse_step_input_owned(args: Dictionary) -> StepResult<StepInput> {
     parse_step_input_object(Object::from(args))
 }
 
@@ -376,14 +406,14 @@ fn particles_to_object(particles: &[Particle]) -> Object {
     Object::from(Array::from_iter(particles.iter().map(particle_to_object)))
 }
 
-fn one_based_i64(value: usize, field: &str) -> Result<i64> {
+fn one_based_i64(value: usize, field: &'static str) -> StepResult<i64> {
     let next = value
         .checked_add(1)
-        .ok_or_else(|| error(format!("{field} overflow")))?;
-    i64::try_from(next).map_err(|_| error(format!("{field} overflow")))
+        .ok_or(StepInputError::OneBasedIndexOverflow { field })?;
+    i64::try_from(next).map_err(|_| StepInputError::OneBasedIndexOverflow { field })
 }
 
-fn step_impl(args: Dictionary) -> Result<Dictionary> {
+fn step_impl(args: Dictionary) -> StepResult<Dictionary> {
     let input = parse_step_input_owned(args)?;
     let output = simulate_step(input);
 
@@ -419,8 +449,9 @@ fn step_impl(args: Dictionary) -> Result<Dictionary> {
     Ok(result)
 }
 
+/// Validates one step payload from Neovim and returns the next simulated frame.
 pub(crate) fn step(args: Dictionary) -> Result<Dictionary> {
-    step_impl(args)
+    step_impl(args).map_err(nvim_oxi::Error::from)
 }
 
 #[cfg(test)]
@@ -466,8 +497,6 @@ mod tests {
         args.insert("max_length", 25.0_f64);
         args.insert("max_length_insert_mode", 1.0_f64);
         args.insert("trail_duration_ms", 200.0_f64);
-        args.insert("trail_short_duration_ms", 40.0_f64);
-        args.insert("trail_size", 0.8_f64);
         args.insert("trail_min_distance", 0.0_f64);
         args.insert("trail_thickness", 1.0_f64);
         args.insert("trail_thickness_x", 1.0_f64);
@@ -500,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_step_input_success() {
+    fn parse_step_input_parses_valid_fixture_dictionary() {
         let args = valid_step_args();
         let parsed = parse_step_input(&args).expect("expected valid step args");
         assert_eq!(parsed.mode, "n");
@@ -510,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_step_input_missing_key() {
+    fn parse_step_input_reports_missing_mode_key() {
         let mut args = Dictionary::new();
         for (key, value) in valid_step_args() {
             if key.to_string_lossy() == "mode" {
@@ -520,11 +549,10 @@ mod tests {
         }
 
         let err = parse_step_input(&args).expect_err("expected parse failure");
-        assert!(
-            err.to_string().contains("missing key"),
-            "unexpected error: {err}"
-        );
-        assert!(err.to_string().contains("mode"), "unexpected error: {err}");
+        assert!(matches!(
+            err,
+            StepInputError::Validation(LuaParseError::MissingKey { ref key }) if key == "mode"
+        ));
     }
 
     #[test]
@@ -532,14 +560,11 @@ mod tests {
         let mut args = valid_step_args();
         set_arg(&mut args, "particle_max_num", Object::from(-1_i64));
         let err = parse_step_input(&args).expect_err("expected parse failure");
-        assert!(
-            err.to_string().contains("particle_max_num"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            err.to_string().contains("non-negative integer"),
-            "unexpected error: {err}"
-        );
+        assert!(matches!(
+            err,
+            StepInputError::Validation(LuaParseError::InvalidValue { ref key, expected })
+                if key == "particle_max_num" && expected == "non-negative integer"
+        ));
     }
 
     #[test]
@@ -559,13 +584,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_step_input_rejects_out_of_range_trail_size() {
-        let mut args = valid_step_args();
-        set_arg(&mut args, "trail_size", Object::from(1.5_f64));
-        let err = parse_step_input(&args).expect_err("expected parse failure");
-        assert!(
-            err.to_string().contains("trail_size"),
-            "unexpected error: {err}"
-        );
+    fn one_based_i64_reports_typed_overflow() {
+        let err = one_based_i64(usize::MAX, "index_head").expect_err("expected overflow");
+
+        assert!(matches!(
+            err,
+            StepInputError::OneBasedIndexOverflow {
+                field: "index_head"
+            }
+        ));
     }
 }

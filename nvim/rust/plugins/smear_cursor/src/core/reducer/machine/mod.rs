@@ -5,13 +5,18 @@ mod support;
 mod timers;
 
 use super::transition::Transition;
+use crate::core::event::Event;
+#[cfg(test)]
 use crate::core::event::{
-    ApplyReport, EffectFailedEvent, Event, ExternalDemandQueuedEvent, InitializeEvent,
+    ApplyReport, EffectFailedEvent, ExternalDemandQueuedEvent, InitializeEvent,
     ObservationBaseCollectedEvent, TimerFiredWithTokenEvent,
 };
+use crate::core::state::CoreState;
+#[cfg(test)]
 use crate::core::state::{
-    CoreState, ExternalDemand, ObservationRequest, ProbeRequestSet, RealizationDivergence,
+    ExternalDemand, ObservationRequest, ProbeRequestSet, RealizationDivergence,
 };
+#[cfg(test)]
 use crate::core::types::{
     CursorCol, CursorPosition, CursorRow, Millis, ProposalId, TimerGeneration, TimerId, TimerToken,
 };
@@ -45,8 +50,8 @@ pub(crate) fn reduce(state: &CoreState, event: Event) -> Transition {
     }
 }
 
-pub(crate) fn phase0_smoke_fingerprint() -> u64 {
-    // Keep phase-0 scaffolding reachable in non-test builds while remaining pure.
+#[cfg(test)]
+fn phase0_smoke_fingerprint() -> u64 {
     let mut state = CoreState::default();
     let mut fingerprint = 0_u64;
     let animation_token = TimerToken::new(TimerId::Animation, TimerGeneration::new(1));
@@ -104,12 +109,10 @@ pub(crate) fn phase0_smoke_fingerprint() -> u64 {
             observed_at: Millis::new(8),
         }),
         Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
-            kind: crate::core::effect::TimerKind::Animation,
             token: animation_token,
             observed_at: Millis::new(9),
         }),
         Event::TimerLostWithToken(crate::core::event::TimerLostWithTokenEvent {
-            kind: crate::core::effect::TimerKind::Recovery,
             token: recovery_token,
             observed_at: Millis::new(10),
         }),
@@ -129,4 +132,14 @@ pub(crate) fn phase0_smoke_fingerprint() -> u64 {
         ^ crate::core::types::phase1_types_fingerprint()
         ^ crate::core::state::phase2_probe_fingerprint_seed()
         ^ crate::core::effect::phase4_effect_fingerprint_seed()
+}
+
+#[cfg(test)]
+mod phase0_reducer_fingerprint_coverage {
+    use super::phase0_smoke_fingerprint;
+
+    #[test]
+    fn phase0_reducer_fingerprint_stays_non_zero_after_explicit_event_coverage() {
+        assert_ne!(phase0_smoke_fingerprint(), 0);
+    }
 }

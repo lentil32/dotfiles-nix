@@ -1,6 +1,7 @@
 use super::CursorLocation;
 use crate::core::types::StrokeId;
 use crate::types::Point;
+use std::num::NonZeroU32;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum PluginState {
@@ -67,11 +68,21 @@ impl CursorTracking {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct AnimationTiming {
     pub(super) last_tick_ms: Option<f64>,
+}
+
+impl AnimationTiming {
+    pub(super) fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct MotionClock {
     pub(super) next_frame_at_ms: Option<f64>,
     pub(super) simulation_accumulator_ms: f64,
 }
 
-impl AnimationTiming {
+impl MotionClock {
     pub(super) fn reset(&mut self) {
         *self = Self::default();
     }
@@ -151,6 +162,53 @@ impl PendingTarget {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(super) struct SettlingPhase {
+    pub(super) pending_target: PendingTarget,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct RunningPhase {
+    pub(super) clock: MotionClock,
+    pub(super) settle_hold_counter: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct DrainingPhase {
+    pub(super) clock: MotionClock,
+    pub(super) remaining_steps: NonZeroU32,
+}
+
+impl DrainingPhase {
+    pub(super) fn new(remaining_steps: u32) -> Option<Self> {
+        NonZeroU32::new(remaining_steps).map(|remaining_steps| Self {
+            clock: MotionClock::default(),
+            remaining_steps,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum AnimationPhase {
+    Uninitialized,
+    Idle,
+    Settling(SettlingPhase),
+    Running(RunningPhase),
+    Draining(DrainingPhase),
+}
+
+impl AnimationPhase {
+    pub(super) fn state(&self) -> AnimationState {
+        match self {
+            Self::Uninitialized => AnimationState::Uninitialized,
+            Self::Idle => AnimationState::Idle,
+            Self::Settling(_) => AnimationState::Settling,
+            Self::Running(_) => AnimationState::Running,
+            Self::Draining(_) => AnimationState::Draining,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct TransientRuntimeState {
     pub(super) target_position: Point,
     pub(super) retarget_epoch: u64,
@@ -160,9 +218,6 @@ pub(super) struct TransientRuntimeState {
     pub(super) last_mode_was_cmdline: Option<bool>,
     pub(super) timing: AnimationTiming,
     pub(super) tracking: CursorTracking,
-    pub(super) pending_target: Option<PendingTarget>,
-    pub(super) settle_hold_counter: u32,
-    pub(super) drain_steps_remaining: u32,
     pub(super) color_at_cursor: Option<String>,
 }
 
@@ -177,9 +232,6 @@ impl Default for TransientRuntimeState {
             last_mode_was_cmdline: None,
             timing: AnimationTiming::default(),
             tracking: CursorTracking::default(),
-            pending_target: None,
-            settle_hold_counter: 0,
-            drain_steps_remaining: 0,
             color_at_cursor: None,
         }
     }

@@ -786,6 +786,7 @@ dependencies = [
  "nvim-utils",
  "proptest",
  "serde",
+ "thiserror",
 ]
 
 [[package]]

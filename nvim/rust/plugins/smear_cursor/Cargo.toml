@@ -15,6 +15,7 @@ nvim-oxi = { workspace = true, features = ["libuv"] }
 nvim-oxi-utils = { workspace = true }
 nvim-utils = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+thiserror = "2.0"
 
 [dev-dependencies]
 proptest = { workspace = true }

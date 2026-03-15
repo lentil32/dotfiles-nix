@@ -2,7 +2,6 @@ use super::super::policy::BufferEventPolicy;
 use super::core_dispatch::dispatch_core_events_with_default_scheduler;
 use crate::core::event::{Event as CoreEvent, InitializeEvent, KeyFallbackQueuedEvent};
 use crate::core::types::Millis;
-use nvim_oxi::Result;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum KeyEventAction {
@@ -46,7 +45,7 @@ pub(super) fn dispatch_core_key_fallback_queued(
     needs_initialize: bool,
     observed_at: Millis,
     due_at: Millis,
-) -> Result<()> {
+) {
     dispatch_core_events_with_default_scheduler(build_key_fallback_events(
         needs_initialize,
         observed_at,

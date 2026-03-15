@@ -22,8 +22,6 @@ pub(crate) struct RuntimeConfig {
     pub(crate) max_length: f64,
     pub(crate) max_length_insert_mode: f64,
     pub(crate) trail_duration_ms: f64,
-    pub(crate) trail_short_duration_ms: f64,
-    pub(crate) trail_size: f64,
     pub(crate) trail_min_distance: f64,
     pub(crate) trail_thickness: f64,
     pub(crate) trail_thickness_x: f64,
@@ -161,8 +159,6 @@ impl Default for RuntimeConfig {
             max_length: 0.0,
             max_length_insert_mode: 0.0,
             trail_duration_ms: 150.0,
-            trail_short_duration_ms: 40.0,
-            trail_size: 1.0,
             trail_min_distance: 0.0,
             trail_thickness: 1.0,
             trail_thickness_x: 1.0,
@@ -269,36 +265,89 @@ impl From<&RuntimeConfig> for StaticRenderConfig {
 mod tests {
     use super::RuntimeConfig;
 
-    #[test]
-    fn mode_allowed_respects_composite_modes() {
-        let mut config = RuntimeConfig {
+    fn mode_filter_fixture() -> RuntimeConfig {
+        RuntimeConfig {
             smear_insert_mode: false,
             smear_replace_mode: false,
             smear_terminal_mode: false,
             smear_to_cmd: false,
             ..RuntimeConfig::default()
-        };
+        }
+    }
 
+    #[test]
+    fn mode_allowed_rejects_insert_composite_modes_when_insert_smear_is_disabled() {
+        let config = mode_filter_fixture();
         assert!(!config.mode_allowed("ic"));
-        assert!(!config.mode_allowed("Rc"));
-        assert!(!config.mode_allowed("cv"));
-        assert!(!config.mode_allowed("nt"));
-        assert!(!config.mode_allowed("ntT"));
-        assert!(config.mode_allowed("n"));
+    }
 
+    #[test]
+    fn mode_allowed_accepts_insert_composite_modes_when_insert_smear_is_enabled() {
+        let mut config = mode_filter_fixture();
         config.smear_insert_mode = true;
-        config.smear_replace_mode = true;
-        config.smear_terminal_mode = true;
-        config.smear_to_cmd = true;
         assert!(config.mode_allowed("ic"));
+    }
+
+    #[test]
+    fn mode_allowed_rejects_replace_composite_modes_when_replace_smear_is_disabled() {
+        let config = mode_filter_fixture();
+        assert!(!config.mode_allowed("Rc"));
+    }
+
+    #[test]
+    fn mode_allowed_accepts_replace_composite_modes_when_replace_smear_is_enabled() {
+        let mut config = mode_filter_fixture();
+        config.smear_replace_mode = true;
         assert!(config.mode_allowed("Rc"));
+    }
+
+    #[test]
+    fn mode_allowed_rejects_cmdline_composite_modes_when_cmdline_smear_is_disabled() {
+        let config = mode_filter_fixture();
+        assert!(!config.mode_allowed("cv"));
+    }
+
+    #[test]
+    fn mode_allowed_accepts_cmdline_composite_modes_when_cmdline_smear_is_enabled() {
+        let mut config = mode_filter_fixture();
+        config.smear_to_cmd = true;
         assert!(config.mode_allowed("cv"));
+    }
+
+    #[test]
+    fn mode_allowed_rejects_terminal_normal_mode_without_terminal_smear() {
+        let config = mode_filter_fixture();
+        assert!(!config.mode_allowed("nt"));
+    }
+
+    #[test]
+    fn mode_allowed_accepts_terminal_normal_mode_with_terminal_smear() {
+        let mut config = mode_filter_fixture();
+        config.smear_terminal_mode = true;
         assert!(config.mode_allowed("nt"));
+    }
+
+    #[test]
+    fn mode_allowed_rejects_terminal_pending_mode_without_terminal_smear() {
+        let config = mode_filter_fixture();
+        assert!(!config.mode_allowed("ntT"));
+    }
+
+    #[test]
+    fn mode_allowed_accepts_terminal_pending_mode_with_terminal_smear() {
+        let mut config = mode_filter_fixture();
+        config.smear_terminal_mode = true;
         assert!(config.mode_allowed("ntT"));
     }
 
     #[test]
-    fn cursor_shape_helpers_use_mode_families() {
+    fn mode_allowed_keeps_normal_mode_enabled_without_composite_flags() {
+        let config = mode_filter_fixture();
+        assert!(config.mode_allowed("n"));
+    }
+
+    #[test]
+    fn cursor_is_vertical_bar_uses_insert_mode_family_flag() {
         let config = RuntimeConfig {
             vertical_bar_cursor: false,
             vertical_bar_cursor_insert_mode: true,
@@ -308,6 +357,17 @@ mod tests {
 
         assert!(config.cursor_is_vertical_bar("ic"));
         assert!(!config.cursor_is_vertical_bar("n"));
+    }
+
+    #[test]
+    fn cursor_is_horizontal_bar_uses_replace_mode_family_flag() {
+        let config = RuntimeConfig {
+            vertical_bar_cursor: false,
+            vertical_bar_cursor_insert_mode: true,
+            horizontal_bar_cursor_replace_mode: true,
+            ..RuntimeConfig::default()
+        };
+
         assert!(config.cursor_is_horizontal_bar("Rc"));
         assert!(!config.cursor_is_horizontal_bar("n"));
     }

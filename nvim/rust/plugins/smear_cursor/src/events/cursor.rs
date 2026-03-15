@@ -1,35 +1,93 @@
 use super::CURSOR_COLOR_LUAEVAL_EXPR;
 use super::logging::trace_lazy;
-use crate::lua::{i64_from_object, i64_from_object_ref_with, string_from_object};
+use crate::lua::{
+    LuaParseError, i64_from_object_ref_with_typed, i64_from_object_typed, string_from_object_typed,
+};
 use crate::types::Point;
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Array, Dictionary, Object, Result, String as NvimString, api};
 use nvim_utils::mode::is_cmdline_mode;
+use thiserror::Error;
 
 type ScreenCell = (i64, i64);
 type ScreenPoint = (f64, f64);
+
+type CursorResult<T> = std::result::Result<T, CursorReadError>;
+
+#[derive(Debug, Error)]
+enum CursorParseError {
+    #[error("screenpos returned invalid dictionary")]
+    ScreenposDictionary,
+    #[error("screenpos missing row/col pair")]
+    ScreenposMissingRowCol,
+    #[error("synconcealed returned invalid list")]
+    SynconcealedInvalidList,
+    #[error("synconcealed returned unexpected list length")]
+    SynconcealedUnexpectedLen,
+    #[error("{context} parse failed: {source}")]
+    Value {
+        context: String,
+        #[source]
+        source: LuaParseError,
+    },
+}
+
+#[derive(Debug, Error)]
+enum CursorReadError {
+    #[error(transparent)]
+    Shell(#[from] nvim_oxi::Error),
+    #[error(transparent)]
+    Parse(#[from] CursorParseError),
+}
+
+impl From<CursorReadError> for nvim_oxi::Error {
+    fn from(error: CursorReadError) -> Self {
+        match error {
+            CursorReadError::Shell(error) => error,
+            CursorReadError::Parse(error) => nvim_oxi::api::Error::Other(error.to_string()).into(),
+        }
+    }
+}
+
+impl From<nvim_oxi::api::Error> for CursorReadError {
+    fn from(error: nvim_oxi::api::Error) -> Self {
+        Self::Shell(error.into())
+    }
+}
+
+fn cursor_parse_error(context: impl Into<String>, source: LuaParseError) -> CursorReadError {
+    CursorParseError::Value {
+        context: context.into(),
+        source,
+    }
+    .into()
+}
 
 pub(super) fn mode_string() -> String {
     api::get_mode().mode.to_string_lossy().into_owned()
 }
 
-fn dictionary_i64_field(dict: &Dictionary, context: &str, field: &str) -> Result<Option<i64>> {
+fn dictionary_i64_field(
+    dict: &Dictionary,
+    context: &str,
+    field: &str,
+) -> CursorResult<Option<i64>> {
     let field_key = NvimString::from(field);
     let Some(value) = dict.get(&field_key) else {
         return Ok(None);
     };
 
-    i64_from_object_ref_with(value, || format!("{context}.{field}")).map(Some)
+    i64_from_object_ref_with_typed(value, || format!("{context}.{field}"))
+        .map(Some)
+        .map_err(|source| cursor_parse_error(format!("{context}.{field}"), source))
 }
 
-fn screenpos_dictionary(screenpos: Object) -> Result<Dictionary> {
-    Dictionary::from_object(screenpos).map_err(|_| {
-        nvim_oxi::api::Error::Other("screenpos returned invalid dictionary".into()).into()
-    })
+fn screenpos_dictionary(screenpos: Object) -> CursorResult<Dictionary> {
+    Dictionary::from_object(screenpos).map_err(|_| CursorParseError::ScreenposDictionary.into())
 }
 
-fn parse_screenpos_cell_from_dict(dict: &Dictionary) -> Result<Option<ScreenCell>> {
+fn parse_screenpos_cell_from_dict(dict: &Dictionary) -> CursorResult<Option<ScreenCell>> {
     let row = dictionary_i64_field(dict, "screenpos", "row")?;
     let col = dictionary_i64_field(dict, "screenpos", "col")?;
 
@@ -37,11 +95,11 @@ fn parse_screenpos_cell_from_dict(dict: &Dictionary) -> Result<Option<ScreenCell
         (None, None) => Ok(None),
         (Some(row), Some(col)) if row > 0 && col > 0 => Ok(Some((row, col))),
         (Some(_), Some(_)) => Ok(None),
-        _ => Err(nvim_oxi::api::Error::Other("screenpos missing row/col".into()).into()),
+        _ => Err(CursorParseError::ScreenposMissingRowCol.into()),
     }
 }
 
-fn parse_screenpos_cell(screenpos: Object) -> Result<Option<ScreenCell>> {
+fn parse_screenpos_cell(screenpos: Object) -> CursorResult<Option<ScreenCell>> {
     parse_screenpos_cell_from_dict(&screenpos_dictionary(screenpos)?)
 }
 
@@ -144,35 +202,37 @@ fn trace_screen_cursor_read(window: &api::Window, buffer_read: &BufferCursorRead
     });
 }
 
-fn replacement_display_width(replacement: &str) -> Result<i64> {
+fn replacement_display_width(replacement: &str) -> CursorResult<i64> {
     if replacement.is_empty() {
         return Ok(0);
     }
 
     let args = Array::from_iter([Object::from(replacement)]);
     let width = api::call_function("strdisplaywidth", args)?;
-    i64_from_object("strdisplaywidth", width)
+    i64_from_object_typed("strdisplaywidth", width)
+        .map_err(|source| cursor_parse_error("strdisplaywidth", source))
 }
 
-fn parse_synconcealed(value: Object) -> Result<Option<(String, i64)>> {
+fn parse_synconcealed(value: Object) -> CursorResult<Option<(String, i64)>> {
     let [concealed, replacement, match_id]: [Object; 3] = Vec::<Object>::from_object(value)
-        .map_err(|_| nvim_oxi::api::Error::Other("synconcealed returned invalid list".into()))?
+        .map_err(|_| CursorParseError::SynconcealedInvalidList)?
         .try_into()
-        .map_err(|_| {
-            nvim_oxi::api::Error::Other("synconcealed returned unexpected list length".into())
-        })?;
+        .map_err(|_| CursorParseError::SynconcealedUnexpectedLen)?;
 
-    let concealed = i64_from_object("synconcealed[0]", concealed)?;
+    let concealed = i64_from_object_typed("synconcealed[0]", concealed)
+        .map_err(|source| cursor_parse_error("synconcealed[0]", source))?;
     if concealed == 0 {
         return Ok(None);
     }
 
-    let replacement = string_from_object("synconcealed[1]", replacement)?;
-    let match_id = i64_from_object("synconcealed[2]", match_id)?;
+    let replacement = string_from_object_typed("synconcealed[1]", replacement)
+        .map_err(|source| cursor_parse_error("synconcealed[1]", source))?;
+    let match_id = i64_from_object_typed("synconcealed[2]", match_id)
+        .map_err(|source| cursor_parse_error("synconcealed[2]", source))?;
     Ok(Some((replacement, match_id)))
 }
 
-fn concealed_regions_before_cursor(line: usize, column: usize) -> Result<Vec<ConcealRegion>> {
+fn concealed_regions_before_cursor(line: usize, column: usize) -> CursorResult<Vec<ConcealRegion>> {
     let mut regions: Vec<ConcealRegion> = Vec::new();
     let line = i64::try_from(line).unwrap_or(i64::MAX);
     let max_col1 = i64::try_from(column).unwrap_or(i64::MAX);
@@ -222,7 +282,7 @@ fn resolve_buffer_cursor_position(
     line: usize,
     column: usize,
     raw_cell: ScreenCell,
-) -> Result<ScreenPoint> {
+) -> CursorResult<ScreenPoint> {
     if column == 0 {
         return Ok(screen_cell_to_point(raw_cell));
     }
@@ -260,7 +320,7 @@ fn resolve_buffer_cursor_position(
     Ok(apply_conceal_delta(raw_cell, conceal_delta))
 }
 
-fn buffer_screen_cursor_position(window: &api::Window) -> Result<BufferCursorRead> {
+fn buffer_screen_cursor_position(window: &api::Window) -> CursorResult<BufferCursorRead> {
     let (line, column) = window.get_cursor()?;
     let screenpos = screenpos_for_buffer_column(window, line, buffer_column_to_col1(column))?;
     let screenpos = screenpos_dictionary(screenpos)?;
@@ -281,7 +341,7 @@ fn buffer_screen_cursor_position(window: &api::Window) -> Result<BufferCursorRea
     })
 }
 
-fn screen_cursor_position(window: &api::Window) -> Result<Option<ScreenPoint>> {
+fn screen_cursor_position(window: &api::Window) -> CursorResult<Option<ScreenPoint>> {
     let buffer_read = buffer_screen_cursor_position(window)?;
     // `screenpos()` is the stable callback-safe base here. The `gg` trace showed
     // `screenrow()`/`screencol()` reporting stale or command-line cells on scheduled edges, so we
@@ -296,16 +356,17 @@ fn command_row_from_dimensions(lines: i64, cmdheight: i64) -> i64 {
     lines.saturating_sub(visible_cmdheight).saturating_add(1)
 }
 
-fn command_type_string() -> Result<String> {
+fn command_type_string() -> CursorResult<String> {
     let value = api::call_function("getcmdtype", Array::new())?;
-    string_from_object("getcmdtype", value)
+    string_from_object_typed("getcmdtype", value)
+        .map_err(|source| cursor_parse_error("getcmdtype", source))
 }
 
 fn should_use_real_cmdline_cursor(cmdtype: &str) -> bool {
     !cmdtype.is_empty()
 }
 
-fn cmdline_cursor_position(window: &api::Window) -> Result<Option<(f64, f64)>> {
+fn cmdline_cursor_position(window: &api::Window) -> CursorResult<Option<(f64, f64)>> {
     let cmdtype = command_type_string()?;
     if !should_use_real_cmdline_cursor(&cmdtype) {
         // showcmd and normal-mode prefix keys can transiently report `mode=c` while the
@@ -315,7 +376,8 @@ fn cmdline_cursor_position(window: &api::Window) -> Result<Option<(f64, f64)>> {
     }
 
     let screen_col_value = api::call_function("getcmdscreenpos", Array::new())?;
-    let screen_col = i64_from_object("getcmdscreenpos", screen_col_value)?;
+    let screen_col = i64_from_object_typed("getcmdscreenpos", screen_col_value)
+        .map_err(|source| cursor_parse_error("getcmdscreenpos", source))?;
     if screen_col <= 0 {
         return Ok(None);
     }
@@ -332,9 +394,9 @@ pub(super) fn cursor_position_for_mode(
         if !smear_to_cmd {
             return Ok(None);
         }
-        return cmdline_cursor_position(window);
+        return cmdline_cursor_position(window).map_err(nvim_oxi::Error::from);
     }
-    screen_cursor_position(window)
+    screen_cursor_position(window).map_err(nvim_oxi::Error::from)
 }
 
 fn current_buffer_option_string(buffer: &api::Buffer, option_name: &str) -> Result<String> {
@@ -353,7 +415,10 @@ fn cursor_color_at_current_position() -> Result<Option<String>> {
     if value.is_nil() {
         return Ok(None);
     }
-    Ok(Some(string_from_object("cursor_color_luaeval", value)?))
+    let parsed = string_from_object_typed("cursor_color_luaeval", value).map_err(|source| {
+        nvim_oxi::Error::from(cursor_parse_error("cursor_color_luaeval", source))
+    })?;
+    Ok(Some(parsed))
 }
 
 pub(super) fn sampled_cursor_color_at_current_position() -> Result<Option<String>> {
@@ -363,7 +428,8 @@ pub(super) fn sampled_cursor_color_at_current_position() -> Result<Option<String
 pub(super) fn line_value(key: &str) -> Result<i64> {
     let args = Array::from_iter([Object::from(key)]);
     let value = api::call_function("line", args)?;
-    i64_from_object("line", value)
+    i64_from_object_typed("line", value)
+        .map_err(|source| nvim_oxi::Error::from(cursor_parse_error(format!("line({key})"), source)))
 }
 
 fn command_row() -> Result<f64> {

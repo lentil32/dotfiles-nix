@@ -33,7 +33,7 @@ pub(super) fn reduce_render_plan_computed(
     }
 
     let proposal = payload.planned_render.proposal().clone();
-    let Some(next_state) = state.clone().accept_planned_render(payload.planned_render) else {
+    let Some(next_state) = state.clone().accept_planned_render(*payload.planned_render) else {
         return Transition::new(
             state.clone(),
             vec![record_event_loop_metric(EventLoopMetricEffect::StaleToken)],
@@ -115,8 +115,6 @@ fn reduce_apply_completed(
             vec![record_event_loop_metric(EventLoopMetricEffect::StaleToken)],
         );
     };
-    let should_schedule_next_animation = proposal.should_schedule_next_animation();
-    let next_animation_at_ms = proposal.next_animation_at_ms();
     let ready_state = cleared_state.with_realization(RealizationLedger::acknowledge(
         proposal.basis().target().cloned(),
     ));
@@ -132,19 +130,26 @@ fn reduce_apply_completed(
     let mut next_state = base_state;
     effects.extend(dispatch);
 
-    if should_schedule_next_animation {
-        let animation_delay = next_animation_at_ms.map_or(DEFAULT_ANIMATION_DELAY_MS, |deadline| {
-            let remaining = deadline.value().saturating_sub(observed_at.value()).max(1);
-            delay_budget_from_ms(remaining)
-        });
-        let (scheduled_state, schedule) = schedule_timer_with_delay(
-            next_state,
-            TimerKind::Animation,
-            animation_delay,
-            observed_at,
-        );
-        next_state = scheduled_state;
-        effects.push(schedule);
+    match proposal.animation_schedule() {
+        crate::core::state::AnimationSchedule::Idle => {}
+        crate::core::state::AnimationSchedule::DefaultDelay
+        | crate::core::state::AnimationSchedule::Deadline(_) => {
+            let animation_delay = proposal.animation_schedule().deadline().map_or(
+                DEFAULT_ANIMATION_DELAY_MS,
+                |deadline| {
+                    let remaining = deadline.value().saturating_sub(observed_at.value()).max(1);
+                    delay_budget_from_ms(remaining)
+                },
+            );
+            let (scheduled_state, schedule) = schedule_timer_with_delay(
+                next_state,
+                TimerKind::Animation,
+                animation_delay,
+                observed_at,
+            );
+            next_state = scheduled_state;
+            effects.push(schedule);
+        }
     }
 
     if !dispatch_present

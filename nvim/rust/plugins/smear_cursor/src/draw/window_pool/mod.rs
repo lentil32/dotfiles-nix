@@ -1,5 +1,6 @@
 use nvim_oxi::api;
 use std::collections::HashMap;
+use thiserror::Error;
 
 pub(crate) const ADAPTIVE_POOL_MIN_BUDGET: usize = 32;
 pub(crate) const ADAPTIVE_POOL_HARD_MAX_BUDGET: usize = 256;
@@ -227,8 +228,12 @@ pub(crate) enum AllocationPolicy {
     BootstrapIfPoolEmpty,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub(crate) enum AcquireError {
+    #[error(
+        "render window pool exhausted under {policy:?} allocation policy",
+        policy = .allocation_policy
+    )]
     Exhausted { allocation_policy: AllocationPolicy },
 }
 

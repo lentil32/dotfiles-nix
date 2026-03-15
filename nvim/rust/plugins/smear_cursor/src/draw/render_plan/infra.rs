@@ -35,10 +35,7 @@ impl HighlightLevel {
 
     pub(crate) fn from_raw_clamped(value: u32) -> Self {
         let clamped = value.max(1);
-        match NonZeroU32::new(clamped) {
-            Some(value) => Self(value),
-            None => Self(NonZeroU32::MIN),
-        }
+        NonZeroU32::new(clamped).map_or(Self(NonZeroU32::MIN), Self)
     }
 
     pub(crate) fn value(self) -> u32 {
@@ -53,10 +50,7 @@ impl HighlightLevel {
         if len == 0 {
             return 0;
         }
-        let raw_index = match usize::try_from(self.value()) {
-            Ok(index) => index,
-            Err(_) => usize::MAX,
-        };
+        let raw_index = usize::try_from(self.value()).map_or(usize::MAX, |index| index);
         raw_index.min(len.saturating_sub(1))
     }
 }
@@ -78,10 +72,9 @@ impl Glyph {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Static(value) => value,
-            Self::Braille(index) => match BRAILLE_GLYPHS.get(index.saturating_sub(1) as usize) {
-                Some(value) => value.as_ref(),
-                None => "",
-            },
+            Self::Braille(index) => BRAILLE_GLYPHS
+                .get(index.saturating_sub(1) as usize)
+                .map_or("", |value| value.as_ref()),
         }
     }
 }
@@ -143,70 +136,6 @@ pub(crate) enum DecodePathTrace {
     RibbonDpSolveFailed,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DecodePathCounters {
-    pub(crate) baseline: u64,
-    pub(crate) pairwise_fallback_disconnected: u64,
-    pub(crate) pairwise_fallback_oversized: u64,
-    pub(crate) ribbon_dp: u64,
-    pub(crate) ribbon_dp_solve_failed: u64,
-}
-
-impl DecodePathCounters {
-    pub(crate) const fn count_for(self, path: DecodePathTrace) -> u64 {
-        match path {
-            DecodePathTrace::Baseline => self.baseline,
-            DecodePathTrace::PairwiseFallbackDisconnected => self.pairwise_fallback_disconnected,
-            DecodePathTrace::PairwiseFallbackOversized => self.pairwise_fallback_oversized,
-            DecodePathTrace::RibbonDp => self.ribbon_dp,
-            DecodePathTrace::RibbonDpSolveFailed => self.ribbon_dp_solve_failed,
-        }
-    }
-
-    pub(crate) const fn total(self) -> u64 {
-        self.baseline
-            .saturating_add(self.pairwise_fallback_disconnected)
-            .saturating_add(self.pairwise_fallback_oversized)
-            .saturating_add(self.ribbon_dp)
-            .saturating_add(self.ribbon_dp_solve_failed)
-    }
-
-    fn record(&mut self, path: DecodePathTrace) {
-        match path {
-            DecodePathTrace::Baseline => {
-                self.baseline = self.baseline.saturating_add(1);
-            }
-            DecodePathTrace::PairwiseFallbackDisconnected => {
-                self.pairwise_fallback_disconnected =
-                    self.pairwise_fallback_disconnected.saturating_add(1);
-            }
-            DecodePathTrace::PairwiseFallbackOversized => {
-                self.pairwise_fallback_oversized =
-                    self.pairwise_fallback_oversized.saturating_add(1);
-            }
-            DecodePathTrace::RibbonDp => {
-                self.ribbon_dp = self.ribbon_dp.saturating_add(1);
-            }
-            DecodePathTrace::RibbonDpSolveFailed => {
-                self.ribbon_dp_solve_failed = self.ribbon_dp_solve_failed.saturating_add(1);
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DecodeDiagnostics {
-    pub(crate) last_path: Option<DecodePathTrace>,
-    pub(crate) path_counters: DecodePathCounters,
-}
-
-impl DecodeDiagnostics {
-    fn record_path(&mut self, path: DecodePathTrace) {
-        self.last_path = Some(path);
-        self.path_counters.record(path);
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DecodedCellState {
     glyph: DecodedGlyph,
@@ -231,7 +160,6 @@ pub(crate) struct PlannerState {
     latent_cache: LatentFieldCache,
     center_history: VecDeque<CenterPathSample>,
     previous_cells: BTreeMap<(i64, i64), DecodedCellState>,
-    decode_diagnostics: DecodeDiagnostics,
     compiled_cache: CompiledFieldCache,
 }
 
@@ -242,14 +170,6 @@ impl PlannerState {
 
     pub(crate) const fn history_revision(&self) -> u64 {
         self.history_revision
-    }
-
-    pub(crate) const fn decode_diagnostics(&self) -> DecodeDiagnostics {
-        self.decode_diagnostics
-    }
-
-    fn record_decode_path(&mut self, path: DecodePathTrace) {
-        self.decode_diagnostics.record_path(path);
     }
 }
 
@@ -264,7 +184,6 @@ pub(crate) struct PlannerOutput {
     pub(crate) plan: RenderPlan,
     pub(crate) next_state: PlannerState,
     pub(crate) signature: Option<u64>,
-    pub(crate) decode_path: DecodePathTrace,
 }
 
 #[derive(Clone, Debug)]
@@ -521,6 +440,7 @@ impl SliceState {
         }
     }
 
+    #[cfg(test)]
     fn run_start_key(self) -> Option<usize> {
         self.run.map(|run| run.start)
     }
@@ -553,13 +473,13 @@ impl ProjectedSpanQ16 {
         let safe_half_span_q16 = half_span_q16.max(0);
         let min_q16 = saturating_q16_offset(center_q16, -safe_half_span_q16);
         let max_q16 = saturating_q16_offset(center_q16, safe_half_span_q16);
-        match Self::try_new(min_q16, max_q16) {
-            Some(span) => span,
-            None => Self {
+        Self::try_new(min_q16, max_q16).map_or(
+            Self {
                 min_q16: max_q16,
                 max_q16: min_q16,
             },
-        }
+            |span| span,
+        )
     }
 
     fn width_cells(self) -> f64 {

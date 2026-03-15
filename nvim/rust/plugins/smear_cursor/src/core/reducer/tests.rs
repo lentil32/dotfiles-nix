@@ -1,9 +1,8 @@
-use super::reduce;
+use super::{Transition, reduce};
 use crate::core::effect::{
     ApplyRenderCleanupEffect, CursorPositionReadPolicy, Effect, EventLoopMetricEffect,
     IngressCursorPresentationEffect, IngressCursorPresentationRequest, ObservationRuntimeContext,
     RenderCleanupExecution, RequestObservationBaseEffect, RequestProbeEffect, ScheduleTimerEffect,
-    TimerKind,
 };
 use crate::core::event::{
     ApplyReport, EffectFailedEvent, Event, ExternalDemandQueuedEvent, InitializeEvent,
@@ -18,7 +17,7 @@ use crate::core::state::{
     BackgroundProbeBatch, BackgroundProbeChunk, CoreState, CursorColorSample, DegradedApplyMetrics,
     DemandQueue, ExternalDemand, ExternalDemandKind, InFlightProposal, IngressPolicyState,
     ObservationBasis, ObservationMotion, ObservationRequest, ObservationSnapshot, PatchBasis,
-    ProbeFailure, ProbeKind, ProbeRequestSet, ProbeReuse, ProbeSet, ProbeState, RealizationClear,
+    ProbeFailure, ProbeKind, ProbeRequestSet, ProbeReuse, ProbeSlot, ProbeState, RealizationClear,
     RealizationDivergence, RealizationLedger, RealizationPlan, RecoveryPolicyState,
     RenderCleanupState, ScenePatch, SemanticEntityId,
 };
@@ -26,7 +25,7 @@ use crate::core::types::{
     CursorCol, CursorPosition, CursorRow, DelayBudgetMs, IngressSeq, Lifecycle, Millis, ProposalId,
     TimerGeneration, TimerId, TimerToken, ViewportSnapshot,
 };
-use crate::state::{CursorLocation, CursorShape};
+use crate::state::{CursorLocation, CursorShape, RuntimeState};
 use crate::types::{Point, ScreenCell};
 
 fn cursor(row: u32, col: u32) -> CursorPosition {
@@ -46,6 +45,26 @@ fn with_cleanup_invalidation(effects: Vec<Effect>) -> Vec<Effect> {
 
 fn ready_state() -> CoreState {
     CoreState::default().initialize()
+}
+
+fn ready_state_with_runtime_config(configure: impl FnOnce(&mut RuntimeState)) -> CoreState {
+    let ready = ready_state();
+    let mut runtime = ready.runtime().clone();
+    configure(&mut runtime);
+    ready.with_runtime(runtime)
+}
+
+fn external_demand_event(
+    kind: ExternalDemandKind,
+    observed_at: u64,
+    requested_target: Option<CursorPosition>,
+) -> Event {
+    Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+        kind,
+        observed_at: Millis::new(observed_at),
+        requested_target,
+        ingress_cursor_presentation: None,
+    })
 }
 
 fn observation_request(seq: u64, kind: ExternalDemandKind, observed_at: u64) -> ObservationRequest {
@@ -77,7 +96,88 @@ fn observation_motion() -> ObservationMotion {
 fn observation_snapshot(position: CursorPosition) -> ObservationSnapshot {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let basis = observation_basis(&request, Some(position), 91);
-    ObservationSnapshot::new(request, basis, ProbeSet::default(), observation_motion())
+    ObservationSnapshot::new(request, basis, observation_motion())
+}
+
+fn observing_state_from_demand(
+    ready: &CoreState,
+    kind: ExternalDemandKind,
+    observed_at: u64,
+    requested_target: Option<CursorPosition>,
+) -> CoreState {
+    reduce(
+        ready,
+        external_demand_event(kind, observed_at, requested_target),
+    )
+    .next
+}
+
+fn active_request(state: &CoreState) -> ObservationRequest {
+    state
+        .active_observation_request()
+        .cloned()
+        .expect("active observation request")
+}
+
+fn collect_observation_base(
+    state: &CoreState,
+    request: &ObservationRequest,
+    basis: ObservationBasis,
+    motion: ObservationMotion,
+) -> Transition {
+    reduce(
+        state,
+        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
+            request: request.clone(),
+            basis,
+            motion,
+        }),
+    )
+}
+
+fn cursor_color_probe_ready_state() -> CoreState {
+    ready_state_with_runtime_config(|runtime| {
+        runtime.config.cursor_color = Some("none".to_string());
+    })
+}
+
+fn background_probe_ready_state() -> CoreState {
+    ready_state_with_runtime_config(|runtime| {
+        runtime.config.particles_enabled = true;
+        runtime.config.particles_over_text = false;
+    })
+}
+
+fn dual_probe_ready_state() -> CoreState {
+    ready_state_with_runtime_config(|runtime| {
+        runtime.config.cursor_color = Some("none".to_string());
+        runtime.config.particles_enabled = true;
+        runtime.config.particles_over_text = false;
+    })
+}
+
+struct ObservationScenario {
+    observing: CoreState,
+    request: ObservationRequest,
+    basis: ObservationBasis,
+    based: Transition,
+}
+
+impl ObservationScenario {
+    fn new(ready: CoreState) -> Self {
+        let observing =
+            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+        let request = active_request(&observing);
+        let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+        let based =
+            collect_observation_base(&observing, &request, basis.clone(), observation_motion());
+        Self {
+            observing,
+            request,
+            basis,
+            based,
+        }
+    }
 }
 
 fn cursor_position_policy(state: &CoreState) -> CursorPositionReadPolicy {
@@ -192,7 +292,6 @@ fn timer_armed_state(state: CoreState) -> (CoreState, TimerToken) {
 
 fn animation_tick_event(token: TimerToken, observed_at: u64) -> Event {
     Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
-        kind: TimerKind::Animation,
         token,
         observed_at: Millis::new(observed_at),
     })
@@ -200,7 +299,6 @@ fn animation_tick_event(token: TimerToken, observed_at: u64) -> Event {
 
 fn ingress_tick_event(token: TimerToken, observed_at: u64) -> Event {
     Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
-        kind: TimerKind::Ingress,
         token,
         observed_at: Millis::new(observed_at),
     })
@@ -208,7 +306,6 @@ fn ingress_tick_event(token: TimerToken, observed_at: u64) -> Event {
 
 fn cleanup_tick_event(token: TimerToken, observed_at: u64) -> Event {
     Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
-        kind: TimerKind::Cleanup,
         token,
         observed_at: Millis::new(observed_at),
     })
@@ -233,13 +330,12 @@ fn planned_state_after_animation_tick(
         &transition.next,
         Event::RenderPlanComputed(RenderPlanComputedEvent {
             proposal_id,
-            planned_render: crate::core::reducer::build_planned_render(
+            planned_render: Box::new(crate::core::reducer::build_planned_render(
                 &payload.planning_state,
                 payload.proposal_id,
                 &payload.render_decision,
-                payload.should_schedule_next_animation,
-                payload.next_animation_at_ms,
-            ),
+                payload.animation_schedule,
+            )),
             observed_at: payload.requested_at,
         }),
     );
@@ -252,24 +348,71 @@ fn applying_state_with_realization_plan(
     should_schedule_next_animation: bool,
     next_animation_at_ms: Option<Millis>,
 ) -> (CoreState, ProposalId) {
-    let basis = PatchBasis::new(
-        state
-            .realization()
-            .trusted_acknowledged_for_patch()
-            .cloned(),
-        None,
-    );
+    let acknowledged = state
+        .realization()
+        .trusted_acknowledged_for_patch()
+        .cloned();
+    let target = match &realization {
+        RealizationPlan::Draw(_) => acknowledged.clone().or_else(|| {
+            state
+                .scene()
+                .projection_entry()
+                .map(|entry| entry.snapshot().clone())
+        }),
+        RealizationPlan::Noop => acknowledged.clone(),
+        RealizationPlan::Clear(_) | RealizationPlan::Failure(_) => None,
+    };
+    let basis = PatchBasis::new(acknowledged, target);
     let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
-    let proposal = InFlightProposal::new(
-        proposal_id,
-        patch,
-        realization,
-        RenderCleanupAction::NoAction,
-        RenderSideEffects::default(),
-        should_schedule_next_animation,
-        next_animation_at_ms,
-    );
+    let proposal = match realization {
+        RealizationPlan::Draw(draw) => InFlightProposal::draw(
+            proposal_id,
+            patch,
+            draw,
+            RenderCleanupAction::NoAction,
+            RenderSideEffects::default(),
+            crate::core::state::AnimationSchedule::from_parts(
+                should_schedule_next_animation,
+                next_animation_at_ms,
+            ),
+        )
+        .expect("test draw proposal should be constructible"),
+        RealizationPlan::Clear(clear) => InFlightProposal::clear(
+            proposal_id,
+            patch,
+            clear,
+            RenderCleanupAction::NoAction,
+            RenderSideEffects::default(),
+            crate::core::state::AnimationSchedule::from_parts(
+                should_schedule_next_animation,
+                next_animation_at_ms,
+            ),
+        )
+        .expect("test clear proposal should be constructible"),
+        RealizationPlan::Noop => InFlightProposal::noop(
+            proposal_id,
+            patch,
+            RenderCleanupAction::NoAction,
+            RenderSideEffects::default(),
+            crate::core::state::AnimationSchedule::from_parts(
+                should_schedule_next_animation,
+                next_animation_at_ms,
+            ),
+        )
+        .expect("test noop proposal should be constructible"),
+        RealizationPlan::Failure(failure) => InFlightProposal::failure(
+            proposal_id,
+            patch,
+            failure,
+            RenderCleanupAction::NoAction,
+            RenderSideEffects::default(),
+            crate::core::state::AnimationSchedule::from_parts(
+                should_schedule_next_animation,
+                next_animation_at_ms,
+            ),
+        ),
+    };
     (
         state
             .into_applying(proposal)
@@ -293,127 +436,201 @@ fn initialize_from_idle_enters_primed_protocol_without_follow_up_reads() {
     assert!(transition.effects.is_empty());
 }
 
-#[test]
-fn lifecycle_constructors_preserve_protocol_owned_shared_state() {
-    let recovery_policy = RecoveryPolicyState::default().with_retry_attempt(3);
-    let ingress_policy = IngressPolicyState::default().note_cursor_autocmd(Millis::new(55));
-    let (timers, armed_token) = CoreState::default().timers().arm(TimerId::Animation);
-    let primed = CoreState::default()
-        .with_timers(timers)
-        .with_recovery_policy(recovery_policy)
-        .with_ingress_policy(ingress_policy)
-        .initialize();
+mod protocol_shared_state_constructors {
+    use super::*;
 
-    assert_eq!(primed.timers(), timers);
-    assert_eq!(
-        primed.timers().active_token(TimerId::Animation),
-        Some(armed_token)
-    );
-    assert_eq!(primed.recovery_policy(), recovery_policy);
-    assert_eq!(primed.ingress_policy(), ingress_policy);
+    fn primed_state_with_shared_policy() -> (
+        CoreState,
+        RecoveryPolicyState,
+        IngressPolicyState,
+        TimerToken,
+    ) {
+        let recovery_policy = RecoveryPolicyState::default().with_retry_attempt(3);
+        let ingress_policy = IngressPolicyState::default().note_cursor_autocmd(Millis::new(55));
+        let (timers, armed_token) = CoreState::default().timers().arm(TimerId::Animation);
+        let primed = CoreState::default()
+            .with_timers(timers)
+            .with_recovery_policy(recovery_policy)
+            .with_ingress_policy(ingress_policy)
+            .initialize();
+        (primed, recovery_policy, ingress_policy, armed_token)
+    }
 
-    let request = observation_request(11, ExternalDemandKind::ExternalCursor, 77);
-    let observing = primed
-        .with_demand_queue(DemandQueue::default())
-        .into_observing(request);
-    assert_eq!(observing.timers(), timers);
-    assert_eq!(observing.recovery_policy(), recovery_policy);
-    assert_eq!(observing.ingress_policy(), ingress_policy);
+    fn assert_shared_protocol_state(
+        state: &CoreState,
+        expected_token: TimerToken,
+        recovery_policy: RecoveryPolicyState,
+        ingress_policy: IngressPolicyState,
+    ) {
+        assert_eq!(
+            state.timers().active_token(TimerId::Animation),
+            Some(expected_token)
+        );
+        assert_eq!(state.recovery_policy(), recovery_policy);
+        assert_eq!(state.ingress_policy(), ingress_policy);
+    }
 
-    let observation = observation_snapshot(cursor(4, 9));
-    let ready = observing
-        .with_active_observation(Some(observation.clone()))
-        .expect("observation staging should succeed")
-        .into_ready_with_observation(observation);
-    assert_eq!(ready.timers(), timers);
-    assert_eq!(ready.recovery_policy(), recovery_policy);
-    assert_eq!(ready.ingress_policy(), ingress_policy);
+    #[test]
+    fn initialize_keeps_armed_timers_and_policy_state() {
+        let (primed, recovery_policy, ingress_policy, armed_token) =
+            primed_state_with_shared_policy();
 
-    let recovering = ready.clone().into_recovering();
-    assert_eq!(recovering.timers(), timers);
-    assert_eq!(recovering.recovery_policy(), recovery_policy);
-    assert_eq!(recovering.ingress_policy(), ingress_policy);
+        assert_shared_protocol_state(&primed, armed_token, recovery_policy, ingress_policy);
+    }
 
-    let (applying, proposal_id) =
-        applying_state_with_realization_plan(ready, noop_realization_plan(), false, None);
-    assert_eq!(applying.timers(), timers);
-    assert_eq!(applying.recovery_policy(), recovery_policy);
-    assert_eq!(applying.ingress_policy(), ingress_policy);
+    #[test]
+    fn into_observing_keeps_armed_timers_and_policy_state() {
+        let (primed, recovery_policy, ingress_policy, armed_token) =
+            primed_state_with_shared_policy();
+        let observing = primed
+            .with_demand_queue(DemandQueue::default())
+            .into_observing(observation_request(
+                11,
+                ExternalDemandKind::ExternalCursor,
+                77,
+            ));
 
-    let (cleared, _) = applying
-        .clear_pending_for(proposal_id)
-        .expect("proposal should clear back to ready");
-    assert_eq!(cleared.timers(), timers);
-    assert_eq!(cleared.recovery_policy(), recovery_policy);
-    assert_eq!(cleared.ingress_policy(), ingress_policy);
+        assert_shared_protocol_state(&observing, armed_token, recovery_policy, ingress_policy);
+    }
+
+    #[test]
+    fn into_ready_with_observation_keeps_armed_timers_and_policy_state() {
+        let (primed, recovery_policy, ingress_policy, armed_token) =
+            primed_state_with_shared_policy();
+        let observation = observation_snapshot(cursor(4, 9));
+        let ready = primed
+            .with_demand_queue(DemandQueue::default())
+            .into_observing(observation_request(
+                11,
+                ExternalDemandKind::ExternalCursor,
+                77,
+            ))
+            .with_active_observation(Some(observation.clone()))
+            .expect("observation staging should succeed")
+            .into_ready_with_observation(observation);
+
+        assert_shared_protocol_state(&ready, armed_token, recovery_policy, ingress_policy);
+    }
+
+    #[test]
+    fn into_recovering_keeps_armed_timers_and_policy_state() {
+        let (primed, recovery_policy, ingress_policy, armed_token) =
+            primed_state_with_shared_policy();
+        let observation = observation_snapshot(cursor(4, 9));
+        let ready = primed
+            .with_demand_queue(DemandQueue::default())
+            .into_observing(observation_request(
+                11,
+                ExternalDemandKind::ExternalCursor,
+                77,
+            ))
+            .with_active_observation(Some(observation.clone()))
+            .expect("observation staging should succeed")
+            .into_ready_with_observation(observation);
+        let recovering = ready.into_recovering();
+
+        assert_shared_protocol_state(&recovering, armed_token, recovery_policy, ingress_policy);
+    }
+
+    #[test]
+    fn clear_pending_for_keeps_armed_timers_and_policy_state() {
+        let (primed, recovery_policy, ingress_policy, armed_token) =
+            primed_state_with_shared_policy();
+        let observation = observation_snapshot(cursor(4, 9));
+        let ready = primed
+            .with_demand_queue(DemandQueue::default())
+            .into_observing(observation_request(
+                11,
+                ExternalDemandKind::ExternalCursor,
+                77,
+            ))
+            .with_active_observation(Some(observation.clone()))
+            .expect("observation staging should succeed")
+            .into_ready_with_observation(observation);
+        let (applying, proposal_id) =
+            applying_state_with_realization_plan(ready, noop_realization_plan(), false, None);
+        let (cleared, _) = applying
+            .clear_pending_for(proposal_id)
+            .expect("proposal should clear back to ready");
+
+        assert_shared_protocol_state(&cleared, armed_token, recovery_policy, ingress_policy);
+    }
 }
 
-#[test]
-fn cursor_demand_is_queue_owned_and_coalesced_while_observing() {
-    let ready = ready_state();
-    let first = reduce(
-        &ready,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(20),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    );
+mod observing_cursor_demand_queue {
+    use super::*;
 
-    assert_eq!(first.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
-        first.effects,
-        with_cleanup_invalidation(vec![Effect::RequestObservationBase(
-            RequestObservationBaseEffect {
-                request: observation_request(1, ExternalDemandKind::ExternalCursor, 20),
-                context: observation_runtime_context(&ready),
-            }
-        )])
-    );
+    #[test]
+    fn first_cursor_demand_enters_observing_and_requests_observation_base() {
+        let ready = ready_state();
 
-    let second = reduce(
-        &first.next,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(21),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    );
+        let first = reduce(
+            &ready,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        );
 
-    assert_eq!(second.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
-        second.effects,
-        vec![Effect::RecordEventLoopMetric(
-            EventLoopMetricEffect::IngressCoalesced,
-        )]
-    );
+        assert_eq!(first.next.lifecycle(), Lifecycle::Observing);
+        assert_eq!(
+            first.effects,
+            with_cleanup_invalidation(vec![Effect::RequestObservationBase(
+                RequestObservationBaseEffect {
+                    request: observation_request(1, ExternalDemandKind::ExternalCursor, 20),
+                    context: observation_runtime_context(&ready),
+                }
+            )])
+        );
+    }
 
-    let third = reduce(
-        &second.next,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(22),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    );
+    #[test]
+    fn second_cursor_demand_records_ingress_coalesced_without_restarting_observation() {
+        let ready = ready_state();
+        let observing =
+            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 20, None);
 
-    let queued_cursor = third
-        .next
-        .demand_queue()
-        .latest_cursor()
-        .expect("queued cursor demand");
-    assert_eq!(
-        queued_cursor,
-        &crate::core::state::QueuedDemand::Ready(ExternalDemand::new(
-            IngressSeq::new(3),
-            ExternalDemandKind::ExternalCursor,
-            Millis::new(22),
-            None,
-        ))
-    );
+        let second = reduce(
+            &observing,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        );
+
+        assert_eq!(second.next.lifecycle(), Lifecycle::Observing);
+        assert_eq!(
+            second.effects,
+            vec![Effect::RecordEventLoopMetric(
+                EventLoopMetricEffect::IngressCoalesced,
+            )]
+        );
+    }
+
+    #[test]
+    fn newest_queued_cursor_replaces_the_older_pending_cursor_demand() {
+        let ready = ready_state();
+        let observing =
+            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 20, None);
+        let coalesced = reduce(
+            &observing,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        );
+
+        let third = reduce(
+            &coalesced.next,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 22, None),
+        );
+
+        let queued_cursor = third
+            .next
+            .demand_queue()
+            .latest_cursor()
+            .expect("queued cursor demand");
+        assert_eq!(
+            queued_cursor,
+            &crate::core::state::QueuedDemand::Ready(ExternalDemand::new(
+                IngressSeq::new(3),
+                ExternalDemandKind::ExternalCursor,
+                Millis::new(22),
+                None,
+            ))
+        );
+    }
 }
 
 #[test]
@@ -573,7 +790,7 @@ fn observation_base_collection_emits_cursor_color_probe_request() {
         .probes()
         .cursor_color()
     {
-        ProbeState::Pending { .. } => {}
+        ProbeSlot::Requested(ProbeState::Pending { .. }) => {}
         other => panic!("expected pending cursor color probe, got {other:?}"),
     }
 }
@@ -628,11 +845,11 @@ fn observation_base_collection_stages_only_first_pending_probe_when_multiple_pro
         .expect("active observation snapshot");
     assert!(matches!(
         observation.probes().cursor_color(),
-        ProbeState::Pending { .. }
+        ProbeSlot::Requested(ProbeState::Pending { .. })
     ));
     assert!(matches!(
         observation.probes().background(),
-        ProbeState::Pending { .. }
+        ProbeSlot::Requested(ProbeState::Pending { .. })
     ));
 }
 
@@ -675,227 +892,243 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
         .expect("stored observation snapshot");
     assert_eq!(observation.cursor_color(), Some("#abcdef"));
     match observation.probes().cursor_color() {
-        ProbeState::Ready { reuse, .. } => assert_eq!(*reuse, ProbeReuse::Compatible),
+        ProbeSlot::Requested(ProbeState::Ready { reuse, .. }) => {
+            assert_eq!(*reuse, ProbeReuse::Compatible)
+        }
         other => panic!("expected ready cursor color probe, got {other:?}"),
     }
 }
 
-#[test]
-fn cursor_color_probe_completion_stages_background_probe_before_apply_when_both_probes_are_requested()
- {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.cursor_color = Some("none".to_string());
-    runtime.config.particles_enabled = true;
-    runtime.config.particles_over_text = false;
-    let ready = ready_state().with_runtime(runtime);
-    let observing = reduce(
-        &ready,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(25),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
-    let request = observing
-        .active_observation_request()
-        .cloned()
-        .expect("active observation");
-    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
-    let based = reduce(
-        &observing,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: basis.clone(),
-            motion: observation_motion(),
-        }),
-    );
+mod probe_completion_sequence {
+    use super::*;
 
-    let after_cursor = reduce(
-        &based.next,
-        cursor_color_probe_report(&request, ProbeReuse::Compatible, Some("#abcdef")),
-    );
-    let first_background_chunk = after_cursor
-        .next
-        .observation()
-        .and_then(|observation| observation.background_progress())
-        .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
-        .expect("first background probe chunk");
-
-    assert_eq!(after_cursor.next.lifecycle(), Lifecycle::Observing);
-    assert!(after_cursor.next.pending_proposal().is_none());
-    assert_eq!(
-        after_cursor.effects,
-        vec![Effect::RequestProbe(RequestProbeEffect {
-            observation_basis: basis.clone(),
-            probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
-            kind: ProbeKind::Background,
-            cursor_position_policy: cursor_position_policy(&based.next),
-            background_chunk: Some(first_background_chunk),
-        })]
-    );
-    let observation = after_cursor
-        .next
-        .observation()
-        .expect("observation should stay active while background probe is pending");
-    assert_eq!(observation.cursor_color(), Some("#abcdef"));
-    assert!(matches!(
-        observation.probes().background(),
-        ProbeState::Pending { .. }
-    ));
-
-    let after_background = reduce(
-        &after_cursor.next,
-        background_probe_report(&request, basis.viewport(), &[(7, 8)], ProbeReuse::Exact),
-    );
-
-    assert_eq!(after_background.next.lifecycle(), Lifecycle::Planning);
-    assert!(after_background.next.pending_proposal().is_none());
-    assert!(after_background.next.pending_plan_proposal_id().is_some());
-    assert!(matches!(
-        after_background.effects.as_slice(),
-        [Effect::RequestRenderPlan(_)]
-    ));
-}
-
-#[test]
-fn observation_result_stores_background_probe_in_snapshot() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.particles_enabled = true;
-    runtime.config.particles_over_text = false;
-    let ready = ready_state().with_runtime(runtime);
-    let observing = reduce(
-        &ready,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(25),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
-    let request = observing
-        .active_observation_request()
-        .cloned()
-        .expect("active observation");
-    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
-    let completed = reduce(
-        &observing,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: basis.clone(),
-            motion: observation_motion(),
-        }),
-    );
-
-    assert_eq!(completed.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
-        completed.effects,
-        vec![Effect::RequestProbe(RequestProbeEffect {
-            observation_basis: basis.clone(),
-            probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
-            kind: ProbeKind::Background,
-            cursor_position_policy: cursor_position_policy(&observing),
-            background_chunk: completed
-                .next
-                .observation()
-                .and_then(|observation| observation.background_progress())
-                .and_then(crate::core::state::BackgroundProbeProgress::next_chunk),
-        })]
-    );
-
-    let resolved = reduce(
-        &completed.next,
-        background_probe_report(&request, basis.viewport(), &[(7, 8)], ProbeReuse::Exact),
-    );
-
-    let observation = resolved
-        .next
-        .observation()
-        .expect("stored observation snapshot");
-    let background = observation
-        .background_probe()
-        .expect("background probe batch");
-    assert!(background.allows_particle(crate::types::ScreenCell::new(7, 8).expect("cell")));
-    assert!(!background.allows_particle(crate::types::ScreenCell::new(7, 9).expect("cell")));
-    match observation.probes().background() {
-        ProbeState::Ready { reuse, .. } => assert_eq!(*reuse, ProbeReuse::Exact),
-        other => panic!("expected ready background probe, got {other:?}"),
+    fn dual_probe_scenario() -> ObservationScenario {
+        ObservationScenario::new(dual_probe_ready_state())
     }
-}
 
-#[test]
-fn background_chunk_probe_progress_stages_the_next_chunk_before_apply() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.particles_enabled = true;
-    runtime.config.particles_over_text = false;
-    let ready = ready_state().with_runtime(runtime);
-    let observing = reduce(
-        &ready,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(25),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
-    let request = observing
-        .active_observation_request()
-        .cloned()
-        .expect("active observation");
-    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
-    let completed = reduce(
-        &observing,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: basis.clone(),
-            motion: observation_motion(),
-        }),
-    );
-    let first_chunk = completed
-        .next
-        .observation()
-        .and_then(|observation| observation.background_progress())
-        .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
-        .expect("first chunk");
+    fn background_probe_scenario() -> ObservationScenario {
+        ObservationScenario::new(background_probe_ready_state())
+    }
 
-    let after_first_chunk = reduce(
-        &completed.next,
-        background_chunk_probe_report(&request, first_chunk, basis.viewport(), &[(7, 8)]),
-    );
+    fn after_cursor_color_probe_ready() -> (ObservationScenario, Transition) {
+        let scenario = dual_probe_scenario();
+        let after_cursor = reduce(
+            &scenario.based.next,
+            cursor_color_probe_report(&scenario.request, ProbeReuse::Compatible, Some("#abcdef")),
+        );
+        (scenario, after_cursor)
+    }
 
-    let progressed_observation = after_first_chunk
-        .next
-        .observation()
-        .expect("observation should remain active");
-    let progressed = progressed_observation
-        .background_progress()
-        .expect("background progress after first chunk");
-    let next_chunk = progressed.next_chunk().expect("second chunk");
-    assert_eq!(
-        progressed.next_row(),
-        CursorRow(
-            first_chunk
-                .start_row()
-                .value()
-                .saturating_add(first_chunk.row_count())
-        )
-    );
-    assert!(progressed_observation.background_probe().is_none());
-    assert_eq!(after_first_chunk.next.lifecycle(), Lifecycle::Observing);
-    assert!(after_first_chunk.next.pending_proposal().is_none());
-    assert_eq!(
-        after_first_chunk.effects,
-        vec![Effect::RequestProbe(RequestProbeEffect {
-            observation_basis: basis,
-            probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
-            kind: ProbeKind::Background,
-            cursor_position_policy: cursor_position_policy(&completed.next),
-            background_chunk: Some(next_chunk),
-        })]
-    );
+    fn after_first_background_chunk() -> (ObservationScenario, BackgroundProbeChunk, Transition) {
+        let scenario = background_probe_scenario();
+        let first_chunk = scenario
+            .based
+            .next
+            .observation()
+            .and_then(|observation| observation.background_progress())
+            .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
+            .expect("first chunk");
+        let after_first_chunk = reduce(
+            &scenario.based.next,
+            background_chunk_probe_report(
+                &scenario.request,
+                first_chunk,
+                scenario.basis.viewport(),
+                &[(7, 8)],
+            ),
+        );
+        (scenario, first_chunk, after_first_chunk)
+    }
+
+    #[test]
+    fn cursor_color_completion_keeps_observation_active_until_background_probe_finishes() {
+        let (_scenario, after_cursor) = after_cursor_color_probe_ready();
+
+        assert_eq!(after_cursor.next.lifecycle(), Lifecycle::Observing);
+        assert!(after_cursor.next.pending_proposal().is_none());
+    }
+
+    #[test]
+    fn cursor_color_completion_requests_the_first_background_probe_chunk() {
+        let (scenario, after_cursor) = after_cursor_color_probe_ready();
+        let first_background_chunk = after_cursor
+            .next
+            .observation()
+            .and_then(|observation| observation.background_progress())
+            .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
+            .expect("first background probe chunk");
+
+        assert_eq!(
+            after_cursor.effects,
+            vec![Effect::RequestProbe(RequestProbeEffect {
+                observation_basis: scenario.basis.clone(),
+                probe_request_id: ProbeKind::Background
+                    .request_id(scenario.request.observation_id()),
+                kind: ProbeKind::Background,
+                cursor_position_policy: cursor_position_policy(&scenario.based.next),
+                background_chunk: Some(first_background_chunk),
+            })]
+        );
+    }
+
+    #[test]
+    fn cursor_color_completion_retains_cursor_color_while_background_probe_is_pending() {
+        let (_scenario, after_cursor) = after_cursor_color_probe_ready();
+
+        let observation = after_cursor
+            .next
+            .observation()
+            .expect("observation should stay active while background probe is pending");
+        assert_eq!(observation.cursor_color(), Some("#abcdef"));
+        assert!(matches!(
+            observation.probes().background(),
+            ProbeSlot::Requested(ProbeState::Pending { .. })
+        ));
+    }
+
+    #[test]
+    fn final_background_probe_completion_enters_planning_and_requests_render_plan() {
+        let (scenario, after_cursor) = after_cursor_color_probe_ready();
+
+        let after_background = reduce(
+            &after_cursor.next,
+            background_probe_report(
+                &scenario.request,
+                scenario.basis.viewport(),
+                &[(7, 8)],
+                ProbeReuse::Exact,
+            ),
+        );
+
+        assert_eq!(after_background.next.lifecycle(), Lifecycle::Planning);
+        assert!(after_background.next.pending_proposal().is_none());
+        assert!(after_background.next.pending_plan_proposal_id().is_some());
+        assert!(matches!(
+            after_background.effects.as_slice(),
+            [Effect::RequestRenderPlan(_)]
+        ));
+    }
+
+    #[test]
+    fn observation_base_collection_requests_the_first_background_probe_chunk() {
+        let scenario = background_probe_scenario();
+        let first_chunk = scenario
+            .based
+            .next
+            .observation()
+            .and_then(|observation| observation.background_progress())
+            .and_then(crate::core::state::BackgroundProbeProgress::next_chunk);
+
+        assert_eq!(scenario.based.next.lifecycle(), Lifecycle::Observing);
+        assert_eq!(
+            scenario.based.effects,
+            vec![Effect::RequestProbe(RequestProbeEffect {
+                observation_basis: scenario.basis.clone(),
+                probe_request_id: ProbeKind::Background
+                    .request_id(scenario.request.observation_id()),
+                kind: ProbeKind::Background,
+                cursor_position_policy: cursor_position_policy(&scenario.observing),
+                background_chunk: first_chunk,
+            })]
+        );
+    }
+
+    #[test]
+    fn background_probe_report_stores_allowed_cells_in_snapshot() {
+        let scenario = background_probe_scenario();
+        let resolved = reduce(
+            &scenario.based.next,
+            background_probe_report(
+                &scenario.request,
+                scenario.basis.viewport(),
+                &[(7, 8)],
+                ProbeReuse::Exact,
+            ),
+        );
+
+        let observation = resolved
+            .next
+            .observation()
+            .expect("stored observation snapshot");
+        let background = observation
+            .background_probe()
+            .expect("background probe batch");
+        assert!(background.allows_particle(crate::types::ScreenCell::new(7, 8).expect("cell")));
+        assert!(!background.allows_particle(crate::types::ScreenCell::new(7, 9).expect("cell")));
+    }
+
+    #[test]
+    fn background_probe_report_stores_probe_reuse_state_in_snapshot() {
+        let scenario = background_probe_scenario();
+        let resolved = reduce(
+            &scenario.based.next,
+            background_probe_report(
+                &scenario.request,
+                scenario.basis.viewport(),
+                &[(7, 8)],
+                ProbeReuse::Exact,
+            ),
+        );
+
+        let observation = resolved
+            .next
+            .observation()
+            .expect("stored observation snapshot");
+        match observation.probes().background() {
+            ProbeSlot::Requested(ProbeState::Ready { reuse, .. }) => {
+                assert_eq!(*reuse, ProbeReuse::Exact)
+            }
+            other => panic!("expected ready background probe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn background_chunk_completion_advances_progress_without_materializing_probe_batch() {
+        let (_scenario, first_chunk, after_first_chunk) = after_first_background_chunk();
+
+        let progressed_observation = after_first_chunk
+            .next
+            .observation()
+            .expect("observation should remain active");
+        let progressed = progressed_observation
+            .background_progress()
+            .expect("background progress after first chunk");
+        assert_eq!(
+            progressed.next_row(),
+            CursorRow(
+                first_chunk
+                    .start_row()
+                    .value()
+                    .saturating_add(first_chunk.row_count())
+            )
+        );
+        assert!(progressed_observation.background_probe().is_none());
+    }
+
+    #[test]
+    fn background_chunk_completion_requests_the_next_chunk_before_planning() {
+        let (scenario, _first_chunk, after_first_chunk) = after_first_background_chunk();
+        let progressed = after_first_chunk
+            .next
+            .observation()
+            .and_then(|observation| observation.background_progress())
+            .expect("background progress after first chunk");
+        let next_chunk = progressed.next_chunk().expect("second chunk");
+
+        assert_eq!(after_first_chunk.next.lifecycle(), Lifecycle::Observing);
+        assert!(after_first_chunk.next.pending_proposal().is_none());
+        assert_eq!(
+            after_first_chunk.effects,
+            vec![Effect::RequestProbe(RequestProbeEffect {
+                observation_basis: scenario.basis,
+                probe_request_id: ProbeKind::Background
+                    .request_id(scenario.request.observation_id()),
+                kind: ProbeKind::Background,
+                cursor_position_policy: cursor_position_policy(&scenario.based.next),
+                background_chunk: Some(next_chunk),
+            })]
+        );
+    }
 }
 
 #[test]
@@ -955,118 +1188,90 @@ fn refresh_required_probe_report_retries_base_observation() {
     );
 }
 
-#[test]
-fn refresh_required_probe_report_yields_to_newer_ingress_after_retry_budget_is_exhausted() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.cursor_color = Some("none".to_string());
-    let ready = ready_state().with_runtime(runtime);
-    let observing = reduce(
-        &ready,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(25),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
-    let request = observing
-        .active_observation_request()
-        .cloned()
-        .expect("active observation");
-    let based = reduce(
-        &observing,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: observation_basis(&request, Some(cursor(7, 8)), 26),
-            motion: observation_motion(),
-        }),
-    );
+mod probe_refresh_retry_budget {
+    use super::*;
 
-    let queued_newer = reduce(
-        &based.next,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(27),
-            requested_target: Some(cursor(9, 10)),
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
+    fn exhausted_refresh_transition() -> (ObservationRequest, Transition) {
+        let scenario = ObservationScenario::new(cursor_color_probe_ready_state());
+        let queued_newer = reduce(
+            &scenario.based.next,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 27, Some(cursor(9, 10))),
+        )
+        .next;
 
-    let retry_once = reduce(
-        &queued_newer,
-        cursor_color_probe_report(&request, ProbeReuse::RefreshRequired, None),
-    );
-    assert!(matches!(
-        retry_once.effects.as_slice(),
-        [
-            Effect::RecordEventLoopMetric(EventLoopMetricEffect::ProbeRefreshRetried(
-                ProbeKind::CursorColor
-            )),
-            Effect::RequestObservationBase(_)
-        ]
-    ));
+        let retry_once = reduce(
+            &queued_newer,
+            cursor_color_probe_report(&scenario.request, ProbeReuse::RefreshRequired, None),
+        );
+        let retry_once_based = collect_observation_base(
+            &retry_once.next,
+            &scenario.request,
+            observation_basis(&scenario.request, Some(cursor(7, 9)), 28),
+            observation_motion(),
+        );
+        let retry_twice = reduce(
+            &retry_once_based.next,
+            cursor_color_probe_report(&scenario.request, ProbeReuse::RefreshRequired, None),
+        );
+        let retry_twice_based = collect_observation_base(
+            &retry_twice.next,
+            &scenario.request,
+            observation_basis(&scenario.request, Some(cursor(7, 10)), 29),
+            observation_motion(),
+        );
+        let exhausted = reduce(
+            &retry_twice_based.next,
+            cursor_color_probe_report(&scenario.request, ProbeReuse::RefreshRequired, None),
+        );
+        (scenario.request, exhausted)
+    }
 
-    let retry_once_based = reduce(
-        &retry_once.next,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: observation_basis(&request, Some(cursor(7, 9)), 28),
-            motion: observation_motion(),
-        }),
-    );
-    let retry_twice = reduce(
-        &retry_once_based.next,
-        cursor_color_probe_report(&request, ProbeReuse::RefreshRequired, None),
-    );
-    assert!(matches!(
-        retry_twice.effects.as_slice(),
-        [
-            Effect::RecordEventLoopMetric(EventLoopMetricEffect::ProbeRefreshRetried(
-                ProbeKind::CursorColor
-            )),
-            Effect::RequestObservationBase(_)
-        ]
-    ));
+    #[test]
+    fn refresh_budget_exhaustion_promotes_the_newer_ingress_request() {
+        let (request, exhausted) = exhausted_refresh_transition();
 
-    let retry_twice_based = reduce(
-        &retry_twice.next,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: observation_basis(&request, Some(cursor(7, 10)), 29),
-            motion: observation_motion(),
-        }),
-    );
-    let exhausted = reduce(
-        &retry_twice_based.next,
-        cursor_color_probe_report(&request, ProbeReuse::RefreshRequired, None),
-    );
+        let replacement_request = exhausted
+            .next
+            .active_observation_request()
+            .cloned()
+            .expect("newer ingress should take over after retry budget exhaustion");
+        assert_ne!(replacement_request, request);
+        assert_eq!(
+            replacement_request.demand().requested_target(),
+            Some(cursor(9, 10))
+        );
+        assert_eq!(exhausted.next.lifecycle(), Lifecycle::Observing);
+    }
 
-    let replacement_request = exhausted
-        .next
-        .active_observation_request()
-        .cloned()
-        .expect("newer ingress should take over after retry budget exhaustion");
-    assert_ne!(replacement_request, request);
-    assert_eq!(
-        replacement_request.demand().requested_target(),
-        Some(cursor(9, 10))
-    );
-    assert_eq!(exhausted.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
-        exhausted.effects,
-        vec![
-            Effect::RecordEventLoopMetric(EventLoopMetricEffect::ProbeRefreshBudgetExhausted(
-                ProbeKind::CursorColor
-            ),),
-            Effect::RequestObservationBase(RequestObservationBaseEffect {
-                request: replacement_request,
-                context: observation_runtime_context(&exhausted.next),
-            }),
-        ]
-    );
-    assert!(exhausted.next.observation().is_none());
+    #[test]
+    fn refresh_budget_exhaustion_requests_a_new_base_for_the_replacement_ingress() {
+        let (_request, exhausted) = exhausted_refresh_transition();
+        let replacement_request = exhausted
+            .next
+            .active_observation_request()
+            .cloned()
+            .expect("replacement request after retry exhaustion");
+
+        assert_eq!(
+            exhausted.effects,
+            vec![
+                Effect::RecordEventLoopMetric(EventLoopMetricEffect::ProbeRefreshBudgetExhausted(
+                    ProbeKind::CursorColor
+                ),),
+                Effect::RequestObservationBase(RequestObservationBaseEffect {
+                    request: replacement_request,
+                    context: observation_runtime_context(&exhausted.next),
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_budget_exhaustion_clears_the_stale_observation_snapshot() {
+        let (_request, exhausted) = exhausted_refresh_transition();
+
+        assert!(exhausted.next.observation().is_none());
+    }
 }
 
 #[test]
@@ -1105,89 +1310,169 @@ fn failed_probe_report_is_retained_without_collapsing_to_missing() {
         .expect("stored observation snapshot");
     assert_eq!(observation.cursor_color(), None);
     match observation.probes().cursor_color() {
-        ProbeState::Failed { failure, .. } => assert_eq!(*failure, ProbeFailure::ShellReadFailed),
+        ProbeSlot::Requested(ProbeState::Failed { failure, .. }) => {
+            assert_eq!(*failure, ProbeFailure::ShellReadFailed)
+        }
         other => panic!("expected failed cursor color probe, got {other:?}"),
     }
 }
 
-#[test]
-fn observation_result_stages_render_plan_before_dequeuing_next_pending_demand() {
-    let ready = ready_state();
-    let observing = reduce(
-        &ready,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ModeChanged,
-            observed_at: Millis::new(30),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
-    let observing_with_cursor_queued = reduce(
-        &observing,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(31),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
-    let request = observing_with_cursor_queued
-        .active_observation_request()
-        .cloned()
-        .expect("active observation");
+mod observation_completion_planning {
+    use super::*;
 
-    let completed = reduce(
-        &observing_with_cursor_queued,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: observation_basis(&request, Some(cursor(7, 8)), 32),
-            motion: observation_motion(),
-        }),
-    );
+    fn completed_mode_change_observation_with_cursor_queued() -> Transition {
+        let ready = ready_state();
+        let observing =
+            observing_state_from_demand(&ready, ExternalDemandKind::ModeChanged, 30, None);
+        let observing_with_cursor_queued = reduce(
+            &observing,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 31, None),
+        )
+        .next;
+        let request = active_request(&observing_with_cursor_queued);
 
-    assert_eq!(completed.next.lifecycle(), Lifecycle::Planning);
-    assert_eq!(completed.effects.len(), 1);
-    match &completed.effects[0] {
-        Effect::RequestRenderPlan(payload) => {
-            assert_eq!(payload.requested_at, Millis::new(32));
-            assert_eq!(
-                Some(payload.proposal_id),
-                completed.next.pending_plan_proposal_id()
-            );
-        }
-        other => panic!("expected first render plan request, got {other:?}"),
+        collect_observation_base(
+            &observing_with_cursor_queued,
+            &request,
+            observation_basis(&request, Some(cursor(7, 8)), 32),
+            observation_motion(),
+        )
     }
-    assert!(completed.next.demand_queue().latest_cursor().is_some());
+
+    #[test]
+    fn observation_completion_enters_planning_and_requests_render_plan() {
+        let completed = completed_mode_change_observation_with_cursor_queued();
+
+        assert_eq!(completed.next.lifecycle(), Lifecycle::Planning);
+        assert_eq!(completed.effects.len(), 1);
+        match &completed.effects[0] {
+            Effect::RequestRenderPlan(payload) => {
+                assert_eq!(payload.requested_at, Millis::new(32));
+                assert_eq!(
+                    Some(payload.proposal_id),
+                    completed.next.pending_plan_proposal_id()
+                );
+            }
+            other => panic!("expected first render plan request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn observation_completion_keeps_the_newer_cursor_demand_queued_until_planning_finishes() {
+        let completed = completed_mode_change_observation_with_cursor_queued();
+
+        assert!(completed.next.demand_queue().latest_cursor().is_some());
+    }
 }
 
-#[test]
-fn recent_autocmd_ingress_suppresses_key_fallback_in_reducer() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.delay_after_key = 25.0;
-    let state = ready_state()
-        .with_runtime(runtime)
-        .with_ingress_policy(IngressPolicyState::default().note_cursor_autocmd(Millis::new(100)));
+mod key_fallback_suppression {
+    use super::*;
 
-    let suppressed = reduce(
-        &state,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::KeyFallback,
-            observed_at: Millis::new(112),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    );
+    fn state_with_recent_cursor_autocmd() -> CoreState {
+        let mut runtime = ready_state().runtime().clone();
+        runtime.config.delay_after_key = 25.0;
+        ready_state().with_runtime(runtime).with_ingress_policy(
+            IngressPolicyState::default().note_cursor_autocmd(Millis::new(100)),
+        )
+    }
 
-    assert_eq!(suppressed.next.lifecycle(), state.lifecycle());
-    assert!(suppressed.next.demand_queue().latest_cursor().is_none());
-    assert!(suppressed.next.demand_queue().ordered().is_empty());
-    assert_eq!(
-        suppressed.next.entropy().next_ingress_seq(),
-        IngressSeq::new(1)
-    );
-    assert!(suppressed.effects.is_empty());
+    fn queued_pending_key_fallback_with_cleanup()
+    -> (RenderCleanupState, TimerToken, TimerToken, Transition) {
+        let mut runtime = ready_state().runtime().clone();
+        runtime.config.delay_after_key = 25.0;
+        let cleanup = RenderCleanupState::scheduled(Millis::new(90), 200, 3_000, 21);
+        let (timers, cleanup_token) = ready_state().timers().arm(TimerId::Cleanup);
+        let state = ready_state()
+            .with_runtime(runtime)
+            .with_timers(timers)
+            .with_render_cleanup(cleanup)
+            .with_ingress_policy(
+                IngressPolicyState::default().note_cursor_autocmd(Millis::new(100)),
+            );
+        let queued = reduce(
+            &state,
+            Event::KeyFallbackQueued(KeyFallbackQueuedEvent {
+                observed_at: Millis::new(112),
+                due_at: Millis::new(120),
+            }),
+        );
+        let ingress_token = queued
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("pending key fallback should arm ingress timer");
+        (cleanup, cleanup_token, ingress_token, queued)
+    }
+
+    #[test]
+    fn recent_autocmd_suppression_leaves_lifecycle_and_ingress_entropy_unchanged() {
+        let state = state_with_recent_cursor_autocmd();
+
+        let suppressed = reduce(
+            &state,
+            external_demand_event(ExternalDemandKind::KeyFallback, 112, None),
+        );
+
+        assert_eq!(suppressed.next.lifecycle(), state.lifecycle());
+        assert_eq!(
+            suppressed.next.entropy().next_ingress_seq(),
+            IngressSeq::new(1)
+        );
+        assert!(suppressed.effects.is_empty());
+    }
+
+    #[test]
+    fn recent_autocmd_suppression_does_not_queue_the_key_fallback_demand() {
+        let state = state_with_recent_cursor_autocmd();
+
+        let suppressed = reduce(
+            &state,
+            external_demand_event(ExternalDemandKind::KeyFallback, 112, None),
+        );
+
+        assert!(suppressed.next.demand_queue().latest_cursor().is_none());
+        assert!(suppressed.next.demand_queue().ordered().is_empty());
+    }
+
+    #[test]
+    fn pending_key_fallback_queueing_preserves_the_existing_cleanup_state() {
+        let (cleanup, cleanup_token, _ingress_token, queued) =
+            queued_pending_key_fallback_with_cleanup();
+
+        assert_eq!(queued.next.render_cleanup(), cleanup);
+        assert_eq!(
+            queued.next.timers().active_token(TimerId::Cleanup),
+            Some(cleanup_token)
+        );
+    }
+
+    #[test]
+    fn suppressed_pending_key_fallback_keeps_cleanup_timer_armed() {
+        let (cleanup, cleanup_token, ingress_token, queued) =
+            queued_pending_key_fallback_with_cleanup();
+
+        let suppressed = reduce(&queued.next, ingress_tick_event(ingress_token, 120));
+
+        assert_eq!(suppressed.next.render_cleanup(), cleanup);
+        assert_eq!(
+            suppressed.next.timers().active_token(TimerId::Cleanup),
+            Some(cleanup_token)
+        );
+    }
+
+    #[test]
+    fn suppressed_pending_key_fallback_disarms_the_ingress_timer_without_effects() {
+        let (_cleanup, _cleanup_token, ingress_token, queued) =
+            queued_pending_key_fallback_with_cleanup();
+
+        let suppressed = reduce(&queued.next, ingress_tick_event(ingress_token, 120));
+
+        assert_eq!(
+            suppressed.next.timers().active_token(TimerId::Ingress),
+            None
+        );
+        assert!(suppressed.effects.is_empty());
+    }
 }
 
 #[test]
@@ -1243,57 +1528,11 @@ fn deferred_key_fallback_is_queued_and_arms_ingress_timer() {
     assert_eq!(
         transition.effects,
         with_cleanup_invalidation(vec![Effect::ScheduleTimer(ScheduleTimerEffect {
-            kind: TimerKind::Ingress,
             token: expected_token,
             delay: DelayBudgetMs::try_new(25).expect("positive delay"),
             requested_at: Millis::new(120),
         })])
     );
-}
-
-#[test]
-fn pending_key_fallback_keeps_armed_cleanup_live_through_suppression() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.config.delay_after_key = 25.0;
-    let cleanup = RenderCleanupState::scheduled(Millis::new(90), 200, 3_000, 21);
-    let (timers, cleanup_token) = ready_state().timers().arm(TimerId::Cleanup);
-    let state = ready_state()
-        .with_runtime(runtime)
-        .with_timers(timers)
-        .with_render_cleanup(cleanup)
-        .with_ingress_policy(IngressPolicyState::default().note_cursor_autocmd(Millis::new(100)));
-
-    let queued = reduce(
-        &state,
-        Event::KeyFallbackQueued(KeyFallbackQueuedEvent {
-            observed_at: Millis::new(112),
-            due_at: Millis::new(120),
-        }),
-    );
-    let ingress_token = queued
-        .next
-        .timers()
-        .active_token(TimerId::Ingress)
-        .expect("pending key fallback should arm ingress timer");
-
-    assert_eq!(queued.next.render_cleanup(), cleanup);
-    assert_eq!(
-        queued.next.timers().active_token(TimerId::Cleanup),
-        Some(cleanup_token)
-    );
-
-    let suppressed = reduce(&queued.next, ingress_tick_event(ingress_token, 120));
-
-    assert_eq!(suppressed.next.render_cleanup(), cleanup);
-    assert_eq!(
-        suppressed.next.timers().active_token(TimerId::Cleanup),
-        Some(cleanup_token)
-    );
-    assert_eq!(
-        suppressed.next.timers().active_token(TimerId::Ingress),
-        None
-    );
-    assert!(suppressed.effects.is_empty());
 }
 
 #[test]
@@ -1454,7 +1693,6 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     let observation = ObservationSnapshot::new(
         request.clone(),
         observation_basis(&request, Some(cursor(9, 9)), 100),
-        ProbeSet::default(),
         observation_motion(),
     );
     let mut runtime = ready_state().runtime().clone();
@@ -1482,8 +1720,7 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
         &payload.planning_state,
         payload.proposal_id,
         &payload.render_decision,
-        payload.should_schedule_next_animation,
-        payload.next_animation_at_ms,
+        payload.animation_schedule,
     );
     let proposal = planned_render.proposal();
     let RealizationPlan::Draw(_) = proposal.realization() else {
@@ -1493,7 +1730,8 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
         );
     };
     let next_animation_at = proposal
-        .next_animation_at_ms()
+        .animation_schedule()
+        .deadline()
         .expect("draw proposal should schedule another animation tick");
     assert!(
         next_animation_at.value() > 116,
@@ -1502,59 +1740,83 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     );
 }
 
-#[test]
-fn animation_timer_draw_updates_scene_and_projection_cache() {
-    let (state, _proposal_id) =
-        planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 61);
+mod animation_timer_draw_state {
+    use super::*;
 
-    let scene = state.scene();
-    assert_eq!(scene.revision().value(), 1);
-    assert_eq!(
-        scene.dirty().entities(),
-        &std::collections::BTreeSet::from([SemanticEntityId::CursorTrail])
-    );
+    fn staged_draw_state() -> CoreState {
+        planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 61).0
+    }
 
-    let projection = scene
-        .projection_entry()
-        .expect("projection cache after draw render")
-        .snapshot()
-        .clone();
-    assert_eq!(projection.witness().observation_id().value(), 9);
-    assert_eq!(
-        projection.witness().viewport(),
-        ViewportSnapshot::new(CursorRow(40), CursorCol(120))
-    );
-    assert_eq!(
-        projection
-            .logical_raster()
-            .clear()
-            .map(|clear| clear.max_kept_windows),
-        Some(state.runtime().config.max_kept_windows)
-    );
+    #[test]
+    fn animation_timer_draw_advances_scene_revision_and_marks_the_trail_dirty() {
+        let state = staged_draw_state();
+        let scene = state.scene();
 
-    let Some(proposal) = state.pending_proposal() else {
-        panic!("expected staged render proposal");
-    };
-    let RealizationPlan::Draw(draw) = proposal.realization() else {
-        panic!("expected draw realization plan");
-    };
-    assert_eq!(
-        scene
+        assert_eq!(scene.revision().value(), 1);
+        assert_eq!(
+            scene.dirty().entities(),
+            &std::collections::BTreeSet::from([SemanticEntityId::CursorTrail])
+        );
+    }
+
+    #[test]
+    fn animation_timer_draw_populates_projection_cache_from_the_retained_observation() {
+        let state = staged_draw_state();
+        let projection = state
+            .scene()
+            .projection_entry()
+            .expect("projection cache after draw render")
+            .snapshot()
+            .clone();
+
+        assert_eq!(projection.witness().observation_id().value(), 9);
+        assert_eq!(
+            projection.witness().viewport(),
+            ViewportSnapshot::new(CursorRow(40), CursorCol(120))
+        );
+        assert_eq!(
+            projection
+                .logical_raster()
+                .clear()
+                .map(|clear| clear.max_kept_windows),
+            Some(state.runtime().config.max_kept_windows)
+        );
+    }
+
+    #[test]
+    fn animation_timer_draw_stages_a_draw_proposal_against_the_projection_cache_target() {
+        let state = staged_draw_state();
+        let scene = state.scene();
+        let projection = scene
             .projection_entry()
             .expect("projection cache entry after draw render")
-            .reuse_key()
-            .target_cell_presentation(),
-        proposal.side_effects().target_cell_presentation
-    );
-    assert_eq!(
-        draw.palette().color_levels(),
-        state.runtime().config.color_levels
-    );
-    assert_eq!(
-        draw.max_kept_windows(),
-        state.runtime().config.max_kept_windows
-    );
-    assert_eq!(proposal.patch().basis().target(), Some(&projection));
+            .snapshot()
+            .clone();
+        let Some(proposal) = state.pending_proposal() else {
+            panic!("expected staged render proposal");
+        };
+        let RealizationPlan::Draw(draw) = proposal.realization() else {
+            panic!("expected draw realization plan");
+        };
+
+        assert_eq!(
+            scene
+                .projection_entry()
+                .expect("projection cache entry after draw render")
+                .reuse_key()
+                .target_cell_presentation(),
+            proposal.side_effects().target_cell_presentation
+        );
+        assert_eq!(
+            draw.palette().color_levels(),
+            state.runtime().config.color_levels
+        );
+        assert_eq!(
+            draw.max_kept_windows(),
+            state.runtime().config.max_kept_windows
+        );
+        assert_eq!(proposal.patch().basis().target(), Some(&projection));
+    }
 }
 
 #[test]
@@ -1578,9 +1840,7 @@ fn apply_completed_advances_acknowledged_projection() {
     assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
     assert_eq!(
         completed.next.realization(),
-        &RealizationLedger::Consistent {
-            acknowledged: Some(acknowledged),
-        }
+        &RealizationLedger::Consistent { acknowledged }
     );
 }
 
@@ -1673,18 +1933,18 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
     let basis = PatchBasis::new(None, None);
     let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
-    let proposal = InFlightProposal::new(
+    let proposal = InFlightProposal::clear(
         proposal_id,
         patch,
-        RealizationPlan::Clear(RealizationClear::new(21)),
+        RealizationClear::new(21),
         RenderCleanupAction::Schedule,
         RenderSideEffects {
             redraw_after_clear_if_cmdline: true,
             ..RenderSideEffects::default()
         },
-        false,
-        None,
-    );
+        crate::core::state::AnimationSchedule::Idle,
+    )
+    .expect("clear proposal should be constructible");
     let staged = state
         .into_applying(proposal)
         .expect("staging clear proposal requires retained observation");
@@ -1708,7 +1968,6 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
         completed.effects,
         vec![
             Effect::ScheduleTimer(ScheduleTimerEffect {
-                kind: TimerKind::Cleanup,
                 token: cleanup_token,
                 delay: DelayBudgetMs::try_new(render_cleanup_delay_ms(&runtime.config))
                     .expect("cleanup delay budget"),
@@ -1727,15 +1986,15 @@ fn clear_apply_completion_redraws_after_visual_change_outside_cmdline() {
     let basis = PatchBasis::new(None, None);
     let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
-    let proposal = InFlightProposal::new(
+    let proposal = InFlightProposal::clear(
         proposal_id,
         patch,
-        RealizationPlan::Clear(RealizationClear::new(21)),
+        RealizationClear::new(21),
         RenderCleanupAction::Schedule,
         RenderSideEffects::default(),
-        false,
-        None,
-    );
+        crate::core::state::AnimationSchedule::Idle,
+    )
+    .expect("clear proposal should be constructible");
     let staged = state
         .into_applying(proposal)
         .expect("staging clear proposal requires retained observation");
@@ -1758,7 +2017,6 @@ fn clear_apply_completion_redraws_after_visual_change_outside_cmdline() {
         completed.effects,
         vec![
             Effect::ScheduleTimer(ScheduleTimerEffect {
-                kind: TimerKind::Cleanup,
                 token: cleanup_token,
                 delay: DelayBudgetMs::try_new(render_cleanup_delay_ms(&runtime.config))
                     .expect("cleanup delay budget"),
@@ -1777,15 +2035,15 @@ fn cleanup_timer_soft_clear_rearms_hard_purge_without_new_ingress() {
     let basis = PatchBasis::new(None, None);
     let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
-    let proposal = InFlightProposal::new(
+    let proposal = InFlightProposal::clear(
         proposal_id,
         patch,
-        RealizationPlan::Clear(RealizationClear::new(21)),
+        RealizationClear::new(21),
         RenderCleanupAction::Schedule,
         RenderSideEffects::default(),
-        false,
-        None,
-    );
+        crate::core::state::AnimationSchedule::Idle,
+    )
+    .expect("clear proposal should be constructible");
     let staged = state
         .into_applying(proposal)
         .expect("staging clear proposal requires retained observation");
@@ -1893,51 +2151,65 @@ fn diverged_realization_cannot_derive_noop_for_identical_target() {
     assert_eq!(patch.kind(), crate::core::state::ScenePatchKind::Replace);
 }
 
-#[test]
-fn apply_completed_clears_proposal_and_resumes_pending_observation_before_animation() {
-    let (staged, proposal_id) = applying_state_with_realization_plan(
-        ready_state_with_observation(cursor(4, 9)),
-        noop_realization_plan(),
-        true,
-        Some(Millis::new(90)),
-    );
-    let staged = reduce(
-        &staged,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ModeChanged,
-            observed_at: Millis::new(71),
-            requested_target: None,
-            ingress_cursor_presentation: None,
-        }),
-    )
-    .next;
+mod apply_completion_resume {
+    use super::*;
 
-    let completed = reduce(
-        &staged,
-        Event::ApplyReported(ApplyReport::AppliedFully {
-            proposal_id,
-            observed_at: Millis::new(72),
-            visual_change: false,
-        }),
-    );
+    fn completed_apply_with_pending_mode_change() -> (CoreState, Transition) {
+        let (staged, proposal_id) = applying_state_with_realization_plan(
+            ready_state_with_observation(cursor(4, 9)),
+            noop_realization_plan(),
+            true,
+            Some(Millis::new(90)),
+        );
+        let staged = reduce(
+            &staged,
+            external_demand_event(ExternalDemandKind::ModeChanged, 71, None),
+        )
+        .next;
 
-    assert_eq!(completed.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(completed.next.realization(), &RealizationLedger::Cleared);
-    assert_eq!(completed.effects.len(), 2);
-    assert_eq!(
-        completed.effects[0],
-        Effect::RequestObservationBase(RequestObservationBaseEffect {
-            request: observation_request(1, ExternalDemandKind::ModeChanged, 71),
-            context: observation_runtime_context(&staged),
-        })
-    );
-    assert!(matches!(
-        completed.effects[1],
-        Effect::ScheduleTimer(ScheduleTimerEffect {
-            kind: TimerKind::Animation,
-            ..
-        })
-    ));
+        let completed = reduce(
+            &staged,
+            Event::ApplyReported(ApplyReport::AppliedFully {
+                proposal_id,
+                observed_at: Millis::new(72),
+                visual_change: false,
+            }),
+        );
+        (staged, completed)
+    }
+
+    #[test]
+    fn apply_completion_clears_the_in_flight_proposal_and_resumes_observing() {
+        let (_staged, completed) = completed_apply_with_pending_mode_change();
+
+        assert_eq!(completed.next.lifecycle(), Lifecycle::Observing);
+        assert_eq!(completed.next.realization(), &RealizationLedger::Cleared);
+        assert!(completed.next.pending_proposal().is_none());
+    }
+
+    #[test]
+    fn apply_completion_requests_the_pending_observation_before_rearming_animation() {
+        let (staged, completed) = completed_apply_with_pending_mode_change();
+
+        assert_eq!(
+            completed.effects[0],
+            Effect::RequestObservationBase(RequestObservationBaseEffect {
+                request: observation_request(1, ExternalDemandKind::ModeChanged, 71),
+                context: observation_runtime_context(&staged),
+            })
+        );
+    }
+
+    #[test]
+    fn apply_completion_rearms_animation_after_requesting_the_pending_observation() {
+        let (_staged, completed) = completed_apply_with_pending_mode_change();
+
+        assert_eq!(completed.effects.len(), 2);
+        assert!(matches!(
+            completed.effects[1],
+            Effect::ScheduleTimer(ScheduleTimerEffect { .. })
+        ));
+    }
 }
 
 #[test]
@@ -1964,7 +2236,7 @@ fn full_apply_acknowledges_target_projection() {
     assert_eq!(
         completed.next.realization(),
         &RealizationLedger::Consistent {
-            acknowledged: Some(expected),
+            acknowledged: expected,
         }
     );
 }
@@ -1982,7 +2254,7 @@ fn failed_apply_preserves_last_acknowledged_basis_in_divergence() {
 
     let state = ready_state_with_observation(cursor(4, 9)).with_realization(
         RealizationLedger::Consistent {
-            acknowledged: Some(acknowledged.clone()),
+            acknowledged: acknowledged.clone(),
         },
     );
     let (staged, proposal_id) =
@@ -2097,10 +2369,7 @@ fn degraded_apply_enters_recovering_and_schedules_recovery_timer() {
     );
     assert!(matches!(
         transition.effects.as_slice(),
-        [Effect::ScheduleTimer(ScheduleTimerEffect {
-            kind: TimerKind::Recovery,
-            ..
-        })]
+        [Effect::ScheduleTimer(ScheduleTimerEffect { .. })]
     ));
 }
 
@@ -2202,10 +2471,7 @@ fn effect_failure_for_pending_proposal_preserves_acknowledged_basis_in_divergenc
     );
     assert!(matches!(
         failed.effects.as_slice(),
-        [Effect::ScheduleTimer(ScheduleTimerEffect {
-            kind: TimerKind::Recovery,
-            ..
-        })]
+        [Effect::ScheduleTimer(ScheduleTimerEffect { .. })]
     ));
 }
 
@@ -2247,7 +2513,6 @@ fn stale_timer_token_is_ignored_without_mutating_state() {
     let transition = reduce(
         &state,
         Event::TimerLostWithToken(TimerLostWithTokenEvent {
-            kind: TimerKind::Recovery,
             token: stale_token,
             observed_at: Millis::new(120),
         }),

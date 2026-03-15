@@ -82,8 +82,6 @@ pub(crate) struct MotionOptionsPatch {
     pub(crate) max_length: Option<f64>,
     pub(crate) max_length_insert_mode: Option<f64>,
     pub(crate) trail_duration_ms: Option<f64>,
-    pub(crate) trail_short_duration_ms: Option<f64>,
-    pub(crate) trail_size: Option<f64>,
     pub(crate) trail_min_distance: Option<f64>,
     pub(crate) trail_thickness: Option<f64>,
     pub(crate) trail_thickness_x: Option<f64>,
@@ -199,18 +197,6 @@ impl RuntimeOptionsPatch {
                 "stop_distance_exit",
                 "non-negative number greater than or equal to stop_distance_enter",
             ));
-        }
-
-        let trail_size = self.motion.trail_size.unwrap_or(config.trail_size);
-        if !(0.0..=1.0).contains(&trail_size) {
-            return Err(invalid_key("trail_size", "number between 0.0 and 1.0"));
-        }
-        let trail_short_duration_ms = self
-            .motion
-            .trail_short_duration_ms
-            .unwrap_or(config.trail_short_duration_ms);
-        if !trail_short_duration_ms.is_finite() || trail_short_duration_ms <= 0.0 {
-            return Err(invalid_key("trail_short_duration_ms", "positive number"));
         }
 
         let top_k_per_cell = self
@@ -379,8 +365,6 @@ impl MotionOptionsPatch {
                 max_length,
                 max_length_insert_mode,
                 trail_duration_ms,
-                trail_short_duration_ms,
-                trail_size,
                 trail_min_distance,
                 trail_thickness,
                 trail_thickness_x,

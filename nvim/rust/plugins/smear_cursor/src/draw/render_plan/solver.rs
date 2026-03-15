@@ -243,6 +243,14 @@ fn slice_band_half_width(frame: &RenderFrame) -> f64 {
     (0.75 * safe + 0.5).clamp(0.75, 3.0)
 }
 
+#[derive(Clone, Copy)]
+struct SliceSearchBounds {
+    min_row: i64,
+    max_row: i64,
+    min_col: i64,
+    max_col: i64,
+}
+
 fn measured_slice_support_width_cells(
     sample: CenterSample,
     normal_row: f64,
@@ -250,10 +258,7 @@ fn measured_slice_support_width_cells(
     band_half_width: f64,
     compiled: &BTreeMap<(i64, i64), CompiledCell>,
     frame: &RenderFrame,
-    min_row: i64,
-    max_row: i64,
-    min_col: i64,
-    max_col: i64,
+    bounds: SliceSearchBounds,
 ) -> Option<f64> {
     if compiled.is_empty() {
         return None;
@@ -265,8 +270,10 @@ fn measured_slice_support_width_cells(
     );
     let mut support: Option<ProjectedSpanQ16> = None;
 
-    for (coord, compiled_cell) in compiled.range((min_row, i64::MIN)..=(max_row, i64::MAX)) {
-        if coord.1 < min_col || coord.1 > max_col {
+    for (coord, compiled_cell) in
+        compiled.range((bounds.min_row, i64::MIN)..=(bounds.max_row, i64::MAX))
+    {
+        if coord.1 < bounds.min_col || coord.1 > bounds.max_col {
             continue;
         }
 
@@ -293,10 +300,7 @@ fn measured_slice_support_width_cells(
                     to_q16(across),
                     sample_half_span_q16,
                 );
-                support = Some(match support {
-                    Some(existing) => existing.cover(sample_span),
-                    None => sample_span,
-                });
+                support = Some(support.map_or(sample_span, |existing| existing.cover(sample_span)));
             }
         }
     }
@@ -313,6 +317,7 @@ fn slice_head_width_cells(frame: &RenderFrame, measured_support_width_cells: Opt
         .clamp(1.0, RIBBON_MAX_RUN_LENGTH as f64)
 }
 
+#[cfg(test)]
 fn build_ribbon_slices(
     centerline: &[CenterSample],
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
@@ -348,10 +353,12 @@ fn build_ribbon_slices_with_compiled(
         let col_bound =
             sample.tangent_col.abs() * RIBBON_SLICE_HALF_SPAN + normal_col.abs() * band_half_width;
         let row_bound = row_display_bound / safe_aspect;
-        let min_row = (sample.pos.row - row_bound).floor() as i64 - 1;
-        let max_row = (sample.pos.row + row_bound).ceil() as i64;
-        let min_col = (sample.pos.col - col_bound).floor() as i64 - 1;
-        let max_col = (sample.pos.col + col_bound).ceil() as i64;
+        let bounds = SliceSearchBounds {
+            min_row: (sample.pos.row - row_bound).floor() as i64 - 1,
+            max_row: (sample.pos.row + row_bound).ceil() as i64,
+            min_col: (sample.pos.col - col_bound).floor() as i64 - 1,
+            max_col: (sample.pos.col + col_bound).ceil() as i64,
+        };
         let measured_support_width_cells = measured_slice_support_width_cells(
             sample,
             normal_row,
@@ -359,10 +366,7 @@ fn build_ribbon_slices_with_compiled(
             band_half_width,
             compiled,
             frame,
-            min_row,
-            max_row,
-            min_col,
-            max_col,
+            bounds,
         );
         let target_width_cells = comet_target_width_cells(
             slice_head_width_cells(frame, measured_support_width_cells),
@@ -372,9 +376,10 @@ fn build_ribbon_slices_with_compiled(
             (COMET_MIN_RESOLVABLE_WIDTH * COMET_TIP_CAP_MULTIPLIER).min(target_width_cells);
         let transverse_width_penalty = filament_blend_factor(tail_u).clamp(0.0, 1.0);
 
-        for (coord, candidates) in cell_candidates.range((min_row, i64::MIN)..=(max_row, i64::MAX))
+        for (coord, candidates) in
+            cell_candidates.range((bounds.min_row, i64::MIN)..=(bounds.max_row, i64::MAX))
         {
-            if coord.1 < min_col || coord.1 > max_col {
+            if coord.1 < bounds.min_col || coord.1 > bounds.max_col {
                 continue;
             }
 
@@ -468,6 +473,13 @@ fn ribbon_support_preserves_sparse_bridge_continuity(slices: &[RibbonSlice]) -> 
 
 struct DecodedField {
     cells: BTreeMap<(i64, i64), DecodedCellState>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "decode path trace is exercised only by render-plan tests"
+        )
+    )]
     path: DecodePathTrace,
 }
 
@@ -1053,6 +1065,7 @@ fn decode_compiled_field_with_solver(
     }
 }
 
+#[cfg(test)]
 fn decode_compiled_field_trace(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
@@ -1076,6 +1089,7 @@ fn decode_compiled_field_trace_with_compiled(
     )
 }
 
+#[cfg(test)]
 fn decode_compiled_field(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],

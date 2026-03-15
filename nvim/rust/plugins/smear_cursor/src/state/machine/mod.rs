@@ -10,7 +10,7 @@ mod types;
 
 #[cfg(test)]
 pub(crate) use self::types::JumpCuePhase;
-use self::types::{AnimationState, PluginState, TransientRuntimeState};
+use self::types::{AnimationPhase, PluginState, TransientRuntimeState};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimeState {
@@ -19,7 +19,7 @@ pub(crate) struct RuntimeState {
     pub(crate) config: RuntimeConfig,
     render_static_config: Arc<StaticRenderConfig>,
     plugin_state: PluginState,
-    animation_state: AnimationState,
+    animation_phase: AnimationPhase,
     current_corners: [Point; 4],
     trail_origin_corners: [Point; 4],
     target_corners: [Point; 4],
@@ -40,7 +40,7 @@ impl Default for RuntimeState {
             config,
             render_static_config,
             plugin_state: PluginState::Enabled,
-            animation_state: AnimationState::Uninitialized,
+            animation_phase: AnimationPhase::Uninitialized,
             current_corners: [Point::ZERO; 4],
             trail_origin_corners: [Point::ZERO; 4],
             target_corners: [Point::ZERO; 4],

@@ -12,7 +12,7 @@ fn cterm_colors_object(colors: &[i64]) -> Object {
     Object::from(Array::from_iter(colors.iter().copied().map(Object::from)))
 }
 
-mod cleanup_tests {
+mod render_cleanup_delay_policy {
     use crate::config::RuntimeConfig;
     use crate::core::runtime_reducer::{
         MIN_RENDER_CLEANUP_DELAY_MS, MIN_RENDER_HARD_PURGE_DELAY_MS,
@@ -77,10 +77,18 @@ mod cleanup_tests {
     }
 }
 
-mod event_loop_tests {
+mod event_loop_state_and_key_fallback_policy {
     use super::super::event_loop::EventLoopState;
     use super::super::handlers::{KeyEventAction, decide_key_event_action};
     use super::super::policy::BufferEventPolicy;
+
+    fn metrics_after(
+        record: impl FnOnce(&mut EventLoopState),
+    ) -> super::super::event_loop::RuntimeBehaviorMetrics {
+        let mut state = EventLoopState::new();
+        record(&mut state);
+        state.runtime_metrics()
+    }
 
     #[test]
     fn event_loop_state_elapsed_autocmd_time_handles_unset_and_monotonicity() {
@@ -119,40 +127,52 @@ mod event_loop_tests {
     }
 
     #[test]
-    fn event_loop_state_tracks_structured_ingress_counters() {
-        let mut state = EventLoopState::new();
-        state.record_ingress_received();
-        state.record_ingress_received();
-        state.record_ingress_applied();
-        state.record_ingress_dropped();
-        state.record_ingress_coalesced();
-        state.record_ingress_starved();
-        state.record_observation_request_executed();
-        state.record_degraded_draw_application();
-        state.record_stale_token_event();
-        state.record_planner_compile_duration(320);
-        state.record_planner_compile_duration(1280);
-        state.record_planner_decode_duration(640);
-
-        let metrics = state.runtime_metrics();
+    fn event_loop_state_counts_each_received_ingress() {
+        let metrics = metrics_after(|state| {
+            state.record_ingress_received();
+            state.record_ingress_received();
+        });
         assert_eq!(metrics.ingress_received, 2);
+    }
+
+    #[test]
+    fn event_loop_state_counts_each_applied_ingress() {
+        let metrics = metrics_after(|state| state.record_ingress_applied());
         assert_eq!(metrics.ingress_applied, 1);
+    }
+
+    #[test]
+    fn event_loop_state_counts_each_dropped_ingress() {
+        let metrics = metrics_after(|state| state.record_ingress_dropped());
         assert_eq!(metrics.ingress_dropped, 1);
+    }
+
+    #[test]
+    fn event_loop_state_counts_each_coalesced_ingress() {
+        let metrics = metrics_after(|state| state.record_ingress_coalesced());
         assert_eq!(metrics.ingress_coalesced, 1);
-        assert_eq!(metrics.ingress_starved, 1);
+    }
+
+    #[test]
+    fn event_loop_state_counts_each_executed_observation_request() {
+        let metrics = metrics_after(|state| state.record_observation_request_executed());
         assert_eq!(metrics.observation_requests_executed, 1);
+    }
+
+    #[test]
+    fn event_loop_state_counts_each_degraded_draw_application() {
+        let metrics = metrics_after(|state| state.record_degraded_draw_application());
         assert_eq!(metrics.degraded_draw_applications, 1);
+    }
+
+    #[test]
+    fn event_loop_state_counts_each_stale_token_event() {
+        let metrics = metrics_after(|state| state.record_stale_token_event());
         assert_eq!(metrics.stale_token_events, 1);
-        assert_eq!(metrics.planner_compile.samples, 2);
-        assert_eq!(metrics.planner_compile.total_micros, 1600);
-        assert_eq!(metrics.planner_compile.max_micros, 1280);
-        assert_eq!(metrics.planner_decode.samples, 1);
-        assert_eq!(metrics.planner_decode.total_micros, 640);
-        assert_eq!(metrics.planner_decode.max_micros, 640);
     }
 }
 
-mod runtime_options_apply_tests {
+mod runtime_option_application {
     use super::super::options::apply_runtime_options;
     use super::{cterm_colors_object, options_dict};
     use crate::config::RuntimeConfig;
@@ -160,6 +180,18 @@ mod runtime_options_apply_tests {
         ColorOptionsPatch, OptionalChange, RuntimeOptionsPatch, RuntimeState, RuntimeSwitchesPatch,
     };
     use nvim_oxi::Object;
+
+    fn apply_options_expect_ok(
+        state: &mut RuntimeState,
+        entries: impl IntoIterator<Item = (&'static str, Object)>,
+    ) {
+        let opts = options_dict(entries);
+        let result = apply_runtime_options(state, &opts);
+        assert!(
+            result.is_ok(),
+            "unexpected runtime option error: {result:?}"
+        );
+    }
 
     #[test]
     fn runtime_options_patch_apply_clears_nullable_fields() {
@@ -231,13 +263,7 @@ mod runtime_options_apply_tests {
     #[test]
     fn runtime_options_patch_apply_fps_derives_time_interval() {
         let mut state = RuntimeState::default();
-        let opts = options_dict([("fps", Object::from(120.0_f64))]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(
-            result.is_ok(),
-            "unexpected runtime option error: {result:?}"
-        );
+        apply_options_expect_ok(&mut state, [("fps", Object::from(120.0_f64))]);
         assert_eq!(
             state.config.time_interval,
             RuntimeConfig::interval_ms_for_fps(120.0)
@@ -247,15 +273,12 @@ mod runtime_options_apply_tests {
     #[test]
     fn runtime_options_patch_apply_fps_overrides_explicit_time_interval() {
         let mut state = RuntimeState::default();
-        let opts = options_dict([
-            ("time_interval", Object::from(40.0_f64)),
-            ("fps", Object::from(200.0_f64)),
-        ]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(
-            result.is_ok(),
-            "unexpected runtime option error: {result:?}"
+        apply_options_expect_ok(
+            &mut state,
+            [
+                ("time_interval", Object::from(40.0_f64)),
+                ("fps", Object::from(200.0_f64)),
+            ],
         );
         assert_eq!(
             state.config.time_interval,
@@ -273,60 +296,86 @@ mod runtime_options_apply_tests {
     }
 
     #[test]
-    fn runtime_options_patch_apply_sets_stop_hysteresis_thresholds() {
+    fn runtime_options_patch_apply_sets_stop_distance_enter() {
         let mut state = RuntimeState::default();
-        let opts = options_dict([
-            ("stop_distance_enter", Object::from(0.05_f64)),
-            ("stop_distance_exit", Object::from(0.25_f64)),
-            ("stop_velocity_enter", Object::from(0.08_f64)),
-            ("stop_hold_frames", Object::from(3_i64)),
-        ]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(
-            result.is_ok(),
-            "unexpected runtime option error: {result:?}"
+        apply_options_expect_ok(
+            &mut state,
+            [
+                ("stop_distance_enter", Object::from(0.05_f64)),
+                ("stop_distance_exit", Object::from(0.05_f64)),
+            ],
         );
         assert_eq!(state.config.stop_distance_enter, 0.05_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_stop_distance_exit() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("stop_distance_exit", Object::from(0.25_f64))]);
         assert_eq!(state.config.stop_distance_exit, 0.25_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_stop_velocity_enter() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(
+            &mut state,
+            [("stop_velocity_enter", Object::from(0.08_f64))],
+        );
         assert_eq!(state.config.stop_velocity_enter, 0.08_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_stop_hold_frames() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("stop_hold_frames", Object::from(3_i64))]);
         assert_eq!(state.config.stop_hold_frames, 3_u32);
     }
 
     #[test]
-    fn runtime_options_patch_apply_sets_decode_pipeline_options() {
+    fn runtime_options_patch_apply_sets_tail_duration_ms() {
         let mut state = RuntimeState::default();
-        let opts = options_dict([
-            ("tail_duration_ms", Object::from(260.0_f64)),
-            ("spatial_coherence_weight", Object::from(1.4_f64)),
-            ("temporal_stability_weight", Object::from(0.22_f64)),
-            ("top_k_per_cell", Object::from(6_i64)),
-        ]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(
-            result.is_ok(),
-            "unexpected runtime option error: {result:?}"
-        );
+        apply_options_expect_ok(&mut state, [("tail_duration_ms", Object::from(260.0_f64))]);
         assert_eq!(state.config.tail_duration_ms, 260.0_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_spatial_coherence_weight() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(
+            &mut state,
+            [("spatial_coherence_weight", Object::from(1.4_f64))],
+        );
         assert_eq!(state.config.spatial_coherence_weight, 1.4_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_temporal_stability_weight() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(
+            &mut state,
+            [("temporal_stability_weight", Object::from(0.22_f64))],
+        );
         assert_eq!(state.config.temporal_stability_weight, 0.22_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_top_k_per_cell() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("top_k_per_cell", Object::from(6_i64))]);
         assert_eq!(state.config.top_k_per_cell, 6_u8);
     }
 
     #[test]
     fn runtime_options_patch_apply_sets_simulation_clock_options() {
         let mut state = RuntimeState::default();
-        let opts = options_dict([
-            ("fps", Object::from(144.0_f64)),
-            ("simulation_hz", Object::from(240.0_f64)),
-            ("max_simulation_steps_per_frame", Object::from(12_i64)),
-        ]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(
-            result.is_ok(),
-            "unexpected runtime option error: {result:?}"
+        apply_options_expect_ok(
+            &mut state,
+            [
+                ("fps", Object::from(144.0_f64)),
+                ("simulation_hz", Object::from(240.0_f64)),
+                ("max_simulation_steps_per_frame", Object::from(12_i64)),
+            ],
         );
         assert_eq!(state.config.simulation_hz, 240.0_f64);
         assert_eq!(state.config.max_simulation_steps_per_frame, 12_u32);
@@ -335,15 +384,12 @@ mod runtime_options_apply_tests {
     #[test]
     fn runtime_options_patch_apply_sets_animation_mode_flags() {
         let mut state = RuntimeState::default();
-        let opts = options_dict([
-            ("animate_in_insert_mode", Object::from(false)),
-            ("animate_command_line", Object::from(false)),
-        ]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(
-            result.is_ok(),
-            "unexpected runtime option error: {result:?}"
+        apply_options_expect_ok(
+            &mut state,
+            [
+                ("animate_in_insert_mode", Object::from(false)),
+                ("animate_command_line", Object::from(false)),
+            ],
         );
         assert!(!state.config.animate_in_insert_mode);
         assert!(!state.config.animate_command_line);
@@ -354,15 +400,12 @@ mod runtime_options_apply_tests {
         let combos = [(false, false), (false, true), (true, false), (true, true)];
         for (smear_between_windows, smear_between_buffers) in combos {
             let mut state = RuntimeState::default();
-            let opts = options_dict([
-                ("smear_between_windows", Object::from(smear_between_windows)),
-                ("smear_between_buffers", Object::from(smear_between_buffers)),
-            ]);
-
-            let result = apply_runtime_options(&mut state, &opts);
-            assert!(
-                result.is_ok(),
-                "unexpected runtime option error for window/buffer flags: {result:?}"
+            apply_options_expect_ok(
+                &mut state,
+                [
+                    ("smear_between_windows", Object::from(smear_between_windows)),
+                    ("smear_between_buffers", Object::from(smear_between_buffers)),
+                ],
             );
             assert_eq!(state.config.smear_between_windows, smear_between_windows);
             assert_eq!(state.config.smear_between_buffers, smear_between_buffers);
@@ -370,33 +413,51 @@ mod runtime_options_apply_tests {
     }
 
     #[test]
-    fn runtime_options_patch_apply_sets_time_domain_motion_options() {
+    fn runtime_options_patch_apply_sets_head_response_ms() {
         let mut state = RuntimeState::default();
-        let opts = options_dict([
-            ("head_response_ms", Object::from(40.0_f64)),
-            ("damping_ratio", Object::from(0.75_f64)),
-            ("tail_response_ms", Object::from(120.0_f64)),
-            ("trail_duration_ms", Object::from(220.0_f64)),
-            ("trail_short_duration_ms", Object::from(50.0_f64)),
-            ("trail_size", Object::from(0.7_f64)),
-            ("trail_min_distance", Object::from(1.5_f64)),
-            ("trail_thickness", Object::from(0.9_f64)),
-            ("trail_thickness_x", Object::from(1.1_f64)),
-        ]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(
-            result.is_ok(),
-            "unexpected runtime option error: {result:?}"
-        );
+        apply_options_expect_ok(&mut state, [("head_response_ms", Object::from(40.0_f64))]);
         assert_eq!(state.config.head_response_ms, 40.0_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_damping_ratio() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("damping_ratio", Object::from(0.75_f64))]);
         assert_eq!(state.config.damping_ratio, 0.75_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_tail_response_ms() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("tail_response_ms", Object::from(120.0_f64))]);
         assert_eq!(state.config.tail_response_ms, 120.0_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_trail_duration_ms() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("trail_duration_ms", Object::from(220.0_f64))]);
         assert_eq!(state.config.trail_duration_ms, 220.0_f64);
-        assert_eq!(state.config.trail_short_duration_ms, 50.0_f64);
-        assert_eq!(state.config.trail_size, 0.7_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_trail_min_distance() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("trail_min_distance", Object::from(1.5_f64))]);
         assert_eq!(state.config.trail_min_distance, 1.5_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_trail_thickness() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("trail_thickness", Object::from(0.9_f64))]);
         assert_eq!(state.config.trail_thickness, 0.9_f64);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_trail_thickness_x() {
+        let mut state = RuntimeState::default();
+        apply_options_expect_ok(&mut state, [("trail_thickness_x", Object::from(1.1_f64))]);
         assert_eq!(state.config.trail_thickness_x, 1.1_f64);
     }
 
@@ -449,15 +510,6 @@ mod runtime_options_apply_tests {
     }
 
     #[test]
-    fn runtime_options_patch_apply_rejects_out_of_range_trail_size() {
-        let mut state = RuntimeState::default();
-        let opts = options_dict([("trail_size", Object::from(1.5_f64))]);
-
-        let result = apply_runtime_options(&mut state, &opts);
-        assert!(result.is_err(), "expected invalid trail_size");
-    }
-
-    #[test]
     fn runtime_options_patch_apply_rejects_negative_trail_thickness() {
         let mut state = RuntimeState::default();
         let opts = options_dict([("trail_thickness", Object::from(-0.1_f64))]);
@@ -479,7 +531,7 @@ mod runtime_options_apply_tests {
     }
 }
 
-mod runtime_options_parse_tests {
+mod runtime_option_parsing {
     use super::super::options::{
         parse_optional_change_with, parse_optional_filetypes_disabled, validated_non_negative_f64,
     };
@@ -574,7 +626,7 @@ mod runtime_options_parse_tests {
     }
 
     #[test]
-    fn runtime_options_patch_parse_rejects_legacy_and_removed_option_keys() {
+    fn runtime_options_patch_parse_rejects_unknown_and_removed_option_keys() {
         for (legacy_key, value) in [
             ("stiffness", Object::from(0.5_f64)),
             ("neovide_parity_mode", Object::from(true)),
@@ -591,28 +643,15 @@ mod runtime_options_parse_tests {
                 err.to_string().contains(legacy_key),
                 "unexpected error: {err}"
             );
-            let expects_removed_message = matches!(
-                legacy_key,
-                "aa_band_min"
-                    | "aa_band_max"
-                    | "edge_gate_low"
-                    | "edge_gate_high"
-                    | "temporal_hysteresis_enter"
-                    | "temporal_hysteresis_exit"
+            assert!(
+                err.to_string().contains("supported option key"),
+                "unexpected error: {err}"
             );
-            if expects_removed_message {
-                assert!(err.to_string().contains("removed render heuristic"));
-            } else {
-                assert!(
-                    err.to_string().contains("supported option key"),
-                    "unexpected error: {err}"
-                );
-            }
         }
     }
 }
 
-mod buffer_policy_tests {
+mod buffer_event_policy {
     use super::super::policy::{
         BufferEventPolicy, IngressCursorPresentationContext, IngressCursorPresentationPolicy,
     };
@@ -667,7 +706,7 @@ mod buffer_policy_tests {
     }
 }
 
-mod handler_decision_tests {
+mod handler_decisions {
     use super::super::handlers::{
         select_core_event_source, should_request_observation_for_autocmd,
     };
@@ -677,28 +716,56 @@ mod handler_decision_tests {
     use crate::types::Point;
 
     #[test]
-    fn core_observation_request_autocmd_filter_includes_cmdline_changed() {
+    fn cursor_move_autocmd_requests_observation() {
         assert!(should_request_observation_for_autocmd(
             AutocmdIngress::CursorMoved
         ));
+    }
+
+    #[test]
+    fn insert_cursor_move_autocmd_requests_observation() {
         assert!(should_request_observation_for_autocmd(
             AutocmdIngress::CursorMovedInsert
         ));
+    }
+
+    #[test]
+    fn window_enter_autocmd_requests_observation() {
         assert!(should_request_observation_for_autocmd(
             AutocmdIngress::WinEnter
         ));
+    }
+
+    #[test]
+    fn win_scrolled_autocmd_requests_observation() {
         assert!(should_request_observation_for_autocmd(
             AutocmdIngress::WinScrolled
         ));
+    }
+
+    #[test]
+    fn cmdline_changed_autocmd_requests_observation() {
         assert!(should_request_observation_for_autocmd(
             AutocmdIngress::CmdlineChanged
         ));
+    }
+
+    #[test]
+    fn mode_changed_autocmd_does_not_request_observation() {
         assert!(!should_request_observation_for_autocmd(
             AutocmdIngress::ModeChanged
         ));
+    }
+
+    #[test]
+    fn buf_enter_autocmd_does_not_request_observation() {
         assert!(!should_request_observation_for_autocmd(
             AutocmdIngress::BufEnter
         ));
+    }
+
+    #[test]
+    fn unknown_autocmd_does_not_request_observation() {
         assert!(!should_request_observation_for_autocmd(
             AutocmdIngress::Unknown
         ));

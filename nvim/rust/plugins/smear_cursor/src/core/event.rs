@@ -1,4 +1,4 @@
-use crate::core::effect::{IngressCursorPresentationRequest, TimerKind};
+use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::state::{
     ApplyFailureKind, BackgroundProbeBatch, BackgroundProbeChunk, CursorColorSample,
     ExternalDemandKind, ObservationBasis, ObservationMotion, ObservationRequest, PlannedRender,
@@ -90,7 +90,7 @@ pub(crate) enum ApplyReport {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RenderPlanComputedEvent {
     pub(crate) proposal_id: ProposalId,
-    pub(crate) planned_render: PlannedRender,
+    pub(crate) planned_render: Box<PlannedRender>,
     pub(crate) observed_at: Millis,
 }
 
@@ -114,14 +114,12 @@ pub(crate) struct RenderCleanupAppliedEvent {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TimerFiredWithTokenEvent {
-    pub(crate) kind: TimerKind,
     pub(crate) token: TimerToken,
     pub(crate) observed_at: Millis,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TimerLostWithTokenEvent {
-    pub(crate) kind: TimerKind,
     pub(crate) token: TimerToken,
     pub(crate) observed_at: Millis,
 }

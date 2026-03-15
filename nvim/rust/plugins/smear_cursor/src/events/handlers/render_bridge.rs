@@ -9,12 +9,9 @@ use super::super::trace::{apply_report_summary, proposal_summary};
 use super::render_apply::{ApplyRenderActionError, apply_render_action};
 use crate::core::effect::ApplyProposalEffect;
 use crate::core::event::{ApplyReport, EffectFailedEvent, Event as CoreEvent};
-use crate::core::state::{ApplyFailureKind, RealizationDivergence, RealizationPlan};
-use nvim_oxi::Result;
+use crate::core::state::{ApplyFailureKind, RealizationDivergence};
 
-pub(crate) fn execute_core_apply_proposal_effect(
-    payload: ApplyProposalEffect,
-) -> Result<Vec<CoreEvent>> {
+pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -> Vec<CoreEvent> {
     let observed_at = to_core_millis(now_ms());
     let proposal = payload.proposal;
     let proposal_id = proposal.proposal_id();
@@ -29,11 +26,8 @@ pub(crate) fn execute_core_apply_proposal_effect(
     let apply_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let apply_started_ms = now_ms();
         let namespace_id = ensure_namespace_id();
-        let realization = proposal.realization();
-        let patch = proposal.patch();
-        let render_side_effects = proposal.side_effects();
 
-        if let RealizationPlan::Failure(failure) = realization {
+        if let Some(failure) = proposal.failure_reason() {
             return CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
                 proposal_id,
                 reason: failure.reason(),
@@ -42,8 +36,7 @@ pub(crate) fn execute_core_apply_proposal_effect(
             });
         }
 
-        let apply_result =
-            apply_render_action(namespace_id, patch, realization, render_side_effects);
+        let apply_result = apply_render_action(namespace_id, &proposal);
 
         let apply_duration_ms = (now_ms() - apply_started_ms).max(0.0);
         record_cursor_callback_duration(apply_duration_ms);
@@ -109,18 +102,15 @@ pub(crate) fn execute_core_apply_proposal_effect(
         }
     }));
 
-    let follow_up = match apply_outcome {
-        Ok(event) => event,
-        Err(_) => {
-            // Surprising: apply effect panicked after the reducer committed the proposal.
-            // Emit a typed failure so recovery can preserve divergence from the acknowledged basis.
-            warn("core render apply panicked");
-            CoreEvent::EffectFailed(EffectFailedEvent {
-                proposal_id: Some(proposal_id),
-                observed_at,
-            })
-        }
-    };
+    let follow_up = apply_outcome.unwrap_or_else(|_| {
+        // Surprising: apply effect panicked after the reducer committed the proposal.
+        // Emit a typed failure so recovery can preserve divergence from the acknowledged basis.
+        warn("core render apply panicked");
+        CoreEvent::EffectFailed(EffectFailedEvent {
+            proposal_id: Some(proposal_id),
+            observed_at,
+        })
+    });
     super::super::logging::trace_lazy(|| {
         let report_summary = match &follow_up {
             CoreEvent::ApplyReported(report) => apply_report_summary(report),
@@ -137,5 +127,5 @@ pub(crate) fn execute_core_apply_proposal_effect(
         format!("apply_proposal_result {proposal_trace} {report_summary}")
     });
 
-    Ok(vec![follow_up])
+    vec![follow_up]
 }

@@ -375,13 +375,10 @@ impl LatentFieldCache {
         if let Some(buckets) = self.curves.get_mut(&key) {
             if let Some(bucket) = buckets.bucket_for_age_mut(age_steps) {
                 for (coord, tile) in &slice.microtiles {
-                    let remove_cell = match bucket.get_mut(coord) {
-                        Some(cell) => {
-                            cell.remove_tile(tile);
-                            cell.is_empty()
-                        }
-                        None => false,
-                    };
+                    let remove_cell = bucket.get_mut(coord).is_some_and(|cell| {
+                        cell.remove_tile(tile);
+                        cell.is_empty()
+                    });
                     if remove_cell {
                         let _ = bucket.remove(coord);
                     }

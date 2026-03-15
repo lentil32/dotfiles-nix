@@ -52,10 +52,9 @@ fn screen_distance(window: &api::Window, row_start: i64, row_end: i64) -> Result
             .start_row(line_index_1_to_0(start))
             .end_row(line_index_1_to_0(end))
             .build();
-        match window.text_height(&opts) {
-            Ok(height) => i64::from(height.all).saturating_sub(1),
-            Err(_) => 0,
-        }
+        window
+            .text_height(&opts)
+            .map_or(0, |height| i64::from(height.all).saturating_sub(1))
     };
 
     if reversed {

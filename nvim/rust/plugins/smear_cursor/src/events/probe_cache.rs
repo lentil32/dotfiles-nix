@@ -69,11 +69,11 @@ mod tests {
     use crate::core::state::{CursorColorProbeWitness, CursorColorSample};
     use crate::core::types::{CursorCol, CursorPosition, CursorRow, Generation};
 
-    fn cursor(row: u32, col: u32) -> Option<CursorPosition> {
-        Some(CursorPosition {
+    fn cursor(row: u32, col: u32) -> CursorPosition {
+        CursorPosition {
             row: CursorRow(row),
             col: CursorCol(col),
-        })
+        }
     }
 
     fn witness(
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn probe_cache_state_returns_cursor_color_entry_only_for_identical_witness() {
         let mut cache = ProbeCacheState::default();
-        let key = witness(22, 14, "n", cursor(7, 8), 0);
+        let key = witness(22, 14, "n", Some(cursor(7, 8)), 0);
         let sample = Some(CursorColorSample::new("#abcdef".to_string()));
         cache.store_cursor_color_sample(key.clone(), sample.clone());
 
@@ -104,13 +104,13 @@ mod tests {
             CursorColorCacheLookup::Hit(sample),
         );
 
-        let changedtick = witness(22, 15, "n", cursor(7, 8), 0);
+        let changedtick = witness(22, 15, "n", Some(cursor(7, 8)), 0);
         assert_eq!(
             cache.cached_cursor_color_sample(&changedtick),
             CursorColorCacheLookup::Miss,
         );
 
-        let moved_cursor = witness(22, 14, "n", cursor(7, 9), 0);
+        let moved_cursor = witness(22, 14, "n", Some(cursor(7, 9)), 0);
         assert_eq!(
             cache.cached_cursor_color_sample(&moved_cursor),
             CursorColorCacheLookup::Miss,
@@ -121,7 +121,7 @@ mod tests {
     fn probe_cache_state_invalidates_cursor_color_entry_when_colorscheme_changes() {
         let mut cache = ProbeCacheState::default();
         cache.store_cursor_color_sample(
-            witness(22, 14, "n", cursor(7, 8), 0),
+            witness(22, 14, "n", Some(cursor(7, 8)), 0),
             Some(CursorColorSample::new("#abcdef".to_string())),
         );
 
@@ -129,7 +129,7 @@ mod tests {
 
         assert_eq!(cache.colorscheme_generation(), Generation::new(1));
         assert_eq!(
-            cache.cached_cursor_color_sample(&witness(22, 14, "n", cursor(7, 8), 1)),
+            cache.cached_cursor_color_sample(&witness(22, 14, "n", Some(cursor(7, 8)), 1)),
             CursorColorCacheLookup::Miss,
         );
     }
@@ -138,7 +138,7 @@ mod tests {
     fn probe_cache_state_reset_clears_generation_and_entries() {
         let mut cache = ProbeCacheState::default();
         cache.store_cursor_color_sample(
-            witness(22, 14, "i", cursor(5, 6), 0),
+            witness(22, 14, "i", Some(cursor(5, 6)), 0),
             Some(CursorColorSample::new("#fedcba".to_string())),
         );
         cache.note_cursor_color_colorscheme_change();
@@ -147,7 +147,7 @@ mod tests {
 
         assert_eq!(cache.colorscheme_generation(), Generation::INITIAL);
         assert_eq!(
-            cache.cached_cursor_color_sample(&witness(22, 14, "i", cursor(5, 6), 0)),
+            cache.cached_cursor_color_sample(&witness(22, 14, "i", Some(cursor(5, 6)), 0)),
             CursorColorCacheLookup::Miss,
         );
     }

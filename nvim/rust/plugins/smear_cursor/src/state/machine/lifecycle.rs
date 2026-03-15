@@ -1,17 +1,33 @@
-use super::types::PendingTarget;
-use super::{AnimationState, CursorLocation, CursorShape, RuntimeState};
+use super::types::{
+    AnimationPhase, DrainingPhase, MotionClock, PendingTarget, RunningPhase, SettlingPhase,
+};
+use super::{CursorLocation, CursorShape, RuntimeState};
 use crate::animation::{center, corners_for_cursor, initial_velocity, zero_velocity_corners};
 use crate::types::{Point, StepOutput};
 
 impl RuntimeState {
+    fn motion_clock_mut(&mut self) -> Option<&mut MotionClock> {
+        match &mut self.animation_phase {
+            AnimationPhase::Running(phase) => Some(&mut phase.clock),
+            AnimationPhase::Draining(phase) => Some(&mut phase.clock),
+            AnimationPhase::Uninitialized | AnimationPhase::Idle | AnimationPhase::Settling(_) => {
+                None
+            }
+        }
+    }
+
+    fn running_phase_mut(&mut self) -> Option<&mut RunningPhase> {
+        match &mut self.animation_phase {
+            AnimationPhase::Running(phase) => Some(phase),
+            AnimationPhase::Uninitialized
+            | AnimationPhase::Idle
+            | AnimationPhase::Settling(_)
+            | AnimationPhase::Draining(_) => None,
+        }
+    }
+
     pub(crate) fn start_animation(&mut self) {
-        self.mark_initialized();
-        self.transient.pending_target = None;
-        self.transient.settle_hold_counter = 0;
-        self.transient.drain_steps_remaining = 0;
-        self.transient.timing.next_frame_at_ms = None;
-        self.transient.timing.simulation_accumulator_ms = 0.0;
-        self.animation_state = AnimationState::Running;
+        self.animation_phase = AnimationPhase::Running(RunningPhase::default());
     }
 
     pub(crate) fn start_animation_towards_target(&mut self) {
@@ -26,21 +42,16 @@ impl RuntimeState {
 
     pub(crate) fn stop_animation(&mut self) {
         if matches!(
-            self.animation_state,
-            AnimationState::Running | AnimationState::Draining
+            self.animation_phase,
+            AnimationPhase::Running(_) | AnimationPhase::Draining(_)
         ) {
-            self.animation_state = AnimationState::Idle;
+            self.animation_phase = AnimationPhase::Idle;
         }
-        self.transient.settle_hold_counter = 0;
-        self.transient.drain_steps_remaining = 0;
-        self.transient.timing.next_frame_at_ms = None;
-        self.transient.timing.simulation_accumulator_ms = 0.0;
     }
 
     pub(crate) fn clear_pending_target(&mut self) {
-        self.transient.pending_target = None;
-        if self.animation_state == AnimationState::Settling {
-            self.animation_state = AnimationState::Idle;
+        if matches!(self.animation_phase, AnimationPhase::Settling(_)) {
+            self.animation_phase = AnimationPhase::Idle;
         }
     }
 
@@ -51,13 +62,13 @@ impl RuntimeState {
         location: &CursorLocation,
         now_ms: f64,
     ) {
-        self.transient.drain_steps_remaining = 0;
         let delay_ms = self.config.delay_event_to_smear.max(0.0);
         let pending = PendingTarget::new(position, location, now_ms, now_ms + delay_ms);
         self.set_target(position, shape);
         self.update_tracking(location);
-        self.transient.pending_target = Some(pending);
-        self.animation_state = AnimationState::Settling;
+        self.animation_phase = AnimationPhase::Settling(SettlingPhase {
+            pending_target: pending,
+        });
     }
 
     pub(crate) fn refresh_settling_target(
@@ -67,9 +78,8 @@ impl RuntimeState {
         location: &CursorLocation,
         now_ms: f64,
     ) {
-        self.transient.drain_steps_remaining = 0;
         let delay_ms = self.config.delay_event_to_smear.max(0.0);
-        let pending = match self.transient.pending_target.as_ref() {
+        let pending = match self.pending_target() {
             Some(existing) if existing.matches_observation(position, location) => PendingTarget {
                 position: existing.position,
                 cursor_location: existing.cursor_location.clone(),
@@ -80,8 +90,9 @@ impl RuntimeState {
         };
         self.set_target(position, shape);
         self.update_tracking(location);
-        self.transient.pending_target = Some(pending);
-        self.animation_state = AnimationState::Settling;
+        self.animation_phase = AnimationPhase::Settling(SettlingPhase {
+            pending_target: pending,
+        });
     }
 
     pub(crate) fn should_promote_settled_target(
@@ -90,7 +101,7 @@ impl RuntimeState {
         observed_position: Point,
         observed_location: &CursorLocation,
     ) -> bool {
-        let Some(pending) = self.transient.pending_target.as_ref() else {
+        let Some(pending) = self.pending_target() else {
             return false;
         };
         pending.matches_observation(observed_position, observed_location)
@@ -99,49 +110,64 @@ impl RuntimeState {
     }
 
     pub(crate) fn note_settle_probe(&mut self, within_enter_threshold: bool) -> bool {
+        let Some(phase) = self.running_phase_mut() else {
+            return false;
+        };
         if within_enter_threshold {
-            self.transient.settle_hold_counter =
-                self.transient.settle_hold_counter.saturating_add(1);
+            phase.settle_hold_counter = phase.settle_hold_counter.saturating_add(1);
         } else {
-            self.transient.settle_hold_counter = 0;
+            phase.settle_hold_counter = 0;
         }
-        self.transient.settle_hold_counter >= self.config.stop_hold_frames
+        phase.settle_hold_counter >= self.config.stop_hold_frames
     }
 
     pub(crate) fn reset_settle_probe(&mut self) {
-        self.transient.settle_hold_counter = 0;
+        if let Some(phase) = self.running_phase_mut() {
+            phase.settle_hold_counter = 0;
+        }
     }
 
     pub(crate) fn start_tail_drain(&mut self, remaining_steps: u32) {
-        self.transient.pending_target = None;
-        self.transient.settle_hold_counter = 0;
-        self.transient.drain_steps_remaining = remaining_steps;
-        self.transient.timing.next_frame_at_ms = None;
-        self.transient.timing.simulation_accumulator_ms = 0.0;
         self.previous_center = center(&self.current_corners);
-        self.animation_state = if remaining_steps == 0 {
-            AnimationState::Idle
-        } else {
-            AnimationState::Draining
-        };
+        self.animation_phase = DrainingPhase::new(remaining_steps)
+            .map(AnimationPhase::Draining)
+            .unwrap_or(AnimationPhase::Idle);
     }
 
     #[cfg(test)]
     pub(crate) fn drain_steps_remaining(&self) -> u32 {
-        self.transient.drain_steps_remaining
+        match &self.animation_phase {
+            AnimationPhase::Draining(phase) => phase.remaining_steps.get(),
+            AnimationPhase::Uninitialized
+            | AnimationPhase::Idle
+            | AnimationPhase::Settling(_)
+            | AnimationPhase::Running(_) => 0,
+        }
     }
 
     pub(crate) fn consume_tail_drain_step(&mut self, step_ms: f64) -> bool {
-        if self.transient.drain_steps_remaining == 0 || !self.consume_simulation_step(step_ms) {
+        if !matches!(self.animation_phase, AnimationPhase::Draining(_))
+            || !self.consume_simulation_step(step_ms)
+        {
             return false;
         }
-        self.transient.drain_steps_remaining =
-            self.transient.drain_steps_remaining.saturating_sub(1);
-        if self.transient.drain_steps_remaining == 0
-            && self.animation_state == AnimationState::Draining
-        {
-            self.animation_state = AnimationState::Idle;
-            self.transient.timing.next_frame_at_ms = None;
+
+        let should_stop = match &mut self.animation_phase {
+            AnimationPhase::Draining(phase) => match phase.remaining_steps.get() - 1 {
+                0 => true,
+                next_steps => {
+                    phase.remaining_steps =
+                        std::num::NonZeroU32::new(next_steps).expect("drain phase stays positive");
+                    false
+                }
+            },
+            AnimationPhase::Uninitialized
+            | AnimationPhase::Idle
+            | AnimationPhase::Settling(_)
+            | AnimationPhase::Running(_) => false,
+        };
+        if should_stop {
+            self.animation_phase = AnimationPhase::Idle;
         }
         true
     }
@@ -155,24 +181,25 @@ impl RuntimeState {
     }
 
     pub(crate) fn settle_deadline_ms(&self) -> Option<f64> {
-        self.transient
-            .pending_target
-            .as_ref()
+        self.pending_target()
             .map(|pending| pending.settle_deadline_ms)
     }
 
     pub(crate) fn advance_next_frame_deadline(&mut self, now_ms: f64) -> f64 {
         let frame_period_ms = self.config.time_interval.max(1.0);
-        let mut next_frame_at_ms = self
-            .transient
-            .timing
-            .next_frame_at_ms
-            .unwrap_or(now_ms + frame_period_ms);
+        let Some(clock) = self.motion_clock_mut() else {
+            debug_assert!(
+                false,
+                "next-frame deadlines should only be advanced while running or draining"
+            );
+            return now_ms + frame_period_ms;
+        };
+        let mut next_frame_at_ms = clock.next_frame_at_ms.unwrap_or(now_ms + frame_period_ms);
         if next_frame_at_ms <= now_ms {
             let missed_frames = ((now_ms - next_frame_at_ms) / frame_period_ms).floor() + 1.0;
             next_frame_at_ms += missed_frames * frame_period_ms;
         }
-        self.transient.timing.next_frame_at_ms = Some(next_frame_at_ms);
+        clock.next_frame_at_ms = Some(next_frame_at_ms);
         next_frame_at_ms
     }
 
@@ -182,23 +209,40 @@ impl RuntimeState {
         } else {
             0.0
         };
-        self.transient.timing.simulation_accumulator_ms += clamped;
+        let Some(clock) = self.motion_clock_mut() else {
+            debug_assert!(
+                false,
+                "simulation time should only accumulate while running or draining"
+            );
+            return;
+        };
+        clock.simulation_accumulator_ms += clamped;
     }
 
     pub(crate) fn consume_simulation_step(&mut self, step_ms: f64) -> bool {
+        let Some(clock) = self.motion_clock_mut() else {
+            debug_assert!(
+                false,
+                "simulation steps should only be consumed while running or draining"
+            );
+            return false;
+        };
         if !step_ms.is_finite() || step_ms <= 0.0 {
-            self.transient.timing.simulation_accumulator_ms = 0.0;
+            clock.simulation_accumulator_ms = 0.0;
             return false;
         }
-        if self.transient.timing.simulation_accumulator_ms < step_ms {
+        if clock.simulation_accumulator_ms < step_ms {
             return false;
         }
-        self.transient.timing.simulation_accumulator_ms -= step_ms;
+        clock.simulation_accumulator_ms -= step_ms;
         true
     }
 
     pub(crate) fn reset_animation_timing(&mut self) {
         self.transient.timing.reset();
+        if let Some(clock) = self.motion_clock_mut() {
+            clock.reset();
+        }
     }
 
     pub(crate) fn tracked_location(&self) -> Option<CursorLocation> {

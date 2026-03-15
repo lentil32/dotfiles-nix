@@ -24,8 +24,6 @@ fn build_step_input(
         max_length: state.config.max_length,
         max_length_insert_mode: state.config.max_length_insert_mode,
         trail_duration_ms: state.config.trail_duration_ms,
-        trail_short_duration_ms: state.config.trail_short_duration_ms,
-        trail_size: state.config.trail_size,
         trail_min_distance: state.config.trail_min_distance,
         trail_thickness: state.config.trail_thickness,
         trail_thickness_x: state.config.trail_thickness_x,
@@ -65,14 +63,14 @@ pub(crate) fn build_render_frame(
     RenderFrame {
         mode: mode.to_string(),
         corners: render_corners,
-        step_samples,
+        step_samples: std::sync::Arc::from(step_samples),
         planner_idle_steps,
         target,
         target_corners: state.target_corners(),
         vertical_bar,
         trail_stroke_id: state.trail_stroke_id(),
         retarget_epoch: state.retarget_epoch(),
-        particles: state.particles().to_vec(),
+        particles: std::sync::Arc::from(state.particles().to_vec()),
         color_at_cursor: state.color_at_cursor().map(str::to_owned),
         static_config: state.render_static_config(),
     }
@@ -91,12 +89,9 @@ pub(super) fn next_animation_deadline_from_settling(
         .map(|deadline| as_delay_ms(deadline.max(now_ms + 1.0)))
 }
 
-pub(super) fn next_animation_deadline_from_clock(
-    state: &mut RuntimeState,
-    now_ms: f64,
-) -> Option<u64> {
+pub(super) fn next_animation_deadline_from_clock(state: &mut RuntimeState, now_ms: f64) -> u64 {
     let next_frame_at_ms = state.advance_next_frame_deadline(now_ms);
-    Some(as_delay_ms(next_frame_at_ms.max(now_ms + 1.0)))
+    as_delay_ms(next_frame_at_ms.max(now_ms + 1.0))
 }
 
 pub(super) fn clamp_row_to_window(row: f64, scroll_shift: ScrollShift) -> f64 {

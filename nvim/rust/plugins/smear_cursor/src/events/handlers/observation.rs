@@ -20,14 +20,30 @@ use crate::core::types::{CursorCol, CursorPosition, CursorRow, ViewportSnapshot}
 use crate::draw::{
     BRAILLE_CODE_MAX, BRAILLE_CODE_MIN, OCTANT_CODE_MAX, OCTANT_CODE_MIN, editor_bounds,
 };
-use crate::lua::{i64_from_object, parse_indexed_objects};
-use crate::types::ScreenCell;
+use crate::lua::{
+    LuaParseError, bool_from_object_typed, i64_from_object, parse_indexed_objects_typed,
+};
 use nvim_oxi::{Array, Object, Result, api};
+use thiserror::Error;
 
-const SCREENCHAR_BATCH_LUAEVAL_EXPR: &str = r"(function(cells)
+const BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR: &str = r"(function(request)
+  local start_row = request[1]
+  local row_count = request[2]
+  local max_col = request[3]
+  local braille_min = request[4]
+  local braille_max = request[5]
+  local octant_min = request[6]
+  local octant_max = request[7]
   local result = {}
-  for i, cell in ipairs(cells) do
-    result[i] = vim.fn.screenchar(cell[1], cell[2])
+  local index = 1
+  for row = start_row, start_row + row_count - 1 do
+    for col = 1, max_col do
+      local code = vim.fn.screenchar(row, col)
+      result[index] = code == 32
+        or (code >= braille_min and code <= braille_max)
+        or (code >= octant_min and code <= octant_max)
+      index = index + 1
+    end
   end
   return result
 end)(_A)";
@@ -92,6 +108,20 @@ fn current_buffer_changedtick(buffer_handle: i64) -> Result<u64> {
     }
 
     Ok(changedtick as u64)
+}
+
+#[derive(Debug, Error)]
+enum BackgroundProbeMaskError {
+    #[error("background probe luaeval failed: {0}")]
+    LuaEval(#[source] nvim_oxi::Error),
+    #[error("background probe mask shape mismatch: {0}")]
+    Shape(#[source] LuaParseError),
+    #[error("background probe mask decode failed at index {index}: {source}")]
+    ValueDecode {
+        index: usize,
+        #[source]
+        source: LuaParseError,
+    },
 }
 
 fn current_cursor_color_probe_witness(
@@ -183,62 +213,69 @@ fn collect_observation_basis(
     ))
 }
 
-fn background_char_code_is_allowed(code: i64) -> bool {
-    let is_space = code == 32;
-    let is_braille = (BRAILLE_CODE_MIN..=BRAILLE_CODE_MAX).contains(&code);
-    let is_octant = (OCTANT_CODE_MIN..=OCTANT_CODE_MAX).contains(&code);
-    is_space || is_braille || is_octant
-}
-
-fn background_probe_cells_for_chunk(
+fn batch_background_allowed_mask(
     viewport: ViewportSnapshot,
     chunk: BackgroundProbeChunk,
-) -> Vec<ScreenCell> {
-    let capacity = usize::try_from(chunk.row_count())
-        .ok()
-        .and_then(|rows| {
-            usize::try_from(viewport.max_col.value())
-                .ok()
-                .and_then(|cols| rows.checked_mul(cols))
-        })
-        .unwrap_or(0);
-    let mut cells = Vec::with_capacity(capacity);
+) -> std::result::Result<Vec<bool>, BackgroundProbeMaskError> {
     let start_row = chunk.start_row().value();
-    let end_row = start_row
-        .saturating_add(chunk.row_count().saturating_sub(1))
-        .min(viewport.max_row.value());
-    for row in start_row..=end_row {
-        for col in 1..=viewport.max_col.value() {
-            let Some(cell) = ScreenCell::new(i64::from(row), i64::from(col)) else {
-                continue;
-            };
-            cells.push(cell);
-        }
-    }
-    cells
-}
-
-fn batch_screen_char_codes(cells: &[ScreenCell]) -> Option<Vec<i64>> {
-    if cells.is_empty() {
-        return Some(Vec::new());
+    if start_row == 0 || start_row > viewport.max_row.value() {
+        return Ok(Vec::new());
     }
 
-    let request = Array::from_iter(cells.iter().map(|cell| {
-        Object::from(Array::from_iter([
-            Object::from(cell.row()),
-            Object::from(cell.col()),
-        ]))
-    }));
+    let row_count = chunk.row_count().min(
+        viewport
+            .max_row
+            .value()
+            .saturating_sub(start_row)
+            .saturating_add(1),
+    );
+    let width = usize::try_from(viewport.max_col.value()).map_err(|_| {
+        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
+            "background_probe_mask",
+            "viewport width that fits in usize",
+        ))
+    })?;
+    let row_count_usize = usize::try_from(row_count).map_err(|_| {
+        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
+            "background_probe_mask",
+            "row count that fits in usize",
+        ))
+    })?;
+    let expected_len = width.checked_mul(row_count_usize).ok_or_else(|| {
+        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
+            "background_probe_mask",
+            "mask length that fits in usize",
+        ))
+    })?;
+    if expected_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let request = Array::from_iter([
+        Object::from(i64::from(start_row)),
+        Object::from(i64::from(row_count)),
+        Object::from(i64::from(viewport.max_col.value())),
+        Object::from(BRAILLE_CODE_MIN),
+        Object::from(BRAILLE_CODE_MAX),
+        Object::from(OCTANT_CODE_MIN),
+        Object::from(OCTANT_CODE_MAX),
+    ]);
     let args = Array::from_iter([
-        Object::from(SCREENCHAR_BATCH_LUAEVAL_EXPR),
+        Object::from(BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR),
         Object::from(request),
     ]);
-    let value = api::call_function("luaeval", args).ok()?;
-    let values = parse_indexed_objects("screenchar_batch", value, Some(cells.len())).ok()?;
+    let value = api::call_function("luaeval", args)
+        .map_err(|error| BackgroundProbeMaskError::LuaEval(error.into()))?;
+    let values = parse_indexed_objects_typed("background_probe_mask", value, Some(expected_len))
+        .map_err(BackgroundProbeMaskError::Shape)?;
 
     values
         .into_iter()
-        .map(|value| i64_from_object("screenchar_batch", value).ok())
+        .enumerate()
+        .map(|(index, value)| {
+            bool_from_object_typed("background_probe_mask", value)
+                .map_err(|source| BackgroundProbeMaskError::ValueDecode { index, source })
+        })
         .collect()
 }
 
@@ -320,20 +357,17 @@ fn collect_background_report(payload: &RequestProbeEffect) -> CoreEvent {
             failure: ProbeFailure::ShellReadFailed,
         });
     };
-    let cells = background_probe_cells_for_chunk(viewport, chunk);
-    let Some(char_codes) = batch_screen_char_codes(&cells) else {
-        warn("background sampling failed");
-        return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
-            observation_id: payload.observation_basis.observation_id(),
-            probe_request_id: payload.probe_request_id,
-            failure: ProbeFailure::ShellReadFailed,
-        });
+    let allowed_mask = match batch_background_allowed_mask(viewport, chunk) {
+        Ok(allowed_mask) => allowed_mask,
+        Err(err) => {
+            warn(&format!("background sampling failed: {err}"));
+            return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
+                observation_id: payload.observation_basis.observation_id(),
+                probe_request_id: payload.probe_request_id,
+                failure: ProbeFailure::ShellReadFailed,
+            });
+        }
     };
-
-    let allowed_mask = char_codes
-        .into_iter()
-        .map(background_char_code_is_allowed)
-        .collect::<Vec<_>>();
 
     CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
         observation_id: payload.observation_basis.observation_id(),

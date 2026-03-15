@@ -1,3 +1,9 @@
+//! Plugin lifecycle orchestration for setup, teardown, and toggle boundaries.
+//!
+//! This module keeps Neovim callbacks, host-bridge state, and runtime state in
+//! lockstep so setup failures degrade into an explicitly disabled runtime
+//! instead of leaving stale callbacks behind.
+
 use super::AUTOCMD_GROUP_NAME;
 use super::cursor::{cursor_position_for_mode, line_value, mode_string};
 use super::host_bridge::{
@@ -6,7 +12,9 @@ use super::host_bridge::{
 use super::ingress::registered_autocmd_event_names;
 use super::logging::{debug, ensure_hideable_guicursor, set_log_level, unhide_real_cursor, warn};
 use super::options::apply_runtime_options;
-use super::runtime::{diagnostics_report, engine_lock, reset_transient_event_state};
+use super::runtime::{
+    diagnostics_report, mutate_engine_state, read_engine_state, reset_transient_event_state,
+};
 use crate::draw::{clear_highlight_cache, purge_render_windows};
 use crate::state::{CursorLocation, CursorShape};
 use crate::types::Point;
@@ -26,10 +34,7 @@ fn jump_to_current_cursor() -> Result<()> {
         return Ok(());
     }
 
-    let smear_to_cmd = {
-        let state = engine_lock();
-        state.core_state.runtime().config.smear_to_cmd
-    };
+    let smear_to_cmd = read_engine_state(|state| state.core_state.runtime().config.smear_to_cmd);
     let Some((row, col)) = cursor_position_for_mode(&window, &mode, smear_to_cmd)? else {
         return Ok(());
     };
@@ -41,8 +46,7 @@ fn jump_to_current_cursor() -> Result<()> {
         line_value(".")?,
     );
 
-    let hide_target_hack = {
-        let mut state = engine_lock();
+    let hide_target_hack = mutate_engine_state(|state| {
         state.shell.set_namespace_id(namespace_id);
         let mut runtime = state.core_state.runtime().clone();
         let cursor_shape = CursorShape::new(
@@ -54,7 +58,7 @@ fn jump_to_current_cursor() -> Result<()> {
         let next_core = state.core_state().with_runtime(runtime);
         state.set_core_state(next_core);
         hide_target_hack
-    };
+    });
 
     reset_transient_event_state();
     let _ = purge_render_windows(namespace_id);
@@ -114,6 +118,7 @@ fn setup_user_command() -> Result<()> {
     Ok(())
 }
 
+/// Applies runtime options and installs the event bridge for the plugin session.
 pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
     let host_bridge = verify_host_bridge()?;
     let namespace_id = ensure_namespace_id();
@@ -121,21 +126,19 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
     unhide_real_cursor();
     clear_highlight_cache();
 
-    {
-        let mut state = engine_lock();
+    mutate_engine_state(|state| {
         state.shell.set_namespace_id(namespace_id);
         let mut runtime = state.core_state.runtime().clone();
         runtime.disable();
         let next_core = state.core_state().with_runtime(runtime);
         state.set_core_state(next_core);
-    }
+    });
     clear_autocmd_group();
     set_on_key_listener(host_bridge, namespace_id, false)?;
     reset_transient_event_state();
 
     let has_enabled_option = opts.get(&NvimString::from("enabled")).is_some();
-    let (enabled, setup_warning) = {
-        let mut state = engine_lock();
+    let (enabled, setup_warning) = mutate_engine_state(|state| {
         state.shell.set_namespace_id(namespace_id);
         let mut runtime = state.core_state.runtime().clone();
         // Surprising: setup errors used to return before teardown, leaving stale callbacks alive.
@@ -164,7 +167,7 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
         let next_core = state.core_state().with_runtime(runtime);
         state.set_core_state(next_core);
         outcome
-    };
+    });
 
     setup_user_command()?;
     if enabled {
@@ -180,8 +183,7 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
 
 pub(crate) fn toggle() -> Result<()> {
     let host_bridge = installed_host_bridge()?;
-    let (is_enabled, namespace_id, hide_target_hack) = {
-        let mut state = engine_lock();
+    let (is_enabled, namespace_id, hide_target_hack) = mutate_engine_state(|state| {
         let mut runtime = state.core_state.runtime().clone();
         let toggled_enabled = !runtime.is_enabled();
         if toggled_enabled {
@@ -197,7 +199,7 @@ pub(crate) fn toggle() -> Result<()> {
         let next_core = state.core_state().with_runtime(runtime);
         state.set_core_state(next_core);
         outcome
-    };
+    });
 
     if let Some(namespace_id) = namespace_id {
         if is_enabled {
@@ -218,6 +220,6 @@ pub(crate) fn toggle() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn diagnostics() -> Result<String> {
-    Ok(diagnostics_report())
+pub(crate) fn diagnostics() -> String {
+    diagnostics_report()
 }

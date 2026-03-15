@@ -1,21 +1,21 @@
+//! Shell-facing realization helpers for scene patches and render plans.
+//!
+//! This layer normalizes logical planner output into the draw, clear, and noop
+//! payloads that the host bridge can apply, keeping missing-basis failures as
+//! explicit lifecycle results instead of hidden exceptions.
+
 use crate::core::state::{BackgroundProbeBatch, ProjectionSnapshot, ScenePatch, ScenePatchKind};
 use crate::draw::render_plan::{
     CellOp, ClearOp, Glyph, HighlightRef, RenderPlan, TargetCellOverlay, Viewport,
 };
-use crate::types::{RenderFrame, ScreenCell};
+use crate::types::{RenderFrame, ScreenCell, StaticRenderConfig};
 use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PaletteSpec {
     mode: String,
-    cursor_color: Option<String>,
-    cursor_color_insert_mode: Option<String>,
-    normal_bg: Option<String>,
-    transparent_bg_fallback_color: String,
-    cterm_cursor_colors: Option<Vec<u16>>,
-    cterm_bg: Option<u16>,
-    color_levels: u32,
-    gamma_bits: u64,
+    static_config: Arc<StaticRenderConfig>,
     color_at_cursor: Option<String>,
 }
 
@@ -23,14 +23,7 @@ impl PaletteSpec {
     pub(crate) fn from_frame(frame: &RenderFrame) -> Self {
         Self {
             mode: frame.mode.clone(),
-            cursor_color: frame.cursor_color.clone(),
-            cursor_color_insert_mode: frame.cursor_color_insert_mode.clone(),
-            normal_bg: frame.normal_bg.clone(),
-            transparent_bg_fallback_color: frame.transparent_bg_fallback_color.clone(),
-            cterm_cursor_colors: frame.cterm_cursor_colors.clone(),
-            cterm_bg: frame.cterm_bg,
-            color_levels: frame.color_levels.max(1),
-            gamma_bits: frame.gamma.to_bits(),
+            static_config: Arc::clone(&frame.static_config),
             color_at_cursor: frame.color_at_cursor.clone(),
         }
     }
@@ -40,39 +33,39 @@ impl PaletteSpec {
     }
 
     pub(crate) fn cursor_color(&self) -> Option<&str> {
-        self.cursor_color.as_deref()
+        self.static_config.cursor_color.as_deref()
     }
 
     pub(crate) fn cursor_color_insert_mode(&self) -> Option<&str> {
-        self.cursor_color_insert_mode.as_deref()
+        self.static_config.cursor_color_insert_mode.as_deref()
     }
 
     pub(crate) fn normal_bg(&self) -> Option<&str> {
-        self.normal_bg.as_deref()
+        self.static_config.normal_bg.as_deref()
     }
 
     pub(crate) fn transparent_bg_fallback_color(&self) -> &str {
-        &self.transparent_bg_fallback_color
+        &self.static_config.transparent_bg_fallback_color
     }
 
     pub(crate) fn cterm_cursor_colors(&self) -> Option<&[u16]> {
-        self.cterm_cursor_colors.as_deref()
+        self.static_config.cterm_cursor_colors.as_deref()
     }
 
-    pub(crate) const fn cterm_bg(&self) -> Option<u16> {
-        self.cterm_bg
+    pub(crate) fn cterm_bg(&self) -> Option<u16> {
+        self.static_config.cterm_bg
     }
 
-    pub(crate) const fn color_levels(&self) -> u32 {
-        self.color_levels
+    pub(crate) fn color_levels(&self) -> u32 {
+        self.static_config.color_levels.max(1)
     }
 
-    pub(crate) const fn gamma(&self) -> f64 {
-        f64::from_bits(self.gamma_bits)
+    pub(crate) fn gamma(&self) -> f64 {
+        self.static_config.gamma
     }
 
-    pub(crate) const fn gamma_bits(&self) -> u64 {
-        self.gamma_bits
+    pub(crate) fn gamma_bits(&self) -> u64 {
+        self.static_config.gamma.to_bits()
     }
 
     pub(crate) fn color_at_cursor(&self) -> Option<&str> {
@@ -188,11 +181,13 @@ pub(crate) enum ScenePatchRealization<'a> {
     Noop,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum ScenePatchRealizationError {
+    #[error("replace patch missing target projection")]
     MissingTargetProjection,
 }
 
+/// Resolves one scene patch into the shell-facing draw, clear, or noop input.
 pub(crate) fn project_scene_patch(
     patch: &ScenePatch,
 ) -> Result<ScenePatchRealization<'_>, ScenePatchRealizationError> {
@@ -413,7 +408,7 @@ mod tests {
         RenderFrame {
             mode: "n".to_string(),
             corners,
-            step_samples: vec![sample_for_corners(corners)],
+            step_samples: vec![sample_for_corners(corners)].into(),
             planner_idle_steps: 0,
             target: Point {
                 row: 10.0,
@@ -423,7 +418,7 @@ mod tests {
             vertical_bar: false,
             trail_stroke_id: StrokeId::new(1),
             retarget_epoch: 1,
-            particles: Vec::new(),
+            particles: Vec::new().into(),
             color_at_cursor: None,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: None,

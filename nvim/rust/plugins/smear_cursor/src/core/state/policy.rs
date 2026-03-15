@@ -175,22 +175,22 @@ impl TimerState {
         }
     }
 
-    fn with_active_token(self, timer_id: TimerId, token: Option<TimerToken>) -> Self {
-        match timer_id {
+    fn with_active_token(self, token: TimerToken) -> Self {
+        match token.id() {
             TimerId::Animation => Self {
-                active_animation: token,
+                active_animation: Some(token),
                 ..self
             },
             TimerId::Ingress => Self {
-                active_ingress: token,
+                active_ingress: Some(token),
                 ..self
             },
             TimerId::Recovery => Self {
-                active_recovery: token,
+                active_recovery: Some(token),
                 ..self
             },
             TimerId::Cleanup => Self {
-                active_cleanup: token,
+                active_cleanup: Some(token),
                 ..self
             },
         }
@@ -201,7 +201,7 @@ impl TimerState {
         let token = TimerToken::new(timer_id, generation);
         let next = self
             .with_generation(timer_id, generation)
-            .with_active_token(timer_id, Some(token));
+            .with_active_token(token);
         (next, token)
     }
 
@@ -210,7 +210,24 @@ impl TimerState {
     }
 
     pub(crate) fn clear_active(self, timer_id: TimerId) -> Self {
-        self.with_active_token(timer_id, None)
+        match timer_id {
+            TimerId::Animation => Self {
+                active_animation: None,
+                ..self
+            },
+            TimerId::Ingress => Self {
+                active_ingress: None,
+                ..self
+            },
+            TimerId::Recovery => Self {
+                active_recovery: None,
+                ..self
+            },
+            TimerId::Cleanup => Self {
+                active_cleanup: None,
+                ..self
+            },
+        }
     }
 
     pub(crate) fn clear_matching(self, token: TimerToken) -> Self {
@@ -219,5 +236,30 @@ impl TimerState {
         } else {
             self
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timer_state_arm_stores_the_active_token_in_its_matching_slot() {
+        let (state, token) = TimerState::default().arm(TimerId::Recovery);
+
+        assert_eq!(state.active_recovery, Some(token));
+        assert_eq!(state.active_animation, None);
+        assert_eq!(state.active_ingress, None);
+        assert_eq!(state.active_cleanup, None);
+        assert_eq!(state.active_token(TimerId::Recovery), Some(token));
+    }
+
+    #[test]
+    fn timer_state_clear_matching_ignores_tokens_from_other_slots() {
+        let (state, recovery_token) = TimerState::default().arm(TimerId::Recovery);
+        let animation_token = TimerToken::new(TimerId::Animation, recovery_token.generation());
+
+        assert_eq!(state.clear_matching(animation_token), state);
+        assert_eq!(state.clear_matching(recovery_token).active_recovery, None);
     }
 }

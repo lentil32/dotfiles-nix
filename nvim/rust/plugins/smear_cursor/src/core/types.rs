@@ -1,3 +1,15 @@
+// Surprising: several phase-1 domain types are already checked in even though later phases still
+// own the first production callsites for them.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "phase-1 domain contracts and fingerprint seeds are intentionally retained for later reducer wiring"
+    )
+)]
+
+use thiserror::Error;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Lifecycle {
     Idle,
@@ -12,8 +24,9 @@ pub(crate) enum Lifecycle {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct WindowId(i64);
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum WindowIdError {
+    #[error("window id must be positive, got {0}")]
     NonPositive(i64),
 }
 
@@ -34,8 +47,9 @@ impl WindowId {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct BufferId(i64);
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum BufferIdError {
+    #[error("buffer id must be positive, got {0}")]
     NonPositive(i64),
 }
 
@@ -56,8 +70,9 @@ impl BufferId {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct TabId(i32);
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum TabIdError {
+    #[error("tab id must be positive, got {0}")]
     NonPositive(i32),
 }
 
@@ -390,8 +405,9 @@ impl ArcLenQ16 {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct DelayBudgetMs(u64);
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum DelayBudgetMsError {
+    #[error("delay budget must be positive")]
     MustBePositive,
 }
 
@@ -492,16 +508,26 @@ impl ViewportSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
 pub(crate) enum PoolSnapshotError {
+    #[error(
+        "pool snapshot invalid: in_use_windows {in_use_windows} exceeds total_windows {total_windows}"
+    )]
     InUseExceedsTotal {
         total_windows: u32,
         in_use_windows: u32,
     },
+    #[error(
+        "pool snapshot invalid: available_windows {available_windows} exceeds total_windows {total_windows}"
+    )]
     AvailableExceedsTotal {
         total_windows: u32,
         available_windows: u32,
     },
+    #[error(
+        "pool snapshot invalid: total_windows {total_windows} implies available_windows {expected_available}, found {available_windows}",
+        expected_available = .total_windows - .in_use_windows
+    )]
     CapacityMismatch {
         total_windows: u32,
         in_use_windows: u32,
@@ -669,10 +695,7 @@ pub(crate) fn phase1_types_fingerprint() -> u64 {
         Err(TabIdError::NonPositive(value)) => u64::from(value.unsigned_abs()),
     };
 
-    let delay_ok = match DelayBudgetMs::try_new(8) {
-        Ok(value) => value.value(),
-        Err(_) => 0,
-    };
+    let delay_ok = DelayBudgetMs::try_new(8).map_or(0, DelayBudgetMs::value);
     let delay_error_seed = match DelayBudgetMs::try_new(0) {
         Ok(value) => value.value(),
         Err(DelayBudgetMsError::MustBePositive) => 1,

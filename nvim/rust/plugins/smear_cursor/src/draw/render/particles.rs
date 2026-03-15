@@ -65,7 +65,7 @@ pub(super) fn draw_particles(
     // Surprising-but-important invariant: output particles are already unique per screen cell,
     // so downstream probe logic should avoid re-deduplicating by `(row, col)`.
     let mut cells: BTreeMap<(i64, i64), ParticleCellAggregate> = BTreeMap::new();
-    for particle in &frame.particles {
+    for particle in frame.particles.iter() {
         let row = particle.position.row.floor() as i64;
         let col = particle.position.col.floor() as i64;
         let sub_row = round_lua(4.0 * frac01(particle.position.row) + 0.5).clamp(1, 4);

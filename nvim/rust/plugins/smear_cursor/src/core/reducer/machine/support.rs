@@ -10,9 +10,9 @@ use crate::core::runtime_reducer::{
     render_hard_cleanup_delay_ms,
 };
 use crate::core::state::{
-    CoreState, ExternalDemandKind, InFlightProposal, ObservationBasis, ObservationRequest,
-    ObservationSnapshot, ProbeKind, ProbeRequestSet, ProbeState, RealizationPlan,
-    RenderCleanupState,
+    AnimationSchedule, CoreState, ExternalDemandKind, InFlightProposal, ObservationBasis,
+    ObservationRequest, ObservationSnapshot, ProbeKind, ProbeRequestSet, ProbeState,
+    ProposalExecution, RenderCleanupState,
 };
 use crate::core::types::{DelayBudgetMs, Millis, ProposalId, TimerId};
 
@@ -22,11 +22,11 @@ pub(super) const DEFAULT_RECOVERY_DELAY_MS: u64 = 16;
 const RECOVERY_MAX_DELAY_MS: u64 = 256;
 
 pub(super) fn delay_budget_from_ms(delay_ms: u64) -> DelayBudgetMs {
-    match DelayBudgetMs::try_new(delay_ms) {
-        Ok(delay) => delay,
+    DelayBudgetMs::try_new(delay_ms).map_or(
         // Surprising: recovery backoff produced a non-positive delay. Fall back to animation default.
-        Err(_) => DEFAULT_ANIMATION_DELAY_MS,
-    }
+        DEFAULT_ANIMATION_DELAY_MS,
+        |delay| delay,
+    )
 }
 
 fn recovery_backoff_delay(attempt: u8) -> DelayBudgetMs {
@@ -35,10 +35,11 @@ fn recovery_backoff_delay(attempt: u8) -> DelayBudgetMs {
     }
 
     let shift = u32::from(attempt.saturating_sub(1));
-    let scaled = match 1_u64.checked_shl(shift) {
-        Some(scale) => DEFAULT_RECOVERY_DELAY_MS.saturating_mul(scale),
-        None => RECOVERY_MAX_DELAY_MS,
-    };
+    let scaled = 1_u64
+        .checked_shl(shift)
+        .map_or(RECOVERY_MAX_DELAY_MS, |scale| {
+            DEFAULT_RECOVERY_DELAY_MS.saturating_mul(scale)
+        });
     let clamped = scaled.min(RECOVERY_MAX_DELAY_MS);
     delay_budget_from_ms(clamped)
 }
@@ -94,7 +95,6 @@ pub(super) fn schedule_timer_with_delay(
     let (timers, token) = state.timers().arm(timer_id);
     let next_state = state.with_timers(timers);
     let effect = Effect::ScheduleTimer(ScheduleTimerEffect {
-        kind,
         token,
         delay,
         requested_at,
@@ -184,7 +184,9 @@ pub(super) fn next_pending_probe_effect(
     observation: &ObservationSnapshot,
 ) -> Option<Effect> {
     let basis = observation.basis();
-    if let ProbeState::Pending { request_id } = observation.probes().cursor_color() {
+    if let crate::core::state::ProbeSlot::Requested(ProbeState::Pending { request_id }) =
+        observation.probes().cursor_color()
+    {
         return Some(request_probe(
             state,
             basis.clone(),
@@ -194,7 +196,9 @@ pub(super) fn next_pending_probe_effect(
         ));
     }
 
-    if let ProbeState::Pending { request_id } = observation.probes().background() {
+    if let crate::core::state::ProbeSlot::Requested(ProbeState::Pending { request_id }) =
+        observation.probes().background()
+    {
         return Some(request_probe(
             state,
             basis.clone(),
@@ -221,8 +225,7 @@ pub(super) fn request_render_plan_effect(
     observation: ObservationSnapshot,
     proposal_id: ProposalId,
     render_decision: RenderDecision,
-    should_schedule_next_animation: bool,
-    next_animation_at_ms: Option<Millis>,
+    animation_schedule: AnimationSchedule,
     requested_at: Millis,
 ) -> Effect {
     Effect::RequestRenderPlan(Box::new(RequestRenderPlanEffect {
@@ -230,8 +233,7 @@ pub(super) fn request_render_plan_effect(
         planning_state,
         observation,
         render_decision,
-        should_schedule_next_animation,
-        next_animation_at_ms,
+        animation_schedule,
         requested_at,
     }))
 }
@@ -252,21 +254,26 @@ pub(super) fn ingress_cursor_presentation_effect(
     }
 
     Some(Effect::ApplyIngressCursorPresentation(
-        match request.prepaint_cell() {
-            Some(cell) => IngressCursorPresentationEffect::HideCursorAndPrepaint {
-                cell,
-                zindex: runtime.config.windows_zindex,
-            },
-            None => IngressCursorPresentationEffect::HideCursor,
-        },
+        request
+            .prepaint_cell()
+            .map_or(IngressCursorPresentationEffect::HideCursor, |cell| {
+                IngressCursorPresentationEffect::HideCursorAndPrepaint {
+                    cell,
+                    zindex: runtime.config.windows_zindex,
+                }
+            }),
     ))
 }
 
 fn proposal_max_kept_windows(state: &CoreState, proposal: &InFlightProposal) -> usize {
-    match proposal.realization() {
-        RealizationPlan::Draw(draw) => draw.max_kept_windows(),
-        RealizationPlan::Clear(clear) => clear.max_kept_windows(),
-        RealizationPlan::Noop | RealizationPlan::Failure(_) => {
+    match proposal.execution() {
+        ProposalExecution::Draw {
+            realization: draw, ..
+        } => draw.max_kept_windows(),
+        ProposalExecution::Clear {
+            realization: clear, ..
+        } => clear.max_kept_windows(),
+        ProposalExecution::Noop { .. } | ProposalExecution::Failure { .. } => {
             state.runtime().config.max_kept_windows
         }
     }
@@ -362,15 +369,17 @@ pub(super) fn redraw_effect_for_proposal(
         return None;
     }
 
-    match proposal.realization() {
-        RealizationPlan::Draw(_) if proposal.side_effects().redraw_after_draw_if_cmdline => {
+    match proposal.execution() {
+        ProposalExecution::Draw { .. } if proposal.side_effects().redraw_after_draw_if_cmdline => {
             Some(Effect::RedrawCmdline)
         }
-        RealizationPlan::Clear(_) => {
+        ProposalExecution::Clear { .. } => {
             // hiding smear windows at settle/clear time must flush the UI even outside
             // cmdline mode or the old frame can remain visible until the next user input.
             Some(Effect::RedrawCmdline)
         }
-        _ => None,
+        ProposalExecution::Draw { .. }
+        | ProposalExecution::Noop { .. }
+        | ProposalExecution::Failure { .. } => None,
     }
 }

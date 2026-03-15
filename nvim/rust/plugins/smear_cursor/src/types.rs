@@ -106,6 +106,9 @@ impl RenderStepSample {
     }
 }
 
+pub(crate) type SharedRenderStepSamples = Arc<[RenderStepSample]>;
+pub(crate) type SharedParticles = Arc<[Particle]>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StaticRenderConfig {
     pub(crate) cursor_color: Option<String>,
@@ -137,14 +140,14 @@ pub(crate) struct StaticRenderConfig {
 pub(crate) struct RenderFrame {
     pub(crate) mode: String,
     pub(crate) corners: [Point; 4],
-    pub(crate) step_samples: Vec<RenderStepSample>,
+    pub(crate) step_samples: SharedRenderStepSamples,
     pub(crate) planner_idle_steps: u32,
     pub(crate) target: Point,
     pub(crate) target_corners: [Point; 4],
     pub(crate) vertical_bar: bool,
     pub(crate) trail_stroke_id: StrokeId,
     pub(crate) retarget_epoch: u64,
-    pub(crate) particles: Vec<Particle>,
+    pub(crate) particles: SharedParticles,
     pub(crate) color_at_cursor: Option<String>,
     pub(crate) static_config: Arc<StaticRenderConfig>,
 }
@@ -172,8 +175,6 @@ pub(crate) struct StepInput {
     pub(crate) max_length: f64,
     pub(crate) max_length_insert_mode: f64,
     pub(crate) trail_duration_ms: f64,
-    pub(crate) trail_short_duration_ms: f64,
-    pub(crate) trail_size: f64,
     pub(crate) trail_min_distance: f64,
     pub(crate) trail_thickness: f64,
     pub(crate) trail_thickness_x: f64,

@@ -54,14 +54,11 @@ impl DepthTelemetry {
 pub(super) struct RuntimeBehaviorMetrics {
     pub(super) ingress_received: u64,
     pub(super) ingress_coalesced: u64,
-    pub(super) ingress_starved: u64,
     pub(super) ingress_dropped: u64,
     pub(super) ingress_applied: u64,
     pub(super) observation_requests_executed: u64,
     pub(super) degraded_draw_applications: u64,
     pub(super) stale_token_events: u64,
-    pub(super) planner_compile: DurationTelemetry,
-    pub(super) planner_decode: DurationTelemetry,
     pub(super) timer_schedule: DurationTelemetry,
     pub(super) timer_fire: DurationTelemetry,
     pub(super) scheduled_queue_depth: DepthTelemetry,
@@ -104,11 +101,6 @@ impl RuntimeBehaviorMetrics {
 
     fn record_ingress_coalesced(&mut self) {
         self.ingress_coalesced = self.ingress_coalesced.saturating_add(1);
-    }
-
-    #[cfg(test)]
-    fn record_ingress_starved(&mut self) {
-        self.ingress_starved = self.ingress_starved.saturating_add(1);
     }
 
     fn record_ingress_dropped(&mut self) {
@@ -158,16 +150,6 @@ impl RuntimeBehaviorMetrics {
         let telemetry = self.probe_telemetry_mut(kind);
         telemetry.refresh_budget_exhausted = telemetry.refresh_budget_exhausted.saturating_add(1);
     }
-
-    #[cfg(test)]
-    fn record_planner_compile_duration(&mut self, duration_micros: u64) {
-        self.planner_compile.record_micros(duration_micros);
-    }
-
-    #[cfg(test)]
-    fn record_planner_decode_duration(&mut self, duration_micros: u64) {
-        self.planner_decode.record_micros(duration_micros);
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -196,22 +178,11 @@ impl EventLoopState {
             runtime_metrics: RuntimeBehaviorMetrics {
                 ingress_received: 0,
                 ingress_coalesced: 0,
-                ingress_starved: 0,
                 ingress_dropped: 0,
                 ingress_applied: 0,
                 observation_requests_executed: 0,
                 degraded_draw_applications: 0,
                 stale_token_events: 0,
-                planner_compile: DurationTelemetry {
-                    samples: 0,
-                    total_micros: 0,
-                    max_micros: 0,
-                },
-                planner_decode: DurationTelemetry {
-                    samples: 0,
-                    total_micros: 0,
-                    max_micros: 0,
-                },
                 timer_schedule: DurationTelemetry {
                     samples: 0,
                     total_micros: 0,
@@ -289,11 +260,6 @@ impl EventLoopState {
         self.runtime_metrics.record_ingress_coalesced();
     }
 
-    #[cfg(test)]
-    pub(super) fn record_ingress_starved(&mut self) {
-        self.runtime_metrics.record_ingress_starved();
-    }
-
     pub(super) fn record_ingress_dropped(&mut self) {
         self.runtime_metrics.record_ingress_dropped();
     }
@@ -340,18 +306,6 @@ impl EventLoopState {
     pub(super) fn record_probe_refresh_budget_exhausted(&mut self, kind: ProbeKind) {
         self.runtime_metrics
             .record_probe_refresh_budget_exhausted(kind);
-    }
-
-    #[cfg(test)]
-    pub(super) fn record_planner_compile_duration(&mut self, duration_micros: u64) {
-        self.runtime_metrics
-            .record_planner_compile_duration(duration_micros);
-    }
-
-    #[cfg(test)]
-    pub(super) fn record_planner_decode_duration(&mut self, duration_micros: u64) {
-        self.runtime_metrics
-            .record_planner_decode_duration(duration_micros);
     }
 
     pub(super) fn runtime_metrics(&self) -> RuntimeBehaviorMetrics {

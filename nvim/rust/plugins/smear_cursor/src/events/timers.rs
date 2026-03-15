@@ -14,13 +14,17 @@ pub(super) struct NvimTimerId(NonZeroI64);
 
 impl NvimTimerId {
     pub(super) fn try_new(value: i64) -> Result<Self> {
-        match NonZeroI64::new(value).filter(|timer_id| timer_id.get() > 0) {
-            Some(timer_id) => Ok(Self(timer_id)),
-            None => Err(nvim_oxi::api::Error::Other(format!(
-                "timer_start returned invalid timer id: {value}"
-            ))
-            .into()),
-        }
+        NonZeroI64::new(value)
+            .filter(|timer_id| timer_id.get() > 0)
+            .map_or_else(
+                || {
+                    Err(nvim_oxi::api::Error::Other(format!(
+                        "timer_start returned invalid timer id: {value}"
+                    ))
+                    .into())
+                },
+                |timer_id| Ok(Self(timer_id)),
+            )
     }
 
     pub(super) const fn get(self) -> i64 {

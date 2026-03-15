@@ -52,7 +52,7 @@ pub(super) fn transition_ready_or_observe(state: CoreState, observed_at: Millis)
         return Transition::new(next_state, vec![effect]);
     }
 
-    let settled = match next_state.observation().cloned() {
+    let settled = match next_state.retained_observation().cloned() {
         Some(observation) => next_state.into_ready_with_observation(observation),
         None => next_state.into_primed(),
     };
@@ -70,7 +70,7 @@ pub(super) fn observe_or_plan(state: CoreState, observed_at: Millis) -> Transiti
         return Transition::new(next_state, vec![effect]);
     }
 
-    let mut transition = match next_state.observation().cloned() {
+    let mut transition = match next_state.retained_observation().cloned() {
         Some(observation) => {
             let ready = next_state.into_ready_with_observation(observation.clone());
             plan_ready_state(ready, observation, observed_at)
@@ -128,7 +128,8 @@ fn queue_external_demand(
         | crate::core::state::ProtocolState::Ready { .. } => {
             transition_ready_or_observe(queued_state, observed_at)
         }
-        crate::core::state::ProtocolState::Observing { .. }
+        crate::core::state::ProtocolState::ObservingRequest { .. }
+        | crate::core::state::ProtocolState::ObservingActive { .. }
         | crate::core::state::ProtocolState::Planning { .. }
         | crate::core::state::ProtocolState::Applying { .. }
         | crate::core::state::ProtocolState::Recovering { .. } => {
@@ -223,9 +224,7 @@ pub(super) fn reduce_observation_base_collected(
         .basis
         .cursor_position()
         .or_else(|| state.last_cursor());
-    let probes = crate::core::state::ProbeSet::from_request(&payload.request);
-    let next_observation =
-        ObservationSnapshot::new(payload.request, payload.basis, probes, payload.motion);
+    let next_observation = ObservationSnapshot::new(payload.request, payload.basis, payload.motion);
     let base_state = reset_recovery_attempt(state.clone().with_last_cursor(next_cursor));
     let next_probe = next_pending_probe_effect(&base_state, &next_observation);
     let Some(next_probe) = next_probe else {
@@ -267,18 +266,15 @@ fn apply_probe_report(
                     ProbeKind::CursorColor,
                 ));
             }
-            let probes = observation
-                .probes()
+            let updated = observation
                 .clone()
-                .with_cursor_color(ProbeState::ready(
+                .with_cursor_color_probe(ProbeState::ready(
                     *probe_request_id,
                     *reported_id,
                     *reuse,
                     sample.clone(),
-                ));
-            Some(ProbeReportResolution::Updated(Box::new(
-                observation.clone().with_probes(probes),
-            )))
+                ))?;
+            Some(ProbeReportResolution::Updated(Box::new(updated)))
         }
         ProbeReportedEvent::CursorColorFailed {
             observation_id: reported_id,
@@ -291,13 +287,10 @@ fn apply_probe_report(
             {
                 return None;
             }
-            let probes = observation
-                .probes()
+            let updated = observation
                 .clone()
-                .with_cursor_color(ProbeState::failed(*probe_request_id, *failure));
-            Some(ProbeReportResolution::Updated(Box::new(
-                observation.clone().with_probes(probes),
-            )))
+                .with_cursor_color_probe(ProbeState::failed(*probe_request_id, *failure))?;
+            Some(ProbeReportResolution::Updated(Box::new(updated)))
         }
         ProbeReportedEvent::BackgroundReady {
             observation_id: reported_id,
@@ -316,21 +309,15 @@ fn apply_probe_report(
                     ProbeKind::Background,
                 ));
             }
-            let probes = observation
-                .probes()
+            let updated = observation
                 .clone()
-                .with_background(ProbeState::ready(
+                .with_background_probe(ProbeState::ready(
                     *probe_request_id,
                     *reported_id,
                     *reuse,
                     batch.clone(),
-                ));
-            Some(ProbeReportResolution::Updated(Box::new(
-                observation
-                    .clone()
-                    .with_probes(probes)
-                    .with_background_progress(None),
-            )))
+                ))?;
+            Some(ProbeReportResolution::Updated(Box::new(updated)))
         }
         ProbeReportedEvent::BackgroundChunkReady {
             observation_id: reported_id,
@@ -347,28 +334,21 @@ fn apply_probe_report(
             let progress = observation.background_progress()?;
             match progress.apply_chunk(*chunk, allowed_mask) {
                 Some(BackgroundProbeUpdate::InProgress(next_progress)) => {
-                    Some(ProbeReportResolution::Updated(Box::new(
-                        observation
-                            .clone()
-                            .with_background_progress(Some(next_progress)),
-                    )))
+                    let updated = observation
+                        .clone()
+                        .with_background_progress(next_progress)?;
+                    Some(ProbeReportResolution::Updated(Box::new(updated)))
                 }
                 Some(BackgroundProbeUpdate::Complete(batch)) => {
-                    let probes = observation
-                        .probes()
+                    let updated = observation
                         .clone()
-                        .with_background(ProbeState::ready(
+                        .with_background_probe(ProbeState::ready(
                             *probe_request_id,
                             *reported_id,
                             ProbeReuse::Exact,
                             batch,
-                        ));
-                    Some(ProbeReportResolution::Updated(Box::new(
-                        observation
-                            .clone()
-                            .with_probes(probes)
-                            .with_background_progress(None),
-                    )))
+                        ))?;
+                    Some(ProbeReportResolution::Updated(Box::new(updated)))
                 }
                 None => None,
             }
@@ -384,16 +364,10 @@ fn apply_probe_report(
             {
                 return None;
             }
-            let probes = observation
-                .probes()
+            let updated = observation
                 .clone()
-                .with_background(ProbeState::failed(*probe_request_id, *failure));
-            Some(ProbeReportResolution::Updated(Box::new(
-                observation
-                    .clone()
-                    .with_probes(probes)
-                    .with_background_progress(None),
-            )))
+                .with_background_probe(ProbeState::failed(*probe_request_id, *failure))?;
+            Some(ProbeReportResolution::Updated(Box::new(updated)))
         }
     }
 }
