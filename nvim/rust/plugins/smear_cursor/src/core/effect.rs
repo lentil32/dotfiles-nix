@@ -494,9 +494,8 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
         crate::core::state::ObservationMotion::default(),
     );
 
-    let noop_patch = crate::core::state::ScenePatch::derive(crate::core::state::PatchBasis::new(
-        None, None,
-    ));
+    let noop_patch =
+        crate::core::state::ScenePatch::derive(crate::core::state::PatchBasis::new(None, None));
     let noop_proposal = match crate::core::state::InFlightProposal::noop(
         proposal_id,
         noop_patch,

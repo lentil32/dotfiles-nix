@@ -157,7 +157,6 @@ in
     tree
     gnupg
     sops
-    gnused
     gnutar
     gawk
     pandoc

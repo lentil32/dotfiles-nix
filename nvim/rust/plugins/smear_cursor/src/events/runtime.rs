@@ -512,7 +512,9 @@ fn with_engine_state_access<R>(
     }
 }
 
-pub(super) fn read_engine_state<R>(reader: impl FnOnce(&EngineState) -> R) -> EngineAccessResult<R> {
+pub(super) fn read_engine_state<R>(
+    reader: impl FnOnce(&EngineState) -> R,
+) -> EngineAccessResult<R> {
     with_engine_state_access(|state| reader(state))
 }
 

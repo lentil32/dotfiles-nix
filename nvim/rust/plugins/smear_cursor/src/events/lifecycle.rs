@@ -32,8 +32,7 @@ fn jump_to_current_cursor() -> Result<()> {
         return Ok(());
     }
 
-    let smear_to_cmd =
-        read_engine_state(|state| state.core_state.runtime().config.smear_to_cmd)?;
+    let smear_to_cmd = read_engine_state(|state| state.core_state.runtime().config.smear_to_cmd)?;
     let Some((row, col)) = cursor_position_for_mode(&window, &mode, smear_to_cmd)? else {
         return Ok(());
     };

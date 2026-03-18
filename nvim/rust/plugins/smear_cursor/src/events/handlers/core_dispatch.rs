@@ -235,12 +235,8 @@ fn execute_scheduled_effect_batch(
         }
 
         let mut stage_effect_batch = stage_effect_batch_on_default_queue;
-        dispatch_core_event(follow_up, &mut stage_effect_batch).map_err(|error| {
-            ScheduledWorkExecutionError {
-                work_name,
-                error,
-            }
-        })?;
+        dispatch_core_event(follow_up, &mut stage_effect_batch)
+            .map_err(|error| ScheduledWorkExecutionError { work_name, error })?;
     }
 
     Ok(())
@@ -286,8 +282,10 @@ fn scheduled_drain_budget_for_depth(queued_items: usize) -> usize {
     // Drain a bounded fraction of the queued snapshot so backlog converges geometrically under
     // burst load, while smaller queues still clear in a single shell edge.
     let half_backlog = queued_items.saturating_add(1) / 2;
-    let bounded_half =
-        half_backlog.clamp(MIN_SCHEDULED_WORK_ITEMS_PER_EDGE, MAX_SCHEDULED_WORK_ITEMS_PER_EDGE);
+    let bounded_half = half_backlog.clamp(
+        MIN_SCHEDULED_WORK_ITEMS_PER_EDGE,
+        MAX_SCHEDULED_WORK_ITEMS_PER_EDGE,
+    );
     queued_items.min(bounded_half)
 }
 
@@ -315,12 +313,8 @@ fn drain_scheduled_work_with_executor(
             }
             ScheduledWorkItem::CoreEvent(event) => {
                 let work_name = core_event_label(&event);
-                dispatch_scheduled_core_event(*event).map_err(|error| {
-                    ScheduledWorkExecutionError {
-                        work_name,
-                        error,
-                    }
-                })?;
+                dispatch_scheduled_core_event(*event)
+                    .map_err(|error| ScheduledWorkExecutionError { work_name, error })?;
             }
         }
         drained_items = drained_items.saturating_add(1);
@@ -532,7 +526,8 @@ mod tests {
 
         fn observing_state_after_base_collection(&self) -> (ObservationRequest, CoreState) {
             self.set_core_state(ready_state_with_cursor_color_probe());
-            let observing = reduce_core_event(&current_core_state(), external_cursor_demand(25)).next;
+            let observing =
+                reduce_core_event(&current_core_state(), external_cursor_demand(25)).next;
             let request = observing
                 .active_observation_request()
                 .cloned()
