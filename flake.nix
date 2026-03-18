@@ -64,6 +64,10 @@
       url = "github:PeonPing/homebrew-tap";
       flake = false;
     };
+    homebrew-steipete = {
+      url = "github:steipete/homebrew-tap";
+      flake = false;
+    };
   };
 
   outputs =
@@ -87,6 +91,7 @@
       homebrew-anomalyco,
       homebrew-supabase,
       homebrew-peonping,
+      homebrew-steipete,
       nixCats,
       ...
     }@inputs:
@@ -219,6 +224,7 @@
                   "anomalyco/homebrew-tap" = homebrew-anomalyco;
                   "supabase/homebrew-tap" = homebrew-supabase;
                   "peonping/homebrew-tap" = homebrew-peonping;
+                  "steipete/homebrew-tap" = homebrew-steipete;
                 };
               };
             }

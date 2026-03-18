@@ -19,6 +19,8 @@ let
 
   # Package format: { cask = "name"; } or { formulae = "name"; }
   # Optional: { desc = "description"; cask = "name"; }
+  # Third-party taps: use "owner/tap/pkg" here, but the tap itself must also be
+  # declared in flake.nix (flake input + nix-homebrew.taps) since mutableTaps = false.
   packages = [
     # Security
     { cask = "1password"; }
@@ -64,6 +66,7 @@ let
       desc = "OpenAI Codex Desktop";
       cask = "codex-app";
     }
+    { cask = "steipete/tap/codexbar"; }
     { formulae = "anomalyco/tap/opencode"; }
     {
       desc = "Agent terminal notifications + voice packs";

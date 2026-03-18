@@ -188,6 +188,22 @@
         "type": "github"
       }
     },
+    "homebrew-steipete": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773638503,
+        "narHash": "sha256-+MEAcuZsndu0S8kS3uMxLwfJRNVZU1P/r2mdNp+6CXk=",
+        "owner": "steipete",
+        "repo": "homebrew-tap",
+        "rev": "782e279da0b67bba5729413c839445db059ca7f1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "steipete",
+        "repo": "homebrew-tap",
+        "type": "github"
+      }
+    },
     "homebrew-supabase": {
       "flake": false,
       "locked": {
@@ -354,6 +370,7 @@
         "homebrew-pear": "homebrew-pear",
         "homebrew-peonping": "homebrew-peonping",
         "homebrew-services": "homebrew-services",
+        "homebrew-steipete": "homebrew-steipete",
         "homebrew-supabase": "homebrew-supabase",
         "nix-darwin": "nix-darwin",
         "nix-homebrew": "nix-homebrew",
