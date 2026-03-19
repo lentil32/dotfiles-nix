@@ -5,22 +5,15 @@ require("lze").load({
     event = { "BufReadPre", "BufNewFile" },
     after = function()
       require("conform").setup({
+        default_format_opts = {
+          lsp_format = "prefer",
+        },
         formatters_by_ft = {
-          javascript = { "biome" },
-          typescript = { "biome" },
-          javascriptreact = { "biome" },
-          typescriptreact = { "biome" },
-          json = { "biome" },
-          jsonc = { "biome" },
-          lua = { lsp_format = "prefer" },
-          rust = { "rustfmt" },
-          toml = { "taplo" },
-          yaml = { "yamlfmt" },
-          ["yaml.ansible"] = { "yamlfmt" },
+          rust = { "rustfmt", lsp_format = "never" },
+          ["yaml.ansible"] = { "yamlfmt", lsp_format = "never" },
         },
         format_on_save = {
           timeout_ms = 500,
-          lsp_fallback = true,
         },
       })
     end,

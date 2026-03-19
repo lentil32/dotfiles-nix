@@ -240,7 +240,9 @@ in
               vim.nvim-vtsls
             ];
             runtimeDeps = [
-              p.biome
+              # Oxfmt is only packaged in nixpkgs-unstable on this pinned flake.
+              pkgs-unstable.oxfmt
+              pkgs-unstable.oxlint
               p.vtsls
             ];
           };

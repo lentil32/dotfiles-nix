@@ -5,6 +5,63 @@ local on_attach = require("myLuaConf.LSPs.on_attach")
 local blink = require("blink.cmp")
 local capabilities = blink.get_lsp_capabilities()
 
+local oxfmt_filetypes = {
+  "javascript",
+  "javascriptreact",
+  "javascript.jsx",
+  "typescript",
+  "typescriptreact",
+  "typescript.tsx",
+  "toml",
+  "json",
+  "jsonc",
+  "json5",
+  "yaml",
+  "html",
+  "vue",
+  "handlebars",
+  "hbs",
+  "css",
+  "scss",
+  "less",
+  "graphql",
+  "markdown",
+  "mdx",
+}
+
+local oxlint_filetypes = {
+  "javascript",
+  "javascriptreact",
+  "javascript.jsx",
+  "typescript",
+  "typescriptreact",
+  "typescript.tsx",
+  "vue",
+  "svelte",
+  "astro",
+}
+
+local function oxlint_on_attach(client, bufnr)
+  on_attach(client, bufnr)
+
+  vim.api.nvim_buf_create_user_command(bufnr, "LspOxlintFixAll", function()
+    client:request_sync("workspace/executeCommand", {
+      command = "oxc.fixAll",
+      arguments = {
+        {
+          uri = vim.uri_from_bufnr(bufnr),
+        },
+      },
+    }, nil, bufnr)
+  end, { desc = "Apply all fixable oxlint diagnostics" })
+end
+
+local function on_attach_without_formatting(client, bufnr)
+  on_attach(client, bufnr)
+  client.server_capabilities.documentFormattingProvider = false
+  client.server_capabilities.documentRangeFormattingProvider = false
+end
+
 require("lze").load({
   {
     "nvim-lspconfig",
@@ -102,10 +159,33 @@ require("lze").load({
     },
   },
   {
-    "biome",
+    "oxfmt",
     enabled = nixCats("lsp") or false,
     lsp = {
-      filetypes = { "javascript", "javascriptreact", "typescript", "typescriptreact", "json" },
+      cmd = { "oxfmt", "--lsp" },
+      filetypes = oxfmt_filetypes,
+      -- Oxfmt works without a dedicated config file, so keep project-level fallbacks.
+      root_markers = {
+        { ".oxfmtrc.json", ".oxfmtrc.jsonc" },
+        { "package.json" },
+        { ".git" },
+      },
+      workspace_required = true,
+    },
+  },
+  {
+    "oxlint",
+    enabled = nixCats("lsp") or false,
+    lsp = {
+      before_init = function(_, config)
+        config.settings = config.settings or {}
+      end,
+      cmd = { "oxlint", "--lsp" },
+      filetypes = oxlint_filetypes,
+      on_attach = oxlint_on_attach,
+      root_markers = { ".oxlintrc.json", "oxlint.config.ts" },
+      settings = {},
+      workspace_required = true,
     },
   },
   {
@@ -113,6 +193,7 @@ require("lze").load({
     enabled = nixCats("lsp") or false,
     lsp = {
       filetypes = { "json", "jsonc" },
+      on_attach = on_attach_without_formatting,
     },
   },
   {
@@ -120,6 +201,7 @@ require("lze").load({
     enabled = nixCats("lsp") or false,
     lsp = {
       filetypes = { "toml" },
+      on_attach = on_attach_without_formatting,
     },
   },
   {
@@ -127,6 +209,7 @@ require("lze").load({
     enabled = nixCats("lsp") or false,
     lsp = {
       filetypes = { "yaml" },
+      on_attach = on_attach_without_formatting,
     },
   },
   {
@@ -141,6 +224,7 @@ require("lze").load({
         "typescriptreact",
         "typescript.tsx",
       },
+      on_attach = on_attach_without_formatting,
     },
   },
 })

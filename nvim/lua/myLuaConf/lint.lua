@@ -6,11 +6,6 @@ require("lze").load({
     after = function()
       local lint = require("lint")
       lint.linters_by_ft = {
-        javascript = { "biomejs" },
-        javascriptreact = { "biomejs" },
-        typescript = { "biomejs" },
-        typescriptreact = { "biomejs" },
-        jsonc = { "biomejs" },
         rust = { "clippy" },
         yaml = { "yamllint" },
         ["yaml.ansible"] = { "yamllint" },
