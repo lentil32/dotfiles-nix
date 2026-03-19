@@ -87,29 +87,25 @@ fn cleanup_close_indices_include_untracked_in_use_windows() {
 }
 
 #[test]
-fn clear_work_detection_ignores_stale_lifecycle_counters() {
-    let tabs = std::collections::HashMap::from([(
-        1_i32,
-        TabWindows {
-            windows: vec![CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 1,
-                    buffer_id: 11,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(3),
-                },
-                placement: Some(WindowPlacement {
-                    row: 1,
-                    col: 1,
-                    width: 1,
-                    zindex: 80,
-                }),
-            }],
-            lifecycle_counters: Default::default(),
-            ..TabWindows::default()
-        },
-    )]);
+fn clear_work_detection_reads_maintained_tracking_state() {
+    let tabs = tabs_with(TabWindows {
+        windows: vec![CachedRenderWindow {
+            handles: WindowBufferHandle {
+                window_id: 1,
+                buffer_id: 11,
+            },
+            lifecycle: CachedWindowLifecycle::AvailableVisible {
+                last_used_epoch: FrameEpoch(3),
+            },
+            placement: Some(WindowPlacement {
+                row: 1,
+                col: 1,
+                width: 1,
+                zindex: 80,
+            }),
+        }],
+        ..TabWindows::default()
+    });
 
     assert!(has_visible_windows(&tabs));
     assert!(has_pending_clear_work(&tabs, 32));

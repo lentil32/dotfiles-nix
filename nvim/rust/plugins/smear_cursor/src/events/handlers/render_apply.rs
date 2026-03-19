@@ -16,9 +16,10 @@ use crate::core::state::{
     RealizationFailure,
 };
 use crate::draw::{
-    AllocationPolicy, ApplyMetrics, PurgeRenderWindowsSummary, clear_active_render_windows,
-    clear_prepaint_for_current_tab, draw_current, editor_bounds, prepaint_cursor_block,
-    purge_render_windows, redraw,
+    AllocationPolicy, ApplyMetrics, ClearPrepaintOverlaysSummary, CompactRenderWindowsSummary,
+    PurgeRenderWindowsSummary, clear_active_render_windows, clear_all_prepaint_overlays,
+    clear_prepaint_for_current_tab, compact_render_windows, draw_current, editor_bounds,
+    prepaint_cursor_block, purge_render_windows, redraw,
 };
 use nvim_oxi::Result;
 
@@ -245,21 +246,33 @@ fn draw_release_requires_redraw(metrics: &ApplyMetrics) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RenderCleanupOutcome {
-    SoftClear(crate::draw::ClearActiveRenderWindowsSummary),
+    SoftClear {
+        render: crate::draw::ClearActiveRenderWindowsSummary,
+        prepaint: ClearPrepaintOverlaysSummary,
+    },
+    CompactToBudget(CompactRenderWindowsSummary),
     HardPurge(PurgeRenderWindowsSummary),
 }
 
 impl RenderCleanupOutcome {
     fn action(self) -> crate::core::event::RenderCleanupAppliedAction {
         match self {
-            Self::SoftClear(_) => crate::core::event::RenderCleanupAppliedAction::SoftCleared,
+            Self::SoftClear { .. } => crate::core::event::RenderCleanupAppliedAction::SoftCleared,
+            Self::CompactToBudget(summary) => {
+                crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
+                    converged_to_idle: summary.converged_to_idle(),
+                }
+            }
             Self::HardPurge(_) => crate::core::event::RenderCleanupAppliedAction::HardPurged,
         }
     }
 
     fn had_visual_change(self) -> bool {
         match self {
-            Self::SoftClear(summary) => summary.had_visual_change(),
+            Self::SoftClear { render, prepaint } => {
+                render.had_visual_change() || prepaint.had_visual_change()
+            }
+            Self::CompactToBudget(summary) => summary.had_visual_change(),
             Self::HardPurge(summary) => summary.had_visual_change(),
         }
     }
@@ -290,12 +303,25 @@ pub(crate) fn execute_core_apply_render_cleanup_effect(
             namespace_id,
         )
     });
-    clear_prepaint_for_current_tab(namespace_id);
 
     let outcome = match payload.execution {
-        RenderCleanupExecution::SoftClear { max_kept_windows } => RenderCleanupOutcome::SoftClear(
-            clear_active_render_windows(namespace_id, max_kept_windows),
-        ),
+        RenderCleanupExecution::SoftClear { max_kept_windows } => {
+            // Surprising: cleanup is a lifecycle edge, not a current-tab affordance. Sweep every
+            // tracked prepaint overlay before entering Cooling so stale cursor blocks cannot leak
+            // across tab switches after the hot burst ends.
+            RenderCleanupOutcome::SoftClear {
+                prepaint: clear_all_prepaint_overlays(namespace_id),
+                render: clear_active_render_windows(namespace_id, max_kept_windows),
+            }
+        }
+        RenderCleanupExecution::CompactToBudget {
+            target_budget,
+            max_prune_per_tick,
+        } => RenderCleanupOutcome::CompactToBudget(compact_render_windows(
+            namespace_id,
+            target_budget,
+            max_prune_per_tick,
+        )),
         RenderCleanupExecution::HardPurge => {
             RenderCleanupOutcome::HardPurge(purge_render_windows(namespace_id))
         }
@@ -490,7 +516,10 @@ mod tests {
         SceneRevision, ViewportSnapshot,
     };
     use crate::draw::render_plan::{CellOp, Viewport};
-    use crate::draw::{ClearActiveRenderWindowsSummary, PurgeRenderWindowsSummary};
+    use crate::draw::{
+        ClearActiveRenderWindowsSummary, ClearPrepaintOverlaysSummary, CompactRenderWindowsSummary,
+        PurgeRenderWindowsSummary,
+    };
     use std::sync::Arc;
 
     fn projection_snapshot(viewport: ViewportSnapshot) -> ProjectionSnapshot {
@@ -656,9 +685,104 @@ mod tests {
 
     #[test]
     fn render_cleanup_outcome_skips_redraw_for_noop_soft_clear() {
-        let outcome = RenderCleanupOutcome::SoftClear(ClearActiveRenderWindowsSummary::default());
+        let outcome = RenderCleanupOutcome::SoftClear {
+            render: ClearActiveRenderWindowsSummary::default(),
+            prepaint: ClearPrepaintOverlaysSummary::default(),
+        };
 
         assert!(!outcome.had_visual_change());
+    }
+
+    #[test]
+    fn render_cleanup_outcome_flushes_redraw_for_visible_soft_clear_prepaint() {
+        let outcome = RenderCleanupOutcome::SoftClear {
+            render: ClearActiveRenderWindowsSummary::default(),
+            prepaint: ClearPrepaintOverlaysSummary {
+                had_visible_prepaint_before_clear: true,
+                cleared_prepaint_overlays: 1,
+            },
+        };
+
+        assert!(outcome.had_visual_change());
+    }
+
+    #[test]
+    fn render_cleanup_outcome_maps_compaction_convergence_to_idle_action() {
+        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
+            target_budget: 2,
+            total_windows_before: 4,
+            total_windows_after: 2,
+            closed_visible_windows: 0,
+            pruned_windows: 2,
+            invalid_removed_windows: 0,
+            has_visible_windows_after: false,
+            has_pending_work_after: false,
+        });
+
+        assert_eq!(
+            outcome.action(),
+            crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
+                converged_to_idle: true,
+            }
+        );
+    }
+
+    #[test]
+    fn render_cleanup_outcome_keeps_cooling_when_visible_windows_survive_compaction() {
+        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
+            target_budget: 2,
+            total_windows_before: 4,
+            total_windows_after: 2,
+            closed_visible_windows: 0,
+            pruned_windows: 2,
+            invalid_removed_windows: 0,
+            has_visible_windows_after: true,
+            has_pending_work_after: false,
+        });
+
+        assert_eq!(
+            outcome.action(),
+            crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
+                converged_to_idle: false,
+            }
+        );
+    }
+
+    #[test]
+    fn render_cleanup_outcome_keeps_cooling_when_retained_pool_is_still_oversized() {
+        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
+            target_budget: 2,
+            total_windows_before: 5,
+            total_windows_after: 3,
+            closed_visible_windows: 0,
+            pruned_windows: 2,
+            invalid_removed_windows: 0,
+            has_visible_windows_after: false,
+            has_pending_work_after: true,
+        });
+
+        assert_eq!(
+            outcome.action(),
+            crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
+                converged_to_idle: false,
+            }
+        );
+    }
+
+    #[test]
+    fn render_cleanup_outcome_flushes_redraw_for_visible_compaction_recovery() {
+        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
+            target_budget: 1,
+            total_windows_before: 2,
+            total_windows_after: 1,
+            closed_visible_windows: 1,
+            pruned_windows: 0,
+            invalid_removed_windows: 0,
+            has_visible_windows_after: false,
+            has_pending_work_after: false,
+        });
+
+        assert!(outcome.had_visual_change());
     }
 
     #[test]

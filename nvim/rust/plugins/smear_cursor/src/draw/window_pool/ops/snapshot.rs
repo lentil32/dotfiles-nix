@@ -29,6 +29,10 @@ pub(crate) fn tab_in_use_window_count_from_tab(tab_windows: &TabWindows) -> usiz
     tab_windows.in_use_window_count()
 }
 
+pub(crate) fn tab_visible_window_count_from_tab(tab_windows: &TabWindows) -> usize {
+    tab_windows.visible_window_count()
+}
+
 #[cfg(test)]
 mod snapshot_tests {
     use super::{
@@ -45,7 +49,7 @@ mod snapshot_tests {
             width: 1,
             zindex: 40,
         });
-        let tab_windows = TabWindows {
+        let mut tab_windows = TabWindows {
             windows: vec![
                 CachedRenderWindow {
                     handles: WindowBufferHandle {
@@ -80,6 +84,7 @@ mod snapshot_tests {
             ],
             ..TabWindows::default()
         };
+        tab_windows.seed_tracking_from_windows_for_test();
         let tabs = HashMap::from([(9_i32, tab_windows)]);
 
         let snapshot = tab_pool_snapshot(&tabs, 9).expect("tab snapshot should exist");
@@ -90,30 +95,28 @@ mod snapshot_tests {
     }
 
     #[test]
-    fn tab_pool_snapshot_ignores_stale_lifecycle_counters() {
+    fn tab_pool_snapshot_reads_maintained_counters() {
         let placement = Some(WindowPlacement {
             row: 2,
             col: 4,
             width: 1,
             zindex: 40,
         });
-        let tabs = HashMap::from([(
-            9_i32,
-            TabWindows {
-                windows: vec![CachedRenderWindow {
-                    handles: WindowBufferHandle {
-                        window_id: 12,
-                        buffer_id: 22,
-                    },
-                    lifecycle: CachedWindowLifecycle::InUse {
-                        epoch: FrameEpoch(2),
-                    },
-                    placement,
-                }],
-                lifecycle_counters: Default::default(),
-                ..TabWindows::default()
-            },
-        )]);
+        let mut tab_windows = TabWindows {
+            windows: vec![CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: 12,
+                    buffer_id: 22,
+                },
+                lifecycle: CachedWindowLifecycle::InUse {
+                    epoch: FrameEpoch(2),
+                },
+                placement,
+            }],
+            ..TabWindows::default()
+        };
+        tab_windows.seed_tracking_from_windows_for_test();
+        let tabs = HashMap::from([(9_i32, tab_windows)]);
 
         let snapshot = tab_pool_snapshot(&tabs, 9).expect("tab snapshot should exist");
 

@@ -810,6 +810,30 @@ mod tail_drain_lifecycle {
     }
 
     #[test]
+    fn quiescent_external_noop_after_first_frame_schedules_cleanup() {
+        let (mut state, _) = initialized_runtime("n", |_| {});
+        let follow_up = reduce_cursor_event(
+            &mut state,
+            "n",
+            event_at(5.0, 6.0, 116.0),
+            EventSource::External,
+        );
+
+        assert!(matches!(render_action(&follow_up), RenderAction::Noop));
+        assert!(!follow_up.should_schedule_next_animation);
+        assert_eq!(
+            render_side_effects(&follow_up).cursor_visibility,
+            CursorVisibilityEffect::Show
+        );
+        assert_eq!(
+            render_cleanup_action(&follow_up),
+            RenderCleanupAction::Schedule
+        );
+        assert!(!state.is_animating());
+        assert!(!state.is_draining());
+    }
+
+    #[test]
     fn tail_drain_advances_existing_particles_without_emitting_new_ones() {
         let mut state = RuntimeState::default();
         state.config.particles_enabled = true;
@@ -1386,6 +1410,7 @@ mod mode_specific_transitions {
 
     fn insert_immediate_snap() -> (RuntimeState, CursorTransition) {
         let (mut state, _) = initialized_runtime("n", |state| {
+            state.config.delay_event_to_smear = 0.0;
             state.config.smear_insert_mode = true;
             state.config.animate_in_insert_mode = false;
         });
@@ -1400,6 +1425,7 @@ mod mode_specific_transitions {
 
     fn cmdline_boundary_transition() -> (RuntimeState, CursorTransition) {
         let (mut state, _) = initialized_runtime("n", |state| {
+            state.config.delay_event_to_smear = 0.0;
             state.config.smear_to_cmd = true;
             state.config.animate_command_line = false;
         });
@@ -1459,6 +1485,7 @@ mod mode_specific_transitions {
     #[test]
     fn cmdline_external_events_progress_after_a_settle_tick() {
         let mut state = RuntimeState::default();
+        state.config.delay_event_to_smear = 0.0;
         state.config.smear_to_cmd = true;
 
         let _ = reduce_cursor_event(&mut state, "c", event(5.0, 6.0), EventSource::External);
@@ -1512,6 +1539,7 @@ mod mode_specific_transitions {
     #[test]
     fn insert_mode_motion_still_animates_without_text_mutation() {
         let (mut state, _) = initialized_runtime("n", |state| {
+            state.config.delay_event_to_smear = 0.0;
             state.config.smear_insert_mode = true;
             state.config.animate_in_insert_mode = true;
         });

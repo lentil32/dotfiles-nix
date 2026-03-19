@@ -28,6 +28,12 @@ pub(super) fn effect_label(effect: &Effect) -> &'static str {
         Effect::ApplyIngressCursorPresentation(_) => "apply_ingress_cursor_presentation",
         Effect::RecordEventLoopMetric(metric) => match metric {
             EventLoopMetricEffect::IngressCoalesced => "record_ingress_coalesced_metric",
+            EventLoopMetricEffect::DelayedIngressPendingUpdated => {
+                "record_delayed_ingress_pending_update_metric"
+            }
+            EventLoopMetricEffect::CleanupConvergedToCold { .. } => {
+                "record_cleanup_converged_to_cold_metric"
+            }
             EventLoopMetricEffect::StaleToken => "record_stale_token_metric",
             EventLoopMetricEffect::ProbeRefreshRetried(_) => "record_probe_refresh_retried_metric",
             EventLoopMetricEffect::ProbeRefreshBudgetExhausted(_) => {

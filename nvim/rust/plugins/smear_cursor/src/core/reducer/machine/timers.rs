@@ -1,13 +1,46 @@
 use super::Transition;
 use super::observation::{observe_or_plan, transition_ready_or_observe};
 use super::support::{
-    arm_render_cleanup_timer, cleanup_effect_for_timer_fire, record_event_loop_metric,
-    reset_recovery_attempt,
+    arm_render_cleanup_timer, cleanup_effect_for_timer_fire, delay_budget_from_ms,
+    record_event_loop_metric, reset_recovery_attempt, schedule_timer_with_delay,
 };
 use crate::core::effect::{EventLoopMetricEffect, TimerKind};
 use crate::core::event::{TimerFiredWithTokenEvent, TimerLostWithTokenEvent};
 use crate::core::state::CoreState;
 use crate::core::types::{Millis, TimerToken};
+
+fn reduce_ingress_timer_signal(state: CoreState, observed_at: Millis) -> Transition {
+    let Some(pending_delay_until) = state.ingress_policy().pending_delay_until() else {
+        return Transition::new(state, Vec::new());
+    };
+    if !matches!(
+        state.lifecycle(),
+        crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
+    ) {
+        // Surprising: delayed ingress survived into a non-ready lifecycle. Clear the reducer truth
+        // and let the already-fired host timer collapse to a no-op.
+        let cleared_policy = state.ingress_policy().clear_pending_delay();
+        let cleared_state = state.with_ingress_policy(cleared_policy);
+        return Transition::new(cleared_state, Vec::new());
+    }
+    if observed_at.value() < pending_delay_until.value() {
+        let remaining_delay_ms = pending_delay_until
+            .value()
+            .saturating_sub(observed_at.value())
+            .max(1);
+        let (scheduled_state, effect) = schedule_timer_with_delay(
+            state,
+            TimerKind::Ingress,
+            delay_budget_from_ms(remaining_delay_ms),
+            observed_at,
+        );
+        return Transition::new(scheduled_state, vec![effect]);
+    }
+
+    let cleared_policy = state.ingress_policy().clear_pending_delay();
+    let cleared_state = state.with_ingress_policy(cleared_policy);
+    transition_ready_or_observe(cleared_state, observed_at)
+}
 
 fn reduce_timer_signal_with_token(
     state: &CoreState,
@@ -37,18 +70,7 @@ fn reduce_timer_signal_with_token(
                 observe_or_plan(disarmed_state, observed_at)
             }
         }
-        TimerKind::Ingress => match disarmed_state.lifecycle() {
-            crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready => {
-                transition_ready_or_observe(disarmed_state, observed_at)
-            }
-            crate::core::types::Lifecycle::Idle
-            | crate::core::types::Lifecycle::Observing
-            | crate::core::types::Lifecycle::Planning
-            | crate::core::types::Lifecycle::Applying
-            | crate::core::types::Lifecycle::Recovering => {
-                Transition::new(disarmed_state, Vec::new())
-            }
-        },
+        TimerKind::Ingress => reduce_ingress_timer_signal(disarmed_state, observed_at),
         TimerKind::Recovery => {
             if disarmed_state.lifecycle() != crate::core::types::Lifecycle::Recovering {
                 Transition::stay(&disarmed_state)

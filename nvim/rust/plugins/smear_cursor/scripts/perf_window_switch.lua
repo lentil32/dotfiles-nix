@@ -4,8 +4,12 @@ local uv = vim.uv or vim.loop
 -- Usage: run via scripts/run_perf_window_switch.sh and override parameters with:
 -- `SMEAR_WINDOWS`, `SMEAR_LINE_COUNT`, `SMEAR_STRESS_ITERATIONS`, `SMEAR_STRESS_ROUNDS`,
 -- `SMEAR_BETWEEN_BUFFERS`, `SMEAR_MAX_RECOVERY_RATIO`, `SMEAR_MAX_STRESS_RATIO`,
--- `SMEAR_SETTLE_WAIT_MS`,
+-- `SMEAR_SETTLE_WAIT_MS`, `SMEAR_RECOVERY_MODE`, `SMEAR_COLD_WAIT_TIMEOUT_MS`,
+-- `SMEAR_REQUIRE_COLD_RECOVERY`,
+-- `SMEAR_RECOVERY_POLL_MS`, `SMEAR_LOGGING_LEVEL`, `SMEAR_SCENARIO_NAME`,
 -- `SMEAR_DRAIN_EVERY` and `SMEAR_DELAY_EVENT_TO_SMEAR`.
+-- Logging note: this plugin uses lower numbers for more logging and `4` for the least verbose
+-- mode, so the perf harness keeps `logging_level = 4` when it wants logging effectively off.
 
 local function getenv_string(name, default_value)
   local value = vim.env[name]
@@ -149,7 +153,10 @@ local function count_smear_floating_windows(visible_only)
 end
 
 local function create_workload_buffer(line_count)
-  local buffer = vim.api.nvim_create_buf(true, false)
+  -- Surprising: a listed non-scratch `[No Name]` buffer can try to create a swapfile in headless
+  -- perf runs. Keep the synthetic workload buffer scratch-only so the harness measures recovery
+  -- behavior instead of swapfile side effects.
+  local buffer = vim.api.nvim_create_buf(false, true)
   local lines = {}
   for index = 1, line_count do
     lines[index] = string.format("line-%05d", index)
@@ -191,6 +198,25 @@ end
 local function emit_line(line)
   io.stdout:write(line .. "\n")
   io.stdout:flush()
+end
+
+local function parse_diagnostics_fields(raw_diagnostics)
+  local fields = {}
+  for token in string.gmatch(raw_diagnostics, "%S+") do
+    local key, value = token:match("^([^=]+)=(.*)$")
+    if key ~= nil then
+      fields[key] = value
+    end
+  end
+  return fields
+end
+
+local function read_diagnostics(smear)
+  local raw = smear.diagnostics()
+  return {
+    raw = raw,
+    fields = parse_diagnostics_fields(raw),
+  }
 end
 
 local function run_switch_phase(label, windows, iterations, drain_every)
@@ -243,7 +269,9 @@ local function run_switch_phase(label, windows, iterations, drain_every)
 end
 
 local function print_diagnostics(label, smear)
-  emit_line(string.format("PERF_DIAGNOSTICS phase=%s %s", label, smear.diagnostics()))
+  local diagnostics = read_diagnostics(smear)
+  emit_line(string.format("PERF_DIAGNOSTICS phase=%s %s", label, diagnostics.raw))
+  return diagnostics
 end
 
 local function wait_for_cleanup(delay_ms)
@@ -255,15 +283,105 @@ local function wait_for_cleanup(delay_ms)
   end, 10)
 end
 
+local function validate_recovery_mode(recovery_mode)
+  if recovery_mode == "cold" or recovery_mode == "fixed" then
+    return recovery_mode
+  end
+
+  error(string.format("SMEAR_RECOVERY_MODE must be 'cold' or 'fixed', got %q", recovery_mode))
+end
+
+local function wait_for_recovery(
+  smear,
+  recovery_mode,
+  settle_wait_ms,
+  cold_wait_timeout_ms,
+  recovery_poll_ms,
+  require_cold_recovery
+)
+  local start_ns = uv.hrtime()
+  local last_diagnostics = read_diagnostics(smear)
+  local reached_cold = last_diagnostics.fields.cleanup_thermal == "cold"
+  local timed_out = false
+
+  if recovery_mode == "fixed" then
+    wait_for_cleanup(settle_wait_ms)
+    last_diagnostics = read_diagnostics(smear)
+    reached_cold = last_diagnostics.fields.cleanup_thermal == "cold"
+  else
+    if not reached_cold then
+      reached_cold = vim.wait(cold_wait_timeout_ms, function()
+        last_diagnostics = read_diagnostics(smear)
+        return last_diagnostics.fields.cleanup_thermal == "cold"
+      end, recovery_poll_ms)
+      timed_out = not reached_cold
+      if timed_out then
+        last_diagnostics = read_diagnostics(smear)
+        reached_cold = last_diagnostics.fields.cleanup_thermal == "cold"
+      end
+    end
+  end
+
+  local elapsed_ms = (uv.hrtime() - start_ns) / 1e6
+  local cleanup_thermal = last_diagnostics.fields.cleanup_thermal or "unknown"
+  local compaction_target_reached = last_diagnostics.fields.compaction_target_reached or "unknown"
+  local queue_total_backlog = last_diagnostics.fields.queue_total_backlog or "unknown"
+  local pool_total_windows = last_diagnostics.fields.pool_total_windows or "unknown"
+
+  emit_line(
+    string.format(
+      "PERF_RECOVERY_WAIT mode=%s elapsed_ms=%.3f reached_cold=%s timed_out=%s cleanup_thermal=%s compaction_target_reached=%s queue_total_backlog=%s pool_total_windows=%s",
+      recovery_mode,
+      elapsed_ms,
+      tostring(reached_cold),
+      tostring(timed_out),
+      cleanup_thermal,
+      compaction_target_reached,
+      queue_total_backlog,
+      pool_total_windows
+    )
+  )
+
+  if recovery_mode == "cold" and require_cold_recovery and not reached_cold then
+    error(
+      string.format(
+        "cleanup did not reach cold within %d ms; last_diagnostics=%s",
+        cold_wait_timeout_ms,
+        last_diagnostics.raw
+      )
+    )
+  end
+
+  return {
+    elapsed_ms = elapsed_ms,
+    reached_cold = reached_cold,
+    timed_out = timed_out,
+    diagnostics = last_diagnostics,
+  }
+end
+
 local function main()
   prepend_runtimepath(getenv_string("SMEAR_CURSOR_RTP", ""))
   prepend_package_cpath(getenv_string("SMEAR_CURSOR_CPATH", ""))
 
-  local ok, smear = pcall(require, "rs_smear_cursor")
-  if not ok then
-    error("failed to require rs_smear_cursor: " .. tostring(smear))
+  local loaded_module_path = package.searchpath("rs_smear_cursor", package.cpath)
+  if loaded_module_path == nil then
+    error("failed to locate rs_smear_cursor in package.cpath")
   end
-  local loaded_module_path = package.searchpath("rs_smear_cursor", package.cpath) or "unknown"
+  -- Surprising: plain `require("rs_smear_cursor")` can still resolve an older installed module
+  -- body even after the harness prepends the local release artifact to `package.cpath`.
+  -- `package.loadlib` forces the harness to execute the exact dylib it is about to benchmark.
+  local module_loader, load_error =
+    package.loadlib(loaded_module_path, "luaopen_rs_smear_cursor")
+  if module_loader == nil then
+    error("failed to load rs_smear_cursor: " .. tostring(load_error))
+  end
+  local ok, smear = pcall(module_loader)
+  if not ok then
+    error("failed to initialize rs_smear_cursor: " .. tostring(smear))
+  end
+  package.loaded.rs_smear_cursor = smear
+  local scenario_name = getenv_string("SMEAR_SCENARIO_NAME", "adhoc")
 
   local windows_count = getenv_positive_integer("SMEAR_WINDOWS", 8)
   local warmup_iterations = getenv_positive_integer("SMEAR_WARMUP_ITERATIONS", 500)
@@ -271,19 +389,26 @@ local function main()
   local stress_iterations = getenv_positive_integer("SMEAR_STRESS_ITERATIONS", 20000)
   local stress_rounds = getenv_positive_integer("SMEAR_STRESS_ROUNDS", 4)
   local recovery_iterations = getenv_positive_integer("SMEAR_RECOVERY_ITERATIONS", baseline_iterations)
+  local recovery_mode = validate_recovery_mode(getenv_string("SMEAR_RECOVERY_MODE", "cold"))
   local settle_wait_ms = getenv_non_negative_number("SMEAR_SETTLE_WAIT_MS", 1200)
+  local cold_wait_timeout_ms = getenv_positive_integer("SMEAR_COLD_WAIT_TIMEOUT_MS", 2500)
+  local require_cold_recovery = getenv_bool("SMEAR_REQUIRE_COLD_RECOVERY", false)
+  local recovery_poll_ms = getenv_positive_integer("SMEAR_RECOVERY_POLL_MS", 10)
   local max_recovery_ratio = getenv_non_negative_number("SMEAR_MAX_RECOVERY_RATIO", 1.4)
   local max_stress_ratio = getenv_non_negative_number("SMEAR_MAX_STRESS_RATIO", 2.0)
   local max_floating_windows = getenv_positive_integer("SMEAR_MAX_FLOATING_WINDOWS", 256)
   local smear_between_buffers = getenv_bool("SMEAR_BETWEEN_BUFFERS", false)
   local particles_enabled = getenv_bool("SMEAR_PARTICLES_ENABLED", false)
   local particles_over_text = getenv_bool("SMEAR_PARTICLES_OVER_TEXT", false)
+  local logging_level = getenv_non_negative_integer("SMEAR_LOGGING_LEVEL", 4)
   local drain_every = getenv_non_negative_integer("SMEAR_DRAIN_EVERY", 16)
   local delay_event_to_smear = getenv_non_negative_number("SMEAR_DELAY_EVENT_TO_SMEAR", 1)
   local workload_line_count = getenv_positive_integer("SMEAR_LINE_COUNT", 2000)
 
   smear.setup({
-    logging_level = 4,
+    -- `logging_level = 4` is intentionally the quietest setting in this plugin, not the most
+    -- verbose one. Keep perf runs on that setting unless the harness is explicitly debugging.
+    logging_level = logging_level,
     particles_enabled = particles_enabled,
     particles_over_text = particles_over_text,
     smear_between_buffers = smear_between_buffers,
@@ -292,6 +417,7 @@ local function main()
     fps = 120,
   })
 
+  emit_line(string.format("PERF_SCENARIO name=%s", scenario_name))
   emit_line(string.format("PERF_LIBRARY module_path=%s", loaded_module_path))
 
   local workload_buffer = create_workload_buffer(workload_line_count)
@@ -302,7 +428,7 @@ local function main()
 
   emit_line(
     string.format(
-      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d settle_wait_ms=%.0f smear_between_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d delay_event_to_smear=%.3f",
+      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d recovery_mode=%s settle_wait_ms=%.0f cold_wait_timeout_ms=%d require_cold_recovery=%s recovery_poll_ms=%d logging_level=%d smear_between_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d delay_event_to_smear=%.3f",
       #windows,
       workload_line_count,
       warmup_iterations,
@@ -310,7 +436,12 @@ local function main()
       stress_iterations,
       stress_rounds,
       recovery_iterations,
+      recovery_mode,
       settle_wait_ms,
+      cold_wait_timeout_ms,
+      tostring(require_cold_recovery),
+      recovery_poll_ms,
+      logging_level,
       tostring(smear_between_buffers),
       tostring(particles_enabled),
       tostring(particles_over_text),
@@ -323,6 +454,7 @@ local function main()
 
   run_switch_phase("warmup", windows, warmup_iterations, drain_every)
   local baseline = run_switch_phase("baseline", windows, baseline_iterations, drain_every)
+  print_diagnostics("post_baseline", smear)
 
   local stress_results = {}
   for round = 1, stress_rounds do
@@ -335,13 +467,38 @@ local function main()
     stress_results[#stress_results + 1] = result
   end
 
-  wait_for_cleanup(settle_wait_ms)
+  local recovery_wait = wait_for_recovery(
+    smear,
+    recovery_mode,
+    settle_wait_ms,
+    cold_wait_timeout_ms,
+    recovery_poll_ms,
+    require_cold_recovery
+  )
 
   local post_wait_floating_windows = count_floating_windows(false)
   local post_wait_visible_floating_windows = count_floating_windows(true)
   local post_wait_smear_floating_windows = count_smear_floating_windows(false)
   local post_wait_visible_smear_floating_windows = count_smear_floating_windows(true)
-  print_diagnostics("post_settle", smear)
+  emit_line(
+    string.format(
+      "PERF_RECOVERY_STATE cleanup_thermal=%s compaction_target_reached=%s queue_total_backlog=%s delayed_ingress_pending=%s",
+      recovery_wait.diagnostics.fields.cleanup_thermal or "unknown",
+      recovery_wait.diagnostics.fields.compaction_target_reached or "unknown",
+      recovery_wait.diagnostics.fields.queue_total_backlog or "unknown",
+      recovery_wait.diagnostics.fields.delayed_ingress_pending or "unknown"
+    )
+  )
+  emit_line(
+    string.format(
+      "PERF_WINDOW_COUNTS phase=post_recovery_wait floating_windows=%d visible_floating_windows=%d smear_floating_windows=%d visible_smear_floating_windows=%d",
+      post_wait_floating_windows,
+      post_wait_visible_floating_windows,
+      post_wait_smear_floating_windows,
+      post_wait_visible_smear_floating_windows
+    )
+  )
+  print_diagnostics("post_recovery_wait", smear)
   local recovery = run_switch_phase("recovery", windows, recovery_iterations, drain_every)
   print_diagnostics("post_recovery", smear)
   local recovery_ratio = recovery.avg_us / baseline.avg_us
@@ -369,10 +526,14 @@ local function main()
 
   emit_line(
     string.format(
-      "PERF_SUMMARY baseline_avg_us=%.3f recovery_avg_us=%.3f recovery_ratio=%.3f post_wait_floating_windows=%d post_wait_visible_floating_windows=%d post_wait_smear_floating_windows=%d post_wait_visible_smear_floating_windows=%d",
+      "PERF_SUMMARY baseline_avg_us=%.3f recovery_avg_us=%.3f recovery_ratio=%.3f recovery_wait_mode=%s recovery_wait_elapsed_ms=%.3f recovery_reached_cold=%s recovery_timed_out=%s post_wait_floating_windows=%d post_wait_visible_floating_windows=%d post_wait_smear_floating_windows=%d post_wait_visible_smear_floating_windows=%d",
       baseline.avg_us,
       recovery.avg_us,
       recovery_ratio,
+      recovery_mode,
+      recovery_wait.elapsed_ms,
+      tostring(recovery_wait.reached_cold),
+      tostring(recovery_wait.timed_out),
       post_wait_floating_windows,
       post_wait_visible_floating_windows,
       post_wait_smear_floating_windows,
@@ -383,7 +544,7 @@ local function main()
   if post_wait_visible_floating_windows > max_floating_windows then
     error(
       string.format(
-        "visible floating windows still high after settle wait: expected <= %d, got %d",
+        "visible floating windows still high after recovery wait: expected <= %d, got %d",
         max_floating_windows,
         post_wait_visible_floating_windows
       )
@@ -393,7 +554,7 @@ local function main()
   if post_wait_visible_smear_floating_windows > max_floating_windows then
     error(
       string.format(
-        "visible smear floating windows still high after settle wait: expected <= %d, got %d",
+        "visible smear floating windows still high after recovery wait: expected <= %d, got %d",
         max_floating_windows,
         post_wait_visible_smear_floating_windows
       )

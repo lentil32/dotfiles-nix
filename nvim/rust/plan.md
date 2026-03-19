@@ -1,205 +1,94 @@
-# Smear Cursor Panic Patch Plan
-
-## Goal
-
-Remove or downgrade the remaining production panic points in `plugins/smear_cursor` so failures become explicit, deterministic lifecycle transitions, logged no-ops, or typed `Result` errors instead of `panic!`/`expect`/`unreachable!`.
-
-This patch should preserve the project rules:
-
-- state transitions define truth
-- reducers stay pure
-- effects stay deferred and isolated
-- failure/retry remain modeled as normal lifecycle transitions
-
-<!-- Surprising: exported plugin entrypoints and several shell-effect edges already use `catch_unwind`, so the current failure mode is mostly "runtime reset / plugin error" rather than "hard Neovim crash". -->
-<!-- Surprising: `.tmp/nvim-oxi.nvim` was not present under this repo root during the audit, so this plan is based on the local `plugins/smear_cursor` crate only. -->
-
-## Current Panic Inventory
-
-Production-reachable or production-adjacent sites worth patching first:
-
-- `plugins/smear_cursor/src/events.rs`
-  - `EngineContext::take_state()` panics on re-entry with `engine state re-entered while already in use`.
-- `plugins/smear_cursor/src/core/reducer/machine/planning.rs`
-  - `build_planned_render()` uses `expect(...)` when building `InFlightProposal::{draw, clear, noop}`.
-- `plugins/smear_cursor/src/events/handlers/render_apply.rs`
-  - `ProposalExecution::Failure` currently hits `unreachable!(...)`.
-- `plugins/smear_cursor/src/draw/palette.rs`
-  - `refresh_highlight_palette_for_spec()` has an `unreachable!(...)` arm for `SkippedStale`.
-
-Latent runtime panic points that do not show up in the explicit panic grep:
-
-- `RefCell` borrow panics in singleton helpers:
-  - `plugins/smear_cursor/src/events/event_loop.rs`
-  - `plugins/smear_cursor/src/events/handlers/core_dispatch.rs`
-  - `plugins/smear_cursor/src/events/logging.rs`
-  - `plugins/smear_cursor/src/draw/palette.rs`
-  - `plugins/smear_cursor/src/draw/mod.rs`
-
-## Existing Containment
-
-The next agent should keep these guards in place and only narrow the panic surface underneath them:
-
-- exported Lua entrypoints are wrapped in `guard_plugin_call()` in `plugins/smear_cursor/src/lib.rs`
-- scheduled callbacks are wrapped in `schedule_guarded()` in `plugins/smear_cursor/src/events/timers.rs`
-- render planning is wrapped in `catch_unwind` in `plugins/smear_cursor/src/events/handlers/render_plan.rs`
-- render apply is wrapped in `catch_unwind` in `plugins/smear_cursor/src/events/handlers/render_bridge.rs`
-- some draw/palette state holders already reset internal caches after unwind
-
-Do not remove those wrappers as part of this patch. Reduce the need for them.
-
-## Patch Order
-
-### Phase 1: Remove the low-blast-radius invariant panics
-
-Start here. These changes are local, easy to verify, and reduce production panic count without forcing a broad API refactor.
-
-1. Render-plan construction [done]
-
-- Change `build_planned_render()` in `plugins/smear_cursor/src/core/reducer/machine/planning.rs` to return `Result<PlannedRender, E>` instead of panicking.
-- Prefer reusing the existing proposal-shape error from `InFlightProposal::{draw, clear, noop}` if it is already expressive enough.
-- If a wrapper error is needed, use a small `thiserror` enum such as `RenderPlanBuildError`.
-- Update `execute_core_request_render_plan_effect()` to map `Err(...)` into the existing `RenderPlanFailed` path.
-- Keep the `catch_unwind` there for truly unexpected bugs, but log the typed error separately so it is distinguishable from a panic.
-
-2. Shell apply path [done]
-
-- Replace the `unreachable!` for `ProposalExecution::Failure` in `plugins/smear_cursor/src/events/handlers/render_apply.rs`.
-- Add a typed `ApplyRenderActionError` variant for this invalid shell entry, for example `FailureProposalReachedShell`.
-- In `render_bridge`, map that error into the existing `ApplyReported::ApplyFailed` path rather than panicking.
-- Keep the current outer `catch_unwind` as the last-resort guard.
-
-3. Palette refresh path [done]
-
-- Replace the `unreachable!` arm in `plugins/smear_cursor/src/draw/palette.rs` with an explicit stale-state fallback.
-- Recommended behavior:
-  - use `debug_assert!` to keep the invariant visible in debug/test builds
-  - return `Ok(PaletteRefreshOutcome::SkippedStale)` or a similar non-panicking fallback in release
-  - optionally log a warning once if that branch becomes reachable
-- Do not silently mutate unrelated palette state in that fallback.
-
-### Phase 2: Remove the engine-state re-entry panic
-
-This is the highest-severity item, but it has a wider API impact than Phase 1.
-
-1. Refactor the engine checkout path [done]
-
-- Change `EngineContext::take_state()` in `plugins/smear_cursor/src/events.rs` to stop panicking on `EngineStateSlot::InUse`.
-- Introduce an explicit error or outcome type, for example:
-  - `EngineAccessError::Reentered`
-  - or `enum EngineCheckout { Ready(EngineState), Reentered }`
-
-2. Refactor `with_engine_state_access()` [done]
-
-- `with_engine_state_access()` in `plugins/smear_cursor/src/events/runtime.rs` currently assumes checkout always succeeds and only handles panics after checkout.
-- Rework it so re-entry becomes a normal failure path before the closure runs.
-- Preferred direction:
-  - add `try_with_engine_state_access<R>(...) -> Result<R, EngineAccessError>`
-  - keep thin helpers that map this into existing plugin/runtime failure reporting where needed
-- Avoid introducing a hidden fallback value for generic `R`; that will make failures invisible.
-
-3. Model the failure explicitly [done]
-
-- Re-entry should become one of:
-  - a typed `Result` returned to the plugin entry boundary
-  - a logged no-op plus an existing failure event
-  - a runtime reset with an explicit warning and deterministic follow-up transition
-- Do not replace the panic with silent early return.
-- Add a brief comment explaining why re-entry is treated as a modeled lifecycle failure.
-
-<!-- Surprising: `with_engine_state_access()` already resets runtime state after an unwind, but the initial checkout still panics before the reducer can model anything. -->
-
-### Phase 3: Audit the singleton `RefCell` helpers
-
-After the explicit panic macros are removed, there are still borrow-rule panics available through `RefCell`.
-
-1. Audit helpers that use `borrow_mut()` directly [done]
-
-- `plugins/smear_cursor/src/events/event_loop.rs`
-- `plugins/smear_cursor/src/events/handlers/core_dispatch.rs`
-- `plugins/smear_cursor/src/events/logging.rs`
-- `plugins/smear_cursor/src/draw/palette.rs`
-- `plugins/smear_cursor/src/draw/mod.rs`
-
-2. Decide helper by helper [done]
-
-- If re-entry is genuinely impossible and already enforced structurally, keep `borrow_mut()` and add a short comment saying why.
-- If re-entry is plausible on scheduled edges or logging paths, switch to `try_borrow_mut()` and degrade gracefully.
-- Logging should never be able to panic the plugin. If `LOG_FILE_HANDLE` is already borrowed, fall back to `api::err_writeln` or skip the file write.
-
-3. Keep scope tight [done]
-
-- This phase is allowed to stop after the helpers most likely to run during callback nesting are protected.
-- Do not broaden into unrelated architectural cleanup.
-
-## Test Plan
-
-Add targeted regression tests as each phase lands.
-
-1. Planning path
-
-- Add a test proving an invalid proposal shape returns `RenderPlanFailed` or a typed error path instead of panicking.
-- Prefer a descriptive module/test name under the existing render-plan or reducer tests.
-
-2. Apply path
-
-- Add a test proving `ProposalExecution::Failure` is converted into an apply failure event or typed apply error, not `unreachable!`.
-
-3. Palette path
-
-- Add a test forcing the stale palette branch and asserting the function returns a stable outcome without panic.
-
-4. Engine re-entry
-
-- Add a test that intentionally exercises nested engine-state access and verifies:
-  - no panic escapes
-  - runtime state is reset or failure is reported deterministically
-  - subsequent accesses still work
-
-5. RefCell helper hardening
-
-- Add focused tests only where behavior changes.
-- Follow the existing test style: descriptive names, one behavior per test where practical.
-
-## Verification Commands
-
-Run at minimum:
-
-```bash
-cargo test -p rs_smear_cursor --lib
-```
-
-If the patch changes signatures or adds error enums, also run:
-
-```bash
-cargo clippy -p rs_smear_cursor --all-targets -- -D warnings
-```
-
-Useful grep after patching:
-
-```bash
-rg -n "panic!|expect\\(|unwrap\\(|unreachable!" plugins/smear_cursor/src --glob '!**/tests.rs'
-```
-
-That grep does not catch `RefCell` borrow panics, so Phase 3 still needs a manual audit even if the grep is clean.
-
-## Acceptance Criteria
-
-Minimum acceptable handoff:
-
-- no production `expect(...)` remains in `build_planned_render()`
-- no production `unreachable!(...)` remains in the render-apply and palette paths identified above
-- the plugin crate tests still pass
-
-Full acceptance:
-
-- engine-state re-entry no longer panics
-- at least the highest-risk singleton `RefCell` helpers are protected or explicitly documented as structurally non-reentrant
-- new tests cover every removed panic site
-
-## Notes For The Next Agent
-
-- Preserve deterministic state-machine semantics. If a failure happens after reducer state is committed, surface that as an explicit effect failure or apply failure, not a hidden rollback.
-- Prefer `Result` and `thiserror` over ad hoc stringly-typed failures.
-- Keep reducer purity intact. Error construction is fine in the effect layer; mutating shell/runtime state inside reducers is not.
-- Do not touch test-only panic sites in this patch unless they block the refactor.
+# Smear Cursor Recovery Rewrite Plan
+
+## Constraints
+
+- [x] Assume no backward-compatibility requirements. Prefer simpler runtime semantics over preserving old behavior.
+- [x] Preserve project rules: state transitions define truth, reducers stay pure, effects stay deferred and isolated, and failure or retry remains a typed lifecycle transition.
+
+Comment: the slowdown is a coupled-system problem, not one bad knob. The current tail comes from three sources acting together: an oversized retained render pool, repeated delayed-ingress timer rearming, and conservative scheduled-drain behavior after the burst ends.
+
+## Workstream 1: Thermal Lifecycle And Cleanup Contract
+
+- [x] Replace implicit warm or settle behavior with explicit thermal states: `Hot`, `Cooling`, `Cold`.
+- [x] Add reducer-owned cleanup state fields: `idle_target_budget`, `max_prune_per_tick`, `next_compaction_due_at`, and `entered_cooling_at`.
+- [x] `Hot -> Cooling` when ingress has gone quiet long enough to stop optimizing for reuse.
+- [x] `Cooling -> Hot` on fresh ingress.
+- [x] `Cooling -> Cold` when the pool is compacted to `idle_target_budget`, no smear windows remain visible, and no cleanup work is pending.
+- [x] Add `RenderCleanupExecution::CompactToBudget { target_budget, max_prune_per_tick }`.
+- [x] On `Hot -> Cooling`, immediately clear prepaint and hide all visible smear windows.
+- [x] Make `CompactToBudget` the primary recovery mechanism.
+- [x] Keep hard purge only as a fallback safety net, not as the normal path to idle recovery.
+
+## Workstream 2: Split Hot Reuse Policy From Idle Retention Policy
+
+- [x] Keep the adaptive pool budget only for `Hot` reuse decisions.
+- [x] Add a separate idle retention budget with a small default, likely `0..2`.
+- [x] Stop using `cached_budget` as the source of truth for cleanup once the lifecycle has entered `Cooling`.
+- [x] Remove the assumption that the hot adaptive floor must also define idle retention.
+- [x] Revisit `max_kept_windows` after the rewrite and lower or delete it if the new lifecycle makes the current cap unnecessary.
+
+Comment: keep `max_kept_windows` as the explicit peak simultaneous-window cap. Cooling and idle retention now converge through the separate adaptive and idle budgets, but one burst can still need more live windows in a single frame than we want to retain after cleanup.
+
+## Workstream 3: Window Pool Hot-Path Rewrite
+
+- [x] Replace scan-derived counts with exact maintained counters for total, available, in-use, visible, and reusable windows.
+- [x] Keep full-vector scans only for invariant checks, recovery, and debug paths.
+- [x] Add a generic reusable-window freelist for placement misses.
+- [x] Keep the exact-placement index for placement hits.
+- [x] Remove or sharply reduce linear reuse scans across retained windows.
+- [x] Centralize counter, index, and freelist updates so prune, hide, close, invalidate, and reuse all mutate shared bookkeeping in one place.
+- [x] Add invariant helpers and tests for counters, placement index correctness, freelist correctness, and snapshot correctness.
+
+## Workstream 4: Delayed Ingress Timer Rewrite
+
+- [x] Model delayed ingress as reducer-owned pending deadline state instead of repeated host timer replacement.
+- [x] Extend ingress policy state with the minimum deadline state needed to describe one pending delayed ingress window.
+- [x] Only arm the host ingress timer on the transition from no pending delayed ingress to pending delayed ingress.
+- [x] While delayed ingress is already pending, update reducer state and coalesced cursor demand without emitting repeated `timer_stop` or `timer_start` churn.
+- [x] On ingress timer fire, observe immediately if due; otherwise rearm once for the remaining delay.
+- [x] Keep latest cursor-demand coalescing and let the already armed timer consume that latest state.
+- [x] Remove unnecessary host timer replacement from the runtime scheduling path.
+
+## Workstream 5: Cooling-Phase Drain Policy
+
+- [x] Keep bounded scheduled-drain behavior in `Hot`.
+- [x] Switch to aggressive convergence in `Cooling`: either drain to empty or use a much larger bounded budget with the same observable result.
+- [x] Make queue convergence part of the lifecycle contract instead of a side effect of repeated dispatch edges.
+- [x] Expose separate diagnostics for hot backlog, cooling backlog, delayed-ingress churn, and post-burst convergence time.
+
+## Workstream 6: Harness, Diagnostics, Tests, And Dead-Code Sweep
+
+- [x] Update `plugins/smear_cursor/scripts/perf_window_switch.lua` to measure recovery as "reach `Cold`" instead of "wait a fixed short settle interval".
+- [x] Keep both fixed-settle and state-based perf modes so new regressions can be compared against old runs.
+- [x] Add scenarios for heavy burst switching, delayed ingress enabled, delayed ingress disabled, short settle, and long settle.
+- [x] Record these diagnostics in perf runs: thermal lifecycle state, pool size, idle target budget, compaction progress, host timer rearm count, delayed ingress pending state, and queue drain behavior by lifecycle.
+- [x] Keep logging off by default for perf runs.
+- [x] Document clearly that `logging_level = 4` is least verbose in this plugin, not most verbose.
+- [x] Add unit tests for `Hot -> Cooling -> Cold` and `Cooling -> Hot`.
+- [x] Add unit tests proving repeated cursor ingress does not repeatedly rearm the host timer.
+- [x] Add unit tests proving `CompactToBudget` converges to `idle_target_budget`.
+- [x] Add unit tests for pool counters, freelist, placement index, and snapshot invariants.
+- [x] Add regressions for no stale visible smear windows after cooling, no oversized retained pool after convergence, no queue tail after idle convergence, and no stale timer-token churn after burst ingress.
+- [x] Add property-style tests for bounded queue growth and timer-token correctness.
+- [x] Remove dead code, compatibility shims, and config knobs that become meaningless after the rewrite.
+
+Comment: the sweep removed the live scan-and-rebuild bookkeeping path and unused legacy Lua parse wrappers. No additional cleanup-era runtime knob survived beyond `max_kept_windows`, which still caps peak simultaneous-window demand.
+
+## Primary Files
+
+- [x] State and reducers: `plugins/smear_cursor/src/core/state/policy.rs`, `plugins/smear_cursor/src/core/reducer/machine/observation.rs`, `plugins/smear_cursor/src/core/reducer/machine/timers.rs`, `plugins/smear_cursor/src/core/reducer/machine/support.rs`, `plugins/smear_cursor/src/core/runtime_reducer/cleanup.rs`
+- [x] Runtime and dispatch: `plugins/smear_cursor/src/events/runtime.rs`, `plugins/smear_cursor/src/events/handlers/core_dispatch.rs`, `plugins/smear_cursor/src/events/handlers/render_apply.rs`
+- [x] Draw and pool: `plugins/smear_cursor/src/draw/mod.rs`, `plugins/smear_cursor/src/draw/window_pool/mod.rs`, `plugins/smear_cursor/src/draw/window_pool/ops/adaptive.rs`, `plugins/smear_cursor/src/draw/window_pool/ops/acquire.rs`, `plugins/smear_cursor/src/draw/window_pool/ops/cleanup.rs`, `plugins/smear_cursor/src/draw/window_pool/ops/snapshot.rs`
+- [x] Config and perf harness: `plugins/smear_cursor/src/config.rs`, `plugins/smear_cursor/scripts/perf_window_switch.lua`, `plugins/smear_cursor/scripts/run_perf_window_switch.sh`
+
+## Acceptance Gates
+
+- [x] Under the default burst stress harness, the runtime reaches `Cold` without relying on the `3s` hard-purge fallback.
+- [x] Under the default burst stress harness, the pool shrinks to `idle_target_budget` within `1000 ms` of the last ingress.
+- [x] Under the default burst stress harness with `1200 ms` settle, `recovery_ratio <= 1.10`.
+- [x] Under the default burst stress harness with `3500 ms` settle, `recovery_ratio <= 1.05`.
+- [x] During one continuous delayed-ingress burst, host delayed-ingress timer rearms stay bounded to burst-level behavior and do not scale with ingress event count.
+- [x] After `Cooling` completes, later switches no longer pay pool-size-dependent hot-path costs from stale retained windows.
+- [x] Diagnostics are sufficient to explain future regressions without ad hoc tracing.
+
+Comment: validated on 2026-03-19 with the default matrix harness. `burst_delay_on_cold` and `burst_delay_off_cold` both reached `Cold` in about `198 ms`; the retained pool converged to `0` windows for delay-on and `2` windows for delay-off, matching the `idle_target_budget = 2` cap. Fixed-settle recovery ratios stayed below the gates in every scenario: `1.039` and `0.978` at `1200 ms`, `0.977` and `0.727` at `3500 ms`. The delayed-ingress burst kept `host_timer_rearms_ingress = 0` even while `delayed_ingress_pending_updates` grew above `80k`, so timer churn stayed burst-level instead of scaling with ingress count.

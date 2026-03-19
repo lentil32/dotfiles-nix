@@ -26,24 +26,8 @@ pub(crate) fn invalid_key(key: &str, expected: &'static str) -> nvim_oxi::Error 
     into_nvim_error(invalid_key_error(key, expected))
 }
 
-#[expect(
-    dead_code,
-    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
-)]
-pub(crate) fn missing_key(key: &str) -> nvim_oxi::Error {
-    into_nvim_error(missing_key_error(key))
-}
-
 pub(crate) fn require_object_typed(value: Option<Object>, key: &str) -> LuaParseResult<Object> {
     value.ok_or_else(|| missing_key_error(key))
-}
-
-#[expect(
-    dead_code,
-    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
-)]
-pub(crate) fn require_object(value: Option<Object>, key: &str) -> Result<Object> {
-    require_object_typed(value, key).map_err(into_nvim_error)
 }
 
 pub(crate) fn require_with_typed<T, F>(
@@ -55,17 +39,6 @@ where
     F: Fn(&str, Object) -> LuaParseResult<T>,
 {
     parse(key, require_object_typed(value, key)?)
-}
-
-#[expect(
-    dead_code,
-    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
-)]
-pub(crate) fn require_with<T, F>(value: Option<Object>, key: &str, parse: F) -> Result<T>
-where
-    F: Fn(&str, Object) -> LuaParseResult<T>,
-{
-    require_with_typed(value, key, parse).map_err(into_nvim_error)
 }
 
 pub(crate) fn f64_from_object_typed(key: &str, value: Object) -> LuaParseResult<f64> {
@@ -121,17 +94,6 @@ where
         }
         _ => Err(invalid_integer()),
     }
-}
-
-#[expect(
-    dead_code,
-    reason = "Legacy nvim-oxi parse wrappers remain available for modules that still surface plain nvim results"
-)]
-pub(crate) fn i64_from_object_ref_with<K>(value: &Object, key: K) -> Result<i64>
-where
-    K: Fn() -> String,
-{
-    i64_from_object_ref_with_typed(value, key).map_err(into_nvim_error)
 }
 
 pub(crate) fn bool_from_object_typed(key: &str, value: Object) -> LuaParseResult<bool> {

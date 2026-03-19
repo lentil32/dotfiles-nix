@@ -16,7 +16,7 @@ mod palette;
 pub(crate) mod render_plan;
 mod window_pool;
 pub(crate) use apply::ApplyMetrics;
-pub(crate) use window_pool::AllocationPolicy;
+pub(crate) use window_pool::{AllocationPolicy, CompactRenderWindowsSummary};
 
 pub(crate) const EXTMARK_ID: u32 = 999;
 const PREPAINT_EXTMARK_ID: u32 = 1001;
@@ -58,6 +58,18 @@ impl PurgeRenderWindowsSummary {
     pub(crate) fn had_visual_change(self) -> bool {
         (self.had_visible_render_windows_before_purge && self.purged_windows > 0)
             || (self.had_visible_prepaint_before_purge && self.cleared_prepaint_overlays > 0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ClearPrepaintOverlaysSummary {
+    pub(crate) had_visible_prepaint_before_clear: bool,
+    pub(crate) cleared_prepaint_overlays: usize,
+}
+
+impl ClearPrepaintOverlaysSummary {
+    pub(crate) fn had_visual_change(self) -> bool {
+        self.had_visible_prepaint_before_clear && self.cleared_prepaint_overlays > 0
     }
 }
 
@@ -357,6 +369,36 @@ pub(crate) fn with_render_tab<T>(
     })
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RenderPoolDiagnostics {
+    pub(crate) total_windows: usize,
+    pub(crate) available_windows: usize,
+    pub(crate) in_use_windows: usize,
+    pub(crate) visible_windows: usize,
+}
+
+pub(crate) fn render_pool_diagnostics() -> RenderPoolDiagnostics {
+    with_render_tabs(|render_tabs| {
+        let mut diagnostics = RenderPoolDiagnostics::default();
+        for tab_windows in render_tabs.values() {
+            let snapshot = window_pool::tab_pool_snapshot_from_tab(tab_windows);
+            diagnostics.total_windows = diagnostics
+                .total_windows
+                .saturating_add(snapshot.total_windows);
+            diagnostics.available_windows = diagnostics
+                .available_windows
+                .saturating_add(snapshot.available_windows);
+            diagnostics.in_use_windows = diagnostics
+                .in_use_windows
+                .saturating_add(snapshot.in_use_windows);
+            diagnostics.visible_windows = diagnostics
+                .visible_windows
+                .saturating_add(window_pool::tab_visible_window_count_from_tab(tab_windows));
+        }
+        diagnostics
+    })
+}
+
 pub(crate) fn clear_highlight_cache() {
     palette::clear_highlight_cache();
 }
@@ -614,16 +656,28 @@ pub(crate) fn clear_prepaint_for_current_tab(namespace_id: u32) {
 fn clear_all_prepaint_tracked(
     prepaint_by_tab: &mut HashMap<i32, PrepaintOverlay>,
     namespace_id: u32,
-) -> (usize, bool) {
+) -> ClearPrepaintOverlaysSummary {
     let prepaint_by_tab = std::mem::take(prepaint_by_tab);
-    let had_visible_overlays = prepaint_by_tab
-        .values()
-        .any(|overlay| overlay.placement.is_some());
-    let cleared_prepaint_overlays = prepaint_by_tab.len();
+    let summary = ClearPrepaintOverlaysSummary {
+        had_visible_prepaint_before_clear: prepaint_by_tab
+            .values()
+            .any(|overlay| overlay.placement.is_some()),
+        cleared_prepaint_overlays: prepaint_by_tab.len(),
+    };
     for overlay in prepaint_by_tab.values().copied() {
         close_prepaint_overlay(namespace_id, overlay);
     }
-    (cleared_prepaint_overlays, had_visible_overlays)
+    summary
+}
+
+pub(crate) fn clear_all_prepaint_overlays(namespace_id: u32) -> ClearPrepaintOverlaysSummary {
+    if namespace_id == 0 {
+        return ClearPrepaintOverlaysSummary::default();
+    }
+
+    with_prepaint_by_tab(|prepaint_by_tab| {
+        clear_all_prepaint_tracked(prepaint_by_tab, namespace_id)
+    })
 }
 
 fn evict_empty_render_tab_entries(render_tabs: &mut HashMap<i32, window_pool::TabWindows>) {
@@ -713,6 +767,23 @@ pub(crate) fn clear_active_render_windows(
     })
 }
 
+pub(crate) fn compact_render_windows(
+    namespace_id: u32,
+    target_budget: usize,
+    max_prune_per_tick: usize,
+) -> CompactRenderWindowsSummary {
+    with_render_tabs(|render_tabs| {
+        let summary = window_pool::compact_tabs_to_budget(
+            render_tabs,
+            namespace_id,
+            target_budget,
+            max_prune_per_tick,
+        );
+        evict_empty_render_tab_entries(render_tabs);
+        summary
+    })
+}
+
 pub(crate) fn purge_render_windows(namespace_id: u32) -> PurgeRenderWindowsSummary {
     let mut render_tabs = take_render_tabs();
     let mut prepaint_by_tab = take_prepaint_by_tab();
@@ -755,16 +826,16 @@ pub(crate) fn recover_all_namespaces(namespace_id: u32) -> RecoveryNamespaceClea
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyMetrics, PrepaintOverlay, PurgeRenderWindowsSummary, RecoveryNamespaceCleanupSummary,
-        RenderOutcome, classify_draw_outcome, clear_active_render_windows,
-        clear_all_prepaint_tracked, clear_draw_context_for_test, evict_empty_render_tab_entries,
-        insert_prepaint_overlay_for_test, prepaint_count_for_test, prepaint_snapshot_for_test,
-        render_tab_handles, restore_render_tabs, summarize_recovery_namespace_cleanup,
-        summarize_tracked_purge_state, take_render_tabs_for_test, with_prepaint_by_tab,
-        with_render_tab,
+        ApplyMetrics, ClearPrepaintOverlaysSummary, PrepaintOverlay, PurgeRenderWindowsSummary,
+        RecoveryNamespaceCleanupSummary, RenderOutcome, classify_draw_outcome,
+        clear_active_render_windows, clear_all_prepaint_overlays, clear_draw_context_for_test,
+        evict_empty_render_tab_entries, insert_prepaint_overlay_for_test, prepaint_count_for_test,
+        prepaint_snapshot_for_test, render_pool_diagnostics, render_tab_handles,
+        restore_render_tabs, summarize_recovery_namespace_cleanup, summarize_tracked_purge_state,
+        take_render_tabs_for_test, with_render_tab,
     };
     use crate::core::types::StrokeId;
-    use crate::draw::window_pool::WindowBufferHandle;
+    use crate::draw::window_pool::{WindowBufferHandle, WindowPlacement};
     use crate::types::{
         BASE_TIME_INTERVAL, Point, RenderFrame, RenderStepSample, StaticRenderConfig,
     };
@@ -774,6 +845,63 @@ mod tests {
 
     fn reset_draw_context_for_test() {
         clear_draw_context_for_test();
+    }
+
+    #[test]
+    fn render_pool_diagnostics_aggregates_window_counts_across_tabs() {
+        let _guard = DRAW_TEST_MUTEX.lock().expect("draw test mutex poisoned");
+        reset_draw_context_for_test();
+
+        let placement_a = WindowPlacement {
+            row: 1,
+            col: 2,
+            width: 1,
+            zindex: 40,
+        };
+        let placement_b = WindowPlacement {
+            row: 3,
+            col: 4,
+            width: 1,
+            zindex: 50,
+        };
+
+        with_render_tab(11, |tab_windows| {
+            tab_windows.push_test_visible_window(
+                WindowBufferHandle {
+                    window_id: 101,
+                    buffer_id: 201,
+                },
+                placement_a,
+                1,
+            );
+            tab_windows.push_test_visible_window(
+                WindowBufferHandle {
+                    window_id: 102,
+                    buffer_id: 202,
+                },
+                placement_b,
+                2,
+            );
+        });
+        with_render_tab(22, |tab_windows| {
+            tab_windows.push_test_visible_window(
+                WindowBufferHandle {
+                    window_id: 103,
+                    buffer_id: 203,
+                },
+                placement_a,
+                3,
+            );
+        });
+
+        let diagnostics = render_pool_diagnostics();
+
+        assert_eq!(diagnostics.total_windows, 3);
+        assert_eq!(diagnostics.available_windows, 3);
+        assert_eq!(diagnostics.in_use_windows, 0);
+        assert_eq!(diagnostics.visible_windows, 3);
+
+        reset_draw_context_for_test();
     }
 
     fn base_frame() -> RenderFrame {
@@ -935,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn clearing_all_prepaint_tracking_does_not_touch_render_tab_state() {
+    fn clearing_all_prepaint_overlays_does_not_touch_render_tab_state() {
         let _guard = DRAW_TEST_MUTEX
             .lock()
             .expect("draw test mutex should not be poisoned");
@@ -958,14 +1086,55 @@ mod tests {
                 placement: None,
             },
         );
-        with_prepaint_by_tab(|prepaint_by_tab| {
-            clear_all_prepaint_tracked(prepaint_by_tab, 99);
-        });
+        let summary = clear_all_prepaint_overlays(99);
+
+        assert_eq!(
+            summary,
+            ClearPrepaintOverlaysSummary {
+                had_visible_prepaint_before_clear: false,
+                cleared_prepaint_overlays: 2,
+            }
+        );
         assert_eq!(prepaint_count_for_test(), 0);
 
         assert!(with_render_tab(17, |tab_windows| tab_windows
             .cached_payload_matches(77, 707)));
         assert_eq!(render_tab_handles().len(), 1);
+
+        reset_draw_context_for_test();
+    }
+
+    #[test]
+    fn clearing_all_prepaint_overlays_reports_visible_overlay_changes() {
+        let _guard = DRAW_TEST_MUTEX
+            .lock()
+            .expect("draw test mutex should not be poisoned");
+        reset_draw_context_for_test();
+
+        insert_prepaint_overlay_for_test(
+            17,
+            PrepaintOverlay {
+                window_id: -19,
+                buffer_id: -119,
+                placement: Some(super::PrepaintPlacement {
+                    cell: crate::types::ScreenCell::new(3, 4)
+                        .expect("test prepaint cell should be in bounds"),
+                    zindex: 120,
+                }),
+            },
+        );
+
+        let summary = clear_all_prepaint_overlays(99);
+
+        assert_eq!(
+            summary,
+            ClearPrepaintOverlaysSummary {
+                had_visible_prepaint_before_clear: true,
+                cleared_prepaint_overlays: 1,
+            }
+        );
+        assert!(summary.had_visual_change());
+        assert_eq!(prepaint_count_for_test(), 0);
 
         reset_draw_context_for_test();
     }

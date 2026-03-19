@@ -52,45 +52,76 @@ enum CachedWindowLifecycle {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct WindowLifecycleCounters {
+    total: usize,
     available: usize,
+    reusable: usize,
     in_use: usize,
     visible: usize,
+    invalid: usize,
 }
 
 impl WindowLifecycleCounters {
     fn single(lifecycle: CachedWindowLifecycle) -> Self {
         match lifecycle {
             CachedWindowLifecycle::AvailableVisible { .. } => Self {
+                total: 1,
                 available: 1,
+                reusable: 1,
                 in_use: 0,
                 visible: 1,
+                invalid: 0,
             },
             CachedWindowLifecycle::AvailableHidden { .. } => Self {
+                total: 1,
                 available: 1,
+                reusable: 1,
                 in_use: 0,
                 visible: 0,
+                invalid: 0,
             },
             CachedWindowLifecycle::InUse { .. } => Self {
+                total: 1,
                 available: 0,
+                reusable: 0,
                 in_use: 1,
                 visible: 1,
+                invalid: 0,
             },
-            CachedWindowLifecycle::Invalid => Self::default(),
+            CachedWindowLifecycle::Invalid => Self {
+                total: 1,
+                available: 0,
+                reusable: 0,
+                in_use: 0,
+                visible: 0,
+                invalid: 1,
+            },
         }
     }
 
     fn add_assign(&mut self, counters: Self) {
+        self.total = self.total.saturating_add(counters.total);
         self.available = self.available.saturating_add(counters.available);
+        self.reusable = self.reusable.saturating_add(counters.reusable);
         self.in_use = self.in_use.saturating_add(counters.in_use);
         self.visible = self.visible.saturating_add(counters.visible);
+        self.invalid = self.invalid.saturating_add(counters.invalid);
     }
 
     fn sub_assign(&mut self, counters: Self) {
-        // If this ever saturates, the derived pool counters drifted from lifecycle truth.
+        // If this ever saturates, the maintained counters drifted from lifecycle truth.
+        self.total = self.total.saturating_sub(counters.total);
         self.available = self.available.saturating_sub(counters.available);
+        self.reusable = self.reusable.saturating_sub(counters.reusable);
         self.in_use = self.in_use.saturating_sub(counters.in_use);
         self.visible = self.visible.saturating_sub(counters.visible);
+        self.invalid = self.invalid.saturating_sub(counters.invalid);
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlacementTrackingSlot {
+    placement: WindowPlacement,
+    slot: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -273,6 +304,30 @@ pub(crate) struct ReleaseUnusedSummary {
     pub(crate) invalid_removed_windows: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CompactRenderWindowsSummary {
+    pub(crate) target_budget: usize,
+    pub(crate) total_windows_before: usize,
+    pub(crate) total_windows_after: usize,
+    pub(crate) closed_visible_windows: usize,
+    pub(crate) pruned_windows: usize,
+    pub(crate) invalid_removed_windows: usize,
+    pub(crate) has_visible_windows_after: bool,
+    pub(crate) has_pending_work_after: bool,
+}
+
+impl CompactRenderWindowsSummary {
+    pub(crate) fn converged_to_idle(self) -> bool {
+        self.total_windows_after <= self.target_budget
+            && !self.has_visible_windows_after
+            && !self.has_pending_work_after
+    }
+
+    pub(crate) fn had_visual_change(self) -> bool {
+        self.closed_visible_windows > 0
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct AcquiredWindow {
     pub(crate) window_id: i32,
@@ -286,12 +341,16 @@ pub(crate) struct TabWindows {
     current_epoch: FrameEpoch,
     frame_demand: usize,
     last_frame_demand: usize,
-    reuse_scan_index: usize,
     in_use_indices: Vec<usize>,
+    in_use_slots: Vec<Option<usize>>,
     visible_available_indices: Vec<usize>,
+    visible_available_slots: Vec<Option<usize>>,
+    reusable_window_indices: Vec<usize>,
+    reusable_window_slots: Vec<Option<usize>>,
     windows: Vec<CachedRenderWindow>,
     payload_by_window: HashMap<i32, CachedWindowPayload>,
     available_windows_by_placement: HashMap<WindowPlacement, Vec<usize>>,
+    available_window_placement_slots: Vec<Option<PlacementTrackingSlot>>,
     lifecycle_counters: WindowLifecycleCounters,
     ewma_demand_milli: u64,
     cached_budget: usize,
@@ -303,12 +362,16 @@ impl Default for TabWindows {
             current_epoch: FrameEpoch::ZERO,
             frame_demand: 0,
             last_frame_demand: 0,
-            reuse_scan_index: 0,
             in_use_indices: Vec::new(),
+            in_use_slots: Vec::new(),
             visible_available_indices: Vec::new(),
+            visible_available_slots: Vec::new(),
+            reusable_window_indices: Vec::new(),
+            reusable_window_slots: Vec::new(),
             windows: Vec::new(),
             payload_by_window: HashMap::new(),
             available_windows_by_placement: HashMap::new(),
+            available_window_placement_slots: Vec::new(),
             lifecycle_counters: WindowLifecycleCounters::default(),
             ewma_demand_milli: 0,
             cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
@@ -343,73 +406,220 @@ impl TabWindows {
         let lifecycle = CachedWindowLifecycle::AvailableVisible {
             last_used_epoch: FrameEpoch(last_used_epoch),
         };
-        let index = self.windows.len();
-        self.windows.push(CachedRenderWindow {
+        self.push_cached_window(CachedRenderWindow {
             handles,
             lifecycle,
             placement: Some(placement),
         });
-        self.visible_available_indices.push(index);
-        self.track_available_window_index_insert(index, Some(placement), lifecycle);
-        self.track_window_insert(lifecycle);
     }
 
     fn clear_payload(&mut self, window_id: i32) {
         self.payload_by_window.remove(&window_id);
     }
 
-    fn track_available_window_index_insert(
+    fn push_cached_window(&mut self, cached: CachedRenderWindow) {
+        let index = self.windows.len();
+        self.windows.push(cached);
+        self.in_use_slots.push(None);
+        self.visible_available_slots.push(None);
+        self.reusable_window_slots.push(None);
+        self.available_window_placement_slots.push(None);
+        self.track_window_insert(index, cached.lifecycle, cached.placement);
+        self.debug_assert_tracking_consistent();
+    }
+
+    fn track_index_insert(indices: &mut Vec<usize>, slots: &mut [Option<usize>], index: usize) {
+        if slots.get(index).and_then(|slot| *slot).is_some() {
+            return;
+        }
+        let slot = indices.len();
+        indices.push(index);
+        slots[index] = Some(slot);
+    }
+
+    fn track_index_remove(indices: &mut Vec<usize>, slots: &mut [Option<usize>], index: usize) {
+        let Some(slot) = slots.get_mut(index).and_then(Option::take) else {
+            return;
+        };
+        indices.swap_remove(slot);
+        if slot < indices.len() {
+            let moved_index = indices[slot];
+            slots[moved_index] = Some(slot);
+        }
+    }
+
+    fn register_in_use_index(&mut self, index: usize) {
+        Self::track_index_insert(&mut self.in_use_indices, &mut self.in_use_slots, index);
+    }
+
+    fn unregister_in_use_index(&mut self, index: usize) {
+        Self::track_index_remove(&mut self.in_use_indices, &mut self.in_use_slots, index);
+    }
+
+    fn register_visible_available_index(&mut self, index: usize) {
+        Self::track_index_insert(
+            &mut self.visible_available_indices,
+            &mut self.visible_available_slots,
+            index,
+        );
+    }
+
+    fn unregister_visible_available_index(&mut self, index: usize) {
+        Self::track_index_remove(
+            &mut self.visible_available_indices,
+            &mut self.visible_available_slots,
+            index,
+        );
+    }
+
+    fn take_visible_available_indices_for_hide(&mut self) -> Vec<usize> {
+        let indices = std::mem::take(&mut self.visible_available_indices);
+        self.visible_available_slots.fill(None);
+        indices
+    }
+
+    fn register_reusable_index(&mut self, index: usize) {
+        Self::track_index_insert(
+            &mut self.reusable_window_indices,
+            &mut self.reusable_window_slots,
+            index,
+        );
+    }
+
+    fn unregister_reusable_index(&mut self, index: usize) {
+        Self::track_index_remove(
+            &mut self.reusable_window_indices,
+            &mut self.reusable_window_slots,
+            index,
+        );
+    }
+
+    fn register_available_placement_index(
         &mut self,
         index: usize,
         placement: Option<WindowPlacement>,
-        lifecycle: CachedWindowLifecycle,
     ) {
-        if !matches!(
-            lifecycle,
-            CachedWindowLifecycle::AvailableVisible { .. }
-                | CachedWindowLifecycle::AvailableHidden { .. }
-        ) {
-            return;
-        }
         let Some(placement) = placement else {
             return;
         };
-        self.available_windows_by_placement
-            .entry(placement)
-            .or_default()
-            .push(index);
-    }
-
-    fn track_available_window_index_remove(
-        &mut self,
-        index: usize,
-        placement: Option<WindowPlacement>,
-        lifecycle: CachedWindowLifecycle,
-    ) {
-        if !matches!(
-            lifecycle,
-            CachedWindowLifecycle::AvailableVisible { .. }
-                | CachedWindowLifecycle::AvailableHidden { .. }
-        ) {
+        if self
+            .available_window_placement_slots
+            .get(index)
+            .and_then(|slot| *slot)
+            .is_some()
+        {
             return;
         }
-        let Some(placement) = placement else {
+
+        let indices = self
+            .available_windows_by_placement
+            .entry(placement)
+            .or_default();
+        let slot = indices.len();
+        indices.push(index);
+        self.available_window_placement_slots[index] =
+            Some(PlacementTrackingSlot { placement, slot });
+    }
+
+    fn unregister_available_placement_index(&mut self, index: usize) {
+        let Some(entry) = self
+            .available_window_placement_slots
+            .get_mut(index)
+            .and_then(Option::take)
+        else {
             return;
         };
 
         let mut remove_key = false;
-        if let Some(indices) = self.available_windows_by_placement.get_mut(&placement) {
-            if let Some(position) = indices.iter().position(|candidate| *candidate == index) {
-                indices.swap_remove(position);
+        if let Some(indices) = self
+            .available_windows_by_placement
+            .get_mut(&entry.placement)
+        {
+            indices.swap_remove(entry.slot);
+            if entry.slot < indices.len() {
+                let moved_index = indices[entry.slot];
+                if let Some(slot) = self.available_window_placement_slots[moved_index].as_mut() {
+                    slot.slot = entry.slot;
+                }
             }
             remove_key = indices.is_empty();
         }
         if remove_key {
-            self.available_windows_by_placement.remove(&placement);
+            self.available_windows_by_placement.remove(&entry.placement);
         }
     }
 
-    fn track_available_window_transition(
+    fn register_window_tracking(
+        &mut self,
+        index: usize,
+        lifecycle: CachedWindowLifecycle,
+        placement: Option<WindowPlacement>,
+    ) {
+        self.lifecycle_counters
+            .add_assign(WindowLifecycleCounters::single(lifecycle));
+        match lifecycle {
+            CachedWindowLifecycle::AvailableVisible { .. } => {
+                self.register_reusable_index(index);
+                self.register_visible_available_index(index);
+                self.register_available_placement_index(index, placement);
+            }
+            CachedWindowLifecycle::AvailableHidden { .. } => {
+                self.register_reusable_index(index);
+                self.register_available_placement_index(index, placement);
+            }
+            CachedWindowLifecycle::InUse { .. } => {
+                self.register_in_use_index(index);
+            }
+            CachedWindowLifecycle::Invalid => {}
+        }
+    }
+
+    fn unregister_window_tracking(
+        &mut self,
+        index: usize,
+        lifecycle: CachedWindowLifecycle,
+        placement: Option<WindowPlacement>,
+    ) {
+        match lifecycle {
+            CachedWindowLifecycle::AvailableVisible { .. } => {
+                self.unregister_available_placement_index(index);
+                self.unregister_visible_available_index(index);
+                self.unregister_reusable_index(index);
+            }
+            CachedWindowLifecycle::AvailableHidden { .. } => {
+                self.unregister_available_placement_index(index);
+                self.unregister_reusable_index(index);
+            }
+            CachedWindowLifecycle::InUse { .. } => {
+                self.unregister_in_use_index(index);
+            }
+            CachedWindowLifecycle::Invalid => {
+                let _ = placement;
+            }
+        }
+        self.lifecycle_counters
+            .sub_assign(WindowLifecycleCounters::single(lifecycle));
+    }
+
+    fn track_window_insert(
+        &mut self,
+        index: usize,
+        lifecycle: CachedWindowLifecycle,
+        placement: Option<WindowPlacement>,
+    ) {
+        self.register_window_tracking(index, lifecycle, placement);
+    }
+
+    fn track_window_remove(
+        &mut self,
+        index: usize,
+        lifecycle: CachedWindowLifecycle,
+        placement: Option<WindowPlacement>,
+    ) {
+        self.unregister_window_tracking(index, lifecycle, placement);
+    }
+
+    fn track_window_transition(
         &mut self,
         index: usize,
         before_lifecycle: CachedWindowLifecycle,
@@ -417,106 +627,209 @@ impl TabWindows {
         after_lifecycle: CachedWindowLifecycle,
         after_placement: Option<WindowPlacement>,
     ) {
-        self.track_available_window_index_remove(index, before_placement, before_lifecycle);
-        self.track_available_window_index_insert(index, after_placement, after_lifecycle);
-    }
-
-    fn sync_lifecycle_counters(&mut self) {
-        let mut counters = WindowLifecycleCounters::default();
-        for cached in &self.windows {
-            counters.add_assign(WindowLifecycleCounters::single(cached.lifecycle));
-        }
-        self.lifecycle_counters = counters;
-    }
-
-    fn sync_available_window_placement_index(&mut self) {
-        let mut next_index = HashMap::new();
-        for (index, cached) in self.windows.iter().enumerate() {
-            if !matches!(
-                cached.lifecycle,
-                CachedWindowLifecycle::AvailableVisible { .. }
-                    | CachedWindowLifecycle::AvailableHidden { .. }
-            ) {
-                continue;
-            }
-            let Some(placement) = cached.placement else {
-                continue;
-            };
-            next_index
-                .entry(placement)
-                .or_insert_with(Vec::new)
-                .push(index);
-        }
-        self.available_windows_by_placement = next_index;
-    }
-
-    fn track_window_insert(&mut self, lifecycle: CachedWindowLifecycle) {
-        self.lifecycle_counters
-            .add_assign(WindowLifecycleCounters::single(lifecycle));
-    }
-
-    fn track_window_remove(&mut self, lifecycle: CachedWindowLifecycle) {
-        self.lifecycle_counters
-            .sub_assign(WindowLifecycleCounters::single(lifecycle));
-    }
-
-    fn track_window_transition(
-        &mut self,
-        before: CachedWindowLifecycle,
-        after: CachedWindowLifecycle,
-    ) {
-        if before == after {
+        if before_lifecycle == after_lifecycle && before_placement == after_placement {
             return;
         }
-        self.track_window_remove(before);
-        self.track_window_insert(after);
+        self.unregister_window_tracking(index, before_lifecycle, before_placement);
+        self.register_window_tracking(index, after_lifecycle, after_placement);
+    }
+
+    fn retarget_window_index_after_swap_remove(&mut self, from: usize, to: usize) {
+        // The `windows` vector is the source of truth, but these side indexes are all keyed by
+        // vector position. Retarget the moved tail entry before `swap_remove` mutates the slots.
+        if let Some(slot) = self.in_use_slots.get(from).and_then(|slot| *slot) {
+            self.in_use_indices[slot] = to;
+        }
+        if let Some(slot) = self
+            .visible_available_slots
+            .get(from)
+            .and_then(|slot| *slot)
+        {
+            self.visible_available_indices[slot] = to;
+        }
+        if let Some(slot) = self.reusable_window_slots.get(from).and_then(|slot| *slot) {
+            self.reusable_window_indices[slot] = to;
+        }
+        if let Some(slot) = self
+            .available_window_placement_slots
+            .get(from)
+            .and_then(|slot| *slot)
+        {
+            if let Some(indices) = self.available_windows_by_placement.get_mut(&slot.placement) {
+                indices[slot.slot] = to;
+            }
+        }
+    }
+
+    fn swap_remove_window(&mut self, index: usize) -> Option<CachedRenderWindow> {
+        let removed = self.windows.get(index).copied()?;
+        let last_index = self.windows.len().saturating_sub(1);
+        self.track_window_remove(index, removed.lifecycle, removed.placement);
+        self.clear_payload(removed.handles.window_id);
+
+        if index != last_index {
+            self.retarget_window_index_after_swap_remove(last_index, index);
+        }
+
+        let removed = self.windows.swap_remove(index);
+        self.in_use_slots.swap_remove(index);
+        self.visible_available_slots.swap_remove(index);
+        self.reusable_window_slots.swap_remove(index);
+        self.available_window_placement_slots.swap_remove(index);
+        self.debug_assert_tracking_consistent();
+        Some(removed)
+    }
+
+    #[cfg(test)]
+    fn seed_tracking_from_windows_for_test(&mut self) {
+        // Test fixtures can start from hand-built `windows` vectors, but the live pool must never
+        // fall back to scan-and-rebuild bookkeeping after the exact-tracking rewrite.
+        self.in_use_indices.clear();
+        self.in_use_slots = vec![None; self.windows.len()];
+        self.visible_available_indices.clear();
+        self.visible_available_slots = vec![None; self.windows.len()];
+        self.reusable_window_indices.clear();
+        self.reusable_window_slots = vec![None; self.windows.len()];
+        self.available_windows_by_placement.clear();
+        self.available_window_placement_slots = vec![None; self.windows.len()];
+        self.lifecycle_counters = WindowLifecycleCounters::default();
+
+        for index in 0..self.windows.len() {
+            let cached = self.windows[index];
+            self.track_window_insert(index, cached.lifecycle, cached.placement);
+        }
+        self.debug_assert_tracking_consistent();
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn tracking_snapshot_from_windows(&self) -> WindowTrackingSnapshot {
+        let mut snapshot = WindowTrackingSnapshot {
+            lifecycle_counters: WindowLifecycleCounters::default(),
+            ..WindowTrackingSnapshot::default()
+        };
+
+        for (index, cached) in self.windows.iter().copied().enumerate() {
+            snapshot
+                .lifecycle_counters
+                .add_assign(WindowLifecycleCounters::single(cached.lifecycle));
+            match cached.lifecycle {
+                CachedWindowLifecycle::AvailableVisible { .. } => {
+                    snapshot.visible_available_indices.push(index);
+                    snapshot.reusable_window_indices.push(index);
+                    if let Some(placement) = cached.placement {
+                        snapshot
+                            .available_windows_by_placement
+                            .entry(placement)
+                            .or_default()
+                            .push(index);
+                    }
+                }
+                CachedWindowLifecycle::AvailableHidden { .. } => {
+                    snapshot.reusable_window_indices.push(index);
+                    if let Some(placement) = cached.placement {
+                        snapshot
+                            .available_windows_by_placement
+                            .entry(placement)
+                            .or_default()
+                            .push(index);
+                    }
+                }
+                CachedWindowLifecycle::InUse { .. } => {
+                    snapshot.in_use_indices.push(index);
+                }
+                CachedWindowLifecycle::Invalid => {}
+            }
+        }
+
+        snapshot.normalize();
+        snapshot
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn tracking_snapshot_from_bookkeeping(&self) -> WindowTrackingSnapshot {
+        let mut snapshot = WindowTrackingSnapshot {
+            lifecycle_counters: self.lifecycle_counters,
+            in_use_indices: self.in_use_indices.clone(),
+            visible_available_indices: self.visible_available_indices.clone(),
+            reusable_window_indices: self.reusable_window_indices.clone(),
+            available_windows_by_placement: self.available_windows_by_placement.clone(),
+        };
+        snapshot.normalize();
+        snapshot
+    }
+
+    fn debug_assert_tracking_consistent(&self) {
+        #[cfg(any(test, debug_assertions))]
+        {
+            debug_assert_eq!(
+                self.tracking_snapshot_from_bookkeeping(),
+                self.tracking_snapshot_from_windows(),
+                "render window bookkeeping drifted from lifecycle truth"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn assert_tracking_consistent(&self) {
+        assert_eq!(
+            self.tracking_snapshot_from_bookkeeping(),
+            self.tracking_snapshot_from_windows(),
+            "render window bookkeeping drifted from lifecycle truth"
+        );
+    }
+
+    fn reusable_window_index(&self) -> Option<usize> {
+        self.reusable_window_indices.last().copied()
+    }
+
+    fn placement_window_index(&self, placement: WindowPlacement) -> Option<usize> {
+        self.available_windows_by_placement
+            .get(&placement)
+            .and_then(|indices| indices.last().copied())
     }
 
     fn available_window_count(&self) -> usize {
-        // cleanup/capacity decisions must follow authoritative window lifecycle truth.
-        // The tracked counters are an optimization only; if they ever drift, rendering must still
-        // recover by scanning the retained windows instead of suppressing clear work.
-        self.windows
-            .iter()
-            .filter(|cached| {
-                matches!(
-                    cached.lifecycle,
-                    CachedWindowLifecycle::AvailableVisible { .. }
-                        | CachedWindowLifecycle::AvailableHidden { .. }
-                )
-            })
-            .count()
+        self.lifecycle_counters.available
     }
 
     fn in_use_window_count(&self) -> usize {
-        self.windows
-            .iter()
-            .filter(|cached| matches!(cached.lifecycle, CachedWindowLifecycle::InUse { .. }))
-            .count()
+        self.lifecycle_counters.in_use
     }
 
     fn visible_window_count(&self) -> usize {
-        self.windows
-            .iter()
-            .filter(|cached| {
-                matches!(
-                    cached.lifecycle,
-                    CachedWindowLifecycle::AvailableVisible { .. }
-                        | CachedWindowLifecycle::InUse { .. }
-                )
-            })
-            .count()
+        self.lifecycle_counters.visible
     }
 
     fn usable_window_count(&self) -> usize {
-        self.available_window_count()
-            .saturating_add(self.in_use_window_count())
+        self.lifecycle_counters
+            .reusable
+            .saturating_add(self.lifecycle_counters.in_use)
     }
 
     fn has_invalid_windows(&self) -> bool {
-        self.windows
-            .iter()
-            .any(|cached| matches!(cached.lifecycle, CachedWindowLifecycle::Invalid))
+        self.lifecycle_counters.invalid > 0
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct WindowTrackingSnapshot {
+    lifecycle_counters: WindowLifecycleCounters,
+    in_use_indices: Vec<usize>,
+    visible_available_indices: Vec<usize>,
+    reusable_window_indices: Vec<usize>,
+    available_windows_by_placement: HashMap<WindowPlacement, Vec<usize>>,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl WindowTrackingSnapshot {
+    fn normalize(&mut self) {
+        self.in_use_indices.sort_unstable();
+        self.visible_available_indices.sort_unstable();
+        self.reusable_window_indices.sort_unstable();
+        for indices in self.available_windows_by_placement.values_mut() {
+            indices.sort_unstable();
+        }
     }
 }
 

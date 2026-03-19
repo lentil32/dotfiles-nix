@@ -91,14 +91,29 @@ pub(super) fn reduce_render_cleanup_applied(
         return Transition::stay(state);
     }
 
+    let next_cleanup =
+        cleanup_state_after_applied(state.render_cleanup(), payload.action, payload.observed_at);
     let next_state = state
         .clone()
         .with_realization(state.realization().clone().cleanup_applied())
-        .with_render_cleanup(cleanup_state_after_applied(
-            state.render_cleanup(),
-            payload.action,
-        ));
-    let (next_state, effects) = arm_render_cleanup_timer(next_state, payload.observed_at);
+        .with_render_cleanup(next_cleanup);
+    let (next_state, mut effects) = arm_render_cleanup_timer(next_state, payload.observed_at);
+    if matches!(
+        (state.render_cleanup().thermal(), next_cleanup.thermal()),
+        (
+            crate::core::state::RenderThermalState::Cooling,
+            crate::core::state::RenderThermalState::Cold
+        )
+    ) {
+        if let Some(started_at) = state.render_cleanup().entered_cooling_at() {
+            effects.push(record_event_loop_metric(
+                EventLoopMetricEffect::CleanupConvergedToCold {
+                    started_at,
+                    converged_at: payload.observed_at,
+                },
+            ));
+        }
+    }
     Transition::new(next_state, effects)
 }
 

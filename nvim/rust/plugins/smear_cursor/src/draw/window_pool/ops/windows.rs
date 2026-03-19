@@ -1,8 +1,14 @@
 fn window_from_handle_i32(handle: i32) -> Option<api::Window> {
+    if handle <= 0 {
+        return None;
+    }
     handles::valid_window(i64::from(handle))
 }
 
 fn buffer_from_handle_i32(handle: i32) -> Option<api::Buffer> {
+    if handle <= 0 {
+        return None;
+    }
     handles::valid_buffer(i64::from(handle))
 }
 

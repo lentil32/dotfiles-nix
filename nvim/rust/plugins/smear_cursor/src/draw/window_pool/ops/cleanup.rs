@@ -5,9 +5,7 @@ fn prune_tab_windows(
 ) -> usize {
     let keep_budget = effective_keep_budget(tab_windows.cached_budget, max_kept_windows);
     if tab_windows.windows.len() <= keep_budget {
-        if remove_invalid_windows(tab_windows, namespace_id) > 0 {
-            rebuild_available_window_placement_index(tab_windows);
-        }
+        let _ = remove_invalid_windows(tab_windows, namespace_id);
         return 0;
     }
 
@@ -25,9 +23,6 @@ fn prune_tab_windows(
     if invalid_removed > 0 {
         pruned_windows = pruned_windows.saturating_add(invalid_removed);
     }
-    if !remove_indices.is_empty() || invalid_removed > 0 {
-        rebuild_available_window_placement_index(tab_windows);
-    }
 
     pruned_windows
 }
@@ -38,6 +33,137 @@ pub(crate) fn prune_tab(
     max_kept_windows: usize,
 ) -> usize {
     prune_tab_windows(tab_windows, namespace_id, max_kept_windows)
+}
+
+fn total_window_count(render_tabs: &std::collections::HashMap<i32, TabWindows>) -> usize {
+    render_tabs
+        .values()
+        .map(|tab_windows| tab_windows.windows.len())
+        .sum()
+}
+
+fn has_pending_compaction_work(
+    render_tabs: &std::collections::HashMap<i32, TabWindows>,
+    target_budget: usize,
+) -> bool {
+    total_window_count(render_tabs) > target_budget
+        || render_tabs.values().any(|tab_windows| {
+            tab_has_visible_windows(tab_windows) || tab_windows.has_invalid_windows()
+        })
+}
+
+fn global_compaction_prune_plan(
+    render_tabs: &std::collections::HashMap<i32, TabWindows>,
+    target_budget: usize,
+    max_prune_per_tick: usize,
+) -> std::collections::HashMap<i32, Vec<usize>> {
+    let total_windows = total_window_count(render_tabs);
+    if total_windows <= target_budget || max_prune_per_tick == 0 {
+        return std::collections::HashMap::new();
+    }
+
+    let prune_goal = total_windows
+        .saturating_sub(target_budget)
+        .min(max_prune_per_tick);
+    let mut candidates = render_tabs
+        .iter()
+        .flat_map(|(tab_handle, tab_windows)| {
+            tab_windows
+                .windows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, cached)| {
+                    cached
+                        .available_epoch()
+                        .map(|epoch| (epoch, *tab_handle, index))
+                })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    candidates.truncate(prune_goal.min(candidates.len()));
+
+    let mut plan = std::collections::HashMap::<i32, Vec<usize>>::new();
+    for (_, tab_handle, index) in candidates {
+        plan.entry(tab_handle).or_default().push(index);
+    }
+    for indices in plan.values_mut() {
+        indices.sort_unstable();
+    }
+    plan
+}
+
+fn apply_global_compaction_prune_plan(
+    render_tabs: &mut std::collections::HashMap<i32, TabWindows>,
+    namespace_id: u32,
+    prune_plan: std::collections::HashMap<i32, Vec<usize>>,
+) -> usize {
+    let mut pruned_windows = 0_usize;
+    let mut tab_handles = prune_plan.keys().copied().collect::<Vec<_>>();
+    tab_handles.sort_unstable();
+
+    for tab_handle in tab_handles {
+        let Some(tab_windows) = render_tabs.get_mut(&tab_handle) else {
+            continue;
+        };
+        let Some(indices) = prune_plan.get(&tab_handle) else {
+            continue;
+        };
+        let mut removed_any = false;
+        let _event_ignore = EventIgnoreGuard::set_all();
+        for remove_index in indices.iter().copied().rev() {
+            if remove_index >= tab_windows.windows.len() {
+                continue;
+            }
+            remove_cached_window_at(tab_windows, namespace_id, remove_index);
+            pruned_windows = pruned_windows.saturating_add(1);
+            removed_any = true;
+        }
+        if removed_any {
+            tab_windows.debug_assert_tracking_consistent();
+        }
+    }
+
+    pruned_windows
+}
+
+pub(crate) fn compact_tabs_to_budget(
+    render_tabs: &mut std::collections::HashMap<i32, TabWindows>,
+    namespace_id: u32,
+    target_budget: usize,
+    max_prune_per_tick: usize,
+) -> CompactRenderWindowsSummary {
+    let mut summary = CompactRenderWindowsSummary {
+        target_budget,
+        total_windows_before: total_window_count(render_tabs),
+        ..CompactRenderWindowsSummary::default()
+    };
+    let mut tab_handles = render_tabs.keys().copied().collect::<Vec<_>>();
+    tab_handles.sort_unstable();
+
+    for tab_handle in tab_handles {
+        let Some(tab_windows) = render_tabs.get_mut(&tab_handle) else {
+            continue;
+        };
+        // Surprising: Cooling should already have closed visible windows on the Hot->Cooling edge,
+        // but compaction must still recover authoritatively if stale shell-visible entries remain.
+        summary.closed_visible_windows = summary
+            .closed_visible_windows
+            .saturating_add(close_visible_tab_windows(tab_windows, namespace_id));
+        let invalid_removed = remove_invalid_windows(tab_windows, namespace_id);
+        if invalid_removed > 0 {
+            summary.invalid_removed_windows = summary
+                .invalid_removed_windows
+                .saturating_add(invalid_removed);
+        }
+    }
+
+    let prune_plan = global_compaction_prune_plan(render_tabs, target_budget, max_prune_per_tick);
+    summary.pruned_windows =
+        apply_global_compaction_prune_plan(render_tabs, namespace_id, prune_plan);
+    summary.total_windows_after = total_window_count(render_tabs);
+    summary.has_visible_windows_after = render_tabs.values().any(tab_has_visible_windows);
+    summary.has_pending_work_after = has_pending_compaction_work(render_tabs, target_budget);
+    summary
 }
 
 fn shell_visible_close_indices(tab_windows: &TabWindows) -> Vec<usize> {
@@ -63,8 +189,6 @@ fn close_visible_tab_windows(tab_windows: &mut TabWindows, namespace_id: u32) ->
         remove_cached_window_at(tab_windows, namespace_id, remove_index);
         closed_windows = closed_windows.saturating_add(1);
     }
-
-    rebuild_available_window_placement_index(tab_windows);
     closed_windows
 }
 
@@ -78,7 +202,7 @@ fn release_unused_tab_windows(
 ) -> ReleaseUnusedSummary {
     let hide_config = hide_window_config();
     let mut summary = ReleaseUnusedSummary::default();
-    let mut hide_indices = std::mem::take(&mut tab_windows.visible_available_indices);
+    let mut hide_indices = tab_windows.take_visible_available_indices_for_hide();
     if hide_indices.is_empty() {
         return summary;
     }
@@ -119,9 +243,17 @@ fn release_unused_tab_windows(
         }
 
         let previous_lifecycle = tab_windows.windows[index].lifecycle;
+        let previous_placement = tab_windows.windows[index].placement;
         tab_windows.windows[index].mark_hidden();
         let next_lifecycle = tab_windows.windows[index].lifecycle;
-        tab_windows.track_window_transition(previous_lifecycle, next_lifecycle);
+        let next_placement = tab_windows.windows[index].placement;
+        tab_windows.track_window_transition(
+            index,
+            previous_lifecycle,
+            previous_placement,
+            next_lifecycle,
+            next_placement,
+        );
         summary.hidden_windows = summary.hidden_windows.saturating_add(1);
     }
 
@@ -130,8 +262,8 @@ fn release_unused_tab_windows(
         summary.invalid_removed_windows = summary
             .invalid_removed_windows
             .saturating_add(invalid_removed);
-        rebuild_available_window_placement_index(tab_windows);
     }
+    tab_windows.debug_assert_tracking_consistent();
     summary
 }
 
@@ -159,7 +291,7 @@ pub(crate) fn recover_invalid_window_in_tab(
         return false;
     }
     let _ = remove_invalid_windows(tab_windows, namespace_id);
-    rebuild_available_window_placement_index(tab_windows);
+    tab_windows.debug_assert_tracking_consistent();
     true
 }
 

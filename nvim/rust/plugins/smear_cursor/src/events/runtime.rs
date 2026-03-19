@@ -12,9 +12,11 @@ use crate::core::event::{
     TimerLostWithTokenEvent,
 };
 use crate::core::runtime_reducer::as_delay_ms;
-use crate::core::state::{CoreState, CursorColorProbeWitness, CursorColorSample, ProbeKind};
+use crate::core::state::{
+    CoreState, CursorColorProbeWitness, CursorColorSample, ProbeKind, RenderThermalState,
+};
 use crate::core::types::{DelayBudgetMs, Generation, Millis, TimerId, TimerToken};
-use crate::draw::recover_all_namespaces;
+use crate::draw::{recover_all_namespaces, render_pool_diagnostics};
 use crate::state::CursorLocation;
 use crate::types::Point;
 use nvim_oxi::Result;
@@ -36,62 +38,38 @@ struct CoreTimerHandle {
 
 #[derive(Default)]
 struct CoreTimerHandles {
-    animation: Option<CoreTimerHandle>,
-    ingress: Option<CoreTimerHandle>,
-    recovery: Option<CoreTimerHandle>,
-    cleanup: Option<CoreTimerHandle>,
+    handles: Vec<CoreTimerHandle>,
 }
 
 impl CoreTimerHandles {
-    fn slot_mut(&mut self, timer_id: TimerId) -> &mut Option<CoreTimerHandle> {
-        match timer_id {
-            TimerId::Animation => &mut self.animation,
-            TimerId::Ingress => &mut self.ingress,
-            TimerId::Recovery => &mut self.recovery,
-            TimerId::Cleanup => &mut self.cleanup,
-        }
+    fn insert(&mut self, handle: CoreTimerHandle) {
+        self.handles.push(handle);
     }
 
-    fn replace(&mut self, handle: CoreTimerHandle) -> Option<CoreTimerHandle> {
-        self.slot_mut(handle.token.id()).replace(handle)
+    fn has_outstanding_timer_id(&self, timer_id: TimerId) -> bool {
+        self.handles
+            .iter()
+            .any(|handle| handle.token.id() == timer_id)
     }
 
-    fn clear(&mut self, timer_id: TimerId) -> Option<CoreTimerHandle> {
-        self.slot_mut(timer_id).take()
-    }
-
-    fn clear_all(&mut self) -> [Option<CoreTimerHandle>; 4] {
-        [
-            self.animation.take(),
-            self.ingress.take(),
-            self.recovery.take(),
-            self.cleanup.take(),
-        ]
+    fn clear_all(&mut self) -> Vec<CoreTimerHandle> {
+        self.handles.drain(..).collect()
     }
 
     fn take_by_shell_timer_id(&mut self, shell_timer_id: NvimTimerId) -> Option<CoreTimerHandle> {
-        for slot in [
-            &mut self.animation,
-            &mut self.ingress,
-            &mut self.recovery,
-            &mut self.cleanup,
-        ] {
-            if slot.is_some_and(|handle| handle.shell_timer_id == shell_timer_id) {
-                return slot.take();
-            }
-        }
-
-        None
+        self.handles
+            .iter()
+            .position(|handle| handle.shell_timer_id == shell_timer_id)
+            .map(|index| self.handles.swap_remove(index))
     }
 }
 
 thread_local! {
-    static CORE_TIMER_HANDLES: RefCell<CoreTimerHandles> = const { RefCell::new(CoreTimerHandles {
-        animation: None,
-        ingress: None,
-        recovery: None,
-        cleanup: None,
-    }) };
+    // Reducer token generations define which timer edge is live. The runtime keeps outstanding
+    // shell timers until they fire or the engine resets, so rearming no longer requires host-side
+    // timer replacement on the scheduling path.
+    static CORE_TIMER_HANDLES: RefCell<CoreTimerHandles> =
+        RefCell::new(CoreTimerHandles::default());
 }
 
 fn with_core_timer_handles<R>(f: impl FnOnce(&mut CoreTimerHandles) -> R) -> R {
@@ -237,10 +215,12 @@ impl IngressReadSnapshot {
     }
 }
 
-fn set_core_timer_handle(handle: CoreTimerHandle) {
+fn set_core_timer_handle(handle: CoreTimerHandle) -> bool {
     with_core_timer_handles(|handles| {
-        let _ = handles.replace(handle);
-    });
+        let rearmed = handles.has_outstanding_timer_id(handle.token.id());
+        handles.insert(handle);
+        rearmed
+    })
 }
 
 fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
@@ -262,16 +242,9 @@ fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
     }
 }
 
-fn clear_core_timer_handle(timer_id: TimerId) {
-    let previous = with_core_timer_handles(|handles| handles.clear(timer_id));
-    if let Some(handle) = previous {
-        stop_core_timer_handle(handle, "clear");
-    }
-}
-
 fn clear_all_core_timer_handles() {
     let drained = with_core_timer_handles(CoreTimerHandles::clear_all);
-    for handle in drained.into_iter().flatten() {
+    for handle in drained {
         stop_core_timer_handle(handle, "reset");
     }
 }
@@ -318,6 +291,10 @@ pub(super) fn record_ingress_coalesced() {
     event_loop::record_ingress_coalesced();
 }
 
+pub(super) fn record_delayed_ingress_pending_update() {
+    event_loop::record_delayed_ingress_pending_update();
+}
+
 pub(super) fn record_ingress_dropped() {
     event_loop::record_ingress_dropped();
 }
@@ -346,16 +323,39 @@ pub(super) fn record_timer_fire_duration(duration_micros: u64) {
     event_loop::record_timer_fire_duration(duration_micros);
 }
 
+pub(super) fn record_host_timer_rearm(kind: TimerKind) {
+    event_loop::record_host_timer_rearm(kind);
+}
+
+pub(super) fn record_post_burst_convergence(started_at: Millis, converged_at: Millis) {
+    event_loop::record_post_burst_convergence(started_at, converged_at);
+}
+
 pub(super) fn record_scheduled_queue_depth(depth: usize) {
     event_loop::record_scheduled_queue_depth(depth);
+}
+
+pub(super) fn record_scheduled_queue_depth_for_thermal(thermal: RenderThermalState, depth: usize) {
+    event_loop::record_scheduled_queue_depth_for_thermal(thermal, depth);
 }
 
 pub(super) fn record_scheduled_drain_items(drained_items: usize) {
     event_loop::record_scheduled_drain_items(drained_items);
 }
 
+pub(super) fn record_scheduled_drain_items_for_thermal(
+    thermal: RenderThermalState,
+    drained_items: usize,
+) {
+    event_loop::record_scheduled_drain_items_for_thermal(thermal, drained_items);
+}
+
 pub(super) fn record_scheduled_drain_reschedule() {
     event_loop::record_scheduled_drain_reschedule();
+}
+
+pub(super) fn record_scheduled_drain_reschedule_for_thermal(thermal: RenderThermalState) {
+    event_loop::record_scheduled_drain_reschedule_for_thermal(thermal);
 }
 
 pub(super) fn record_probe_duration(kind: ProbeKind, duration_micros: u64) {
@@ -375,74 +375,174 @@ pub(super) fn event_loop_diagnostics() -> event_loop::EventLoopDiagnostics {
 }
 
 pub(super) fn diagnostics_report() -> String {
+    perf_diagnostics_report()
+}
+
+pub(super) fn perf_diagnostics_report() -> String {
     let loop_diag = event_loop_diagnostics();
     match read_engine_state(|state| {
-        let runtime = state.core_state.runtime();
         let core = state.core_state();
-        let host_bridge_state = match state.shell.host_bridge_state() {
-            HostBridgeState::Unverified => "unverified".to_string(),
-            HostBridgeState::Verified { revision } => format!("verified:v{}", revision.get()),
-        };
-
-        let animation_phase = if !runtime.is_initialized() {
-            "uninitialized"
-        } else if runtime.is_settling() {
-            "settling"
-        } else if runtime.is_animating() {
-            "animating"
-        } else if runtime.is_draining() {
-            "draining"
+        let cleanup = core.render_cleanup();
+        let ingress_policy = core.ingress_policy();
+        let demand_queue = core.demand_queue();
+        let pool = render_pool_diagnostics();
+        let delayed_ingress_due_at = ingress_policy.pending_delay_until();
+        let delayed_ingress_pending = delayed_ingress_due_at.is_some();
+        let queue_cursor_pending = demand_queue.latest_cursor().is_some();
+        let queue_ordered_backlog = demand_queue.ordered().len();
+        let queue_total_backlog =
+            queue_ordered_backlog.saturating_add(usize::from(queue_cursor_pending));
+        let hot_backlog_max = loop_diag
+            .metrics
+            .scheduled_queue_depth_by_thermal
+            .hot
+            .max_depth;
+        let cooling_backlog_max = loop_diag
+            .metrics
+            .scheduled_queue_depth_by_thermal
+            .cooling
+            .max_depth;
+        let post_burst_convergence_last_ms = if loop_diag.metrics.post_burst_convergence.samples > 0
+        {
+            Some(loop_diag.metrics.post_burst_convergence.last_ms)
         } else {
-            "idle"
+            None
         };
+        let compaction_excess_windows = pool
+            .total_windows
+            .saturating_sub(cleanup.idle_target_budget());
 
-        format!(
-            "smear_cursor enabled={} animation_phase={} core_lifecycle={:?} host_bridge={} ingress_received={} ingress_applied={} ingress_dropped={} ingress_coalesced={} observation_requests_executed={} degraded_draw_applications={} stale_token_events={} timer_schedule_samples={} timer_schedule_mean_ms={:.3} timer_schedule_max_ms={:.3} timer_fire_samples={} timer_fire_mean_ms={:.3} timer_fire_max_ms={:.3} scheduled_queue_depth_samples={} scheduled_queue_depth_mean={:.3} scheduled_queue_depth_max={} scheduled_drain_samples={} scheduled_drain_mean_items={:.3} scheduled_drain_max_items={} scheduled_drain_reschedules={} cursor_probe_samples={} cursor_probe_mean_ms={:.3} cursor_probe_max_ms={:.3} cursor_probe_refresh_retries={} cursor_probe_refresh_budget_exhausted={} background_probe_samples={} background_probe_mean_ms={:.3} background_probe_max_ms={:.3} background_probe_refresh_retries={} background_probe_refresh_budget_exhausted={} callback_ewma_ms={:.3} last_autocmd_ms={:.3} last_observation_request_ms={:.3}",
-            runtime.is_enabled(),
-            animation_phase,
-            core.lifecycle(),
-            host_bridge_state,
-            loop_diag.metrics.ingress_received,
-            loop_diag.metrics.ingress_applied,
-            loop_diag.metrics.ingress_dropped,
-            loop_diag.metrics.ingress_coalesced,
-            loop_diag.metrics.observation_requests_executed,
-            loop_diag.metrics.degraded_draw_applications,
-            loop_diag.metrics.stale_token_events,
-            loop_diag.metrics.timer_schedule.samples,
-            loop_diag.metrics.timer_schedule.mean_ms(),
-            loop_diag.metrics.timer_schedule.max_ms(),
-            loop_diag.metrics.timer_fire.samples,
-            loop_diag.metrics.timer_fire.mean_ms(),
-            loop_diag.metrics.timer_fire.max_ms(),
-            loop_diag.metrics.scheduled_queue_depth.samples,
-            loop_diag.metrics.scheduled_queue_depth.mean_depth(),
-            loop_diag.metrics.scheduled_queue_depth.max_depth,
-            loop_diag.metrics.scheduled_drain_items.samples,
-            loop_diag.metrics.scheduled_drain_items.mean_depth(),
-            loop_diag.metrics.scheduled_drain_items.max_depth,
-            loop_diag.metrics.scheduled_drain_reschedules,
-            loop_diag.metrics.cursor_color_probe.duration.samples,
-            loop_diag.metrics.cursor_color_probe.duration.mean_ms(),
-            loop_diag.metrics.cursor_color_probe.duration.max_ms(),
-            loop_diag.metrics.cursor_color_probe.refresh_retries,
-            loop_diag
-                .metrics
-                .cursor_color_probe
-                .refresh_budget_exhausted,
-            loop_diag.metrics.background_probe.duration.samples,
-            loop_diag.metrics.background_probe.duration.mean_ms(),
-            loop_diag.metrics.background_probe.duration.max_ms(),
-            loop_diag.metrics.background_probe.refresh_retries,
-            loop_diag.metrics.background_probe.refresh_budget_exhausted,
-            loop_diag.callback_duration_ewma_ms,
-            loop_diag.last_autocmd_event_ms,
-            loop_diag.last_observation_request_ms,
-        )
+        // Surprising: the Lua-visible `diagnostics()` payload truncates around 1 KiB through the
+        // plugin bridge, so perf automation uses this compact reducer-owned subset instead.
+        [
+            "smear_cursor".to_string(),
+            format!(
+                "cleanup_thermal={}",
+                cleanup_thermal_name(cleanup.thermal())
+            ),
+            format!(
+                "cleanup_idle_target_budget={}",
+                cleanup.idle_target_budget()
+            ),
+            format!(
+                "cleanup_max_prune_per_tick={}",
+                cleanup.max_prune_per_tick()
+            ),
+            format!(
+                "cleanup_next_compaction_due_at_ms={}",
+                optional_millis_value(cleanup.next_compaction_due_at())
+            ),
+            format!(
+                "cleanup_entered_cooling_at_ms={}",
+                optional_millis_value(cleanup.entered_cooling_at())
+            ),
+            format!(
+                "cleanup_hard_purge_due_at_ms={}",
+                optional_millis_value(cleanup.hard_purge_due_at())
+            ),
+            format!("pool_total_windows={}", pool.total_windows),
+            format!("pool_available_windows={}", pool.available_windows),
+            format!("pool_in_use_windows={}", pool.in_use_windows),
+            format!("pool_visible_windows={}", pool.visible_windows),
+            format!("compaction_excess_windows={compaction_excess_windows}"),
+            format!(
+                "compaction_target_reached={}",
+                compaction_excess_windows == 0
+            ),
+            format!("delayed_ingress_pending={delayed_ingress_pending}"),
+            format!(
+                "delayed_ingress_due_at_ms={}",
+                optional_millis_value(delayed_ingress_due_at)
+            ),
+            format!(
+                "delayed_ingress_pending_updates={}",
+                loop_diag.metrics.delayed_ingress_pending_updates
+            ),
+            format!("queue_cursor_pending={queue_cursor_pending}"),
+            format!("queue_ordered_backlog={queue_ordered_backlog}"),
+            format!("queue_total_backlog={queue_total_backlog}"),
+            format!("queue_hot_backlog_max={hot_backlog_max}"),
+            format!("queue_cooling_backlog_max={cooling_backlog_max}"),
+            format!(
+                "post_burst_convergence_last_ms={}",
+                optional_u64_value(post_burst_convergence_last_ms)
+            ),
+            format!(
+                "host_timer_rearms_total={}",
+                loop_diag.metrics.host_timer_rearms_total
+            ),
+            format!(
+                "host_timer_rearms_ingress={}",
+                loop_diag.metrics.host_timer_rearms_by_kind.ingress
+            ),
+            format!(
+                "host_timer_rearms_cleanup={}",
+                loop_diag.metrics.host_timer_rearms_by_kind.cleanup
+            ),
+            format!(
+                "scheduled_drain_hot_max_items={}",
+                loop_diag
+                    .metrics
+                    .scheduled_drain_items_by_thermal
+                    .hot
+                    .max_depth
+            ),
+            format!(
+                "scheduled_drain_cooling_max_items={}",
+                loop_diag
+                    .metrics
+                    .scheduled_drain_items_by_thermal
+                    .cooling
+                    .max_depth
+            ),
+            format!(
+                "scheduled_drain_cold_max_items={}",
+                loop_diag
+                    .metrics
+                    .scheduled_drain_items_by_thermal
+                    .cold
+                    .max_depth
+            ),
+            format!(
+                "scheduled_drain_reschedules_hot={}",
+                loop_diag.metrics.scheduled_drain_reschedules_by_thermal.hot
+            ),
+            format!(
+                "scheduled_drain_reschedules_cooling={}",
+                loop_diag
+                    .metrics
+                    .scheduled_drain_reschedules_by_thermal
+                    .cooling
+            ),
+            format!(
+                "scheduled_drain_reschedules_cold={}",
+                loop_diag
+                    .metrics
+                    .scheduled_drain_reschedules_by_thermal
+                    .cold
+            ),
+        ]
+        .join(" ")
     }) {
         Ok(report) => report,
         Err(err) => format!("smear_cursor error={err}"),
     }
+}
+
+fn cleanup_thermal_name(thermal: RenderThermalState) -> &'static str {
+    match thermal {
+        RenderThermalState::Hot => "hot",
+        RenderThermalState::Cooling => "cooling",
+        RenderThermalState::Cold => "cold",
+    }
+}
+
+fn optional_millis_value(millis: Option<Millis>) -> String {
+    millis.map_or_else(|| "none".to_string(), |millis| millis.value().to_string())
+}
+
+fn optional_u64_value(value: Option<u64>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
 
 fn reset_transient_event_state_with_policy() {
@@ -648,7 +748,6 @@ fn schedule_core_timer_effect(
     requested_at: Millis,
 ) -> Vec<Event> {
     let kind = TimerKind::from_timer_id(token.id());
-    clear_core_timer_handle(token.id());
     let timeout = Duration::from_millis(delay_ms);
     let timer_schedule_summary = format!(
         "kind={} token={} delay_ms={} requested_at={}",
@@ -669,10 +768,13 @@ fn schedule_core_timer_effect(
                     shell_timer_id.get(),
                 )
             });
-            set_core_timer_handle(CoreTimerHandle {
+            let rearmed = set_core_timer_handle(CoreTimerHandle {
                 shell_timer_id,
                 token,
             });
+            if rearmed {
+                record_host_timer_rearm(kind);
+            }
             Vec::new()
         }
         Err(err) => {
@@ -761,6 +863,15 @@ impl EffectExecutor for NeovimEffectExecutor {
             Effect::RecordEventLoopMetric(metric) => {
                 match metric {
                     EventLoopMetricEffect::IngressCoalesced => record_ingress_coalesced(),
+                    EventLoopMetricEffect::DelayedIngressPendingUpdated => {
+                        record_delayed_ingress_pending_update();
+                    }
+                    EventLoopMetricEffect::CleanupConvergedToCold {
+                        started_at,
+                        converged_at,
+                    } => {
+                        record_post_burst_convergence(started_at, converged_at);
+                    }
                     EventLoopMetricEffect::StaleToken => record_stale_token_event(),
                     EventLoopMetricEffect::ProbeRefreshRetried(kind) => {
                         record_probe_refresh_retried(kind);
@@ -862,7 +973,7 @@ pub(super) fn now_ms() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::TimerGeneration;
+    use crate::core::types::{TimerGeneration, TimerId};
 
     fn shell_timer_id(value: i64) -> NvimTimerId {
         NvimTimerId::try_new(value).expect("test shell timer id must be positive")
@@ -876,36 +987,48 @@ mod tests {
     }
 
     #[test]
-    fn core_timer_handles_replace_is_slot_scoped() {
+    fn core_timer_handles_insert_keeps_multiple_shell_timers_for_the_same_kind() {
         let mut handles = CoreTimerHandles::default();
         let animation = handle(11, TimerId::Animation, 1);
         let ingress = handle(12, TimerId::Ingress, 2);
-        let replacement = handle(13, TimerId::Animation, 3);
+        let rearmed_animation = handle(13, TimerId::Animation, 3);
 
-        assert_eq!(handles.replace(animation), None);
-        assert_eq!(handles.replace(ingress), None);
-        assert_eq!(handles.replace(replacement), Some(animation));
-        assert_eq!(handles.animation, Some(replacement));
-        assert_eq!(handles.ingress, Some(ingress));
+        handles.insert(animation);
+        handles.insert(ingress);
+        handles.insert(rearmed_animation);
+
+        assert_eq!(
+            handles.take_by_shell_timer_id(animation.shell_timer_id),
+            Some(animation)
+        );
+        assert_eq!(
+            handles.take_by_shell_timer_id(ingress.shell_timer_id),
+            Some(ingress)
+        );
+        assert_eq!(
+            handles.take_by_shell_timer_id(rearmed_animation.shell_timer_id),
+            Some(rearmed_animation)
+        );
     }
 
     #[test]
-    fn core_timer_handles_take_by_shell_timer_id_is_slot_scoped() {
+    fn core_timer_handles_take_by_shell_timer_id_is_exact() {
         let mut handles = CoreTimerHandles::default();
         let animation = handle(11, TimerId::Animation, 1);
         let ingress = handle(12, TimerId::Ingress, 2);
 
-        let _ = handles.replace(animation);
-        let _ = handles.replace(ingress);
+        handles.insert(animation);
+        handles.insert(ingress);
 
         assert_eq!(
             handles.take_by_shell_timer_id(shell_timer_id(11)),
             Some(animation)
         );
-        assert_eq!(handles.animation, None);
-        assert_eq!(handles.ingress, Some(ingress));
         assert_eq!(handles.take_by_shell_timer_id(shell_timer_id(99)), None);
-        assert_eq!(handles.ingress, Some(ingress));
+        assert_eq!(
+            handles.take_by_shell_timer_id(shell_timer_id(12)),
+            Some(ingress)
+        );
     }
 
     #[test]
@@ -914,12 +1037,12 @@ mod tests {
         let animation = handle(21, TimerId::Animation, 1);
         let recovery = handle(22, TimerId::Recovery, 2);
 
-        let _ = handles.replace(animation);
-        let _ = handles.replace(recovery);
+        handles.insert(animation);
+        handles.insert(recovery);
 
         let drained = handles.clear_all();
 
-        assert_eq!(drained, [Some(animation), None, Some(recovery), None]);
+        assert_eq!(drained, vec![animation, recovery]);
         assert_eq!(
             handles.take_by_shell_timer_id(animation.shell_timer_id),
             None
@@ -928,6 +1051,15 @@ mod tests {
             handles.take_by_shell_timer_id(recovery.shell_timer_id),
             None
         );
+    }
+
+    #[test]
+    fn core_timer_handles_detect_outstanding_kind_for_rearm_tracking() {
+        let mut handles = CoreTimerHandles::default();
+        handles.insert(handle(41, TimerId::Ingress, 1));
+
+        assert!(handles.has_outstanding_timer_id(TimerId::Ingress));
+        assert!(!handles.has_outstanding_timer_id(TimerId::Cleanup));
     }
 
     #[test]
@@ -942,5 +1074,22 @@ mod tests {
             read_engine_state(|state| state.shell.namespace_id()),
             Ok(Some(77))
         );
+    }
+
+    #[test]
+    fn perf_diagnostics_report_includes_recovery_fields_within_bridge_budget() {
+        let report = perf_diagnostics_report();
+
+        assert!(report.starts_with("smear_cursor "));
+        assert!(report.contains("cleanup_thermal="));
+        assert!(report.contains("pool_total_windows="));
+        assert!(report.contains("queue_total_backlog="));
+        assert!(report.contains("queue_hot_backlog_max="));
+        assert!(report.contains("queue_cooling_backlog_max="));
+        assert!(report.contains("delayed_ingress_pending_updates="));
+        assert!(report.contains("post_burst_convergence_last_ms="));
+        assert!(report.contains("host_timer_rearms_ingress="));
+        assert!(report.contains("scheduled_drain_reschedules_cooling="));
+        assert!(report.len() < 1000);
     }
 }

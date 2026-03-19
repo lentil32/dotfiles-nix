@@ -1,8 +1,8 @@
 use super::Transition;
 use super::planning::plan_ready_state;
 use super::support::{
-    delay_budget_from_ms, ingress_cursor_presentation_effect,
-    ingress_marks_cursor_autocmd_freshness, invalidate_cleanup_state, next_pending_probe_effect,
+    delay_budget_from_ms, enter_hot_cleanup_state, ingress_cursor_presentation_effect,
+    ingress_marks_cursor_autocmd_freshness, next_pending_probe_effect,
     probe_refresh_budget_exhausted_metric, probe_refresh_retry_metric, probe_requests_for,
     record_event_loop_metric, request_observation_base, reset_recovery_attempt,
     schedule_timer_with_delay,
@@ -28,6 +28,8 @@ pub(super) fn start_next_observation(
         return (next_state, None);
     };
 
+    let cleared_ingress_policy = next_state.ingress_policy().clear_pending_delay();
+    let next_state = next_state.with_ingress_policy(cleared_ingress_policy);
     let request = ObservationRequest::new(demand, probe_requests_for(&next_state));
     let next_state = next_state.into_observing(request.clone());
     let effect = request_observation_base(&next_state, request);
@@ -78,8 +80,23 @@ fn delayed_cursor_ingress_transition(state: CoreState, observed_at: Millis) -> O
         return None;
     }
 
+    let delay_due_at = Millis::new(observed_at.value().saturating_add(delay_ms));
+    let was_pending = state.ingress_policy().pending_delay_until().is_some();
+    let next_ingress_policy = state
+        .ingress_policy()
+        .note_pending_delay_until(delay_due_at);
+    let next_state = state.with_ingress_policy(next_ingress_policy);
+    if was_pending {
+        return Some(Transition::new(
+            next_state,
+            vec![record_event_loop_metric(
+                EventLoopMetricEffect::DelayedIngressPendingUpdated,
+            )],
+        ));
+    }
+
     let (scheduled_state, effect) = schedule_timer_with_delay(
-        state,
+        next_state,
         TimerKind::Ingress,
         delay_budget_from_ms(delay_ms),
         observed_at,
@@ -96,10 +113,12 @@ fn queue_external_demand(
     let active_cursor_superseded = state
         .active_demand()
         .is_some_and(|active| active.is_cursor() && queued_demand.is_cursor());
+    let max_kept_windows = state.runtime().config.max_kept_windows;
     let (queued_state, queue_coalesced) =
         state.map_demand_queue(|queue| queue.enqueue(queued_demand));
     let was_coalesced = active_cursor_superseded || queue_coalesced;
-    let queued_state = invalidate_cleanup_state(queued_state);
+    let (queued_state, hot_cleanup_effects) =
+        enter_hot_cleanup_state(queued_state, observed_at, max_kept_windows);
 
     let mut transition = match queued_state.protocol() {
         crate::core::state::ProtocolState::Idle { .. } => Transition::stay(&queued_state),
@@ -120,6 +139,10 @@ fn queue_external_demand(
             Transition::new(queued_state, Vec::new())
         }
     };
+
+    if !hot_cleanup_effects.is_empty() {
+        transition.effects.extend(hot_cleanup_effects);
+    }
 
     if was_coalesced {
         transition.effects.insert(

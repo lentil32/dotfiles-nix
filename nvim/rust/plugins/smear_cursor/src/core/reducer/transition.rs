@@ -111,8 +111,14 @@ fn queued_demand_fingerprint(demand: &QueuedDemand) -> u64 {
     demand_fingerprint(demand.as_demand())
 }
 
-fn ingress_policy_fingerprint(last_cursor_autocmd_at: Option<crate::core::types::Millis>) -> u64 {
+fn ingress_policy_fingerprint(
+    last_cursor_autocmd_at: Option<crate::core::types::Millis>,
+    pending_delay_until: Option<crate::core::types::Millis>,
+) -> u64 {
     last_cursor_autocmd_at.map_or(0_u64, crate::core::types::Millis::value)
+        ^ pending_delay_until
+            .map_or(0_u64, crate::core::types::Millis::value)
+            .rotate_left(11)
 }
 
 fn probe_request_set_fingerprint(requests: ProbeRequestSet) -> u64 {
@@ -618,8 +624,10 @@ impl Transition {
                 .map_or(0_u64, TimerToken::fingerprint);
 
         let recovery_policy_seed = u64::from(self.next.recovery_policy().retry_attempt());
-        let ingress_policy_seed =
-            ingress_policy_fingerprint(self.next.ingress_policy().last_cursor_autocmd_at());
+        let ingress_policy_seed = ingress_policy_fingerprint(
+            self.next.ingress_policy().last_cursor_autocmd_at(),
+            self.next.ingress_policy().pending_delay_until(),
+        );
         let cleanup_seed = debug_fingerprint(&self.next.render_cleanup());
         let entropy = self.next.entropy();
         let entropy_seed = entropy.next_proposal_id().value() ^ entropy.next_ingress_seq().value();

@@ -1,8 +1,9 @@
 use super::super::logging::{trace_lazy, warn};
 use super::super::runtime::{
     EffectExecutor, NeovimEffectExecutor, core_state, now_ms, record_scheduled_drain_items,
-    record_scheduled_drain_reschedule, record_scheduled_queue_depth, set_core_state,
-    to_core_millis,
+    record_scheduled_drain_items_for_thermal, record_scheduled_drain_reschedule,
+    record_scheduled_drain_reschedule_for_thermal, record_scheduled_queue_depth,
+    record_scheduled_queue_depth_for_thermal, set_core_state, to_core_millis,
 };
 use super::super::timers::schedule_guarded;
 use super::super::trace::{core_event_summary, core_state_summary, effect_summary};
@@ -10,7 +11,7 @@ use super::labels::{core_event_label, effect_label};
 use crate::core::effect::Effect;
 use crate::core::event::{EffectFailedEvent, Event as CoreEvent, ProbeReportedEvent};
 use crate::core::reducer::reduce as reduce_core_event;
-use crate::core::state::ProbeReuse;
+use crate::core::state::{ProbeReuse, RenderThermalState};
 use nvim_oxi::Result;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -43,23 +44,33 @@ struct ScheduledEffectQueueState {
     drain_scheduled: bool,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ScheduledStageResult {
+    should_schedule: bool,
+    depth: usize,
+}
+
 impl ScheduledEffectQueueState {
-    fn stage_item(&mut self, item: ScheduledWorkItem) -> bool {
+    fn stage_item(&mut self, item: ScheduledWorkItem) -> ScheduledStageResult {
         self.items.push_back(item);
-        record_scheduled_queue_depth(self.items.len());
-        if self.drain_scheduled {
+        let depth = self.items.len();
+        let should_schedule = if self.drain_scheduled {
             false
         } else {
             self.drain_scheduled = true;
             true
+        };
+        ScheduledStageResult {
+            should_schedule,
+            depth,
         }
     }
 
-    fn stage_batch(&mut self, effects: Vec<Effect>) -> bool {
+    fn stage_batch(&mut self, effects: Vec<Effect>) -> ScheduledStageResult {
         self.stage_item(ScheduledWorkItem::EffectBatch(effects))
     }
 
-    fn stage_core_event(&mut self, event: CoreEvent) -> bool {
+    fn stage_core_event(&mut self, event: CoreEvent) -> ScheduledStageResult {
         self.stage_item(ScheduledWorkItem::CoreEvent(Box::new(event)))
     }
 
@@ -94,20 +105,34 @@ fn schedule_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
     });
 }
 
+fn current_cleanup_thermal_state() -> Option<RenderThermalState> {
+    core_state()
+        .ok()
+        .map(|state| state.render_cleanup().thermal())
+}
+
 fn stage_effect_batch_on_default_queue(effects: Vec<Effect>) {
     if effects.is_empty() {
         return;
     }
 
-    let should_schedule = with_scheduled_effect_queue(|queue| queue.stage_batch(effects));
-    if should_schedule {
+    let stage = with_scheduled_effect_queue(|queue| queue.stage_batch(effects));
+    record_scheduled_queue_depth(stage.depth);
+    if let Some(thermal) = current_cleanup_thermal_state() {
+        record_scheduled_queue_depth_for_thermal(thermal, stage.depth);
+    }
+    if stage.should_schedule {
         schedule_scheduled_effect_drain(ScheduledEffectDrainEntry::NextItem);
     }
 }
 
 fn stage_core_event_on_default_queue(event: CoreEvent) {
-    let should_schedule = with_scheduled_effect_queue(|queue| queue.stage_core_event(event));
-    if should_schedule {
+    let stage = with_scheduled_effect_queue(|queue| queue.stage_core_event(event));
+    record_scheduled_queue_depth(stage.depth);
+    if let Some(thermal) = current_cleanup_thermal_state() {
+        record_scheduled_queue_depth_for_thermal(thermal, stage.depth);
+    }
+    if stage.should_schedule {
         schedule_scheduled_effect_drain(ScheduledEffectDrainEntry::NextItem);
     }
 }
@@ -263,6 +288,7 @@ fn dispatch_scheduled_core_event(event: CoreEvent) -> Result<()> {
 }
 
 fn scheduled_drain_budget() -> usize {
+    let thermal = current_cleanup_thermal_state().unwrap_or(RenderThermalState::Cold);
     with_scheduled_effect_queue(|queue| {
         let queued_items = queue.items.len();
         if queued_items == 0 {
@@ -270,8 +296,23 @@ fn scheduled_drain_budget() -> usize {
             return 0;
         }
 
-        scheduled_drain_budget_for_depth(queued_items)
+        scheduled_drain_budget_for_thermal(thermal, queued_items)
     })
+}
+
+fn scheduled_drain_budget_for_thermal(thermal: RenderThermalState, queued_items: usize) -> usize {
+    match thermal {
+        RenderThermalState::Cooling => {
+            // Surprising: Cooling still drains only the snapshot that was already queued when this
+            // edge started. Refresh-required probe retries must remain deferred to the next edge,
+            // so aggressive convergence expands the snapshot budget instead of recursively draining
+            // follow-up work staged mid-pass.
+            queued_items
+        }
+        RenderThermalState::Hot | RenderThermalState::Cold => {
+            scheduled_drain_budget_for_depth(queued_items)
+        }
+    }
 }
 
 fn scheduled_drain_budget_for_depth(queued_items: usize) -> usize {
@@ -294,6 +335,7 @@ fn drain_scheduled_work_with_executor(
 ) -> std::result::Result<bool, ScheduledWorkExecutionError> {
     // Drain a bounded snapshot of already-staged work so backlog can recover faster, while any
     // reducer follow-ups created during this pass still remain deferred to a later scheduled edge.
+    let drain_thermal = current_cleanup_thermal_state();
     let mut remaining_budget = scheduled_drain_budget();
     let mut drained_items = 0_usize;
     while remaining_budget > 0 {
@@ -303,6 +345,9 @@ fn drain_scheduled_work_with_executor(
             });
             if drained_items > 0 {
                 record_scheduled_drain_items(drained_items);
+                if let Some(thermal) = drain_thermal {
+                    record_scheduled_drain_items_for_thermal(thermal, drained_items);
+                }
             }
             return Ok(false);
         };
@@ -331,9 +376,15 @@ fn drain_scheduled_work_with_executor(
 
     if drained_items > 0 {
         record_scheduled_drain_items(drained_items);
+        if let Some(thermal) = drain_thermal {
+            record_scheduled_drain_items_for_thermal(thermal, drained_items);
+        }
     }
     if has_more_items {
         record_scheduled_drain_reschedule();
+        if let Some(thermal) = drain_thermal {
+            record_scheduled_drain_reschedule_for_thermal(thermal);
+        }
     }
 
     Ok(has_more_items)
@@ -364,8 +415,9 @@ fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
 mod tests {
     use super::{
         ScheduledWorkItem, dispatch_core_event, drain_scheduled_work_with_executor,
-        reset_scheduled_effect_queue, reset_scheduled_queue_after_failure,
-        scheduled_drain_budget_for_depth, with_scheduled_effect_queue,
+        reset_scheduled_effect_queue, reset_scheduled_queue_after_failure, scheduled_drain_budget,
+        scheduled_drain_budget_for_depth, scheduled_drain_budget_for_thermal,
+        with_scheduled_effect_queue,
     };
     use crate::core::effect::{Effect, EventLoopMetricEffect};
     use crate::core::event::{
@@ -376,7 +428,7 @@ mod tests {
     use crate::core::state::{
         BackgroundProbeBatch, BackgroundProbeChunk, CoreState, CursorColorSample,
         ExternalDemandKind, ObservationBasis, ObservationMotion, ObservationRequest, ProbeKind,
-        ProbeReuse,
+        ProbeReuse, RenderCleanupState, RenderThermalState,
     };
     use crate::core::types::{
         CursorCol, CursorPosition, CursorRow, Lifecycle, Millis, ViewportSnapshot,
@@ -416,7 +468,9 @@ mod tests {
     }
 
     fn ready_state() -> CoreState {
-        CoreState::default().initialize()
+        let mut runtime = crate::state::RuntimeState::default();
+        runtime.config.delay_event_to_smear = 0.0;
+        CoreState::default().with_runtime(runtime).initialize()
     }
 
     fn cursor(row: u32, col: u32) -> CursorPosition {
@@ -510,7 +564,7 @@ mod tests {
                 // CONTEXT: `stage_batch` reports whether this enqueue operation also needs to arm
                 // the drain edge; it does not signal whether the batch was accepted.
                 let should_schedule =
-                    with_scheduled_effect_queue(|queue| queue.stage_batch(effects));
+                    with_scheduled_effect_queue(|queue| queue.stage_batch(effects).should_schedule);
                 assert!(
                     should_schedule,
                     "ingress dispatch should arm exactly one scheduled work item"
@@ -593,8 +647,21 @@ mod tests {
         ready_state().with_runtime(runtime)
     }
 
+    fn render_cleanup_for_thermal(thermal: RenderThermalState) -> RenderCleanupState {
+        let scheduled = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 12);
+        match thermal {
+            RenderThermalState::Hot => scheduled,
+            RenderThermalState::Cooling => scheduled.enter_cooling(Millis::new(65)),
+            RenderThermalState::Cold => RenderCleanupState::cold(),
+        }
+    }
+
+    fn ready_state_with_cleanup_thermal(thermal: RenderThermalState) -> CoreState {
+        ready_state().with_render_cleanup(render_cleanup_for_thermal(thermal))
+    }
+
     fn queue_stage_batch(effects: Vec<Effect>) -> bool {
-        with_scheduled_effect_queue(|queue| queue.stage_batch(effects))
+        with_scheduled_effect_queue(|queue| queue.stage_batch(effects).should_schedule)
     }
 
     fn queued_work_count() -> usize {
@@ -802,18 +869,53 @@ mod tests {
         }
 
         #[test]
-        fn backlog_aware_budget_clears_small_queues_and_caps_large_backlogs() {
-            assert_eq!(scheduled_drain_budget_for_depth(0), 0);
-            assert_eq!(scheduled_drain_budget_for_depth(3), 3);
-            assert_eq!(scheduled_drain_budget_for_depth(16), 16);
-            assert_eq!(scheduled_drain_budget_for_depth(24), 16);
-            assert_eq!(scheduled_drain_budget_for_depth(40), 20);
-            assert_eq!(scheduled_drain_budget_for_depth(117), 32);
+        fn hot_budget_clears_small_queues_and_caps_large_backlogs() {
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Hot, 0),
+                0
+            );
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Hot, 3),
+                3
+            );
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Hot, 16),
+                16
+            );
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Hot, 24),
+                16
+            );
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Hot, 40),
+                20
+            );
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Hot, 117),
+                32
+            );
         }
 
         #[test]
-        fn first_edge_reschedules_when_backlog_exceeds_the_bounded_fractional_budget() {
+        fn cooling_budget_expands_to_the_full_queued_snapshot() {
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Cooling, 0),
+                0
+            );
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Cooling, 3),
+                3
+            );
+            assert_eq!(
+                scheduled_drain_budget_for_thermal(RenderThermalState::Cooling, 40),
+                40
+            );
+        }
+
+        #[test]
+        fn hot_first_edge_reschedules_when_backlog_exceeds_the_bounded_fractional_budget() {
             let _scope = CoreDispatchTestContext::new();
+            replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
             for _ in 0..40 {
                 let should_schedule = queue_stage_batch(vec![Effect::RedrawCmdline]);
                 if queued_work_count() == 1 {
@@ -846,6 +948,137 @@ mod tests {
             assert!(
                 queue_is_marked_scheduled(),
                 "queue should remain armed while bounded backlog remains"
+            );
+        }
+
+        #[test]
+        fn hot_bounded_drain_converges_exactly_for_a_range_of_backlog_depths() {
+            for queued_items in 1..=96 {
+                let _scope = CoreDispatchTestContext::new();
+                replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
+                for _ in 0..queued_items {
+                    let should_schedule = queue_stage_batch(vec![Effect::RedrawCmdline]);
+                    if queued_work_count() == 1 {
+                        assert!(
+                            should_schedule,
+                            "first staged item should arm the drain for backlog {queued_items}"
+                        );
+                    } else {
+                        assert!(
+                            !should_schedule,
+                            "later staged items should reuse the armed drain for backlog {queued_items}"
+                        );
+                    }
+                }
+                let mut executor = RecordingExecutor::default();
+
+                let has_more_items = drain_next_edge(&mut executor);
+                let expected_drained = scheduled_drain_budget_for_depth(queued_items);
+                let expected_remaining = queued_items.saturating_sub(expected_drained);
+
+                assert_eq!(
+                    executor.executed_effects.len(),
+                    expected_drained,
+                    "drain edge should process the exact bounded budget for backlog {queued_items}"
+                );
+                assert_eq!(
+                    queued_work_count(),
+                    expected_remaining,
+                    "queued backlog should shrink by the exact bounded budget for backlog {queued_items}"
+                );
+                assert_eq!(
+                    has_more_items,
+                    expected_remaining > 0,
+                    "drain outcome should report whether bounded backlog remains for backlog {queued_items}"
+                );
+                assert_eq!(
+                    queue_is_marked_scheduled(),
+                    expected_remaining > 0,
+                    "drain scheduling flag should track whether queued backlog remains for backlog {queued_items}"
+                );
+            }
+        }
+
+        #[test]
+        fn cooling_convergence_leaves_no_queue_tail_after_idle_backlog_drains() {
+            let _scope = CoreDispatchTestContext::new();
+            replace_core_state(ready_state_with_cleanup_thermal(
+                RenderThermalState::Cooling,
+            ));
+            for _ in 0..40 {
+                let should_schedule = queue_stage_batch(vec![Effect::RedrawCmdline]);
+                if queued_work_count() == 1 {
+                    assert!(should_schedule, "first staged item should arm the drain");
+                } else {
+                    assert!(
+                        !should_schedule,
+                        "subsequent staged items should reuse the armed drain edge"
+                    );
+                }
+            }
+            let mut executor = RecordingExecutor::default();
+
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(
+                !has_more_items,
+                "cooling should converge the staged backlog on the first drain edge"
+            );
+            assert_eq!(
+                executor.executed_effects.len(),
+                40,
+                "cooling should drain the full queued snapshot instead of a bounded fraction"
+            );
+            assert_eq!(
+                queued_work_count(),
+                0,
+                "cooling should not leave a bounded tail from the pre-existing backlog"
+            );
+            assert_eq!(
+                scheduled_drain_budget(),
+                0,
+                "idle convergence should leave no remaining scheduled-drain budget"
+            );
+            assert!(
+                !queue_is_marked_scheduled(),
+                "queue should disarm once cooling drains the existing backlog to zero"
+            );
+        }
+
+        #[test]
+        fn cooling_snapshot_drain_still_defers_mid_pass_follow_up_work() {
+            let _scope = CoreDispatchTestContext::new();
+            replace_core_state(ready_state_with_cleanup_thermal(
+                RenderThermalState::Cooling,
+            ));
+            assert!(queue_stage_batch(vec![Effect::RedrawCmdline]));
+            let mut executor = RecordingExecutor::default();
+            executor
+                .planned_follow_ups
+                .push_back(vec![external_cursor_demand(21)]);
+
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(
+                has_more_items,
+                "follow-up work staged during cooling should remain deferred to the next edge"
+            );
+            assert_eq!(
+                executor.executed_effects,
+                vec![Effect::RedrawCmdline],
+                "cooling should still execute the original staged snapshot in order"
+            );
+            assert!(
+                matches!(
+                    queued_front_work_item(),
+                    Some(ScheduledWorkItem::EffectBatch(ref effects))
+                        if contains_observation_base_request(effects)
+                ),
+                "mid-pass follow-up work should stay queued after the cooling snapshot drains"
+            );
+            assert!(
+                queue_is_marked_scheduled(),
+                "queue should remain armed when deferred follow-up work is still pending"
             );
         }
     }
@@ -1000,7 +1233,7 @@ mod tests {
             );
             assert!(matches!(
                 executor.executed_effects.as_slice(),
-                [Effect::RequestObservationBase(_)]
+                [Effect::RequestObservationBase(_), Effect::ScheduleTimer(_)]
             ));
         }
 
@@ -1159,7 +1392,7 @@ mod tests {
 
             assert!(matches!(
                 executor.executed_effects.as_slice(),
-                [Effect::RequestObservationBase(_)]
+                [Effect::RequestObservationBase(_), Effect::ScheduleTimer(_)]
             ));
             assert_eq!(
                 queued_work_count(),
@@ -1178,10 +1411,13 @@ mod tests {
             let (_scope, _request, _basis, first_background_chunk, executor) =
                 setup_after_cursor_color_probe_edge();
 
-            assert!(matches!(
-                executor.executed_effects[1],
-                Effect::RequestProbe(ref payload) if payload.kind == ProbeKind::CursorColor
-            ));
+            assert!(
+                executor.executed_effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::RequestProbe(payload) if payload.kind == ProbeKind::CursorColor
+                )),
+                "cursor-color edge should execute the cursor-color probe request",
+            );
             assert_eq!(queued_work_count(), 1);
             assert!(matches!(
                 queued_front_work_item(),
@@ -1213,12 +1449,15 @@ mod tests {
                 has_more_items,
                 "background chunk completion should queue the next chunk"
             );
-            assert!(matches!(
-                executor.executed_effects[2],
-                Effect::RequestProbe(ref payload)
-                    if payload.kind == ProbeKind::Background
-                        && payload.background_chunk == Some(first_background_chunk)
-            ));
+            assert!(
+                executor.executed_effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::RequestProbe(payload)
+                        if payload.kind == ProbeKind::Background
+                            && payload.background_chunk == Some(first_background_chunk)
+                )),
+                "background-chunk edge should execute the current background probe request",
+            );
             assert_eq!(queued_work_count(), 1);
             assert!(matches!(
                 queued_front_work_item(),

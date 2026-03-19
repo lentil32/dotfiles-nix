@@ -77,6 +77,19 @@ pub(super) fn ingress_marks_cursor_autocmd_freshness(kind: ExternalDemandKind) -
     )
 }
 
+fn hot_cleanup_state(
+    state: &CoreState,
+    observed_at: Millis,
+    max_kept_windows: usize,
+) -> RenderCleanupState {
+    RenderCleanupState::scheduled(
+        observed_at,
+        render_cleanup_delay_ms(&state.runtime().config),
+        render_hard_cleanup_delay_ms(&state.runtime().config),
+        max_kept_windows,
+    )
+}
+
 pub(super) fn schedule_timer_with_delay(
     state: CoreState,
     kind: TimerKind,
@@ -249,11 +262,17 @@ fn proposal_max_kept_windows(state: &CoreState, proposal: &InFlightProposal) -> 
     }
 }
 
-pub(super) fn invalidate_cleanup_state(state: CoreState) -> CoreState {
-    let timers = state.timers().clear_active(TimerId::Cleanup);
-    state
-        .with_timers(timers)
-        .with_render_cleanup(RenderCleanupState::Inactive)
+pub(super) fn enter_hot_cleanup_state(
+    state: CoreState,
+    observed_at: Millis,
+    max_kept_windows: usize,
+) -> (CoreState, Vec<Effect>) {
+    let cleanup = hot_cleanup_state(&state, observed_at, max_kept_windows);
+    let next_state = state.with_render_cleanup(cleanup);
+    if next_state.timers().active_token(TimerId::Cleanup).is_some() {
+        return (next_state, Vec::new());
+    }
+    arm_render_cleanup_timer(next_state, observed_at)
 }
 
 pub(super) fn arm_render_cleanup_timer(
@@ -280,12 +299,14 @@ pub(super) fn advance_cleanup_for_proposal(
 ) -> (CoreState, Vec<Effect>) {
     match proposal.cleanup_action() {
         RenderCleanupAction::NoAction => (state, Vec::new()),
-        RenderCleanupAction::Invalidate => (invalidate_cleanup_state(state), Vec::new()),
+        RenderCleanupAction::Invalidate => {
+            let max_kept_windows = proposal_max_kept_windows(&state, proposal);
+            enter_hot_cleanup_state(state, observed_at, max_kept_windows)
+        }
         RenderCleanupAction::Schedule => {
-            let cleanup = RenderCleanupState::scheduled(
+            let cleanup = hot_cleanup_state(
+                &state,
                 observed_at,
-                render_cleanup_delay_ms(&state.runtime().config),
-                render_hard_cleanup_delay_ms(&state.runtime().config),
                 proposal_max_kept_windows(&state, proposal),
             );
             arm_render_cleanup_timer(state.with_render_cleanup(cleanup), observed_at)
@@ -297,37 +318,61 @@ pub(super) fn cleanup_effect_for_timer_fire(
     cleanup: RenderCleanupState,
     observed_at: Millis,
 ) -> Option<Effect> {
-    match cleanup {
-        RenderCleanupState::Inactive => None,
-        RenderCleanupState::Armed {
-            soft_due_at,
-            hard_due_at: _,
-            ..
-        } if observed_at.value() < soft_due_at.value() => None,
-        RenderCleanupState::Armed { hard_due_at, .. }
-        | RenderCleanupState::SoftCleared { hard_due_at, .. }
-            if observed_at.value() >= hard_due_at.value() =>
-        {
+    if cleanup
+        .hard_purge_due_at()
+        .is_some_and(|hard_due_at| observed_at.value() >= hard_due_at.value())
+    {
+        return Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+            execution: RenderCleanupExecution::HardPurge,
+        }));
+    }
+
+    match cleanup.thermal() {
+        crate::core::state::RenderThermalState::Hot => {
+            let Some(next_compaction_due_at) = cleanup.next_compaction_due_at() else {
+                return None;
+            };
+            if observed_at.value() < next_compaction_due_at.value() {
+                return None;
+            }
             Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
-                execution: RenderCleanupExecution::HardPurge,
+                execution: RenderCleanupExecution::SoftClear {
+                    max_kept_windows: cleanup.max_kept_windows(),
+                },
             }))
         }
-        RenderCleanupState::Armed {
-            max_kept_windows, ..
-        } => Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
-            execution: RenderCleanupExecution::SoftClear { max_kept_windows },
-        })),
-        RenderCleanupState::SoftCleared { .. } => None,
+        crate::core::state::RenderThermalState::Cooling => {
+            let Some(next_compaction_due_at) = cleanup.next_compaction_due_at() else {
+                return None;
+            };
+            if observed_at.value() < next_compaction_due_at.value() {
+                return None;
+            }
+            Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+                execution: RenderCleanupExecution::CompactToBudget {
+                    target_budget: cleanup.idle_target_budget(),
+                    max_prune_per_tick: cleanup.max_prune_per_tick(),
+                },
+            }))
+        }
+        crate::core::state::RenderThermalState::Cold => None,
     }
 }
 
 pub(super) fn cleanup_state_after_applied(
     cleanup: RenderCleanupState,
     action: RenderCleanupAppliedAction,
+    observed_at: Millis,
 ) -> RenderCleanupState {
     match action {
-        RenderCleanupAppliedAction::SoftCleared => cleanup.soft_cleared(),
-        RenderCleanupAppliedAction::HardPurged => RenderCleanupState::Inactive,
+        RenderCleanupAppliedAction::SoftCleared => cleanup.enter_cooling(observed_at),
+        RenderCleanupAppliedAction::CompactedToBudget {
+            converged_to_idle: true,
+        } => cleanup.converge_to_cold(),
+        RenderCleanupAppliedAction::CompactedToBudget {
+            converged_to_idle: false,
+        } => cleanup.continue_cooling(observed_at),
+        RenderCleanupAppliedAction::HardPurged => cleanup.converge_to_cold(),
     }
 }
 

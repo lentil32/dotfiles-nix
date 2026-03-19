@@ -30,16 +30,27 @@ fn available_window_index_for_placement_returns_matching_available_window() {
         ],
         ..TabWindows::default()
     };
-    rebuild_available_window_placement_index(&mut tab_windows);
+    tab_windows.seed_tracking_from_windows_for_test();
 
-    let selected = available_window_index_for_placement(&mut tab_windows, target);
+    let selected = available_window_index_for_placement(&tab_windows, target);
     assert_eq!(selected, Some(2));
 
+    let previous_lifecycle = tab_windows.windows[2].lifecycle;
+    let previous_placement = tab_windows.windows[2].placement;
     tab_windows.windows[2].lifecycle = CachedWindowLifecycle::InUse {
         epoch: FrameEpoch(10),
     };
+    let next_lifecycle = tab_windows.windows[2].lifecycle;
+    let next_placement = tab_windows.windows[2].placement;
+    tab_windows.track_window_transition(
+        2,
+        previous_lifecycle,
+        previous_placement,
+        next_lifecycle,
+        next_placement,
+    );
     assert_eq!(
-        available_window_index_for_placement(&mut tab_windows, target),
+        available_window_index_for_placement(&tab_windows, target),
         None
     );
 }
@@ -179,26 +190,112 @@ fn tab_windows_payload_cache_matches_and_clears() {
 }
 
 #[test]
-fn adjust_tracking_after_remove_reindexes_in_use_and_scan_position() {
+fn swap_remove_window_retains_exact_tracking_for_moved_window() {
+    let placement = WindowPlacement {
+        row: 1,
+        col: 2,
+        width: 1,
+        zindex: 90,
+    };
     let mut tab_windows = TabWindows {
-        reuse_scan_index: 4,
-        in_use_indices: vec![0, 2, 4],
-        visible_available_indices: vec![1, 3, 4],
         windows: vec![
-            cached(1, 101, 1),
-            cached(2, 102, 2),
-            cached(3, 103, 3),
-            cached(4, 104, 4),
-            cached(5, 105, 5),
+            CachedRenderWindow::new_in_use(
+                WindowBufferHandle {
+                    window_id: 1,
+                    buffer_id: 101,
+                },
+                FrameEpoch(1),
+                placement,
+            ),
+            CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: 2,
+                    buffer_id: 102,
+                },
+                lifecycle: CachedWindowLifecycle::AvailableVisible {
+                    last_used_epoch: FrameEpoch(2),
+                },
+                placement: Some(placement),
+            },
+            CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: 3,
+                    buffer_id: 103,
+                },
+                lifecycle: CachedWindowLifecycle::AvailableHidden {
+                    last_used_epoch: FrameEpoch(3),
+                },
+                placement: Some(placement),
+            },
         ],
         ..TabWindows::default()
     };
+    tab_windows.seed_tracking_from_windows_for_test();
 
-    adjust_tracking_after_remove(&mut tab_windows, 1);
+    let removed = tab_windows
+        .swap_remove_window(1)
+        .expect("tracked window should be removable");
 
-    assert_eq!(tab_windows.reuse_scan_index, 3);
-    assert_eq!(tab_windows.in_use_indices, vec![0, 1, 3]);
-    assert_eq!(tab_windows.visible_available_indices, vec![2, 3]);
+    assert_eq!(removed.handles.window_id, 2);
+    assert_eq!(tab_windows.windows.len(), 2);
+    assert_eq!(tab_windows.reusable_window_indices, vec![1]);
+    assert_eq!(tab_windows.in_use_indices, vec![0]);
+    assert_eq!(
+        tab_windows.placement_window_index(placement),
+        Some(1),
+        "the hidden window moved from the tail should retarget its placement entry"
+    );
+    tab_windows.assert_tracking_consistent();
+}
+
+#[test]
+fn taking_visible_available_indices_clears_slots_before_followup_hide_transition() {
+    let placement = WindowPlacement {
+        row: 8,
+        col: 9,
+        width: 2,
+        zindex: 70,
+    };
+    let mut tab_windows = TabWindows {
+        windows: vec![CachedRenderWindow {
+            handles: WindowBufferHandle {
+                window_id: 11,
+                buffer_id: 111,
+            },
+            lifecycle: CachedWindowLifecycle::AvailableVisible {
+                last_used_epoch: FrameEpoch(4),
+            },
+            placement: Some(placement),
+        }],
+        ..TabWindows::default()
+    };
+    tab_windows.seed_tracking_from_windows_for_test();
+
+    let hide_indices = tab_windows.take_visible_available_indices_for_hide();
+    assert_eq!(hide_indices, vec![0]);
+    assert_eq!(tab_windows.visible_available_indices, Vec::<usize>::new());
+    assert_eq!(tab_windows.visible_available_slots, vec![None]);
+
+    let previous_lifecycle = tab_windows.windows[0].lifecycle;
+    let previous_placement = tab_windows.windows[0].placement;
+    tab_windows.windows[0].mark_hidden();
+    let next_lifecycle = tab_windows.windows[0].lifecycle;
+    let next_placement = tab_windows.windows[0].placement;
+    tab_windows.track_window_transition(
+        0,
+        previous_lifecycle,
+        previous_placement,
+        next_lifecycle,
+        next_placement,
+    );
+
+    assert_eq!(tab_windows.visible_available_indices, Vec::<usize>::new());
+    assert_eq!(tab_windows.reusable_window_indices, vec![0]);
+    assert_eq!(
+        available_window_index_for_placement(&tab_windows, placement),
+        Some(0)
+    );
+    tab_windows.assert_tracking_consistent();
 }
 
 #[test]
@@ -236,7 +333,7 @@ fn rollover_in_use_windows_releases_tracked_windows() {
         in_use_indices: vec![0, 1, 99],
         ..TabWindows::default()
     };
-    tab_windows.sync_lifecycle_counters();
+    tab_windows.seed_tracking_from_windows_for_test();
 
     rollover_in_use_windows(&mut tab_windows, previous_epoch);
 
@@ -271,12 +368,12 @@ fn rollover_populates_available_placement_index_without_rebuild() {
         in_use_indices: vec![0],
         ..TabWindows::default()
     };
-    tab_windows.sync_lifecycle_counters();
+    tab_windows.seed_tracking_from_windows_for_test();
 
     rollover_in_use_windows(&mut tab_windows, previous_epoch);
 
     assert_eq!(
-        available_window_index_for_placement(&mut tab_windows, placement),
+        available_window_index_for_placement(&tab_windows, placement),
         Some(0)
     );
 }
@@ -308,21 +405,20 @@ fn changing_reuse_placement_drops_stale_key_and_tracks_new_one_next_frame() {
         }],
         ..TabWindows::default()
     };
-    rebuild_available_window_placement_index(&mut tab_windows);
+    tab_windows.seed_tracking_from_windows_for_test();
     let previous_lifecycle = tab_windows.windows[0].lifecycle;
     let previous_placement = tab_windows.windows[0].placement;
     assert!(tab_windows.windows[0].mark_in_use(FrameEpoch(2)));
+    tab_windows.windows[0].set_placement(new_placement);
     let next_lifecycle = tab_windows.windows[0].lifecycle;
-    tab_windows.track_available_window_transition(
+    let next_placement = tab_windows.windows[0].placement;
+    tab_windows.track_window_transition(
         0,
         previous_lifecycle,
         previous_placement,
         next_lifecycle,
-        previous_placement,
+        next_placement,
     );
-    tab_windows.track_window_transition(previous_lifecycle, next_lifecycle);
-    tab_windows.windows[0].set_placement(new_placement);
-    tab_windows.in_use_indices.push(0);
 
     assert!(
         !tab_windows
@@ -333,7 +429,7 @@ fn changing_reuse_placement_drops_stale_key_and_tracks_new_one_next_frame() {
     begin_tab_frame(&mut tab_windows, 0);
 
     assert_eq!(
-        available_window_index_for_placement(&mut tab_windows, new_placement),
+        available_window_index_for_placement(&tab_windows, new_placement),
         Some(0)
     );
     assert!(
@@ -341,6 +437,7 @@ fn changing_reuse_placement_drops_stale_key_and_tracks_new_one_next_frame() {
             .available_windows_by_placement
             .contains_key(&old_placement)
     );
+    tab_windows.assert_tracking_consistent();
 }
 
 #[test]
@@ -386,7 +483,7 @@ fn prepared_pool_supports_expected_number_of_reuse_acquires() {
         ],
         ..TabWindows::default()
     };
-    rebuild_available_window_placement_index(&mut tab_windows);
+    tab_windows.seed_tracking_from_windows_for_test();
     let mut tabs = tabs_with(tab_windows);
 
     for _ in 0..3 {
@@ -442,6 +539,19 @@ fn frame_capacity_target_respects_max_kept_windows() {
 }
 
 #[test]
+fn frame_capacity_target_can_exceed_adaptive_retention_hard_max_for_peak_draws() {
+    let target = frame_capacity_target(
+        ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_sub(16),
+        24,
+        ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(64),
+        AllocationPolicy::ReuseOnly,
+    );
+
+    assert_eq!(target, ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(9));
+    assert!(target > ADAPTIVE_POOL_HARD_MAX_BUDGET);
+}
+
+#[test]
 fn warm_spare_does_not_change_matching_reuse_order_for_same_span_plan() {
     let placement = WindowPlacement {
         row: 10,
@@ -494,7 +604,7 @@ fn warm_spare_does_not_change_matching_reuse_order_for_same_span_plan() {
         ],
         ..TabWindows::default()
     };
-    rebuild_available_window_placement_index(&mut tab_windows);
+    tab_windows.seed_tracking_from_windows_for_test();
     let mut tabs = tabs_with(tab_windows);
 
     let acquired_window_ids: Vec<i32> = (0..3)

@@ -97,6 +97,7 @@ pub(crate) struct RenderPlanFailedEvent {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum RenderCleanupAppliedAction {
     SoftCleared,
+    CompactedToBudget { converged_to_idle: bool },
     HardPurged,
 }
 

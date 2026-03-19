@@ -685,6 +685,14 @@ pub(crate) fn reduce_cursor_event(
             } else {
                 None
             };
+            let cleanup_action = if should_schedule_next_animation {
+                RenderCleanupAction::Invalidate
+            } else {
+                // Surprising: a quiescent external noop can be the last lifecycle edge after
+                // ingress. Keep cleanup intent alive here so `Hot` can still converge to
+                // `Cooling` and `Cold` without waiting for unrelated future ingress.
+                RenderCleanupAction::Schedule
+            };
             CursorTransitions::noop(mode, allow_real_cursor_updates)
                 .with_motion_class(motion_class)
                 .with_schedule_next_animation(should_schedule_next_animation)
@@ -694,7 +702,7 @@ pub(crate) fn reduce_cursor_event(
                 } else {
                     CursorVisibilityEffect::Show
                 })
-                .with_render_cleanup_action(RenderCleanupAction::Invalidate)
+                .with_render_cleanup_action(cleanup_action)
         }
         EventSource::AnimationTick => {
             let current_corners = state.current_corners();

@@ -20,7 +20,7 @@ use crate::core::state::{
     ObservationBasis, ObservationMotion, ObservationRequest, ObservationSnapshot, ObservedTextRow,
     PatchBasis, ProbeFailure, ProbeKind, ProbeRequestSet, ProbeReuse, ProbeSlot, ProbeState,
     RealizationClear, RealizationDivergence, RealizationLedger, RealizationPlan,
-    RecoveryPolicyState, ScenePatch, SemanticEntityId,
+    RecoveryPolicyState, RenderThermalState, ScenePatch, SemanticEntityId,
 };
 use crate::core::types::{
     CursorCol, CursorPosition, CursorRow, DelayBudgetMs, IngressSeq, Lifecycle, Millis, ProposalId,
@@ -40,12 +40,28 @@ fn noop_realization_plan() -> RealizationPlan {
     RealizationPlan::Noop
 }
 
-fn with_cleanup_invalidation(effects: Vec<Effect>) -> Vec<Effect> {
+fn with_cleanup_invalidation(
+    next_state: &CoreState,
+    observed_at: u64,
+    mut effects: Vec<Effect>,
+) -> Vec<Effect> {
+    let cleanup_token = next_state
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("cleanup timer should be armed");
+    effects.push(Effect::ScheduleTimer(ScheduleTimerEffect {
+        token: cleanup_token,
+        delay: DelayBudgetMs::try_new(render_cleanup_delay_ms(&next_state.runtime().config))
+            .expect("cleanup delay budget"),
+        requested_at: Millis::new(observed_at),
+    }));
     effects
 }
 
 fn ready_state() -> CoreState {
-    CoreState::default().initialize()
+    let mut runtime = RuntimeState::default();
+    runtime.config.delay_event_to_smear = 0.0;
+    CoreState::default().with_runtime(runtime).initialize()
 }
 
 fn ready_state_with_runtime_config(configure: impl FnOnce(&mut RuntimeState)) -> CoreState {
@@ -624,12 +640,16 @@ mod observing_cursor_demand_queue {
         assert_eq!(first.next.lifecycle(), Lifecycle::Observing);
         assert_eq!(
             first.effects,
-            with_cleanup_invalidation(vec![Effect::RequestObservationBase(
-                RequestObservationBaseEffect {
-                    request: observation_request(1, ExternalDemandKind::ExternalCursor, 20),
-                    context: observation_runtime_context(&ready),
-                }
-            )])
+            with_cleanup_invalidation(
+                &first.next,
+                20,
+                vec![Effect::RequestObservationBase(
+                    RequestObservationBaseEffect {
+                        request: observation_request(1, ExternalDemandKind::ExternalCursor, 20),
+                        context: observation_runtime_context(&ready),
+                    }
+                )]
+            )
         );
     }
 
@@ -711,13 +731,21 @@ mod delayed_cursor_demand_queue {
         assert_eq!(first.next.lifecycle(), ready.lifecycle());
         assert_eq!(
             first.effects,
-            vec![Effect::ScheduleTimer(ScheduleTimerEffect {
-                token: ingress_token,
-                delay: DelayBudgetMs::try_new(40).expect("ingress delay budget"),
-                requested_at: Millis::new(20),
-            })]
+            with_cleanup_invalidation(
+                &first.next,
+                20,
+                vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+                    token: ingress_token,
+                    delay: DelayBudgetMs::try_new(40).expect("ingress delay budget"),
+                    requested_at: Millis::new(20),
+                })],
+            )
         );
         assert!(first.next.demand_queue().latest_cursor().is_some());
+        assert_eq!(
+            first.next.ingress_policy().pending_delay_until(),
+            Some(Millis::new(60))
+        );
     }
 
     #[test]
@@ -751,7 +779,7 @@ mod delayed_cursor_demand_queue {
     }
 
     #[test]
-    fn newer_delayed_cursor_demand_replaces_the_pending_queue_and_rearms_the_timer() {
+    fn newer_delayed_cursor_demand_replaces_the_pending_queue_without_rearming_the_timer() {
         let ready = delayed_ready_state();
         let first = reduce(
             &ready,
@@ -772,8 +800,8 @@ mod delayed_cursor_demand_queue {
             .next
             .timers()
             .active_token(TimerId::Ingress)
-            .expect("replacement ingress timer token");
-        assert_ne!(second_token, first_token);
+            .expect("existing ingress timer token");
+        assert_eq!(second_token, first_token);
         assert_eq!(
             second.next.demand_queue().latest_cursor(),
             Some(&crate::core::state::QueuedDemand::ready(
@@ -789,13 +817,153 @@ mod delayed_cursor_demand_queue {
             second.effects,
             vec![
                 Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
-                Effect::ScheduleTimer(ScheduleTimerEffect {
-                    token: second_token,
-                    delay: DelayBudgetMs::try_new(40).expect("ingress delay budget"),
-                    requested_at: Millis::new(21),
-                }),
+                Effect::RecordEventLoopMetric(EventLoopMetricEffect::DelayedIngressPendingUpdated,),
             ]
         );
+        assert_eq!(
+            second.next.ingress_policy().pending_delay_until(),
+            Some(Millis::new(61))
+        );
+    }
+
+    #[test]
+    fn delayed_cursor_burst_updates_pending_deadline_without_stale_timer_token_churn() {
+        let ready = delayed_ready_state();
+        let first = reduce(
+            &ready,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        );
+        let first_token = first
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("first ingress timer token");
+
+        let second = reduce(
+            &first.next,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        );
+        let third = reduce(
+            &second.next,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 22, None),
+        );
+
+        let third_token = third
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("existing ingress timer token");
+        assert_eq!(third_token, first_token);
+        assert_eq!(
+            third.next.demand_queue().latest_cursor(),
+            Some(&crate::core::state::QueuedDemand::ready(
+                ExternalDemand::new(
+                    IngressSeq::new(3),
+                    ExternalDemandKind::ExternalCursor,
+                    Millis::new(22),
+                    None,
+                )
+            ))
+        );
+        assert_eq!(
+            second.effects,
+            vec![
+                Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
+                Effect::RecordEventLoopMetric(EventLoopMetricEffect::DelayedIngressPendingUpdated,),
+            ]
+        );
+        assert_eq!(
+            third.effects,
+            vec![
+                Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
+                Effect::RecordEventLoopMetric(EventLoopMetricEffect::DelayedIngressPendingUpdated,),
+            ]
+        );
+        assert!(
+            second
+                .effects
+                .iter()
+                .chain(third.effects.iter())
+                .all(|effect| !matches!(
+                    effect,
+                    Effect::ScheduleTimer(_)
+                        | Effect::RecordEventLoopMetric(EventLoopMetricEffect::StaleToken)
+                )),
+            "burst updates should reuse the original timer generation instead of churning timer tokens"
+        );
+        assert_eq!(
+            third.next.ingress_policy().pending_delay_until(),
+            Some(Millis::new(62))
+        );
+    }
+
+    #[test]
+    fn early_delayed_cursor_timer_fire_rearms_once_for_the_remaining_deadline() {
+        let ready = delayed_ready_state();
+        let first = reduce(
+            &ready,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        );
+        let delayed = reduce(
+            &first.next,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        );
+        let first_token = delayed
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("ingress timer token");
+
+        let early_fire = reduce(
+            &delayed.next,
+            Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
+                token: first_token,
+                observed_at: Millis::new(60),
+            }),
+        );
+
+        let rearmed_token = early_fire
+            .next
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("ingress timer should be rearmed for the remaining delay");
+        assert_ne!(rearmed_token, first_token);
+        assert_eq!(
+            early_fire.effects,
+            vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+                token: rearmed_token,
+                delay: DelayBudgetMs::try_new(1).expect("remaining ingress delay budget"),
+                requested_at: Millis::new(60),
+            })]
+        );
+        assert_eq!(
+            early_fire.next.ingress_policy().pending_delay_until(),
+            Some(Millis::new(61))
+        );
+    }
+
+    #[test]
+    fn starting_observation_clears_the_pending_delayed_cursor_deadline() {
+        let ready = delayed_ready_state();
+        let delayed = reduce(
+            &ready,
+            external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        )
+        .next;
+        let ingress_token = delayed
+            .timers()
+            .active_token(TimerId::Ingress)
+            .expect("ingress timer token");
+
+        let fired = reduce(
+            &delayed,
+            Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
+                token: ingress_token,
+                observed_at: Millis::new(60),
+            }),
+        );
+
+        assert_eq!(fired.next.ingress_policy().pending_delay_until(), None);
     }
 }
 
@@ -818,20 +986,24 @@ fn observation_request_uses_explicit_cursor_color_probe_policy() {
     assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
     assert_eq!(
         transition.effects,
-        with_cleanup_invalidation(vec![Effect::RequestObservationBase(
-            RequestObservationBaseEffect {
-                request: ObservationRequest::new(
-                    ExternalDemand::new(
-                        IngressSeq::new(1),
-                        ExternalDemandKind::ExternalCursor,
-                        Millis::new(24),
-                        None,
+        with_cleanup_invalidation(
+            &transition.next,
+            24,
+            vec![Effect::RequestObservationBase(
+                RequestObservationBaseEffect {
+                    request: ObservationRequest::new(
+                        ExternalDemand::new(
+                            IngressSeq::new(1),
+                            ExternalDemandKind::ExternalCursor,
+                            Millis::new(24),
+                            None,
+                        ),
+                        ProbeRequestSet::new(true, false),
                     ),
-                    ProbeRequestSet::new(true, false),
-                ),
-                context: observation_runtime_context(&ready),
-            }
-        )])
+                    context: observation_runtime_context(&ready),
+                }
+            )]
+        )
     );
 }
 
@@ -855,20 +1027,24 @@ fn observation_request_uses_explicit_background_probe_policy() {
     assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
     assert_eq!(
         transition.effects,
-        with_cleanup_invalidation(vec![Effect::RequestObservationBase(
-            RequestObservationBaseEffect {
-                request: ObservationRequest::new(
-                    ExternalDemand::new(
-                        IngressSeq::new(1),
-                        ExternalDemandKind::ExternalCursor,
-                        Millis::new(24),
-                        None,
+        with_cleanup_invalidation(
+            &transition.next,
+            24,
+            vec![Effect::RequestObservationBase(
+                RequestObservationBaseEffect {
+                    request: ObservationRequest::new(
+                        ExternalDemand::new(
+                            IngressSeq::new(1),
+                            ExternalDemandKind::ExternalCursor,
+                            Millis::new(24),
+                            None,
+                        ),
+                        ProbeRequestSet::new(false, true),
                     ),
-                    ProbeRequestSet::new(false, true),
-                ),
-                context: observation_runtime_context(&ready),
-            }
-        )])
+                    context: observation_runtime_context(&ready),
+                }
+            )]
+        )
     );
 }
 
@@ -900,12 +1076,16 @@ fn observation_request_captures_runtime_tracking_context() {
 
     assert_eq!(
         transition.effects,
-        with_cleanup_invalidation(vec![Effect::RequestObservationBase(
-            RequestObservationBaseEffect {
-                request: observation_request(1, ExternalDemandKind::ExternalCursor, 24),
-                context: observation_runtime_context(&ready),
-            }
-        )])
+        with_cleanup_invalidation(
+            &transition.next,
+            24,
+            vec![Effect::RequestObservationBase(
+                RequestObservationBaseEffect {
+                    request: observation_request(1, ExternalDemandKind::ExternalCursor, 24),
+                    context: observation_runtime_context(&ready),
+                }
+            )]
+        )
     );
 }
 
@@ -1571,18 +1751,22 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
     assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
     assert_eq!(
         transition.effects,
-        vec![
-            Effect::ApplyIngressCursorPresentation(
-                IngressCursorPresentationEffect::HideCursorAndPrepaint {
-                    cell,
-                    zindex: state.runtime().config.windows_zindex,
-                },
-            ),
-            Effect::RequestObservationBase(RequestObservationBaseEffect {
-                request: observation_request(1, ExternalDemandKind::ExternalCursor, 78),
-                context: observation_runtime_context(&state),
-            }),
-        ]
+        with_cleanup_invalidation(
+            &transition.next,
+            78,
+            vec![
+                Effect::ApplyIngressCursorPresentation(
+                    IngressCursorPresentationEffect::HideCursorAndPrepaint {
+                        cell,
+                        zindex: state.runtime().config.windows_zindex,
+                    },
+                ),
+                Effect::RequestObservationBase(RequestObservationBaseEffect {
+                    request: observation_request(1, ExternalDemandKind::ExternalCursor, 78),
+                    context: observation_runtime_context(&state),
+                }),
+            ],
+        )
     );
 }
 
@@ -2060,6 +2244,15 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
     );
 
     assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
+    assert_eq!(
+        completed.next.render_cleanup().thermal(),
+        RenderThermalState::Hot
+    );
+    assert_eq!(
+        completed.next.render_cleanup().next_compaction_due_at(),
+        Some(Millis::new(79 + render_cleanup_delay_ms(&runtime.config)))
+    );
+    assert_eq!(completed.next.render_cleanup().entered_cooling_at(), None);
     let cleanup_token = completed
         .next
         .timers()
@@ -2129,7 +2322,139 @@ fn clear_apply_completion_redraws_after_visual_change_outside_cmdline() {
 }
 
 #[test]
-fn cleanup_timer_soft_clear_rearms_hard_purge_without_new_ingress() {
+fn cleanup_timer_soft_clear_enters_cooling_compaction_before_cold() {
+    let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
+    runtime.config.max_kept_windows = 21;
+    let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
+    let basis = PatchBasis::new(None, None);
+    let patch = ScenePatch::derive(basis);
+    let (state, proposal_id) = state.allocate_proposal_id();
+    let proposal = InFlightProposal::clear(
+        proposal_id,
+        patch,
+        RealizationClear::new(21),
+        RenderCleanupAction::Schedule,
+        RenderSideEffects::default(),
+        crate::core::state::AnimationSchedule::Idle,
+    )
+    .expect("clear proposal should be constructible");
+    let staged = state
+        .into_applying(proposal)
+        .expect("staging clear proposal requires retained observation");
+
+    let completed = reduce(
+        &staged,
+        Event::ApplyReported(ApplyReport::AppliedFully {
+            proposal_id,
+            observed_at: Millis::new(79),
+            visual_change: true,
+        }),
+    );
+    assert_eq!(
+        completed.next.render_cleanup().thermal(),
+        RenderThermalState::Hot
+    );
+    let soft_token = completed
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("soft cleanup timer should be armed");
+
+    let soft_tick = reduce(
+        &completed.next,
+        cleanup_tick_event(soft_token, 79 + render_cleanup_delay_ms(&runtime.config)),
+    );
+
+    assert_eq!(
+        soft_tick.effects,
+        vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+            execution: RenderCleanupExecution::SoftClear {
+                max_kept_windows: 21,
+            },
+        })]
+    );
+
+    let after_soft = reduce(
+        &soft_tick.next,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+            action: RenderCleanupAppliedAction::SoftCleared,
+        }),
+    );
+    assert_eq!(
+        after_soft.next.render_cleanup().thermal(),
+        RenderThermalState::Cooling
+    );
+    assert_eq!(
+        after_soft.next.render_cleanup().entered_cooling_at(),
+        Some(Millis::new(79 + render_cleanup_delay_ms(&runtime.config)))
+    );
+    let compaction_token = after_soft
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("cooling compaction timer should be armed after soft clear");
+
+    let compaction_tick = reduce(
+        &after_soft.next,
+        cleanup_tick_event(
+            compaction_token,
+            79 + render_cleanup_delay_ms(&runtime.config) + 1,
+        ),
+    );
+
+    assert_eq!(
+        compaction_tick.effects,
+        vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+            execution: RenderCleanupExecution::CompactToBudget {
+                target_budget: 2,
+                max_prune_per_tick: 21,
+            },
+        })]
+    );
+
+    let after_compaction = reduce(
+        &compaction_tick.next,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config) + 1),
+            action: RenderCleanupAppliedAction::CompactedToBudget {
+                converged_to_idle: true,
+            },
+        }),
+    );
+
+    assert_eq!(
+        after_compaction
+            .next
+            .timers()
+            .active_token(TimerId::Cleanup),
+        None
+    );
+    assert_eq!(
+        after_compaction.next.render_cleanup().thermal(),
+        RenderThermalState::Cold
+    );
+    assert_eq!(
+        after_compaction.next.render_cleanup().idle_target_budget(),
+        2
+    );
+    assert_eq!(
+        after_compaction.next.render_cleanup().max_kept_windows(),
+        21
+    );
+    assert_eq!(
+        after_compaction.effects,
+        vec![Effect::RecordEventLoopMetric(
+            EventLoopMetricEffect::CleanupConvergedToCold {
+                started_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+                converged_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config) + 1),
+            },
+        )]
+    );
+}
+
+#[test]
+fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
     let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
     runtime.config.max_kept_windows = 21;
     let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
@@ -2162,21 +2487,10 @@ fn cleanup_timer_soft_clear_rearms_hard_purge_without_new_ingress() {
         .timers()
         .active_token(TimerId::Cleanup)
         .expect("soft cleanup timer should be armed");
-
     let soft_tick = reduce(
         &completed.next,
         cleanup_tick_event(soft_token, 79 + render_cleanup_delay_ms(&runtime.config)),
     );
-
-    assert_eq!(
-        soft_tick.effects,
-        vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
-            execution: RenderCleanupExecution::SoftClear {
-                max_kept_windows: 21,
-            },
-        })]
-    );
-
     let after_soft = reduce(
         &soft_tick.next,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
@@ -2184,14 +2498,40 @@ fn cleanup_timer_soft_clear_rearms_hard_purge_without_new_ingress() {
             action: RenderCleanupAppliedAction::SoftCleared,
         }),
     );
-    let hard_token = after_soft
+    let compaction_token = after_soft
         .next
         .timers()
         .active_token(TimerId::Cleanup)
-        .expect("hard purge timer should be armed after soft clear");
+        .expect("cooling compaction timer should be armed after soft clear");
+    let compaction_tick = reduce(
+        &after_soft.next,
+        cleanup_tick_event(
+            compaction_token,
+            79 + render_cleanup_delay_ms(&runtime.config) + 1,
+        ),
+    );
+    let after_compaction = reduce(
+        &compaction_tick.next,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config) + 1),
+            action: RenderCleanupAppliedAction::CompactedToBudget {
+                converged_to_idle: false,
+            },
+        }),
+    );
+    assert_eq!(
+        after_compaction.next.render_cleanup().thermal(),
+        RenderThermalState::Cooling
+    );
+
+    let hard_token = after_compaction
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("hard purge fallback timer should stay armed while cooling remains pending");
 
     let hard_tick = reduce(
-        &after_soft.next,
+        &after_compaction.next,
         cleanup_tick_event(
             hard_token,
             79 + render_hard_cleanup_delay_ms(&runtime.config),
@@ -2216,6 +2556,87 @@ fn cleanup_timer_soft_clear_rearms_hard_purge_without_new_ingress() {
     assert_eq!(
         after_hard.next.timers().active_token(TimerId::Cleanup),
         None
+    );
+    assert_eq!(
+        after_hard.next.render_cleanup().thermal(),
+        RenderThermalState::Cold
+    );
+    assert_eq!(after_hard.next.render_cleanup().idle_target_budget(), 2);
+    assert_eq!(after_hard.next.render_cleanup().max_kept_windows(), 21);
+    assert_eq!(
+        after_hard.effects,
+        vec![Effect::RecordEventLoopMetric(
+            EventLoopMetricEffect::CleanupConvergedToCold {
+                started_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+                converged_at: Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
+            },
+        )]
+    );
+}
+
+#[test]
+fn fresh_ingress_promotes_cooling_cleanup_state_back_to_hot() {
+    let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
+    runtime.config.max_kept_windows = 21;
+    let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
+    let basis = PatchBasis::new(None, None);
+    let patch = ScenePatch::derive(basis);
+    let (state, proposal_id) = state.allocate_proposal_id();
+    let proposal = InFlightProposal::clear(
+        proposal_id,
+        patch,
+        RealizationClear::new(21),
+        RenderCleanupAction::Schedule,
+        RenderSideEffects::default(),
+        crate::core::state::AnimationSchedule::Idle,
+    )
+    .expect("clear proposal should be constructible");
+    let staged = state
+        .into_applying(proposal)
+        .expect("staging clear proposal requires retained observation");
+
+    let completed = reduce(
+        &staged,
+        Event::ApplyReported(ApplyReport::AppliedFully {
+            proposal_id,
+            observed_at: Millis::new(79),
+            visual_change: true,
+        }),
+    );
+    let soft_token = completed
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("soft cleanup timer should be armed");
+    let soft_tick = reduce(
+        &completed.next,
+        cleanup_tick_event(soft_token, 79 + render_cleanup_delay_ms(&runtime.config)),
+    );
+    let cooling = reduce(
+        &soft_tick.next,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+            action: RenderCleanupAppliedAction::SoftCleared,
+        }),
+    )
+    .next;
+
+    let reheated = reduce(
+        &cooling,
+        external_demand_event(ExternalDemandKind::BufferEntered, 150, None),
+    );
+
+    assert_eq!(
+        reheated.next.render_cleanup().thermal(),
+        RenderThermalState::Hot
+    );
+    assert!(
+        reheated
+            .next
+            .timers()
+            .active_token(TimerId::Cleanup)
+            .is_some(),
+        "fresh ingress should keep one cleanup timer alive while hot deadlines move forward"
     );
 }
 

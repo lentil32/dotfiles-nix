@@ -191,7 +191,13 @@ pub(crate) enum IngressCursorPresentationEffect {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum RenderCleanupExecution {
-    SoftClear { max_kept_windows: usize },
+    SoftClear {
+        max_kept_windows: usize,
+    },
+    CompactToBudget {
+        target_budget: usize,
+        max_prune_per_tick: usize,
+    },
     HardPurge,
 }
 
@@ -201,7 +207,15 @@ impl RenderCleanupExecution {
             Self::SoftClear { max_kept_windows } => {
                 1_u64 ^ (max_kept_windows as u64).rotate_left(7)
             }
-            Self::HardPurge => 2_u64,
+            Self::CompactToBudget {
+                target_budget,
+                max_prune_per_tick,
+            } => {
+                2_u64
+                    ^ (target_budget as u64).rotate_left(7)
+                    ^ (max_prune_per_tick as u64).rotate_left(19)
+            }
+            Self::HardPurge => 3_u64,
         }
     }
 }
@@ -214,6 +228,11 @@ pub(crate) struct ApplyRenderCleanupEffect {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum EventLoopMetricEffect {
     IngressCoalesced,
+    DelayedIngressPendingUpdated,
+    CleanupConvergedToCold {
+        started_at: Millis,
+        converged_at: Millis,
+    },
     StaleToken,
     ProbeRefreshRetried(ProbeKind),
     ProbeRefreshBudgetExhausted(ProbeKind),
@@ -223,9 +242,14 @@ impl EventLoopMetricEffect {
     const fn fingerprint(self) -> u64 {
         match self {
             Self::IngressCoalesced => 1_u64,
-            Self::StaleToken => 2_u64,
-            Self::ProbeRefreshRetried(kind) => 3_u64 ^ kind.fingerprint().rotate_left(7),
-            Self::ProbeRefreshBudgetExhausted(kind) => 4_u64 ^ kind.fingerprint().rotate_left(7),
+            Self::DelayedIngressPendingUpdated => 2_u64,
+            Self::CleanupConvergedToCold {
+                started_at,
+                converged_at,
+            } => 3_u64 ^ started_at.value().rotate_left(7) ^ converged_at.value().rotate_left(19),
+            Self::StaleToken => 4_u64,
+            Self::ProbeRefreshRetried(kind) => 5_u64 ^ kind.fingerprint().rotate_left(7),
+            Self::ProbeRefreshBudgetExhausted(kind) => 6_u64 ^ kind.fingerprint().rotate_left(7),
         }
     }
 }

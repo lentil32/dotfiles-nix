@@ -12,7 +12,7 @@ use crate::core::state::{
     AnimationSchedule, ApplyFailureKind, CoreState, DemandQueue, ExternalDemand,
     ExternalDemandKind, InFlightProposal, ObservationBasis, ObservationRequest, PatchBasis,
     PlannedRender, ProjectionSnapshot, QueuedDemand, RealizationDivergence, RealizationLedger,
-    RealizationPlan, RenderCleanupState, ScenePatch, ScenePatchKind,
+    RealizationPlan, RenderCleanupState, RenderThermalState, ScenePatch, ScenePatchKind,
 };
 use crate::core::types::{CursorPosition, Millis, TimerId, TimerToken, ViewportSnapshot};
 use crate::state::CursorLocation;
@@ -45,6 +45,13 @@ pub(super) fn timer_token_summary(token: TimerToken) -> String {
 
 fn millis_summary(millis: Millis) -> u64 {
     millis.value()
+}
+
+fn optional_millis_summary(millis: Option<Millis>) -> String {
+    millis.map_or_else(
+        || "none".to_string(),
+        |millis| millis_summary(millis).to_string(),
+    )
 }
 
 fn cursor_position_summary(position: Option<CursorPosition>) -> String {
@@ -169,25 +176,27 @@ pub(super) fn scene_patch_summary(patch: &ScenePatch) -> String {
 }
 
 fn render_cleanup_state_summary(cleanup: RenderCleanupState) -> String {
-    match cleanup {
-        RenderCleanupState::Inactive => "inactive".to_string(),
-        RenderCleanupState::Armed {
-            soft_due_at,
-            hard_due_at,
-            max_kept_windows,
-        } => format!(
-            "armed(soft_due_at={} hard_due_at={} max_kept_windows={})",
-            millis_summary(soft_due_at),
-            millis_summary(hard_due_at),
-            max_kept_windows,
+    match cleanup.thermal() {
+        RenderThermalState::Hot => format!(
+            "hot(next_compaction_due_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_prune_per_tick={})",
+            optional_millis_summary(cleanup.next_compaction_due_at()),
+            optional_millis_summary(cleanup.hard_purge_due_at()),
+            cleanup.max_kept_windows(),
+            cleanup.idle_target_budget(),
+            cleanup.max_prune_per_tick(),
         ),
-        RenderCleanupState::SoftCleared {
-            hard_due_at,
-            max_kept_windows,
-        } => format!(
-            "soft_cleared(hard_due_at={} max_kept_windows={})",
-            millis_summary(hard_due_at),
-            max_kept_windows,
+        RenderThermalState::Cooling => format!(
+            "cooling(entered_cooling_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_prune_per_tick={})",
+            optional_millis_summary(cleanup.entered_cooling_at()),
+            optional_millis_summary(cleanup.hard_purge_due_at()),
+            cleanup.max_kept_windows(),
+            cleanup.idle_target_budget(),
+            cleanup.max_prune_per_tick(),
+        ),
+        RenderThermalState::Cold => format!(
+            "cold(idle_target_budget={} max_prune_per_tick={})",
+            cleanup.idle_target_budget(),
+            cleanup.max_prune_per_tick(),
         ),
     }
 }
@@ -342,6 +351,12 @@ pub(super) fn render_cleanup_execution_summary(execution: RenderCleanupExecution
         RenderCleanupExecution::SoftClear { max_kept_windows } => {
             format!("soft_clear(max_kept_windows={max_kept_windows})")
         }
+        RenderCleanupExecution::CompactToBudget {
+            target_budget,
+            max_prune_per_tick,
+        } => format!(
+            "compact_to_budget(target_budget={target_budget} max_prune_per_tick={max_prune_per_tick})"
+        ),
         RenderCleanupExecution::HardPurge => "hard_purge".to_string(),
     }
 }

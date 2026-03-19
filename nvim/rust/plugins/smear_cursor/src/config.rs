@@ -147,7 +147,9 @@ impl Default for RuntimeConfig {
             // Neovide slices animation dt at 1/120s; use the same baseline integration rate.
             simulation_hz: 120.0,
             max_simulation_steps_per_frame: 16,
-            delay_event_to_smear: 0.0,
+            // Keep a tiny ingress debounce by default so bursty cursor churn coalesces
+            // without adding human-noticeable latency.
+            delay_event_to_smear: 1.0,
             // Neovide does not inject a retarget anticipation impulse for cursor corners.
             anticipation: 0.0,
             head_response_ms: 110.0,
@@ -368,5 +370,12 @@ mod tests {
 
         assert!(config.cursor_is_horizontal_bar("Rc"));
         assert!(!config.cursor_is_horizontal_bar("n"));
+    }
+
+    #[test]
+    fn default_delay_event_to_smear_keeps_small_ingress_debounce() {
+        let config = RuntimeConfig::default();
+
+        assert_eq!(config.delay_event_to_smear, 1.0);
     }
 }

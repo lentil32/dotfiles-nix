@@ -1,4 +1,6 @@
-use crate::core::state::ProbeKind;
+use crate::core::effect::TimerKind;
+use crate::core::state::{ProbeKind, RenderThermalState};
+use crate::core::types::Millis;
 use std::cell::RefCell;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -13,17 +15,6 @@ impl DurationTelemetry {
         self.samples = self.samples.saturating_add(1);
         self.total_micros = self.total_micros.saturating_add(duration_micros);
         self.max_micros = self.max_micros.max(duration_micros);
-    }
-
-    pub(super) fn mean_ms(self) -> f64 {
-        if self.samples == 0 {
-            return 0.0;
-        }
-        (self.total_micros as f64 / self.samples as f64) / 1000.0
-    }
-
-    pub(super) fn max_ms(self) -> f64 {
-        self.max_micros as f64 / 1000.0
     }
 }
 
@@ -41,12 +32,135 @@ impl DepthTelemetry {
         self.total_depth = self.total_depth.saturating_add(depth);
         self.max_depth = self.max_depth.max(depth);
     }
+}
 
-    pub(super) fn mean_depth(self) -> f64 {
-        if self.samples == 0 {
-            return 0.0;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct TimerCountTelemetry {
+    pub(super) animation: u64,
+    pub(super) ingress: u64,
+    pub(super) recovery: u64,
+    pub(super) cleanup: u64,
+}
+
+impl TimerCountTelemetry {
+    const fn new() -> Self {
+        Self {
+            animation: 0,
+            ingress: 0,
+            recovery: 0,
+            cleanup: 0,
         }
-        self.total_depth as f64 / self.samples as f64
+    }
+
+    fn record_kind(&mut self, kind: TimerKind) {
+        match kind {
+            TimerKind::Animation => {
+                self.animation = self.animation.saturating_add(1);
+            }
+            TimerKind::Ingress => {
+                self.ingress = self.ingress.saturating_add(1);
+            }
+            TimerKind::Recovery => {
+                self.recovery = self.recovery.saturating_add(1);
+            }
+            TimerKind::Cleanup => {
+                self.cleanup = self.cleanup.saturating_add(1);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ThermalDepthTelemetry {
+    pub(super) hot: DepthTelemetry,
+    pub(super) cooling: DepthTelemetry,
+    pub(super) cold: DepthTelemetry,
+}
+
+impl ThermalDepthTelemetry {
+    const fn new() -> Self {
+        Self {
+            hot: DepthTelemetry {
+                samples: 0,
+                total_depth: 0,
+                max_depth: 0,
+            },
+            cooling: DepthTelemetry {
+                samples: 0,
+                total_depth: 0,
+                max_depth: 0,
+            },
+            cold: DepthTelemetry {
+                samples: 0,
+                total_depth: 0,
+                max_depth: 0,
+            },
+        }
+    }
+
+    fn record_depth(&mut self, thermal: RenderThermalState, depth: usize) {
+        match thermal {
+            RenderThermalState::Hot => self.hot.record_depth(depth),
+            RenderThermalState::Cooling => self.cooling.record_depth(depth),
+            RenderThermalState::Cold => self.cold.record_depth(depth),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ThermalCountTelemetry {
+    pub(super) hot: u64,
+    pub(super) cooling: u64,
+    pub(super) cold: u64,
+}
+
+impl ThermalCountTelemetry {
+    const fn new() -> Self {
+        Self {
+            hot: 0,
+            cooling: 0,
+            cold: 0,
+        }
+    }
+
+    fn record(&mut self, thermal: RenderThermalState) {
+        match thermal {
+            RenderThermalState::Hot => {
+                self.hot = self.hot.saturating_add(1);
+            }
+            RenderThermalState::Cooling => {
+                self.cooling = self.cooling.saturating_add(1);
+            }
+            RenderThermalState::Cold => {
+                self.cold = self.cold.saturating_add(1);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct MillisDurationTelemetry {
+    pub(super) samples: u64,
+    pub(super) total_ms: u64,
+    pub(super) max_ms: u64,
+    pub(super) last_ms: u64,
+}
+
+impl MillisDurationTelemetry {
+    const fn new() -> Self {
+        Self {
+            samples: 0,
+            total_ms: 0,
+            max_ms: 0,
+            last_ms: 0,
+        }
+    }
+
+    fn record_duration_ms(&mut self, duration_ms: u64) {
+        self.samples = self.samples.saturating_add(1);
+        self.total_ms = self.total_ms.saturating_add(duration_ms);
+        self.max_ms = self.max_ms.max(duration_ms);
+        self.last_ms = duration_ms;
     }
 }
 
@@ -61,9 +175,16 @@ pub(super) struct RuntimeBehaviorMetrics {
     pub(super) stale_token_events: u64,
     pub(super) timer_schedule: DurationTelemetry,
     pub(super) timer_fire: DurationTelemetry,
+    pub(super) host_timer_rearms_total: u64,
+    pub(super) host_timer_rearms_by_kind: TimerCountTelemetry,
+    pub(super) delayed_ingress_pending_updates: u64,
     pub(super) scheduled_queue_depth: DepthTelemetry,
     pub(super) scheduled_drain_items: DepthTelemetry,
     pub(super) scheduled_drain_reschedules: u64,
+    pub(super) scheduled_queue_depth_by_thermal: ThermalDepthTelemetry,
+    pub(super) scheduled_drain_items_by_thermal: ThermalDepthTelemetry,
+    pub(super) scheduled_drain_reschedules_by_thermal: ThermalCountTelemetry,
+    pub(super) post_burst_convergence: MillisDurationTelemetry,
     pub(super) cursor_color_probe: ProbeTelemetry,
     pub(super) background_probe: ProbeTelemetry,
 }
@@ -90,6 +211,48 @@ impl ProbeTelemetry {
 }
 
 impl RuntimeBehaviorMetrics {
+    const fn new() -> Self {
+        Self {
+            ingress_received: 0,
+            ingress_coalesced: 0,
+            ingress_dropped: 0,
+            ingress_applied: 0,
+            observation_requests_executed: 0,
+            degraded_draw_applications: 0,
+            stale_token_events: 0,
+            timer_schedule: DurationTelemetry {
+                samples: 0,
+                total_micros: 0,
+                max_micros: 0,
+            },
+            timer_fire: DurationTelemetry {
+                samples: 0,
+                total_micros: 0,
+                max_micros: 0,
+            },
+            host_timer_rearms_total: 0,
+            host_timer_rearms_by_kind: TimerCountTelemetry::new(),
+            delayed_ingress_pending_updates: 0,
+            scheduled_queue_depth: DepthTelemetry {
+                samples: 0,
+                total_depth: 0,
+                max_depth: 0,
+            },
+            scheduled_drain_items: DepthTelemetry {
+                samples: 0,
+                total_depth: 0,
+                max_depth: 0,
+            },
+            scheduled_drain_reschedules: 0,
+            scheduled_queue_depth_by_thermal: ThermalDepthTelemetry::new(),
+            scheduled_drain_items_by_thermal: ThermalDepthTelemetry::new(),
+            scheduled_drain_reschedules_by_thermal: ThermalCountTelemetry::new(),
+            post_burst_convergence: MillisDurationTelemetry::new(),
+            cursor_color_probe: ProbeTelemetry::new(),
+            background_probe: ProbeTelemetry::new(),
+        }
+    }
+
     fn probe_telemetry_mut(&mut self, kind: ProbeKind) -> &mut ProbeTelemetry {
         match kind {
             ProbeKind::CursorColor => &mut self.cursor_color_probe,
@@ -133,16 +296,53 @@ impl RuntimeBehaviorMetrics {
         self.timer_fire.record_micros(duration_micros);
     }
 
+    fn record_host_timer_rearm(&mut self, kind: TimerKind) {
+        self.host_timer_rearms_total = self.host_timer_rearms_total.saturating_add(1);
+        self.host_timer_rearms_by_kind.record_kind(kind);
+    }
+
+    fn record_delayed_ingress_pending_update(&mut self) {
+        self.delayed_ingress_pending_updates =
+            self.delayed_ingress_pending_updates.saturating_add(1);
+    }
+
     fn record_scheduled_queue_depth(&mut self, depth: usize) {
         self.scheduled_queue_depth.record_depth(depth);
+    }
+
+    fn record_scheduled_queue_depth_for_thermal(
+        &mut self,
+        thermal: RenderThermalState,
+        depth: usize,
+    ) {
+        self.scheduled_queue_depth_by_thermal
+            .record_depth(thermal, depth);
     }
 
     fn record_scheduled_drain_items(&mut self, drained_items: usize) {
         self.scheduled_drain_items.record_depth(drained_items);
     }
 
+    fn record_scheduled_drain_items_for_thermal(
+        &mut self,
+        thermal: RenderThermalState,
+        drained_items: usize,
+    ) {
+        self.scheduled_drain_items_by_thermal
+            .record_depth(thermal, drained_items);
+    }
+
     fn record_scheduled_drain_reschedule(&mut self) {
         self.scheduled_drain_reschedules = self.scheduled_drain_reschedules.saturating_add(1);
+    }
+
+    fn record_scheduled_drain_reschedule_for_thermal(&mut self, thermal: RenderThermalState) {
+        self.scheduled_drain_reschedules_by_thermal.record(thermal);
+    }
+
+    fn record_post_burst_convergence(&mut self, started_at: Millis, converged_at: Millis) {
+        let duration_ms = converged_at.value().saturating_sub(started_at.value());
+        self.post_burst_convergence.record_duration_ms(duration_ms);
     }
 
     fn record_probe_duration(&mut self, kind: ProbeKind, duration_micros: u64) {
@@ -185,38 +385,7 @@ impl EventLoopState {
             last_autocmd_event_ms: 0.0,
             last_observation_request_ms: 0.0,
             callback_duration_ewma_ms: 0.0,
-            runtime_metrics: RuntimeBehaviorMetrics {
-                ingress_received: 0,
-                ingress_coalesced: 0,
-                ingress_dropped: 0,
-                ingress_applied: 0,
-                observation_requests_executed: 0,
-                degraded_draw_applications: 0,
-                stale_token_events: 0,
-                timer_schedule: DurationTelemetry {
-                    samples: 0,
-                    total_micros: 0,
-                    max_micros: 0,
-                },
-                timer_fire: DurationTelemetry {
-                    samples: 0,
-                    total_micros: 0,
-                    max_micros: 0,
-                },
-                scheduled_queue_depth: DepthTelemetry {
-                    samples: 0,
-                    total_depth: 0,
-                    max_depth: 0,
-                },
-                scheduled_drain_items: DepthTelemetry {
-                    samples: 0,
-                    total_depth: 0,
-                    max_depth: 0,
-                },
-                scheduled_drain_reschedules: 0,
-                cursor_color_probe: ProbeTelemetry::new(),
-                background_probe: ProbeTelemetry::new(),
-            },
+            runtime_metrics: RuntimeBehaviorMetrics::new(),
         }
     }
 
@@ -306,8 +475,25 @@ impl EventLoopState {
             .record_timer_fire_duration(duration_micros);
     }
 
+    pub(super) fn record_host_timer_rearm(&mut self, kind: TimerKind) {
+        self.runtime_metrics.record_host_timer_rearm(kind);
+    }
+
+    pub(super) fn record_delayed_ingress_pending_update(&mut self) {
+        self.runtime_metrics.record_delayed_ingress_pending_update();
+    }
+
     pub(super) fn record_scheduled_queue_depth(&mut self, depth: usize) {
         self.runtime_metrics.record_scheduled_queue_depth(depth);
+    }
+
+    pub(super) fn record_scheduled_queue_depth_for_thermal(
+        &mut self,
+        thermal: RenderThermalState,
+        depth: usize,
+    ) {
+        self.runtime_metrics
+            .record_scheduled_queue_depth_for_thermal(thermal, depth);
     }
 
     pub(super) fn record_scheduled_drain_items(&mut self, drained_items: usize) {
@@ -315,8 +501,34 @@ impl EventLoopState {
             .record_scheduled_drain_items(drained_items);
     }
 
+    pub(super) fn record_scheduled_drain_items_for_thermal(
+        &mut self,
+        thermal: RenderThermalState,
+        drained_items: usize,
+    ) {
+        self.runtime_metrics
+            .record_scheduled_drain_items_for_thermal(thermal, drained_items);
+    }
+
     pub(super) fn record_scheduled_drain_reschedule(&mut self) {
         self.runtime_metrics.record_scheduled_drain_reschedule();
+    }
+
+    pub(super) fn record_scheduled_drain_reschedule_for_thermal(
+        &mut self,
+        thermal: RenderThermalState,
+    ) {
+        self.runtime_metrics
+            .record_scheduled_drain_reschedule_for_thermal(thermal);
+    }
+
+    pub(super) fn record_post_burst_convergence(
+        &mut self,
+        started_at: Millis,
+        converged_at: Millis,
+    ) {
+        self.runtime_metrics
+            .record_post_burst_convergence(started_at, converged_at);
     }
 
     pub(super) fn record_probe_duration(&mut self, kind: ProbeKind, duration_micros: u64) {
@@ -444,16 +656,45 @@ pub(super) fn record_timer_fire_duration(duration_micros: u64) {
     with_event_loop_state(|state| state.record_timer_fire_duration(duration_micros));
 }
 
+pub(super) fn record_host_timer_rearm(kind: TimerKind) {
+    with_event_loop_state(|state| state.record_host_timer_rearm(kind));
+}
+
+pub(super) fn record_delayed_ingress_pending_update() {
+    with_event_loop_state(EventLoopState::record_delayed_ingress_pending_update);
+}
+
 pub(super) fn record_scheduled_queue_depth(depth: usize) {
     with_event_loop_state(|state| state.record_scheduled_queue_depth(depth));
+}
+
+pub(super) fn record_scheduled_queue_depth_for_thermal(thermal: RenderThermalState, depth: usize) {
+    with_event_loop_state(|state| state.record_scheduled_queue_depth_for_thermal(thermal, depth));
 }
 
 pub(super) fn record_scheduled_drain_items(drained_items: usize) {
     with_event_loop_state(|state| state.record_scheduled_drain_items(drained_items));
 }
 
+pub(super) fn record_scheduled_drain_items_for_thermal(
+    thermal: RenderThermalState,
+    drained_items: usize,
+) {
+    with_event_loop_state(|state| {
+        state.record_scheduled_drain_items_for_thermal(thermal, drained_items)
+    });
+}
+
 pub(super) fn record_scheduled_drain_reschedule() {
     with_event_loop_state(EventLoopState::record_scheduled_drain_reschedule);
+}
+
+pub(super) fn record_scheduled_drain_reschedule_for_thermal(thermal: RenderThermalState) {
+    with_event_loop_state(|state| state.record_scheduled_drain_reschedule_for_thermal(thermal));
+}
+
+pub(super) fn record_post_burst_convergence(started_at: Millis, converged_at: Millis) {
+    with_event_loop_state(|state| state.record_post_burst_convergence(started_at, converged_at));
 }
 
 pub(super) fn record_probe_duration(kind: ProbeKind, duration_micros: u64) {
@@ -476,13 +717,17 @@ pub(super) fn diagnostics_snapshot() -> EventLoopDiagnostics {
 #[cfg(test)]
 mod tests {
     use super::{
-        EventLoopState, diagnostics_snapshot, record_probe_duration,
+        EventLoopState, diagnostics_snapshot, record_delayed_ingress_pending_update,
+        record_host_timer_rearm, record_post_burst_convergence, record_probe_duration,
         record_probe_refresh_budget_exhausted, record_probe_refresh_retried,
-        record_scheduled_drain_items, record_scheduled_drain_reschedule,
-        record_scheduled_queue_depth, record_timer_fire_duration, record_timer_schedule_duration,
-        with_event_loop_state_for_test,
+        record_scheduled_drain_items, record_scheduled_drain_items_for_thermal,
+        record_scheduled_drain_reschedule, record_scheduled_drain_reschedule_for_thermal,
+        record_scheduled_queue_depth, record_scheduled_queue_depth_for_thermal,
+        record_timer_fire_duration, record_timer_schedule_duration, with_event_loop_state_for_test,
     };
-    use crate::core::state::ProbeKind;
+    use crate::core::effect::TimerKind;
+    use crate::core::state::{ProbeKind, RenderThermalState};
+    use crate::core::types::Millis;
 
     fn reset_event_loop_state() {
         with_event_loop_state_for_test(|state| *state = EventLoopState::new());
@@ -556,6 +801,93 @@ mod tests {
         assert_eq!(diagnostics.metrics.scheduled_drain_items.total_depth, 7);
         assert_eq!(diagnostics.metrics.scheduled_drain_items.max_depth, 5);
         assert_eq!(diagnostics.metrics.scheduled_drain_reschedules, 1);
+    }
+
+    #[test]
+    fn host_timer_rearm_telemetry_counts_total_and_kind_specific_rearms() {
+        reset_event_loop_state();
+
+        record_host_timer_rearm(TimerKind::Ingress);
+        record_host_timer_rearm(TimerKind::Ingress);
+        record_host_timer_rearm(TimerKind::Cleanup);
+
+        let diagnostics = diagnostics_snapshot();
+
+        assert_eq!(diagnostics.metrics.host_timer_rearms_total, 3);
+        assert_eq!(diagnostics.metrics.host_timer_rearms_by_kind.ingress, 2);
+        assert_eq!(diagnostics.metrics.host_timer_rearms_by_kind.cleanup, 1);
+        assert_eq!(diagnostics.metrics.host_timer_rearms_by_kind.animation, 0);
+    }
+
+    #[test]
+    fn delayed_ingress_and_convergence_telemetry_record_explicit_rewrite_diagnostics() {
+        reset_event_loop_state();
+
+        record_delayed_ingress_pending_update();
+        record_delayed_ingress_pending_update();
+        record_post_burst_convergence(Millis::new(120), Millis::new(165));
+        record_post_burst_convergence(Millis::new(200), Millis::new(280));
+
+        let diagnostics = diagnostics_snapshot();
+
+        assert_eq!(diagnostics.metrics.delayed_ingress_pending_updates, 2);
+        assert_eq!(diagnostics.metrics.post_burst_convergence.samples, 2);
+        assert_eq!(diagnostics.metrics.post_burst_convergence.last_ms, 80);
+        assert_eq!(diagnostics.metrics.post_burst_convergence.max_ms, 80);
+        assert_eq!(diagnostics.metrics.post_burst_convergence.total_ms, 125);
+    }
+
+    #[test]
+    fn thermal_queue_telemetry_tracks_backlog_and_drain_samples_by_cleanup_state() {
+        reset_event_loop_state();
+
+        record_scheduled_queue_depth_for_thermal(RenderThermalState::Hot, 7);
+        record_scheduled_queue_depth_for_thermal(RenderThermalState::Cooling, 11);
+        record_scheduled_drain_items_for_thermal(RenderThermalState::Cooling, 9);
+        record_scheduled_drain_reschedule_for_thermal(RenderThermalState::Cooling);
+        record_scheduled_drain_items_for_thermal(RenderThermalState::Cold, 1);
+
+        let diagnostics = diagnostics_snapshot();
+
+        assert_eq!(
+            diagnostics
+                .metrics
+                .scheduled_queue_depth_by_thermal
+                .hot
+                .total_depth,
+            7
+        );
+        assert_eq!(
+            diagnostics
+                .metrics
+                .scheduled_queue_depth_by_thermal
+                .cooling
+                .total_depth,
+            11
+        );
+        assert_eq!(
+            diagnostics
+                .metrics
+                .scheduled_drain_items_by_thermal
+                .cooling
+                .total_depth,
+            9
+        );
+        assert_eq!(
+            diagnostics
+                .metrics
+                .scheduled_drain_reschedules_by_thermal
+                .cooling,
+            1
+        );
+        assert_eq!(
+            diagnostics
+                .metrics
+                .scheduled_drain_items_by_thermal
+                .cold
+                .total_depth,
+            1
+        );
     }
 
     #[test]
