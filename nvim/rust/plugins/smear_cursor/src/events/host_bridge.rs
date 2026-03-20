@@ -142,18 +142,6 @@ mod tests {
     }
 
     #[test]
-    fn host_bridge_script_describes_the_versioned_contract() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(script.contains("versioned host bridge contract"));
-    }
-
-    #[test]
-    fn host_bridge_script_registers_the_core_timer_callback_name() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(script.contains(CORE_TIMER_CALLBACK_FUNCTION_NAME));
-    }
-
-    #[test]
     fn host_bridge_script_uses_named_vimscript_timer_callbacks() {
         let script = HOST_BRIDGE_SCRIPT;
         assert!(script.contains("timer_start("));

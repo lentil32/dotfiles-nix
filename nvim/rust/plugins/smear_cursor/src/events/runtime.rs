@@ -15,7 +15,7 @@ use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::{
     CoreState, CursorColorProbeWitness, CursorColorSample, ProbeKind, RenderThermalState,
 };
-use crate::core::types::{DelayBudgetMs, Generation, Millis, TimerId, TimerToken};
+use crate::core::types::{DelayBudgetMs, Generation, Millis, TimerToken};
 use crate::draw::{recover_all_namespaces, render_pool_diagnostics};
 use crate::state::CursorLocation;
 use crate::types::Point;
@@ -42,11 +42,23 @@ struct CoreTimerHandles {
 }
 
 impl CoreTimerHandles {
-    fn insert(&mut self, handle: CoreTimerHandle) {
-        self.handles.push(handle);
+    fn replace(&mut self, handle: CoreTimerHandle) -> Option<CoreTimerHandle> {
+        let timer_id = handle.token.id();
+        if let Some(index) = self
+            .handles
+            .iter()
+            .position(|existing| existing.token.id() == timer_id)
+        {
+            let displaced = std::mem::replace(&mut self.handles[index], handle);
+            Some(displaced)
+        } else {
+            self.handles.push(handle);
+            None
+        }
     }
 
-    fn has_outstanding_timer_id(&self, timer_id: TimerId) -> bool {
+    #[cfg(test)]
+    fn has_outstanding_timer_id(&self, timer_id: crate::core::types::TimerId) -> bool {
         self.handles
             .iter()
             .any(|handle| handle.token.id() == timer_id)
@@ -65,9 +77,9 @@ impl CoreTimerHandles {
 }
 
 thread_local! {
-    // Reducer token generations define which timer edge is live. The runtime keeps outstanding
-    // shell timers until they fire or the engine resets, so rearming no longer requires host-side
-    // timer replacement on the scheduling path.
+    // Reducer token generations define which timer edge is live. The runtime keeps a single
+    // outstanding shell timer per TimerId, replacing the prior host timer when a newer token is
+    // scheduled for the same kind.
     static CORE_TIMER_HANDLES: RefCell<CoreTimerHandles> =
         RefCell::new(CoreTimerHandles::default());
 }
@@ -216,11 +228,11 @@ impl IngressReadSnapshot {
 }
 
 fn set_core_timer_handle(handle: CoreTimerHandle) -> bool {
-    with_core_timer_handles(|handles| {
-        let rearmed = handles.has_outstanding_timer_id(handle.token.id());
-        handles.insert(handle);
-        rearmed
-    })
+    let displaced = with_core_timer_handles(|handles| handles.replace(handle));
+    if let Some(displaced) = displaced {
+        stop_core_timer_handle(displaced, "replace");
+    }
+    displaced.is_some()
 }
 
 fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
@@ -291,8 +303,16 @@ pub(super) fn record_ingress_coalesced() {
     event_loop::record_ingress_coalesced();
 }
 
+pub(super) fn record_ingress_coalesced_count(count: usize) {
+    event_loop::record_ingress_coalesced_count(count);
+}
+
 pub(super) fn record_delayed_ingress_pending_update() {
     event_loop::record_delayed_ingress_pending_update();
+}
+
+pub(super) fn record_delayed_ingress_pending_update_count(count: usize) {
+    event_loop::record_delayed_ingress_pending_update_count(count);
 }
 
 pub(super) fn record_ingress_dropped() {
@@ -313,6 +333,10 @@ pub(super) fn record_degraded_draw_application() {
 
 pub(super) fn record_stale_token_event() {
     event_loop::record_stale_token_event();
+}
+
+pub(super) fn record_stale_token_event_count(count: usize) {
+    event_loop::record_stale_token_event_count(count);
 }
 
 pub(super) fn record_timer_schedule_duration(duration_micros: u64) {
@@ -366,8 +390,16 @@ pub(super) fn record_probe_refresh_retried(kind: ProbeKind) {
     event_loop::record_probe_refresh_retried(kind);
 }
 
+pub(super) fn record_probe_refresh_retried_count(kind: ProbeKind, count: usize) {
+    event_loop::record_probe_refresh_retried_count(kind, count);
+}
+
 pub(super) fn record_probe_refresh_budget_exhausted(kind: ProbeKind) {
     event_loop::record_probe_refresh_budget_exhausted(kind);
+}
+
+pub(super) fn record_probe_refresh_budget_exhausted_count(kind: ProbeKind, count: usize) {
+    event_loop::record_probe_refresh_budget_exhausted_count(kind, count);
 }
 
 pub(super) fn event_loop_diagnostics() -> event_loop::EventLoopDiagnostics {
@@ -987,19 +1019,19 @@ mod tests {
     }
 
     #[test]
-    fn core_timer_handles_insert_keeps_multiple_shell_timers_for_the_same_kind() {
+    fn core_timer_handles_replace_keeps_one_live_timer_per_id() {
         let mut handles = CoreTimerHandles::default();
         let animation = handle(11, TimerId::Animation, 1);
         let ingress = handle(12, TimerId::Ingress, 2);
         let rearmed_animation = handle(13, TimerId::Animation, 3);
 
-        handles.insert(animation);
-        handles.insert(ingress);
-        handles.insert(rearmed_animation);
+        assert_eq!(handles.replace(animation), None);
+        assert_eq!(handles.replace(ingress), None);
+        assert_eq!(handles.replace(rearmed_animation), Some(animation));
 
         assert_eq!(
             handles.take_by_shell_timer_id(animation.shell_timer_id),
-            Some(animation)
+            None
         );
         assert_eq!(
             handles.take_by_shell_timer_id(ingress.shell_timer_id),
@@ -1017,8 +1049,8 @@ mod tests {
         let animation = handle(11, TimerId::Animation, 1);
         let ingress = handle(12, TimerId::Ingress, 2);
 
-        handles.insert(animation);
-        handles.insert(ingress);
+        assert_eq!(handles.replace(animation), None);
+        assert_eq!(handles.replace(ingress), None);
 
         assert_eq!(
             handles.take_by_shell_timer_id(shell_timer_id(11)),
@@ -1037,8 +1069,8 @@ mod tests {
         let animation = handle(21, TimerId::Animation, 1);
         let recovery = handle(22, TimerId::Recovery, 2);
 
-        handles.insert(animation);
-        handles.insert(recovery);
+        assert_eq!(handles.replace(animation), None);
+        assert_eq!(handles.replace(recovery), None);
 
         let drained = handles.clear_all();
 
@@ -1056,10 +1088,26 @@ mod tests {
     #[test]
     fn core_timer_handles_detect_outstanding_kind_for_rearm_tracking() {
         let mut handles = CoreTimerHandles::default();
-        handles.insert(handle(41, TimerId::Ingress, 1));
+        assert_eq!(handles.replace(handle(41, TimerId::Ingress, 1)), None);
 
         assert!(handles.has_outstanding_timer_id(TimerId::Ingress));
         assert!(!handles.has_outstanding_timer_id(TimerId::Cleanup));
+    }
+
+    #[test]
+    fn core_timer_handles_replace_updates_the_live_shell_timer_for_the_same_id() {
+        let mut handles = CoreTimerHandles::default();
+        let first = handle(51, TimerId::Cleanup, 1);
+        let second = handle(52, TimerId::Cleanup, 2);
+
+        assert_eq!(handles.replace(first), None);
+        assert_eq!(handles.replace(second), Some(first));
+
+        assert_eq!(handles.take_by_shell_timer_id(first.shell_timer_id), None);
+        assert_eq!(
+            handles.take_by_shell_timer_id(second.shell_timer_id),
+            Some(second)
+        );
     }
 
     #[test]

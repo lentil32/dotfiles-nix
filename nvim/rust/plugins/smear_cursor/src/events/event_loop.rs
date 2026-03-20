@@ -268,6 +268,11 @@ impl RuntimeBehaviorMetrics {
         self.ingress_coalesced = self.ingress_coalesced.saturating_add(1);
     }
 
+    fn record_ingress_coalesced_count(&mut self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.ingress_coalesced = self.ingress_coalesced.saturating_add(count);
+    }
+
     fn record_ingress_dropped(&mut self) {
         self.ingress_dropped = self.ingress_dropped.saturating_add(1);
     }
@@ -288,6 +293,11 @@ impl RuntimeBehaviorMetrics {
         self.stale_token_events = self.stale_token_events.saturating_add(1);
     }
 
+    fn record_stale_token_event_count(&mut self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.stale_token_events = self.stale_token_events.saturating_add(count);
+    }
+
     fn record_timer_schedule_duration(&mut self, duration_micros: u64) {
         self.timer_schedule.record_micros(duration_micros);
     }
@@ -304,6 +314,12 @@ impl RuntimeBehaviorMetrics {
     fn record_delayed_ingress_pending_update(&mut self) {
         self.delayed_ingress_pending_updates =
             self.delayed_ingress_pending_updates.saturating_add(1);
+    }
+
+    fn record_delayed_ingress_pending_update_count(&mut self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.delayed_ingress_pending_updates =
+            self.delayed_ingress_pending_updates.saturating_add(count);
     }
 
     fn record_scheduled_queue_depth(&mut self, depth: usize) {
@@ -356,9 +372,22 @@ impl RuntimeBehaviorMetrics {
         telemetry.refresh_retries = telemetry.refresh_retries.saturating_add(1);
     }
 
+    fn record_probe_refresh_retried_count(&mut self, kind: ProbeKind, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        let telemetry = self.probe_telemetry_mut(kind);
+        telemetry.refresh_retries = telemetry.refresh_retries.saturating_add(count);
+    }
+
     fn record_probe_refresh_budget_exhausted(&mut self, kind: ProbeKind) {
         let telemetry = self.probe_telemetry_mut(kind);
         telemetry.refresh_budget_exhausted = telemetry.refresh_budget_exhausted.saturating_add(1);
+    }
+
+    fn record_probe_refresh_budget_exhausted_count(&mut self, kind: ProbeKind, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        let telemetry = self.probe_telemetry_mut(kind);
+        telemetry.refresh_budget_exhausted =
+            telemetry.refresh_budget_exhausted.saturating_add(count);
     }
 }
 
@@ -445,6 +474,10 @@ impl EventLoopState {
         self.runtime_metrics.record_ingress_coalesced();
     }
 
+    pub(super) fn record_ingress_coalesced_count(&mut self, count: usize) {
+        self.runtime_metrics.record_ingress_coalesced_count(count);
+    }
+
     pub(super) fn record_ingress_dropped(&mut self) {
         self.runtime_metrics.record_ingress_dropped();
     }
@@ -465,6 +498,10 @@ impl EventLoopState {
         self.runtime_metrics.record_stale_token_event();
     }
 
+    pub(super) fn record_stale_token_event_count(&mut self, count: usize) {
+        self.runtime_metrics.record_stale_token_event_count(count);
+    }
+
     pub(super) fn record_timer_schedule_duration(&mut self, duration_micros: u64) {
         self.runtime_metrics
             .record_timer_schedule_duration(duration_micros);
@@ -481,6 +518,11 @@ impl EventLoopState {
 
     pub(super) fn record_delayed_ingress_pending_update(&mut self) {
         self.runtime_metrics.record_delayed_ingress_pending_update();
+    }
+
+    pub(super) fn record_delayed_ingress_pending_update_count(&mut self, count: usize) {
+        self.runtime_metrics
+            .record_delayed_ingress_pending_update_count(count);
     }
 
     pub(super) fn record_scheduled_queue_depth(&mut self, depth: usize) {
@@ -540,9 +582,23 @@ impl EventLoopState {
         self.runtime_metrics.record_probe_refresh_retried(kind);
     }
 
+    pub(super) fn record_probe_refresh_retried_count(&mut self, kind: ProbeKind, count: usize) {
+        self.runtime_metrics
+            .record_probe_refresh_retried_count(kind, count);
+    }
+
     pub(super) fn record_probe_refresh_budget_exhausted(&mut self, kind: ProbeKind) {
         self.runtime_metrics
             .record_probe_refresh_budget_exhausted(kind);
+    }
+
+    pub(super) fn record_probe_refresh_budget_exhausted_count(
+        &mut self,
+        kind: ProbeKind,
+        count: usize,
+    ) {
+        self.runtime_metrics
+            .record_probe_refresh_budget_exhausted_count(kind, count);
     }
 
     pub(super) fn runtime_metrics(&self) -> RuntimeBehaviorMetrics {
@@ -628,6 +684,13 @@ pub(super) fn record_ingress_coalesced() {
     with_event_loop_state(EventLoopState::record_ingress_coalesced);
 }
 
+pub(super) fn record_ingress_coalesced_count(count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_ingress_coalesced_count(count));
+}
+
 pub(super) fn record_ingress_dropped() {
     with_event_loop_state(EventLoopState::record_ingress_dropped);
 }
@@ -648,6 +711,13 @@ pub(super) fn record_stale_token_event() {
     with_event_loop_state(EventLoopState::record_stale_token_event);
 }
 
+pub(super) fn record_stale_token_event_count(count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_stale_token_event_count(count));
+}
+
 pub(super) fn record_timer_schedule_duration(duration_micros: u64) {
     with_event_loop_state(|state| state.record_timer_schedule_duration(duration_micros));
 }
@@ -662,6 +732,13 @@ pub(super) fn record_host_timer_rearm(kind: TimerKind) {
 
 pub(super) fn record_delayed_ingress_pending_update() {
     with_event_loop_state(EventLoopState::record_delayed_ingress_pending_update);
+}
+
+pub(super) fn record_delayed_ingress_pending_update_count(count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_delayed_ingress_pending_update_count(count));
 }
 
 pub(super) fn record_scheduled_queue_depth(depth: usize) {
@@ -705,8 +782,22 @@ pub(super) fn record_probe_refresh_retried(kind: ProbeKind) {
     with_event_loop_state(|state| state.record_probe_refresh_retried(kind));
 }
 
+pub(super) fn record_probe_refresh_retried_count(kind: ProbeKind, count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_probe_refresh_retried_count(kind, count));
+}
+
 pub(super) fn record_probe_refresh_budget_exhausted(kind: ProbeKind) {
     with_event_loop_state(|state| state.record_probe_refresh_budget_exhausted(kind));
+}
+
+pub(super) fn record_probe_refresh_budget_exhausted_count(kind: ProbeKind, count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_probe_refresh_budget_exhausted_count(kind, count));
 }
 
 pub(super) fn diagnostics_snapshot() -> EventLoopDiagnostics {

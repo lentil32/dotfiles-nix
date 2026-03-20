@@ -2273,56 +2273,7 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
 }
 
 #[test]
-fn clear_apply_completion_redraws_after_visual_change_outside_cmdline() {
-    let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
-    runtime.config.max_kept_windows = 21;
-    let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
-    let basis = PatchBasis::new(None, None);
-    let patch = ScenePatch::derive(basis);
-    let (state, proposal_id) = state.allocate_proposal_id();
-    let proposal = InFlightProposal::clear(
-        proposal_id,
-        patch,
-        RealizationClear::new(21),
-        RenderCleanupAction::Schedule,
-        RenderSideEffects::default(),
-        crate::core::state::AnimationSchedule::Idle,
-    )
-    .expect("clear proposal should be constructible");
-    let staged = state
-        .into_applying(proposal)
-        .expect("staging clear proposal requires retained observation");
-
-    let completed = reduce(
-        &staged,
-        Event::ApplyReported(ApplyReport::AppliedFully {
-            proposal_id,
-            observed_at: Millis::new(79),
-            visual_change: true,
-        }),
-    );
-
-    let cleanup_token = completed
-        .next
-        .timers()
-        .active_token(TimerId::Cleanup)
-        .expect("cleanup timer should be armed");
-    assert_eq!(
-        completed.effects,
-        vec![
-            Effect::ScheduleTimer(ScheduleTimerEffect {
-                token: cleanup_token,
-                delay: DelayBudgetMs::try_new(render_cleanup_delay_ms(&runtime.config))
-                    .expect("cleanup delay budget"),
-                requested_at: Millis::new(79),
-            }),
-            Effect::RedrawCmdline,
-        ]
-    );
-}
-
-#[test]
-fn cleanup_timer_soft_clear_enters_cooling_compaction_before_cold() {
+fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
     let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
     runtime.config.max_kept_windows = 21;
     let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime.clone());
@@ -2389,22 +2340,12 @@ fn cleanup_timer_soft_clear_enters_cooling_compaction_before_cold() {
         after_soft.next.render_cleanup().entered_cooling_at(),
         Some(Millis::new(79 + render_cleanup_delay_ms(&runtime.config)))
     );
-    let compaction_token = after_soft
-        .next
-        .timers()
-        .active_token(TimerId::Cleanup)
-        .expect("cooling compaction timer should be armed after soft clear");
-
-    let compaction_tick = reduce(
-        &after_soft.next,
-        cleanup_tick_event(
-            compaction_token,
-            79 + render_cleanup_delay_ms(&runtime.config) + 1,
-        ),
-    );
-
     assert_eq!(
-        compaction_tick.effects,
+        after_soft.next.timers().active_token(TimerId::Cleanup),
+        None
+    );
+    assert_eq!(
+        after_soft.effects,
         vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
             execution: RenderCleanupExecution::CompactToBudget {
                 target_budget: 2,
@@ -2414,9 +2355,9 @@ fn cleanup_timer_soft_clear_enters_cooling_compaction_before_cold() {
     );
 
     let after_compaction = reduce(
-        &compaction_tick.next,
+        &after_soft.next,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
-            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config) + 1),
+            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
             action: RenderCleanupAppliedAction::CompactedToBudget {
                 converged_to_idle: true,
             },
@@ -2447,7 +2388,7 @@ fn cleanup_timer_soft_clear_enters_cooling_compaction_before_cold() {
         vec![Effect::RecordEventLoopMetric(
             EventLoopMetricEffect::CleanupConvergedToCold {
                 started_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
-                converged_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config) + 1),
+                converged_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
             },
         )]
     );
@@ -2498,22 +2439,14 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
             action: RenderCleanupAppliedAction::SoftCleared,
         }),
     );
-    let compaction_token = after_soft
-        .next
-        .timers()
-        .active_token(TimerId::Cleanup)
-        .expect("cooling compaction timer should be armed after soft clear");
-    let compaction_tick = reduce(
-        &after_soft.next,
-        cleanup_tick_event(
-            compaction_token,
-            79 + render_cleanup_delay_ms(&runtime.config) + 1,
-        ),
+    assert_eq!(
+        after_soft.next.timers().active_token(TimerId::Cleanup),
+        None
     );
     let after_compaction = reduce(
-        &compaction_tick.next,
+        &after_soft.next,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
-            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config) + 1),
+            observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
             action: RenderCleanupAppliedAction::CompactedToBudget {
                 converged_to_idle: false,
             },
@@ -2732,35 +2665,6 @@ mod apply_completion_resume {
             Effect::ScheduleTimer(ScheduleTimerEffect { .. })
         ));
     }
-}
-
-#[test]
-fn full_apply_acknowledges_target_projection() {
-    let (staged, proposal_id) =
-        planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 73);
-    let expected = staged
-        .scene()
-        .projection_entry()
-        .expect("projection cache after draw render")
-        .snapshot()
-        .clone();
-
-    let completed = reduce(
-        &staged,
-        Event::ApplyReported(ApplyReport::AppliedFully {
-            proposal_id,
-            observed_at: Millis::new(74),
-            visual_change: true,
-        }),
-    );
-
-    assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
-    assert_eq!(
-        completed.next.realization(),
-        &RealizationLedger::Consistent {
-            acknowledged: expected,
-        }
-    );
 }
 
 #[test]

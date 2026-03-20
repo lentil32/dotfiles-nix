@@ -65,25 +65,57 @@ fn global_compaction_prune_plan(
     let prune_goal = total_windows
         .saturating_sub(target_budget)
         .min(max_prune_per_tick);
-    let mut candidates = render_tabs
-        .iter()
-        .flat_map(|(tab_handle, tab_windows)| {
-            tab_windows
-                .windows
-                .iter()
-                .enumerate()
-                .filter_map(|(index, cached)| {
-                    cached
-                        .available_epoch()
-                        .map(|epoch| (epoch, *tab_handle, index))
-                })
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_unstable();
-    candidates.truncate(prune_goal.min(candidates.len()));
+    let available_candidates = render_tabs
+        .values()
+        .map(|tab_windows| tab_windows.reusable_window_indices.len())
+        .sum::<usize>();
+    if available_candidates == 0 {
+        return std::collections::HashMap::new();
+    }
+    if prune_goal >= available_candidates {
+        let mut plan = std::collections::HashMap::<i32, Vec<usize>>::new();
+        for (tab_handle, tab_windows) in render_tabs {
+            if tab_windows.reusable_window_indices.is_empty() {
+                continue;
+            }
+            let mut indices = tab_windows.reusable_window_indices.clone();
+            indices.sort_unstable();
+            plan.insert(*tab_handle, indices);
+        }
+        return plan;
+    }
+
+    // Keep only the `prune_goal` oldest candidates; a full global sort is unnecessary.
+    let mut selected_candidates = std::collections::BinaryHeap::with_capacity(prune_goal);
+    for (tab_handle, tab_windows) in render_tabs {
+        for index in tab_windows.reusable_window_indices.iter().copied() {
+            let Some(cached) = tab_windows.windows.get(index) else {
+                continue;
+            };
+            let Some(epoch) = cached.available_epoch() else {
+                continue;
+            };
+            let candidate = (epoch, *tab_handle, index);
+
+            if selected_candidates.len() < prune_goal {
+                selected_candidates.push(candidate);
+                continue;
+            }
+
+            let Some(current_newest_selected) = selected_candidates.peek().copied() else {
+                continue;
+            };
+            if candidate >= current_newest_selected {
+                continue;
+            }
+
+            let _ = selected_candidates.pop();
+            selected_candidates.push(candidate);
+        }
+    }
 
     let mut plan = std::collections::HashMap::<i32, Vec<usize>>::new();
-    for (_, tab_handle, index) in candidates {
+    for (_, tab_handle, index) in selected_candidates.into_iter() {
         plan.entry(tab_handle).or_default().push(index);
     }
     for indices in plan.values_mut() {

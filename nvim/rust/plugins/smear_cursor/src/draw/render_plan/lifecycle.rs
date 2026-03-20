@@ -104,28 +104,31 @@ pub(crate) fn compile_render_frame(
 fn compiled_field_for_state(
     state: &mut PlannerState,
 ) -> std::sync::Arc<std::collections::BTreeMap<(i64, i64), CompiledCell>> {
-    let latent_cache_current = state.latent_cache.latest_step() == state.step_index
-        && state.latent_cache.history_revision() == state.history_revision;
-    if !latent_cache_current {
-        state.latent_cache = latent_field::LatentFieldCache::rebuild(
-            &state.history,
-            state.step_index,
-            state.history_revision,
+    if state.latent_cache.latest_step() != state.step_index {
+        debug_assert!(
+            state.latent_cache.latest_step().value() <= state.step_index.value(),
+            "latent cache should only advance forward with planner state"
         );
+        state.latent_cache.advance_to(state.step_index);
     }
 
     let cache = &state.compiled_cache;
     let cache_is_current = cache.latest_step == Some(state.step_index)
-        && cache.history_revision == state.history_revision;
+        && cache.latent_revision == state.latent_cache.revision();
     if cache_is_current {
         return std::sync::Arc::clone(&cache.field);
     }
 
-    let compiled = std::sync::Arc::new(latent_field::compile_field_from_cache(&state.latent_cache));
+    let compiled = std::sync::Arc::new(latent_field::compile_field_from_cache_with_scratch(
+        &state.latent_cache,
+        &mut state.compiled_cache.scratch,
+    ));
+    let scratch = std::mem::take(&mut state.compiled_cache.scratch);
     state.compiled_cache = CompiledFieldCache {
         latest_step: Some(state.step_index),
-        history_revision: state.history_revision,
+        latent_revision: state.latent_cache.revision(),
         field: std::sync::Arc::clone(&compiled),
+        scratch,
     };
     compiled
 }

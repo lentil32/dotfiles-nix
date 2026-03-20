@@ -1,6 +1,6 @@
 use crate::core::types::{ArcLenQ16, StepIndex, StrokeId};
 use crate::types::{BASE_TIME_INTERVAL, Point};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 pub(super) const MICRO_W: usize = 8;
 pub(super) const MICRO_H: usize = 8;
@@ -48,6 +48,10 @@ impl Default for MicroTile {
 impl MicroTile {
     pub(super) fn max_sample_q12(self) -> u16 {
         self.samples_q12.iter().copied().max().unwrap_or(0)
+    }
+
+    fn total_mass_q12(&self) -> u32 {
+        self.samples_q12.iter().copied().map(u32::from).sum()
     }
 }
 
@@ -184,32 +188,46 @@ impl Default for AccumulatorCell {
     }
 }
 
+impl AccumulatorCell {
+    fn survives(self) -> bool {
+        self.weighted_total_mass
+            >= u64::from(MIN_COMPILED_SAMPLE_Q12).saturating_mul(WEIGHT_Q16_SCALE)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct CompileScratch {
+    accum: HashMap<(i64, i64), AccumulatorCell>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BucketCell {
-    samples_q12_sum: [u64; MICRO_TILE_SAMPLES],
-    total_mass_q12: u64,
+    // Each curve/age bucket currently receives at most one slice per render step, so `u32`
+    // leaves ample headroom while cutting the retained latent-cache footprint roughly in half.
+    samples_q12_sum: [u32; MICRO_TILE_SAMPLES],
+    total_mass_q12: u32,
 }
 
 impl BucketCell {
     fn add_tile(&mut self, tile: &MicroTile) {
-        let mut total_mass_q12 = 0_u64;
+        let mut total_mass_q12 = 0_u32;
         for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
-            let sample_u64 = u64::from(sample);
-            self.samples_q12_sum[index] = self.samples_q12_sum[index].saturating_add(sample_u64);
-            total_mass_q12 = total_mass_q12.saturating_add(sample_u64);
+            let sample_u32 = u32::from(sample);
+            self.samples_q12_sum[index] = self.samples_q12_sum[index].saturating_add(sample_u32);
+            total_mass_q12 = total_mass_q12.saturating_add(sample_u32);
         }
         self.total_mass_q12 = self.total_mass_q12.saturating_add(total_mass_q12);
     }
 
     fn remove_tile(&mut self, tile: &MicroTile) {
-        let mut total_mass_q12 = 0_u64;
+        let mut total_mass_q12 = 0_u32;
         for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
-            let sample_u64 = u64::from(sample);
+            let sample_u32 = u32::from(sample);
             // removal should mirror prior insertion exactly; saturating arithmetic keeps the
             // derived cache non-panicking if that invariant is ever violated.
-            debug_assert!(self.samples_q12_sum[index] >= sample_u64);
-            self.samples_q12_sum[index] = self.samples_q12_sum[index].saturating_sub(sample_u64);
-            total_mass_q12 = total_mass_q12.saturating_add(sample_u64);
+            debug_assert!(self.samples_q12_sum[index] >= sample_u32);
+            self.samples_q12_sum[index] = self.samples_q12_sum[index].saturating_sub(sample_u32);
+            total_mass_q12 = total_mass_q12.saturating_add(sample_u32);
         }
         debug_assert!(self.total_mass_q12 >= total_mass_q12);
         self.total_mass_q12 = self.total_mass_q12.saturating_sub(total_mass_q12);
@@ -223,7 +241,7 @@ impl BucketCell {
 impl Default for BucketCell {
     fn default() -> Self {
         Self {
-            samples_q12_sum: [0_u64; MICRO_TILE_SAMPLES],
+            samples_q12_sum: [0_u32; MICRO_TILE_SAMPLES],
             total_mass_q12: 0,
         }
     }
@@ -299,32 +317,34 @@ impl WeightCurveBuckets {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct LatentFieldCache {
     latest_step: StepIndex,
-    history_revision: u64,
+    revision: u64,
     curves: BTreeMap<WeightCurveKey, WeightCurveBuckets>,
 }
 
 impl LatentFieldCache {
-    pub(super) fn latest_step(&self) -> StepIndex {
+    pub(super) const fn latest_step(&self) -> StepIndex {
         self.latest_step
     }
 
-    pub(super) fn history_revision(&self) -> u64 {
-        self.history_revision
+    pub(super) const fn revision(&self) -> u64 {
+        self.revision
     }
 
+    #[cfg(test)]
     pub(super) fn rebuild(
         history: &VecDeque<DepositedSlice>,
         latest_step: StepIndex,
-        history_revision: u64,
+        revision: u64,
     ) -> Self {
         let mut cache = Self {
             latest_step,
-            history_revision,
+            revision,
             curves: BTreeMap::new(),
         };
         for slice in history {
             cache.insert_slice(slice);
         }
+        cache.revision = revision;
         cache
     }
 
@@ -339,10 +359,6 @@ impl LatentFieldCache {
         }
         self.curves.retain(|_, buckets| !buckets.is_empty());
         self.latest_step = latest_step;
-    }
-
-    pub(super) fn set_history_revision(&mut self, history_revision: u64) {
-        self.history_revision = history_revision;
     }
 
     pub(super) fn insert_slice(&mut self, slice: &DepositedSlice) {
@@ -362,14 +378,17 @@ impl LatentFieldCache {
         for (coord, tile) in &slice.microtiles {
             bucket.entry(*coord).or_default().add_tile(tile);
         }
+        self.revision = self.revision.saturating_add(1);
     }
 
+    #[cfg(test)]
     pub(super) fn remove_slice(&mut self, slice: &DepositedSlice) {
         let key = WeightCurveKey::from_slice(slice);
         let age_steps = self
             .latest_step
             .value()
             .saturating_sub(slice.step_index.value());
+        let mut changed = false;
         let mut remove_curve = false;
 
         if let Some(buckets) = self.curves.get_mut(&key) {
@@ -379,6 +398,7 @@ impl LatentFieldCache {
                         cell.remove_tile(tile);
                         cell.is_empty()
                     });
+                    changed |= remove_cell || bucket.contains_key(coord);
                     if remove_cell {
                         let _ = bucket.remove(coord);
                     }
@@ -390,13 +410,9 @@ impl LatentFieldCache {
         if remove_curve {
             let _ = self.curves.remove(&key);
         }
-    }
-}
-
-fn sample_point(row: i64, col: i64, sample_row: usize, sample_col: usize) -> Point {
-    Point {
-        row: row as f64 + (sample_row as f64 + 0.5) / MICRO_H as f64,
-        col: col as f64 + (sample_col as f64 + 0.5) / MICRO_W as f64,
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
     }
 }
 
@@ -426,53 +442,57 @@ fn axis_interval(sample: f64, start: f64, end: f64, half_extent: f64) -> Option<
     Some((lo, hi))
 }
 
-fn swept_occupancy_fraction(
-    sample: Point,
-    start: Pose,
-    end: Pose,
-    block_aspect_ratio: f64,
-    thickness_y: f64,
-    thickness_x: f64,
-) -> f64 {
-    let safe_aspect_ratio = if block_aspect_ratio.is_finite() {
-        block_aspect_ratio.max(EPSILON)
-    } else {
-        1.0
-    };
+fn sample_offset(sample_index: usize, samples_per_axis: usize) -> f64 {
+    (sample_index as f64 + 0.5) / samples_per_axis as f64
+}
 
-    let width_scale = if thickness_x.is_finite() {
-        thickness_x.max(EPSILON)
-    } else {
-        1.0
-    };
-    let height_scale = if thickness_y.is_finite() {
-        thickness_y.max(EPSILON)
-    } else {
-        1.0
-    };
+fn sample_center_cell_span(
+    start: f64,
+    end: f64,
+    half_extent: f64,
+    samples_per_axis: usize,
+) -> Option<(i64, i64)> {
+    if !start.is_finite() || !end.is_finite() || !half_extent.is_finite() || samples_per_axis == 0 {
+        return None;
+    }
 
-    let half_width = (start.half_width.max(end.half_width) * width_scale).max(EPSILON);
-    let half_height = (start.half_height.max(end.half_height) * height_scale).max(EPSILON);
+    let first_offset = sample_offset(0, samples_per_axis);
+    let last_offset = sample_offset(samples_per_axis.saturating_sub(1), samples_per_axis);
+    let min_center = start.min(end) - half_extent;
+    let max_center = start.max(end) + half_extent;
+    let min_cell = (min_center - last_offset).ceil() as i64;
+    let max_cell = (max_center - first_offset).floor() as i64;
+    (min_cell <= max_cell).then_some((min_cell, max_cell))
+}
 
-    let sx = sample.col;
-    let sy = sample.row * safe_aspect_ratio;
+fn axis_intervals_for_cells<const N: usize>(
+    min_cell: i64,
+    max_cell: i64,
+    sample_scale: f64,
+    start: f64,
+    end: f64,
+    half_extent: f64,
+) -> Vec<(i64, [Option<(f64, f64)>; N])> {
+    let cell_count =
+        usize::try_from(max_cell.saturating_sub(min_cell).saturating_add(1)).unwrap_or_default();
+    let mut cells = Vec::with_capacity(cell_count);
 
-    let start_x = start.center.col;
-    let start_y = start.center.row * safe_aspect_ratio;
-    let end_x = end.center.col;
-    let end_y = end.center.row * safe_aspect_ratio;
+    for cell in min_cell..=max_cell {
+        let mut intervals = [None; N];
+        let mut any_coverage = false;
+        for sample_index in 0..N {
+            let sample = (cell as f64 + sample_offset(sample_index, N)) * sample_scale;
+            let interval = axis_interval(sample, start, end, half_extent);
+            any_coverage |= interval.is_some();
+            intervals[sample_index] = interval;
+        }
 
-    let x_interval = axis_interval(sx, start_x, end_x, half_width);
-    let y_interval = axis_interval(sy, start_y, end_y, half_height * safe_aspect_ratio);
+        if any_coverage {
+            cells.push((cell, intervals));
+        }
+    }
 
-    let Some((x_lo, x_hi)) = x_interval else {
-        return 0.0;
-    };
-    let Some((y_lo, y_hi)) = y_interval else {
-        return 0.0;
-    };
-
-    (x_hi.min(y_hi) - x_lo.max(y_lo)).clamp(0.0, 1.0)
+    cells
 }
 
 pub(super) fn tail_support_steps(tail_duration_ms: f64, simulation_hz: f64) -> usize {
@@ -640,43 +660,82 @@ pub(super) fn deposit_swept_occupancy(
     thickness_y: f64,
     thickness_x: f64,
 ) -> BTreeMap<(i64, i64), MicroTile> {
-    let half_width = (start.half_width.max(end.half_width) * thickness_x.max(EPSILON)).max(EPSILON);
-    let half_height =
-        (start.half_height.max(end.half_height) * thickness_y.max(EPSILON)).max(EPSILON);
+    let safe_aspect_ratio = if block_aspect_ratio.is_finite() {
+        block_aspect_ratio.max(EPSILON)
+    } else {
+        1.0
+    };
+    let width_scale = if thickness_x.is_finite() {
+        thickness_x.max(EPSILON)
+    } else {
+        1.0
+    };
+    let height_scale = if thickness_y.is_finite() {
+        thickness_y.max(EPSILON)
+    } else {
+        1.0
+    };
+    let half_width = (start.half_width.max(end.half_width) * width_scale).max(EPSILON);
+    let half_height = (start.half_height.max(end.half_height) * height_scale).max(EPSILON);
 
-    let min_row = (start.center.row.min(end.center.row) - half_height).floor() as i64;
-    let max_row = (start.center.row.max(end.center.row) + half_height).ceil() as i64;
-    let min_col = (start.center.col.min(end.center.col) - half_width).floor() as i64;
-    let max_col = (start.center.col.max(end.center.col) + half_width).ceil() as i64;
+    let Some((min_row, max_row)) =
+        sample_center_cell_span(start.center.row, end.center.row, half_height, MICRO_H)
+    else {
+        return BTreeMap::new();
+    };
+    let Some((min_col, max_col)) =
+        sample_center_cell_span(start.center.col, end.center.col, half_width, MICRO_W)
+    else {
+        return BTreeMap::new();
+    };
+
+    let row_intervals = axis_intervals_for_cells::<MICRO_H>(
+        min_row,
+        max_row,
+        safe_aspect_ratio,
+        start.center.row * safe_aspect_ratio,
+        end.center.row * safe_aspect_ratio,
+        half_height * safe_aspect_ratio,
+    );
+    let col_intervals = axis_intervals_for_cells::<MICRO_W>(
+        min_col,
+        max_col,
+        1.0,
+        start.center.col,
+        end.center.col,
+        half_width,
+    );
+    if row_intervals.is_empty() || col_intervals.is_empty() {
+        return BTreeMap::new();
+    }
 
     let mut tiles = BTreeMap::<(i64, i64), MicroTile>::new();
 
-    for row in min_row..=max_row {
-        for col in min_col..=max_col {
+    for (row, row_intervals) in &row_intervals {
+        for (col, col_intervals) in &col_intervals {
             let mut tile = MicroTile::default();
             let mut any_coverage = false;
 
-            for sample_row in 0..MICRO_H {
-                for sample_col in 0..MICRO_W {
+            for (sample_row, y_interval) in row_intervals.iter().copied().enumerate() {
+                let Some((y_lo, y_hi)) = y_interval else {
+                    continue;
+                };
+
+                for (sample_col, x_interval) in col_intervals.iter().copied().enumerate() {
+                    let Some((x_lo, x_hi)) = x_interval else {
+                        continue;
+                    };
+
                     let index = sample_row * MICRO_W + sample_col;
-                    let sample = sample_point(row, col, sample_row, sample_col);
-                    let occupancy = swept_occupancy_fraction(
-                        sample,
-                        start,
-                        end,
-                        block_aspect_ratio,
-                        thickness_y,
-                        thickness_x,
-                    );
-                    let sample_q12 =
-                        (occupancy.clamp(0.0, 1.0) * SAMPLE_Q12_SCALE as f64).round() as u16;
+                    let occupancy = (x_hi.min(y_hi) - x_lo.max(y_lo)).clamp(0.0, 1.0);
+                    let sample_q12 = (occupancy * SAMPLE_Q12_SCALE as f64).round() as u16;
                     tile.samples_q12[index] = sample_q12;
                     any_coverage |= sample_q12 > 0;
                 }
             }
 
             if any_coverage {
-                tiles.insert((row, col), tile);
+                tiles.insert((*row, *col), tile);
             }
         }
     }
@@ -698,35 +757,70 @@ pub(super) fn prune_history(
     }
 }
 
-fn accumulate_bucket_weighted_samples(
-    accum: &mut BTreeMap<(i64, i64), AccumulatorCell>,
-    coord: (i64, i64),
-    samples_q12_sum: &[u64; MICRO_TILE_SAMPLES],
-    total_mass_q12: u64,
+fn accumulate_weighted_mass(
+    cell: &mut AccumulatorCell,
+    total_mass_q12: u32,
     weight_q16: u64,
     recent_weight_q16: u64,
 ) {
-    let cell = accum.entry(coord).or_default();
-    for (index, sample_sum) in samples_q12_sum.iter().copied().enumerate() {
-        let weighted = sample_sum.saturating_mul(weight_q16);
-        cell.weighted_samples[index] = cell.weighted_samples[index].saturating_add(weighted);
-    }
     cell.weighted_total_mass = cell
         .weighted_total_mass
-        .saturating_add(total_mass_q12.saturating_mul(weight_q16));
+        .saturating_add(u64::from(total_mass_q12).saturating_mul(weight_q16));
     if recent_weight_q16 > 0 {
         cell.weighted_recent_mass = cell
             .weighted_recent_mass
-            .saturating_add(total_mass_q12.saturating_mul(recent_weight_q16));
+            .saturating_add(u64::from(total_mass_q12).saturating_mul(recent_weight_q16));
+    }
+}
+
+fn accumulate_bucket_weighted_samples(
+    cell: &mut AccumulatorCell,
+    samples_q12_sum: &[u32; MICRO_TILE_SAMPLES],
+    weight_q16: u64,
+) {
+    for (index, sample_sum) in samples_q12_sum.iter().copied().enumerate() {
+        let weighted = u64::from(sample_sum).saturating_mul(weight_q16);
+        cell.weighted_samples[index] = cell.weighted_samples[index].saturating_add(weighted);
+    }
+}
+
+fn accumulate_bucket_weighted_cell(
+    cell: &mut AccumulatorCell,
+    bucket_cell: &BucketCell,
+    weight_q16: u64,
+    recent_weight_q16: u64,
+) {
+    accumulate_weighted_mass(
+        cell,
+        bucket_cell.total_mass_q12,
+        weight_q16,
+        recent_weight_q16,
+    );
+    accumulate_bucket_weighted_samples(cell, &bucket_cell.samples_q12_sum, weight_q16);
+}
+
+#[cfg(test)]
+fn accumulate_microtile_weighted_samples(
+    cell: &mut AccumulatorCell,
+    tile: &MicroTile,
+    weight_q16: u64,
+) {
+    for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
+        let weighted = u64::from(sample).saturating_mul(weight_q16);
+        cell.weighted_samples[index] = cell.weighted_samples[index].saturating_add(weighted);
     }
 }
 
 fn finalize_compiled_cells(
-    accum: BTreeMap<(i64, i64), AccumulatorCell>,
+    accum: &HashMap<(i64, i64), AccumulatorCell>,
 ) -> BTreeMap<(i64, i64), CompiledCell> {
     let mut compiled = BTreeMap::<(i64, i64), CompiledCell>::new();
 
     for (coord, cell) in accum {
+        if !cell.survives() {
+            continue;
+        }
+
         let mut tile = MicroTile::default();
         for (index, weighted_sample) in cell.weighted_samples.iter().copied().enumerate() {
             let normalized = (weighted_sample / WEIGHT_Q16_SCALE).min(u64::from(SAMPLE_Q12_SCALE));
@@ -743,7 +837,7 @@ fn finalize_compiled_cells(
             (cell.weighted_recent_mass / WEIGHT_Q16_SCALE).min(u64::from(u32::MAX)) as u32;
 
         compiled.insert(
-            coord,
+            *coord,
             CompiledCell {
                 tile,
                 age: AgeMoment {
@@ -757,11 +851,10 @@ fn finalize_compiled_cells(
     compiled
 }
 
-pub(super) fn compile_field_from_cache(
-    cache: &LatentFieldCache,
-) -> BTreeMap<(i64, i64), CompiledCell> {
-    let mut accum = BTreeMap::<(i64, i64), AccumulatorCell>::new();
-
+fn for_each_weighted_bucket<F>(cache: &LatentFieldCache, mut visit: F)
+where
+    F: FnMut(u64, u64, &BTreeMap<(i64, i64), BucketCell>),
+{
     for (key, curve) in &cache.curves {
         for age_steps in 0..curve.buckets.len() {
             let age_steps_u64 = u64::try_from(age_steps).unwrap_or(u64::MAX);
@@ -769,25 +862,51 @@ pub(super) fn compile_field_from_cache(
             if weight_q16 == 0 {
                 continue;
             }
-            let recent_weight_q16 = recent_weight_q16_for_curve(*key, age_steps_u64);
+
             let Some(bucket) = curve.bucket_for_age(age_steps_u64) else {
                 continue;
             };
-
-            for (coord, cell) in bucket {
-                accumulate_bucket_weighted_samples(
-                    &mut accum,
-                    *coord,
-                    &cell.samples_q12_sum,
-                    cell.total_mass_q12,
-                    weight_q16,
-                    recent_weight_q16,
-                );
-            }
+            visit(
+                weight_q16,
+                recent_weight_q16_for_curve(*key, age_steps_u64),
+                bucket,
+            );
         }
     }
+}
 
-    finalize_compiled_cells(accum)
+pub(super) fn compile_field_from_cache(
+    cache: &LatentFieldCache,
+) -> BTreeMap<(i64, i64), CompiledCell> {
+    let mut scratch = CompileScratch::default();
+    compile_field_from_cache_with_scratch(cache, &mut scratch)
+}
+
+pub(super) fn compile_field_from_cache_with_scratch(
+    cache: &LatentFieldCache,
+    scratch: &mut CompileScratch,
+) -> BTreeMap<(i64, i64), CompiledCell> {
+    scratch.accum.clear();
+
+    // CONTEXT: active motion invalidates the compiled revision every frame once fresh slices land.
+    // Reuse the accumulator allocation and fold mass/sample accumulation into one retained-cache
+    // walk so hot frames do not also pay a second bucket scan plus HashMap growth churn.
+    for_each_weighted_bucket(cache, |weight_q16, recent_weight_q16, bucket| {
+        for (coord, cell) in bucket {
+            accumulate_bucket_weighted_cell(
+                scratch.accum.entry(*coord).or_default(),
+                cell,
+                weight_q16,
+                recent_weight_q16,
+            );
+        }
+    });
+
+    if scratch.accum.is_empty() {
+        return BTreeMap::new();
+    }
+
+    finalize_compiled_cells(&scratch.accum)
 }
 
 #[cfg(test)]
@@ -795,7 +914,7 @@ pub(super) fn compile_field(
     history: &VecDeque<DepositedSlice>,
     latest_step: StepIndex,
 ) -> BTreeMap<(i64, i64), CompiledCell> {
-    let mut accum = BTreeMap::<(i64, i64), AccumulatorCell>::new();
+    let mut accum = HashMap::<(i64, i64), AccumulatorCell>::new();
 
     for slice in history {
         let age_steps = latest_step.value().saturating_sub(slice.step_index.value());
@@ -806,34 +925,31 @@ pub(super) fn compile_field(
         let recent_weight_q16 = slice_recent_weight_q16(slice, age_steps);
 
         for (coord, tile) in &slice.microtiles {
-            let mut samples_q12_sum = [0_u64; MICRO_TILE_SAMPLES];
-            let mut total_mass_q12 = 0_u64;
-            for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
-                let sample_u64 = u64::from(sample);
-                samples_q12_sum[index] = sample_u64;
-                total_mass_q12 = total_mass_q12.saturating_add(sample_u64);
-            }
-            accumulate_bucket_weighted_samples(
-                &mut accum,
-                *coord,
-                &samples_q12_sum,
-                total_mass_q12,
+            let accum_cell = accum.entry(*coord).or_default();
+            accumulate_weighted_mass(
+                accum_cell,
+                tile.total_mass_q12(),
                 weight_q16,
                 recent_weight_q16,
             );
+            accumulate_microtile_weighted_samples(accum_cell, tile, weight_q16);
         }
     }
 
-    finalize_compiled_cells(accum)
+    if accum.is_empty() {
+        return BTreeMap::new();
+    }
+    finalize_compiled_cells(&accum)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CellRect, LatentFieldCache, MICRO_TILE_SAMPLES, Pose, SAMPLE_Q12_SCALE, TailBand,
-        comet_tail_profiles, compile_field, compile_field_from_cache, deposit_swept_occupancy,
-        intensity_q16, max_comet_support_steps, prune_history, q16_from_non_negative,
-        simulation_step_ms, tail_support_steps,
+        comet_tail_profiles, compile_field, compile_field_from_cache,
+        compile_field_from_cache_with_scratch, deposit_swept_occupancy, intensity_q16,
+        max_comet_support_steps, prune_history, q16_from_non_negative, simulation_step_ms,
+        tail_support_steps,
     };
     use crate::core::types::{ArcLenQ16, StepIndex, StrokeId};
     use crate::types::Point;
@@ -854,6 +970,21 @@ mod tests {
         assert!(!tiles.is_empty());
         let center = tiles.get(&(10, 20)).expect("center cell should be present");
         assert!(center.samples_q12.iter().any(|value| *value > 0));
+    }
+
+    #[test]
+    fn deposit_static_pose_on_exact_cell_boundary_skips_empty_border_tiles() {
+        let pose = Pose {
+            center: Point {
+                row: 10.5,
+                col: 20.5,
+            },
+            half_height: 0.5,
+            half_width: 0.5,
+        };
+
+        let tiles = deposit_swept_occupancy(pose, pose, 2.0, 1.0, 1.0);
+        assert_eq!(tiles.keys().copied().collect::<Vec<_>>(), vec![(10, 20)]);
     }
 
     #[test]
@@ -1139,6 +1270,60 @@ mod tests {
         assert_eq!(
             compile_field_from_cache(&cache),
             compile_field(&history, latest_step)
+        );
+    }
+
+    #[test]
+    fn compile_field_from_cache_with_scratch_reuses_accumulator_capacity() {
+        let support_duration_ms = 180.0;
+        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
+        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
+        let mut scratch = super::CompileScratch::default();
+
+        let first = compile_field_from_cache_with_scratch(&cache, &mut scratch);
+        let first_capacity = scratch.accum.capacity();
+        let second = compile_field_from_cache_with_scratch(&cache, &mut scratch);
+
+        assert_eq!(first, second);
+        assert!(
+            first_capacity > 0,
+            "first compile should reserve accumulator storage for retained cells"
+        );
+        assert_eq!(
+            scratch.accum.capacity(),
+            first_capacity,
+            "scratch-backed recompiles should keep the existing accumulator allocation"
+        );
+    }
+
+    #[test]
+    fn compile_field_discards_cells_below_compiled_visibility_threshold() {
+        let mut tile = super::MicroTile::default();
+        tile.samples_q12[0] = 3;
+
+        let history = VecDeque::from([super::DepositedSlice {
+            stroke_id: StrokeId::new(1),
+            step_index: StepIndex::new(1),
+            dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
+            arc_len_q16: ArcLenQ16::ZERO,
+            bbox: CellRect::new(4, 4, 5, 5),
+            band: TailBand::Core,
+            support_steps: 4,
+            intensity_q16: intensity_q16(1.0),
+            microtiles: BTreeMap::from([((4_i64, 5_i64), tile)]),
+        }]);
+        let cache = LatentFieldCache::rebuild(&history, StepIndex::new(1), 17);
+
+        assert!(compile_field(&history, StepIndex::new(1)).is_empty());
+        assert!(compile_field_from_cache(&cache).is_empty());
+    }
+
+    #[test]
+    fn latent_bucket_cell_stays_compact() {
+        assert!(
+            std::mem::size_of::<super::BucketCell>() <= 260,
+            "bucket cache cell regressed in size: {} bytes",
+            std::mem::size_of::<super::BucketCell>()
         );
     }
 

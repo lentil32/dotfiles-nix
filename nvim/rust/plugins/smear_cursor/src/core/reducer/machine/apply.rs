@@ -6,7 +6,9 @@ use super::support::{
     enter_recovering_with_backoff, record_event_loop_metric, redraw_effect_for_proposal,
     schedule_timer_with_delay,
 };
-use crate::core::effect::{EventLoopMetricEffect, TimerKind};
+use crate::core::effect::{
+    ApplyRenderCleanupEffect, EventLoopMetricEffect, RenderCleanupExecution, TimerKind,
+};
 use crate::core::event::{
     ApplyReport, EffectFailedEvent, RenderCleanupAppliedEvent, RenderPlanComputedEvent,
     RenderPlanFailedEvent,
@@ -97,6 +99,26 @@ pub(super) fn reduce_render_cleanup_applied(
         .clone()
         .with_realization(state.realization().clone().cleanup_applied())
         .with_render_cleanup(next_cleanup);
+    if matches!(
+        payload.action,
+        crate::core::event::RenderCleanupAppliedAction::SoftCleared
+    ) && next_cleanup
+        .next_compaction_due_at()
+        .is_some_and(|due_at| due_at.value() <= payload.observed_at.value())
+    {
+        return Transition::new(
+            next_state,
+            vec![crate::core::effect::Effect::ApplyRenderCleanup(
+                ApplyRenderCleanupEffect {
+                    execution: RenderCleanupExecution::CompactToBudget {
+                        target_budget: next_cleanup.idle_target_budget(),
+                        max_prune_per_tick: next_cleanup.max_prune_per_tick(),
+                    },
+                },
+            )],
+        );
+    }
+
     let (next_state, mut effects) = arm_render_cleanup_timer(next_state, payload.observed_at);
     if matches!(
         (state.render_cleanup().thermal(), next_cleanup.thermal()),
@@ -104,15 +126,14 @@ pub(super) fn reduce_render_cleanup_applied(
             crate::core::state::RenderThermalState::Cooling,
             crate::core::state::RenderThermalState::Cold
         )
-    ) {
-        if let Some(started_at) = state.render_cleanup().entered_cooling_at() {
-            effects.push(record_event_loop_metric(
-                EventLoopMetricEffect::CleanupConvergedToCold {
-                    started_at,
-                    converged_at: payload.observed_at,
-                },
-            ));
-        }
+    ) && let Some(started_at) = state.render_cleanup().entered_cooling_at()
+    {
+        effects.push(record_event_loop_metric(
+            EventLoopMetricEffect::CleanupConvergedToCold {
+                started_at,
+                converged_at: payload.observed_at,
+            },
+        ));
     }
     Transition::new(next_state, effects)
 }

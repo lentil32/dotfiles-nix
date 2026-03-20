@@ -329,9 +329,7 @@ pub(super) fn cleanup_effect_for_timer_fire(
 
     match cleanup.thermal() {
         crate::core::state::RenderThermalState::Hot => {
-            let Some(next_compaction_due_at) = cleanup.next_compaction_due_at() else {
-                return None;
-            };
+            let next_compaction_due_at = cleanup.next_compaction_due_at()?;
             if observed_at.value() < next_compaction_due_at.value() {
                 return None;
             }
@@ -342,9 +340,7 @@ pub(super) fn cleanup_effect_for_timer_fire(
             }))
         }
         crate::core::state::RenderThermalState::Cooling => {
-            let Some(next_compaction_due_at) = cleanup.next_compaction_due_at() else {
-                return None;
-            };
+            let next_compaction_due_at = cleanup.next_compaction_due_at()?;
             if observed_at.value() < next_compaction_due_at.value() {
                 return None;
             }

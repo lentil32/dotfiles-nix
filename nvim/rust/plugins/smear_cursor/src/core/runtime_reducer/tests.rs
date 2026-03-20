@@ -450,14 +450,10 @@ mod bootstrap_and_frame_building {
     }
 
     #[test]
-    fn first_external_event_draws_a_frame() {
-        let (_, transition) = initialized_runtime("n", |_| {});
-        assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
-    }
+    fn first_external_event_bootstraps_frame_cleanup_allocation_and_idle_state() {
+        let (state, transition) = initialized_runtime("n", |_| {});
 
-    #[test]
-    fn first_external_event_schedules_cleanup_and_bootstrap_allocation() {
-        let (_, transition) = initialized_runtime("n", |_| {});
+        assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
         assert_eq!(
             render_cleanup_action(&transition),
             RenderCleanupAction::Schedule
@@ -466,11 +462,6 @@ mod bootstrap_and_frame_building {
             render_allocation_policy(&transition),
             RenderAllocationPolicy::BootstrapIfPoolEmpty
         );
-    }
-
-    #[test]
-    fn first_external_event_initializes_without_starting_animation() {
-        let (state, _) = initialized_runtime("n", |_| {});
         assert!(state.is_initialized());
         assert!(!state.is_animating());
     }
@@ -897,19 +888,42 @@ mod retargeting_while_animating {
     use super::*;
 
     #[test]
-    fn same_surface_external_retargets_draw_immediately_while_animation_is_running() {
+    fn same_surface_external_retargets_draw_immediately_while_animation_is_running_and_keeps_the_trail_stroke_id_stable()
+     {
         let (mut state, _) = animating_runtime_after_kickoff(|state| {
             state.config.delay_event_to_smear = 0.0;
         });
+        let kickoff = reduce_cursor_event(
+            &mut state,
+            "n",
+            event_at(5.0, 24.0, 120.0),
+            EventSource::External,
+        );
+        let kickoff_stroke_id = draw_frame(&kickoff)
+            .map(|frame| frame.trail_stroke_id)
+            .expect("kickoff should draw");
         let retarget = reduce_cursor_event(
             &mut state,
             "n",
             event_at(5.0, 24.0, 120.0),
             EventSource::External,
         );
+        let retarget_stroke_id = draw_frame(&retarget)
+            .map(|frame| frame.trail_stroke_id)
+            .expect("retarget should draw");
+
         assert!(matches!(render_action(&retarget), RenderAction::Draw(_)));
         assert!(retarget.should_schedule_next_animation);
         assert!(state.is_animating());
+
+        assert_eq!(retarget_stroke_id, kickoff_stroke_id);
+        assert_eq!(
+            state.target_position(),
+            Point {
+                row: 5.0,
+                col: 24.0
+            }
+        );
     }
 
     #[test]
@@ -989,28 +1003,6 @@ mod retargeting_while_animating {
             }
         );
     }
-
-    #[test]
-    fn same_surface_retarget_keeps_trail_stroke_id_stable() {
-        let (mut state, kickoff) = animating_runtime_after_kickoff(|state| {
-            state.config.delay_event_to_smear = 0.0;
-        });
-        let kickoff_stroke_id = draw_frame(&kickoff)
-            .map(|frame| frame.trail_stroke_id)
-            .expect("kickoff should draw");
-
-        let retarget = reduce_cursor_event(
-            &mut state,
-            "n",
-            event_at(5.0, 24.0, 120.0),
-            EventSource::External,
-        );
-        let retarget_stroke_id = draw_frame(&retarget)
-            .map(|frame| frame.trail_stroke_id)
-            .expect("same-surface retarget should draw");
-
-        assert_eq!(retarget_stroke_id, kickoff_stroke_id);
-    }
 }
 
 mod window_and_buffer_jump_policies {
@@ -1064,27 +1056,7 @@ mod window_and_buffer_jump_policies {
     }
 
     #[test]
-    fn window_change_draws_when_inter_window_smear_is_enabled() {
-        let mut state = RuntimeState::default();
-        state.config.delay_event_to_smear = 0.0;
-        state.config.smear_between_windows = true;
-        state.config.smear_between_buffers = true;
-
-        let _ = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
-        let transition = reduce_cursor_event(
-            &mut state,
-            "n",
-            event_with_location(5.0, 46.0, 120.0, 99, 999, 20),
-            EventSource::External,
-        );
-
-        assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
-        assert!(transition.should_schedule_next_animation);
-        assert!(state.is_animating());
-    }
-
-    #[test]
-    fn window_change_starts_a_new_trail_stroke_and_classifies_as_a_discontinuous_jump() {
+    fn window_change_draws_starts_a_new_trail_stroke_and_classifies_as_a_discontinuous_jump() {
         let mut state = RuntimeState::default();
         state.config.delay_event_to_smear = 0.0;
         state.config.smear_between_windows = true;
@@ -1101,33 +1073,16 @@ mod window_and_buffer_jump_policies {
         let frame = draw_frame(&transition)
             .expect("window hop should draw when inter-window smear is enabled");
 
+        assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
+        assert!(transition.should_schedule_next_animation);
+        assert!(state.is_animating());
         assert!(frame.trail_stroke_id > before_stroke_id);
         assert_eq!(state.trail_stroke_id(), frame.trail_stroke_id);
         assert_eq!(transition.motion_class, MotionClass::DiscontinuousJump);
     }
 
     #[test]
-    fn buffer_change_draws_when_inter_buffer_smear_is_enabled() {
-        let mut state = RuntimeState::default();
-        state.config.delay_event_to_smear = 0.0;
-        state.config.smear_between_windows = true;
-        state.config.smear_between_buffers = true;
-
-        let _ = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
-        let transition = reduce_cursor_event(
-            &mut state,
-            "n",
-            event_with_location(5.0, 46.0, 120.0, 99, 10, 999),
-            EventSource::External,
-        );
-
-        assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
-        assert!(transition.should_schedule_next_animation);
-        assert!(state.is_animating());
-    }
-
-    #[test]
-    fn buffer_change_starts_a_new_trail_stroke_and_classifies_as_a_discontinuous_jump() {
+    fn buffer_change_draws_starts_a_new_trail_stroke_and_classifies_as_a_discontinuous_jump() {
         let mut state = RuntimeState::default();
         state.config.delay_event_to_smear = 0.0;
         state.config.smear_between_windows = true;
@@ -1144,6 +1099,9 @@ mod window_and_buffer_jump_policies {
         let frame = draw_frame(&transition)
             .expect("buffer hop should draw when inter-buffer smear is enabled");
 
+        assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
+        assert!(transition.should_schedule_next_animation);
+        assert!(state.is_animating());
         assert!(frame.trail_stroke_id > before_stroke_id);
         assert_eq!(state.trail_stroke_id(), frame.trail_stroke_id);
         assert_eq!(transition.motion_class, MotionClass::DiscontinuousJump);
@@ -1182,7 +1140,8 @@ mod jump_classification_and_cues {
     }
 
     #[test]
-    fn cross_window_large_moves_draw_with_reuse_only_allocation() {
+    fn cross_window_large_moves_draw_with_reuse_only_allocation_and_record_a_launch_cue_from_the_previous_window()
+     {
         let (state, transition) = cross_window_large_jump();
         let frame = draw_frame(&transition).expect("discontinuous jumps should still draw");
 
@@ -1194,11 +1153,7 @@ mod jump_classification_and_cues {
             RenderAllocationPolicy::ReuseOnly
         );
         assert_eq!(frame.trail_stroke_id, state.trail_stroke_id());
-    }
 
-    #[test]
-    fn cross_window_large_moves_record_a_launch_cue_from_the_previous_window() {
-        let (state, _) = cross_window_large_jump();
         let cues = state.active_jump_cues();
 
         assert_eq!(cues.len(), 1);
@@ -1208,7 +1163,8 @@ mod jump_classification_and_cues {
     }
 
     #[test]
-    fn same_window_and_cross_window_large_jumps_both_emit_a_single_launch_cue() {
+    fn same_window_and_cross_window_large_jumps_emit_single_launch_cues_and_share_cue_duration_and_strength()
+     {
         let (same_window, same_window_transition) = same_window_large_jump();
         let (cross_window, cross_window_transition) = cross_window_large_jump();
 
@@ -1234,12 +1190,6 @@ mod jump_classification_and_cues {
         assert!(cross_window_transition.should_schedule_next_animation);
         assert!(same_window.is_animating());
         assert!(cross_window.is_animating());
-    }
-
-    #[test]
-    fn same_window_and_cross_window_large_jumps_share_cue_duration_and_strength() {
-        let (same_window, _) = same_window_large_jump();
-        let (cross_window, _) = cross_window_large_jump();
 
         assert_eq!(
             same_window.active_jump_cues()[0].duration_ms,
@@ -1438,6 +1388,36 @@ mod mode_specific_transitions {
         (state, boundary)
     }
 
+    #[test]
+    fn cmdline_external_events_progress_after_a_settle_tick() {
+        let mut state = RuntimeState::default();
+        state.config.delay_event_to_smear = 0.0;
+        state.config.smear_to_cmd = true;
+
+        let _ = reduce_cursor_event(&mut state, "c", event(5.0, 6.0), EventSource::External);
+        let _ = reduce_cursor_event(
+            &mut state,
+            "c",
+            event_with_location(5.0, 12.0, 116.0, 11, 10, 20),
+            EventSource::External,
+        );
+        let _ = reduce_cursor_event(
+            &mut state,
+            "c",
+            event_with_location(5.0, 12.0, 118.0, 11, 10, 20),
+            EventSource::AnimationTick,
+        );
+        let effects = reduce_cursor_event(
+            &mut state,
+            "c",
+            event_with_location(5.0, 16.0, 132.0, 12, 10, 20),
+            EventSource::External,
+        );
+
+        assert!(matches!(render_action(&effects), RenderAction::Draw(_)));
+        assert!(state.is_animating());
+    }
+
     fn text_mutation_snap() -> (RuntimeState, CursorTransition) {
         let (mut state, _) = animating_runtime_after_kickoff(|state| {
             state.config.smear_insert_mode = true;
@@ -1483,37 +1463,8 @@ mod mode_specific_transitions {
     }
 
     #[test]
-    fn cmdline_external_events_progress_after_a_settle_tick() {
-        let mut state = RuntimeState::default();
-        state.config.delay_event_to_smear = 0.0;
-        state.config.smear_to_cmd = true;
-
-        let _ = reduce_cursor_event(&mut state, "c", event(5.0, 6.0), EventSource::External);
-        let _ = reduce_cursor_event(
-            &mut state,
-            "c",
-            event_with_location(5.0, 12.0, 116.0, 11, 10, 20),
-            EventSource::External,
-        );
-        let _ = reduce_cursor_event(
-            &mut state,
-            "c",
-            event_with_location(5.0, 12.0, 118.0, 11, 10, 20),
-            EventSource::AnimationTick,
-        );
-        let effects = reduce_cursor_event(
-            &mut state,
-            "c",
-            event_with_location(5.0, 16.0, 132.0, 12, 10, 20),
-            EventSource::External,
-        );
-
-        assert!(matches!(render_action(&effects), RenderAction::Draw(_)));
-        assert!(state.is_animating());
-    }
-
-    #[test]
-    fn insert_mode_immediate_snap_emits_a_discontinuous_jump_bridge_frame() {
+    fn insert_mode_immediate_snap_emits_a_discontinuous_jump_bridge_frame_and_updates_the_target_without_disabling_insert_smear()
+     {
         let (state, transition) = insert_immediate_snap();
         let frame = draw_frame(&transition)
             .expect("insert immediate mode should still emit a jump bridge frame");
@@ -1522,11 +1473,6 @@ mod mode_specific_transitions {
         assert!(transition.should_schedule_next_animation);
         assert!(state.is_draining());
         assert!(frame.step_samples.len() >= 3);
-    }
-
-    #[test]
-    fn insert_mode_immediate_snap_updates_the_target_without_disabling_insert_smear() {
-        let (state, _) = insert_immediate_snap();
         assert_eq!(
             state.target_position(),
             Point {
@@ -1571,8 +1517,9 @@ mod mode_specific_transitions {
     }
 
     #[test]
-    fn cmdline_boundary_snap_emits_an_immediate_jump_bridge_frame() {
-        let (state, boundary) = cmdline_boundary_transition();
+    fn cmdline_boundary_snap_emits_an_immediate_jump_bridge_frame_and_intra_cmdline_motion_continues_animating_after_the_boundary_snap()
+     {
+        let (mut state, boundary) = cmdline_boundary_transition();
         let boundary_frame = draw_frame(&boundary)
             .expect("cmdline boundary snap should emit an immediate jump bridge frame");
 
@@ -1580,11 +1527,7 @@ mod mode_specific_transitions {
         assert!(boundary.should_schedule_next_animation);
         assert!(state.is_draining());
         assert!(boundary_frame.step_samples.len() >= 3);
-    }
 
-    #[test]
-    fn intra_cmdline_motion_continues_animating_after_the_boundary_snap() {
-        let (mut state, _) = cmdline_boundary_transition();
         let within_cmdline = reduce_cursor_event(
             &mut state,
             "c",

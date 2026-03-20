@@ -3,7 +3,8 @@ local uv = vim.uv or vim.loop
 -- Headless Neovim perf harness.
 -- Usage: run via scripts/run_perf_window_switch.sh and override parameters with:
 -- `SMEAR_WINDOWS`, `SMEAR_LINE_COUNT`, `SMEAR_STRESS_ITERATIONS`, `SMEAR_STRESS_ROUNDS`,
--- `SMEAR_BETWEEN_BUFFERS`, `SMEAR_MAX_RECOVERY_RATIO`, `SMEAR_MAX_STRESS_RATIO`,
+-- `SMEAR_BETWEEN_BUFFERS`, `SMEAR_UNIQUE_BUFFERS`, `SMEAR_MAX_RECOVERY_RATIO`,
+-- `SMEAR_MAX_STRESS_RATIO`,
 -- `SMEAR_SETTLE_WAIT_MS`, `SMEAR_RECOVERY_MODE`, `SMEAR_COLD_WAIT_TIMEOUT_MS`,
 -- `SMEAR_REQUIRE_COLD_RECOVERY`,
 -- `SMEAR_RECOVERY_POLL_MS`, `SMEAR_LOGGING_LEVEL`, `SMEAR_SCENARIO_NAME`,
@@ -165,11 +166,31 @@ local function create_workload_buffer(line_count)
   return buffer
 end
 
-local function create_split_windows(base_buffer, requested_windows)
-  vim.api.nvim_set_current_buf(base_buffer)
-  for _ = 2, requested_windows do
+local function create_workload_buffers(line_count, requested_windows, unique_buffers)
+  local buffers = {}
+  local base_buffer = create_workload_buffer(line_count)
+  for index = 1, requested_windows do
+    buffers[index] = base_buffer
+  end
+
+  if not unique_buffers then
+    return buffers
+  end
+
+  -- Surprising: toggling `smear_between_buffers` only changes plugin policy. The harness needs
+  -- distinct workload buffers per split when it wants to measure real cross-buffer churn.
+  for index = 2, requested_windows do
+    buffers[index] = create_workload_buffer(line_count)
+  end
+
+  return buffers
+end
+
+local function create_split_windows(buffers)
+  vim.api.nvim_set_current_buf(buffers[1])
+  for _ = 2, #buffers do
     vim.cmd("vsplit")
-    vim.api.nvim_set_current_buf(base_buffer)
+    vim.api.nvim_set_current_buf(buffers[1])
   end
   vim.cmd("wincmd =")
 
@@ -182,6 +203,7 @@ local function create_split_windows(base_buffer, requested_windows)
   end
 
   for index, win in ipairs(windows) do
+    vim.api.nvim_win_set_buf(win, buffers[index])
     local line = math.min(index * 11, 1999)
     vim.api.nvim_win_set_cursor(win, { line, 0 })
   end
@@ -398,6 +420,7 @@ local function main()
   local max_stress_ratio = getenv_non_negative_number("SMEAR_MAX_STRESS_RATIO", 2.0)
   local max_floating_windows = getenv_positive_integer("SMEAR_MAX_FLOATING_WINDOWS", 256)
   local smear_between_buffers = getenv_bool("SMEAR_BETWEEN_BUFFERS", false)
+  local unique_buffers = getenv_bool("SMEAR_UNIQUE_BUFFERS", false)
   local particles_enabled = getenv_bool("SMEAR_PARTICLES_ENABLED", false)
   local particles_over_text = getenv_bool("SMEAR_PARTICLES_OVER_TEXT", false)
   local logging_level = getenv_non_negative_integer("SMEAR_LOGGING_LEVEL", 4)
@@ -420,15 +443,19 @@ local function main()
   emit_line(string.format("PERF_SCENARIO name=%s", scenario_name))
   emit_line(string.format("PERF_LIBRARY module_path=%s", loaded_module_path))
 
-  local workload_buffer = create_workload_buffer(workload_line_count)
-  local windows = create_split_windows(workload_buffer, windows_count)
+  local workload_buffers = create_workload_buffers(
+    workload_line_count,
+    windows_count,
+    unique_buffers
+  )
+  local windows = create_split_windows(workload_buffers)
   if #windows < 2 then
     error("need at least 2 windows for this harness")
   end
 
   emit_line(
     string.format(
-      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d recovery_mode=%s settle_wait_ms=%.0f cold_wait_timeout_ms=%d require_cold_recovery=%s recovery_poll_ms=%d logging_level=%d smear_between_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d delay_event_to_smear=%.3f",
+      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d recovery_mode=%s settle_wait_ms=%.0f cold_wait_timeout_ms=%d require_cold_recovery=%s recovery_poll_ms=%d logging_level=%d smear_between_buffers=%s unique_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d delay_event_to_smear=%.3f",
       #windows,
       workload_line_count,
       warmup_iterations,
@@ -443,6 +470,7 @@ local function main()
       recovery_poll_ms,
       logging_level,
       tostring(smear_between_buffers),
+      tostring(unique_buffers),
       tostring(particles_enabled),
       tostring(particles_over_text),
       max_recovery_ratio,

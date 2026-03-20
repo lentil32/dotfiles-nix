@@ -1,23 +1,31 @@
 use super::super::logging::{trace_lazy, warn};
 use super::super::runtime::{
-    EffectExecutor, NeovimEffectExecutor, core_state, now_ms, record_scheduled_drain_items,
+    EffectExecutor, NeovimEffectExecutor, core_state, now_ms,
+    record_delayed_ingress_pending_update_count, record_ingress_coalesced_count,
+    record_post_burst_convergence, record_probe_refresh_budget_exhausted_count,
+    record_probe_refresh_retried_count, record_scheduled_drain_items,
     record_scheduled_drain_items_for_thermal, record_scheduled_drain_reschedule,
     record_scheduled_drain_reschedule_for_thermal, record_scheduled_queue_depth,
-    record_scheduled_queue_depth_for_thermal, set_core_state, to_core_millis,
+    record_scheduled_queue_depth_for_thermal, record_stale_token_event_count, set_core_state,
+    to_core_millis,
 };
 use super::super::timers::schedule_guarded;
 use super::super::trace::{core_event_summary, core_state_summary, effect_summary};
 use super::labels::{core_event_label, effect_label};
-use crate::core::effect::Effect;
+use crate::core::effect::{
+    ApplyRenderCleanupEffect, Effect, EventLoopMetricEffect, ScheduleTimerEffect, TimerKind,
+};
 use crate::core::event::{EffectFailedEvent, Event as CoreEvent, ProbeReportedEvent};
 use crate::core::reducer::reduce as reduce_core_event;
-use crate::core::state::{ProbeReuse, RenderThermalState};
+use crate::core::state::{ProbeKind, ProbeReuse, RenderThermalState};
+use crate::core::types::Millis;
 use nvim_oxi::Result;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
 const MIN_SCHEDULED_WORK_ITEMS_PER_EDGE: usize = 16;
 const MAX_SCHEDULED_WORK_ITEMS_PER_EDGE: usize = 32;
+const MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE: usize = 96;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ScheduledEffectDrainEntry {
@@ -36,11 +44,172 @@ impl ScheduledEffectDrainEntry {
 enum ScheduledWorkItem {
     EffectBatch(Vec<Effect>),
     CoreEvent(Box<CoreEvent>),
+    EffectOnlyAgenda(EffectOnlyAgenda),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ScheduledWorkUnit {
+    EffectBatch(Vec<Effect>),
+    CoreEvent(Box<CoreEvent>),
+    EffectOnlyStep(EffectOnlyStep),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct EffectOnlyAgenda {
+    steps: VecDeque<EffectOnlyStep>,
+}
+
+impl EffectOnlyAgenda {
+    fn append_effects(&mut self, effects: Vec<Effect>) -> usize {
+        effects
+            .into_iter()
+            .map(|effect| usize::from(self.append_effect(effect)))
+            .sum()
+    }
+
+    fn append_effect(&mut self, effect: Effect) -> bool {
+        match effect {
+            Effect::ApplyRenderCleanup(payload) => {
+                if matches!(
+                    self.steps.back(),
+                    Some(EffectOnlyStep::ApplyRenderCleanup(existing)) if *existing == payload
+                ) {
+                    return false;
+                }
+                self.steps
+                    .push_back(EffectOnlyStep::ApplyRenderCleanup(payload));
+                true
+            }
+            Effect::ScheduleTimer(payload) => {
+                if let Some(EffectOnlyStep::ScheduleTimer(existing)) = self.steps.back_mut() {
+                    if TimerKind::from_timer_id(existing.token.id())
+                        == TimerKind::from_timer_id(payload.token.id())
+                    {
+                        *existing = payload;
+                        return false;
+                    }
+                }
+                self.steps.push_back(EffectOnlyStep::ScheduleTimer(payload));
+                true
+            }
+            Effect::RecordEventLoopMetric(metric) => {
+                if let Some(EffectOnlyStep::RecordMetrics(metrics)) = self.steps.back_mut() {
+                    metrics.record(metric);
+                    return false;
+                }
+                let mut metrics = PendingMetricEffects::default();
+                metrics.record(metric);
+                self.steps.push_back(EffectOnlyStep::RecordMetrics(metrics));
+                true
+            }
+            Effect::RedrawCmdline => {
+                if matches!(self.steps.back(), Some(EffectOnlyStep::RedrawCmdline)) {
+                    return false;
+                }
+                self.steps.push_back(EffectOnlyStep::RedrawCmdline);
+                true
+            }
+            _ => unreachable!("only effect-only agenda effects should be appended"),
+        }
+    }
+
+    fn pop_step(&mut self) -> Option<EffectOnlyStep> {
+        self.steps.pop_front()
+    }
+
+    fn front_step(&self) -> Option<EffectOnlyStep> {
+        self.steps.front().cloned()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum EffectOnlyStep {
+    ApplyRenderCleanup(ApplyRenderCleanupEffect),
+    ScheduleTimer(ScheduleTimerEffect),
+    RecordMetrics(PendingMetricEffects),
+    RedrawCmdline,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PendingMetricEffects {
+    ingress_coalesced: usize,
+    delayed_ingress_pending_updated: usize,
+    stale_token: usize,
+    cleanup_converged_to_cold: Vec<(Millis, Millis)>,
+    cursor_color_probe_refresh_retried: usize,
+    background_probe_refresh_retried: usize,
+    cursor_color_probe_refresh_budget_exhausted: usize,
+    background_probe_refresh_budget_exhausted: usize,
+}
+
+impl PendingMetricEffects {
+    fn record(&mut self, metric: EventLoopMetricEffect) {
+        match metric {
+            EventLoopMetricEffect::IngressCoalesced => {
+                self.ingress_coalesced = self.ingress_coalesced.saturating_add(1);
+            }
+            EventLoopMetricEffect::DelayedIngressPendingUpdated => {
+                self.delayed_ingress_pending_updated =
+                    self.delayed_ingress_pending_updated.saturating_add(1);
+            }
+            EventLoopMetricEffect::CleanupConvergedToCold {
+                started_at,
+                converged_at,
+            } => {
+                self.cleanup_converged_to_cold
+                    .push((started_at, converged_at));
+            }
+            EventLoopMetricEffect::StaleToken => {
+                self.stale_token = self.stale_token.saturating_add(1);
+            }
+            EventLoopMetricEffect::ProbeRefreshRetried(kind) => {
+                *self.refresh_retried_count_mut(kind) =
+                    self.refresh_retried_count(kind).saturating_add(1);
+            }
+            EventLoopMetricEffect::ProbeRefreshBudgetExhausted(kind) => {
+                *self.refresh_budget_exhausted_count_mut(kind) =
+                    self.refresh_budget_exhausted_count(kind).saturating_add(1);
+            }
+        }
+    }
+
+    fn refresh_retried_count(&self, kind: ProbeKind) -> usize {
+        match kind {
+            ProbeKind::CursorColor => self.cursor_color_probe_refresh_retried,
+            ProbeKind::Background => self.background_probe_refresh_retried,
+        }
+    }
+
+    fn refresh_retried_count_mut(&mut self, kind: ProbeKind) -> &mut usize {
+        match kind {
+            ProbeKind::CursorColor => &mut self.cursor_color_probe_refresh_retried,
+            ProbeKind::Background => &mut self.background_probe_refresh_retried,
+        }
+    }
+
+    fn refresh_budget_exhausted_count(&self, kind: ProbeKind) -> usize {
+        match kind {
+            ProbeKind::CursorColor => self.cursor_color_probe_refresh_budget_exhausted,
+            ProbeKind::Background => self.background_probe_refresh_budget_exhausted,
+        }
+    }
+
+    fn refresh_budget_exhausted_count_mut(&mut self, kind: ProbeKind) -> &mut usize {
+        match kind {
+            ProbeKind::CursorColor => &mut self.cursor_color_probe_refresh_budget_exhausted,
+            ProbeKind::Background => &mut self.background_probe_refresh_budget_exhausted,
+        }
+    }
 }
 
 #[derive(Default)]
 struct ScheduledEffectQueueState {
     items: VecDeque<ScheduledWorkItem>,
+    pending_work_units: usize,
     drain_scheduled: bool,
 }
 
@@ -51,9 +220,14 @@ struct ScheduledStageResult {
 }
 
 impl ScheduledEffectQueueState {
-    fn stage_item(&mut self, item: ScheduledWorkItem) -> ScheduledStageResult {
+    fn stage_irreducible_item(&mut self, item: ScheduledWorkItem) -> ScheduledStageResult {
         self.items.push_back(item);
-        let depth = self.items.len();
+        self.pending_work_units = self.pending_work_units.saturating_add(1);
+        self.finish_stage()
+    }
+
+    fn finish_stage(&mut self) -> ScheduledStageResult {
+        let depth = self.pending_work_units;
         let should_schedule = if self.drain_scheduled {
             false
         } else {
@@ -67,19 +241,89 @@ impl ScheduledEffectQueueState {
     }
 
     fn stage_batch(&mut self, effects: Vec<Effect>) -> ScheduledStageResult {
-        self.stage_item(ScheduledWorkItem::EffectBatch(effects))
+        if effects.is_empty() {
+            return ScheduledStageResult {
+                should_schedule: false,
+                depth: self.pending_work_units,
+            };
+        }
+
+        if !effects.iter().all(is_continuable_hot_follow_up_effect) {
+            return self.stage_irreducible_item(ScheduledWorkItem::EffectBatch(effects));
+        }
+
+        // CONTEXT: Adjacent runtime-only cleanup/timer/telemetry waves dominate queue churn in hot
+        // bursts. Fold them into a typed agenda so repeated reschedules collapse without moving
+        // reducer work across an irreducible queue boundary.
+        let added_work_units = match self.items.back_mut() {
+            Some(ScheduledWorkItem::EffectOnlyAgenda(agenda)) => agenda.append_effects(effects),
+            _ => {
+                let mut agenda = EffectOnlyAgenda::default();
+                let added_work_units = agenda.append_effects(effects);
+                self.items
+                    .push_back(ScheduledWorkItem::EffectOnlyAgenda(agenda));
+                added_work_units
+            }
+        };
+        self.pending_work_units = self.pending_work_units.saturating_add(added_work_units);
+        self.finish_stage()
     }
 
     fn stage_core_event(&mut self, event: CoreEvent) -> ScheduledStageResult {
-        self.stage_item(ScheduledWorkItem::CoreEvent(Box::new(event)))
+        self.stage_irreducible_item(ScheduledWorkItem::CoreEvent(Box::new(event)))
     }
 
-    fn pop_item(&mut self) -> Option<ScheduledWorkItem> {
-        self.items.pop_front()
+    fn pop_work_unit(&mut self) -> Option<ScheduledWorkUnit> {
+        let unit = match self.items.front()? {
+            ScheduledWorkItem::EffectBatch(_) => match self.items.pop_front()? {
+                ScheduledWorkItem::EffectBatch(effects) => ScheduledWorkUnit::EffectBatch(effects),
+                _ => unreachable!("front queue item should stay stable while borrowed"),
+            },
+            ScheduledWorkItem::CoreEvent(_) => match self.items.pop_front()? {
+                ScheduledWorkItem::CoreEvent(event) => ScheduledWorkUnit::CoreEvent(event),
+                _ => unreachable!("front queue item should stay stable while borrowed"),
+            },
+            ScheduledWorkItem::EffectOnlyAgenda(_) => {
+                let (step, agenda_is_empty) = {
+                    let ScheduledWorkItem::EffectOnlyAgenda(agenda) = self
+                        .items
+                        .front_mut()
+                        .expect("front agenda should remain present while borrowed")
+                    else {
+                        unreachable!("front queue item should stay stable while borrowed");
+                    };
+                    let step = agenda
+                        .pop_step()
+                        .expect("non-empty effect-only agenda should yield a step");
+                    (step, agenda.is_empty())
+                };
+                if agenda_is_empty {
+                    let _ = self.items.pop_front();
+                }
+                ScheduledWorkUnit::EffectOnlyStep(step)
+            }
+        };
+        self.pending_work_units = self.pending_work_units.saturating_sub(1);
+        Some(unit)
+    }
+
+    fn front_work_unit(&self) -> Option<ScheduledWorkUnit> {
+        match self.items.front()? {
+            ScheduledWorkItem::EffectBatch(effects) => {
+                Some(ScheduledWorkUnit::EffectBatch(effects.clone()))
+            }
+            ScheduledWorkItem::CoreEvent(event) => {
+                Some(ScheduledWorkUnit::CoreEvent(event.clone()))
+            }
+            ScheduledWorkItem::EffectOnlyAgenda(agenda) => {
+                agenda.front_step().map(ScheduledWorkUnit::EffectOnlyStep)
+            }
+        }
     }
 
     fn reset(&mut self) {
         self.items.clear();
+        self.pending_work_units = 0;
         self.drain_scheduled = false;
     }
 }
@@ -213,6 +457,31 @@ fn reset_scheduled_queue_after_failure() {
     reset_scheduled_effect_queue();
 }
 
+fn execute_pending_metric_effects(metrics: PendingMetricEffects) {
+    record_ingress_coalesced_count(metrics.ingress_coalesced);
+    record_delayed_ingress_pending_update_count(metrics.delayed_ingress_pending_updated);
+    record_stale_token_event_count(metrics.stale_token);
+    for (started_at, converged_at) in metrics.cleanup_converged_to_cold {
+        record_post_burst_convergence(started_at, converged_at);
+    }
+    record_probe_refresh_retried_count(
+        ProbeKind::CursorColor,
+        metrics.cursor_color_probe_refresh_retried,
+    );
+    record_probe_refresh_retried_count(
+        ProbeKind::Background,
+        metrics.background_probe_refresh_retried,
+    );
+    record_probe_refresh_budget_exhausted_count(
+        ProbeKind::CursorColor,
+        metrics.cursor_color_probe_refresh_budget_exhausted,
+    );
+    record_probe_refresh_budget_exhausted_count(
+        ProbeKind::Background,
+        metrics.background_probe_refresh_budget_exhausted,
+    );
+}
+
 fn execute_scheduled_effect_batch(
     effects: Vec<Effect>,
     executor: &mut impl EffectExecutor,
@@ -267,6 +536,32 @@ fn execute_scheduled_effect_batch(
     Ok(())
 }
 
+fn execute_single_effect(
+    effect: Effect,
+    executor: &mut impl EffectExecutor,
+) -> std::result::Result<(), ScheduledWorkExecutionError> {
+    execute_scheduled_effect_batch(vec![effect], executor)
+}
+
+fn execute_effect_only_step(
+    step: EffectOnlyStep,
+    executor: &mut impl EffectExecutor,
+) -> std::result::Result<(), ScheduledWorkExecutionError> {
+    match step {
+        EffectOnlyStep::ApplyRenderCleanup(payload) => {
+            execute_single_effect(Effect::ApplyRenderCleanup(payload), executor)
+        }
+        EffectOnlyStep::ScheduleTimer(payload) => {
+            execute_single_effect(Effect::ScheduleTimer(payload), executor)
+        }
+        EffectOnlyStep::RecordMetrics(metrics) => {
+            execute_pending_metric_effects(metrics);
+            Ok(())
+        }
+        EffectOnlyStep::RedrawCmdline => execute_single_effect(Effect::RedrawCmdline, executor),
+    }
+}
+
 fn should_schedule_follow_up_event(event: &CoreEvent) -> bool {
     matches!(
         event,
@@ -290,44 +585,122 @@ fn dispatch_scheduled_core_event(event: CoreEvent) -> Result<()> {
 fn scheduled_drain_budget() -> usize {
     let thermal = current_cleanup_thermal_state().unwrap_or(RenderThermalState::Cold);
     with_scheduled_effect_queue(|queue| {
-        let queued_items = queue.items.len();
-        if queued_items == 0 {
+        let queued_work_units = queue.pending_work_units;
+        if queued_work_units == 0 {
             queue.drain_scheduled = false;
             return 0;
         }
 
-        scheduled_drain_budget_for_thermal(thermal, queued_items)
+        if thermal == RenderThermalState::Hot && queue_has_only_effect_only_agendas(queue) {
+            return scheduled_drain_budget_for_hot_effect_only_snapshot(queued_work_units);
+        }
+
+        scheduled_drain_budget_for_thermal(thermal, queued_work_units)
     })
 }
 
-fn scheduled_drain_budget_for_thermal(thermal: RenderThermalState, queued_items: usize) -> usize {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ScheduledDrainSnapshot {
+    thermal: RenderThermalState,
+    queued_work_units: usize,
+    budget: usize,
+}
+
+fn scheduled_drain_snapshot() -> ScheduledDrainSnapshot {
+    let thermal = current_cleanup_thermal_state().unwrap_or(RenderThermalState::Cold);
+    let queued_work_units = with_scheduled_effect_queue(|queue| queue.pending_work_units);
+    ScheduledDrainSnapshot {
+        thermal,
+        queued_work_units,
+        budget: scheduled_drain_budget(),
+    }
+}
+
+fn queue_has_only_effect_only_agendas(queue: &ScheduledEffectQueueState) -> bool {
+    !queue.items.is_empty()
+        && queue
+            .items
+            .iter()
+            .all(|item| matches!(item, ScheduledWorkItem::EffectOnlyAgenda(_)))
+}
+
+fn scheduled_drain_budget_for_thermal(
+    thermal: RenderThermalState,
+    queued_work_units: usize,
+) -> usize {
     match thermal {
         RenderThermalState::Cooling => {
             // Surprising: Cooling still drains only the snapshot that was already queued when this
             // edge started. Refresh-required probe retries must remain deferred to the next edge,
             // so aggressive convergence expands the snapshot budget instead of recursively draining
             // follow-up work staged mid-pass.
-            queued_items
+            queued_work_units
         }
         RenderThermalState::Hot | RenderThermalState::Cold => {
-            scheduled_drain_budget_for_depth(queued_items)
+            scheduled_drain_budget_for_depth(queued_work_units)
         }
     }
 }
 
-fn scheduled_drain_budget_for_depth(queued_items: usize) -> usize {
-    if queued_items == 0 {
+fn scheduled_drain_budget_for_hot_effect_only_snapshot(queued_work_units: usize) -> usize {
+    if queued_work_units == 0 {
+        return 0;
+    }
+
+    // CONTEXT: once Hot queue state has collapsed down to effect-only cleanup/timer/metric/redraw
+    // steps, draining only half the backlog turns one reducer burst into repeated shell edges even
+    // though the queue no longer carries irreducible reducer work. Drain that typed snapshot in
+    // one callback, but keep the existing chained-edge ceiling so a pathological wave still yields
+    // back to the shell.
+    queued_work_units.min(MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE)
+}
+
+fn scheduled_drain_budget_for_depth(queued_work_units: usize) -> usize {
+    if queued_work_units == 0 {
         return 0;
     }
 
     // Drain a bounded fraction of the queued snapshot so backlog converges geometrically under
     // burst load, while smaller queues still clear in a single shell edge.
-    let half_backlog = queued_items.saturating_add(1) / 2;
+    let half_backlog = queued_work_units.saturating_add(1) / 2;
     let bounded_half = half_backlog.clamp(
         MIN_SCHEDULED_WORK_ITEMS_PER_EDGE,
         MAX_SCHEDULED_WORK_ITEMS_PER_EDGE,
     );
-    queued_items.min(bounded_half)
+    queued_work_units.min(bounded_half)
+}
+
+fn should_continue_effect_only_follow_up_chain(
+    snapshot: ScheduledDrainSnapshot,
+    drained_items_this_pass: usize,
+    drained_items_total: usize,
+) -> bool {
+    if snapshot.thermal != RenderThermalState::Hot
+        || snapshot.queued_work_units == 0
+        || snapshot.budget != snapshot.queued_work_units
+        || drained_items_this_pass != snapshot.queued_work_units
+        || drained_items_total >= MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE
+    {
+        return false;
+    }
+
+    with_scheduled_effect_queue(|queue| {
+        !queue.items.is_empty()
+            && queue
+                .items
+                .iter()
+                .all(|item| matches!(item, ScheduledWorkItem::EffectOnlyAgenda(_)))
+    })
+}
+
+fn is_continuable_hot_follow_up_effect(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ApplyRenderCleanup(_)
+            | Effect::ScheduleTimer(_)
+            | Effect::RecordEventLoopMetric(_)
+            | Effect::RedrawCmdline
+    )
 }
 
 fn drain_scheduled_work_with_executor(
@@ -336,34 +709,58 @@ fn drain_scheduled_work_with_executor(
     // Drain a bounded snapshot of already-staged work so backlog can recover faster, while any
     // reducer follow-ups created during this pass still remain deferred to a later scheduled edge.
     let drain_thermal = current_cleanup_thermal_state();
-    let mut remaining_budget = scheduled_drain_budget();
     let mut drained_items = 0_usize;
-    while remaining_budget > 0 {
-        let Some(item) = with_scheduled_effect_queue(ScheduledEffectQueueState::pop_item) else {
-            with_scheduled_effect_queue(|queue| {
-                queue.drain_scheduled = false;
-            });
-            if drained_items > 0 {
-                record_scheduled_drain_items(drained_items);
-                if let Some(thermal) = drain_thermal {
-                    record_scheduled_drain_items_for_thermal(thermal, drained_items);
+    loop {
+        let snapshot = scheduled_drain_snapshot();
+        let mut remaining_budget = snapshot.budget;
+        let mut drained_items_this_pass = 0_usize;
+        while remaining_budget > 0 {
+            let Some(item) = with_scheduled_effect_queue(ScheduledEffectQueueState::pop_work_unit)
+            else {
+                with_scheduled_effect_queue(|queue| {
+                    queue.drain_scheduled = false;
+                });
+                if drained_items > 0 {
+                    record_scheduled_drain_items(drained_items);
+                    if let Some(thermal) = drain_thermal {
+                        record_scheduled_drain_items_for_thermal(thermal, drained_items);
+                    }
+                }
+                return Ok(false);
+            };
+
+            match item {
+                ScheduledWorkUnit::EffectBatch(effects) => {
+                    execute_scheduled_effect_batch(effects, executor)?;
+                }
+                ScheduledWorkUnit::CoreEvent(event) => {
+                    let work_name = core_event_label(&event);
+                    dispatch_scheduled_core_event(*event)
+                        .map_err(|error| ScheduledWorkExecutionError { work_name, error })?;
+                }
+                ScheduledWorkUnit::EffectOnlyStep(step) => {
+                    execute_effect_only_step(step, executor)?;
                 }
             }
-            return Ok(false);
-        };
-
-        match item {
-            ScheduledWorkItem::EffectBatch(effects) => {
-                execute_scheduled_effect_batch(effects, executor)?;
-            }
-            ScheduledWorkItem::CoreEvent(event) => {
-                let work_name = core_event_label(&event);
-                dispatch_scheduled_core_event(*event)
-                    .map_err(|error| ScheduledWorkExecutionError { work_name, error })?;
-            }
+            drained_items = drained_items.saturating_add(1);
+            drained_items_this_pass = drained_items_this_pass.saturating_add(1);
+            remaining_budget -= 1;
         }
-        drained_items = drained_items.saturating_add(1);
-        remaining_budget -= 1;
+
+        // Once Hot drains the full pre-existing snapshot, any remaining cleanup/timer batches were
+        // spawned mid-pass by reducer follow-ups inside this callback. Continue through a bounded
+        // number of those low-risk waves here so immediate cleanup convergence does not pay an
+        // extra schedule edge per reducer hop. Observation and probe batches still remain deferred
+        // to the next edge.
+        if should_continue_effect_only_follow_up_chain(
+            snapshot,
+            drained_items_this_pass,
+            drained_items,
+        ) {
+            continue;
+        }
+
+        break;
     }
 
     let has_more_items = with_scheduled_effect_queue(|queue| {
@@ -414,12 +811,14 @@ fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ScheduledWorkItem, dispatch_core_event, drain_scheduled_work_with_executor,
+        ScheduledWorkUnit, dispatch_core_event, drain_scheduled_work_with_executor,
         reset_scheduled_effect_queue, reset_scheduled_queue_after_failure, scheduled_drain_budget,
-        scheduled_drain_budget_for_depth, scheduled_drain_budget_for_thermal,
-        with_scheduled_effect_queue,
+        scheduled_drain_budget_for_depth, scheduled_drain_budget_for_hot_effect_only_snapshot,
+        scheduled_drain_budget_for_thermal, with_scheduled_effect_queue,
     };
-    use crate::core::effect::{Effect, EventLoopMetricEffect};
+    use crate::core::effect::{
+        Effect, EventLoopMetricEffect, IngressCursorPresentationEffect, ScheduleTimerEffect,
+    };
     use crate::core::event::{
         Event as CoreEvent, ExternalDemandQueuedEvent, ObservationBaseCollectedEvent,
         ProbeReportedEvent,
@@ -431,7 +830,8 @@ mod tests {
         ProbeReuse, RenderCleanupState, RenderThermalState,
     };
     use crate::core::types::{
-        CursorCol, CursorPosition, CursorRow, Lifecycle, Millis, ViewportSnapshot,
+        CursorCol, CursorPosition, CursorRow, DelayBudgetMs, Lifecycle, Millis, TimerGeneration,
+        TimerId, TimerToken, ViewportSnapshot,
     };
     use crate::events::runtime::{core_state, set_core_state};
     use crate::mutex::lock_with_poison_recovery;
@@ -664,12 +1064,30 @@ mod tests {
         with_scheduled_effect_queue(|queue| queue.stage_batch(effects).should_schedule)
     }
 
-    fn queued_work_count() -> usize {
-        with_scheduled_effect_queue(|queue| queue.items.len())
+    fn non_coalescible_effect() -> Effect {
+        Effect::ApplyIngressCursorPresentation(IngressCursorPresentationEffect::HideCursor)
     }
 
-    fn queued_front_work_item() -> Option<ScheduledWorkItem> {
-        with_scheduled_effect_queue(|queue| queue.items.front().cloned())
+    fn schedule_timer_effect(timer_id: TimerId, generation: u64) -> Effect {
+        Effect::ScheduleTimer(ScheduleTimerEffect {
+            token: TimerToken::new(timer_id, TimerGeneration::new(generation)),
+            delay: DelayBudgetMs::try_new(1).expect("positive timer delay"),
+            requested_at: Millis::new(generation),
+        })
+    }
+
+    fn cleanup_effect(max_kept_windows: usize) -> Effect {
+        Effect::ApplyRenderCleanup(crate::core::effect::ApplyRenderCleanupEffect {
+            execution: crate::core::effect::RenderCleanupExecution::SoftClear { max_kept_windows },
+        })
+    }
+
+    fn queued_work_count() -> usize {
+        with_scheduled_effect_queue(|queue| queue.pending_work_units)
+    }
+
+    fn queued_front_work_item() -> Option<ScheduledWorkUnit> {
+        with_scheduled_effect_queue(|queue| queue.front_work_unit())
     }
 
     fn queue_is_marked_scheduled() -> bool {
@@ -770,8 +1188,9 @@ mod tests {
         fn stage_two_effect_batches() -> CoreDispatchTestContext {
             let scope = CoreDispatchTestContext::new();
             assert!(queue_stage_batch(vec![Effect::RedrawCmdline]));
-            assert!(!queue_stage_batch(vec![Effect::RecordEventLoopMetric(
-                EventLoopMetricEffect::StaleToken,
+            assert!(!queue_stage_batch(vec![schedule_timer_effect(
+                TimerId::Cleanup,
+                1,
             )]));
             scope
         }
@@ -791,7 +1210,7 @@ mod tests {
                 executor.executed_effects,
                 vec![
                     Effect::RedrawCmdline,
-                    Effect::RecordEventLoopMetric(EventLoopMetricEffect::StaleToken),
+                    schedule_timer_effect(TimerId::Cleanup, 1)
                 ]
             );
         }
@@ -830,13 +1249,13 @@ mod tests {
                 executor.executed_effects,
                 vec![
                     Effect::RedrawCmdline,
-                    Effect::RecordEventLoopMetric(EventLoopMetricEffect::StaleToken),
+                    schedule_timer_effect(TimerId::Cleanup, 1)
                 ]
             );
             assert!(
                 matches!(
                     queued_front_work_item(),
-                    Some(ScheduledWorkItem::EffectBatch(ref effects))
+                    Some(ScheduledWorkUnit::EffectBatch(ref effects))
                         if contains_observation_base_request(effects)
                 ),
                 "newly staged follow-up work should remain queued for the next scheduled edge"
@@ -844,6 +1263,56 @@ mod tests {
             assert!(
                 queue_is_marked_scheduled(),
                 "queue must stay armed when new follow-up work remains"
+            );
+        }
+
+        #[test]
+        fn hot_edge_continues_through_cleanup_follow_up_waves() {
+            let _scope = CoreDispatchTestContext::new();
+            replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
+            assert!(queue_stage_batch(vec![Effect::ApplyRenderCleanup(
+                crate::core::effect::ApplyRenderCleanupEffect {
+                    execution: crate::core::effect::RenderCleanupExecution::SoftClear {
+                        max_kept_windows: 12,
+                    },
+                },
+            )]));
+            let mut executor = RecordingExecutor::default();
+            executor
+                .planned_follow_ups
+                .push_back(vec![CoreEvent::RenderCleanupApplied(
+                    crate::core::event::RenderCleanupAppliedEvent {
+                        observed_at: Millis::new(65),
+                        action: crate::core::event::RenderCleanupAppliedAction::SoftCleared,
+                    },
+                )]);
+
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(
+                !has_more_items,
+                "hot drain should finish cleanup-only follow-up waves without rearming"
+            );
+            assert_eq!(
+                executor.executed_effects.len(),
+                2,
+                "follow-up cleanup work should run in the same scheduled callback"
+            );
+            assert!(
+                matches!(
+                    executor.executed_effects.get(1),
+                    Some(Effect::ApplyRenderCleanup(_))
+                ),
+                "follow-up compaction should stay ordered after the original cleanup effect"
+            );
+            assert_eq!(
+                queued_work_count(),
+                0,
+                "continued hot drain should leave no queue tail"
+            );
+            assert!(
+                !queue_is_marked_scheduled(),
+                "queue should disarm when the hot follow-up chain finishes"
             );
         }
 
@@ -897,6 +1366,14 @@ mod tests {
         }
 
         #[test]
+        fn hot_effect_only_budget_expands_to_a_single_snapshot_up_to_the_chain_cap() {
+            assert_eq!(scheduled_drain_budget_for_hot_effect_only_snapshot(0), 0);
+            assert_eq!(scheduled_drain_budget_for_hot_effect_only_snapshot(3), 3);
+            assert_eq!(scheduled_drain_budget_for_hot_effect_only_snapshot(40), 40);
+            assert_eq!(scheduled_drain_budget_for_hot_effect_only_snapshot(117), 96);
+        }
+
+        #[test]
         fn cooling_budget_expands_to_the_full_queued_snapshot() {
             assert_eq!(
                 scheduled_drain_budget_for_thermal(RenderThermalState::Cooling, 0),
@@ -913,11 +1390,86 @@ mod tests {
         }
 
         #[test]
+        fn hot_effect_only_backlog_drains_the_full_snapshot_without_rearming() {
+            let _scope = CoreDispatchTestContext::new();
+            replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
+            for index in 0..40 {
+                let should_schedule = queue_stage_batch(vec![cleanup_effect(index + 1)]);
+                if index == 0 {
+                    assert!(
+                        should_schedule,
+                        "first effect-only item should arm the drain"
+                    );
+                } else {
+                    assert!(
+                        !should_schedule,
+                        "later effect-only items should reuse the armed drain"
+                    );
+                }
+            }
+            let mut executor = RecordingExecutor::default();
+
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(
+                !has_more_items,
+                "hot effect-only snapshot should converge in one scheduled edge"
+            );
+            assert_eq!(
+                executor.executed_effects.len(),
+                40,
+                "hot effect-only queues should drain the entire queued snapshot"
+            );
+            assert_eq!(queued_work_count(), 0, "drain should leave no queued tail");
+            assert!(
+                !queue_is_marked_scheduled(),
+                "queue should disarm once the effect-only snapshot converges"
+            );
+        }
+
+        #[test]
+        fn hot_effect_only_snapshot_still_defers_mid_pass_follow_up_work() {
+            let _scope = CoreDispatchTestContext::new();
+            replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
+            assert!(queue_stage_batch(vec![cleanup_effect(12)]));
+            assert!(!queue_stage_batch(vec![cleanup_effect(13)]));
+            let mut executor = RecordingExecutor::default();
+            executor
+                .planned_follow_ups
+                .push_back(vec![external_cursor_demand(21)]);
+            executor.planned_follow_ups.push_back(Vec::new());
+
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(
+                has_more_items,
+                "new reducer follow-up work should remain deferred after the hot effect-only snapshot"
+            );
+            assert_eq!(
+                executor.executed_effects,
+                vec![cleanup_effect(12), cleanup_effect(13)],
+                "the original effect-only snapshot should still drain in FIFO order"
+            );
+            assert!(
+                matches!(
+                    queued_front_work_item(),
+                    Some(ScheduledWorkUnit::EffectBatch(ref effects))
+                        if contains_observation_base_request(effects)
+                ),
+                "mid-pass reducer follow-up work should remain queued for the next edge"
+            );
+            assert!(
+                queue_is_marked_scheduled(),
+                "queue should stay armed when deferred follow-up work remains"
+            );
+        }
+
+        #[test]
         fn hot_first_edge_reschedules_when_backlog_exceeds_the_bounded_fractional_budget() {
             let _scope = CoreDispatchTestContext::new();
             replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
             for _ in 0..40 {
-                let should_schedule = queue_stage_batch(vec![Effect::RedrawCmdline]);
+                let should_schedule = queue_stage_batch(vec![non_coalescible_effect()]);
                 if queued_work_count() == 1 {
                     assert!(should_schedule, "first staged item should arm the drain");
                 } else {
@@ -938,7 +1490,7 @@ mod tests {
             assert_eq!(
                 executor.executed_effects.len(),
                 20,
-                "40 queued items should drain half the backlog on the first edge"
+                "40 queued work units should drain half the backlog on the first edge"
             );
             assert_eq!(
                 queued_work_count(),
@@ -952,12 +1504,81 @@ mod tests {
         }
 
         #[test]
+        fn adjacent_redraw_batches_coalesce_into_one_work_unit() {
+            let _scope = CoreDispatchTestContext::new();
+
+            assert!(queue_stage_batch(vec![Effect::RedrawCmdline]));
+            for _ in 0..39 {
+                assert!(
+                    !queue_stage_batch(vec![Effect::RedrawCmdline]),
+                    "adjacent redraw work should reuse the same agenda and drain edge"
+                );
+            }
+
+            assert_eq!(queued_work_count(), 1, "redraw waves should coalesce");
+
+            let mut executor = RecordingExecutor::default();
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(!has_more_items);
+            assert_eq!(executor.executed_effects, vec![Effect::RedrawCmdline]);
+            assert_eq!(queued_work_count(), 0);
+        }
+
+        #[test]
+        fn adjacent_metric_batches_share_one_work_unit() {
+            let _scope = CoreDispatchTestContext::new();
+
+            assert!(queue_stage_batch(vec![Effect::RecordEventLoopMetric(
+                EventLoopMetricEffect::StaleToken,
+            )]));
+            assert!(!queue_stage_batch(vec![Effect::RecordEventLoopMetric(
+                EventLoopMetricEffect::DelayedIngressPendingUpdated,
+            )]));
+
+            assert_eq!(
+                queued_work_count(),
+                1,
+                "adjacent metric work should aggregate"
+            );
+        }
+
+        #[test]
+        fn adjacent_timer_rearms_for_the_same_kind_keep_only_the_newest_effect() {
+            let _scope = CoreDispatchTestContext::new();
+
+            assert!(queue_stage_batch(vec![schedule_timer_effect(
+                TimerId::Cleanup,
+                1,
+            )]));
+            assert!(!queue_stage_batch(vec![schedule_timer_effect(
+                TimerId::Cleanup,
+                2,
+            )]));
+
+            assert_eq!(
+                queued_work_count(),
+                1,
+                "same-kind timer rearm should replace in place"
+            );
+
+            let mut executor = RecordingExecutor::default();
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(!has_more_items);
+            assert_eq!(
+                executor.executed_effects,
+                vec![schedule_timer_effect(TimerId::Cleanup, 2)]
+            );
+        }
+
+        #[test]
         fn hot_bounded_drain_converges_exactly_for_a_range_of_backlog_depths() {
             for queued_items in 1..=96 {
                 let _scope = CoreDispatchTestContext::new();
                 replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
                 for _ in 0..queued_items {
-                    let should_schedule = queue_stage_batch(vec![Effect::RedrawCmdline]);
+                    let should_schedule = queue_stage_batch(vec![non_coalescible_effect()]);
                     if queued_work_count() == 1 {
                         assert!(
                             should_schedule,
@@ -1006,7 +1627,7 @@ mod tests {
                 RenderThermalState::Cooling,
             ));
             for _ in 0..40 {
-                let should_schedule = queue_stage_batch(vec![Effect::RedrawCmdline]);
+                let should_schedule = queue_stage_batch(vec![non_coalescible_effect()]);
                 if queued_work_count() == 1 {
                     assert!(should_schedule, "first staged item should arm the drain");
                 } else {
@@ -1071,7 +1692,7 @@ mod tests {
             assert!(
                 matches!(
                     queued_front_work_item(),
-                    Some(ScheduledWorkItem::EffectBatch(ref effects))
+                    Some(ScheduledWorkUnit::EffectBatch(ref effects))
                         if contains_observation_base_request(effects)
                 ),
                 "mid-pass follow-up work should stay queued after the cooling snapshot drains"
@@ -1122,7 +1743,7 @@ mod tests {
             );
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::CoreEvent(event)) if *event == refresh_required
+                Some(ScheduledWorkUnit::CoreEvent(event)) if *event == refresh_required
             ));
         }
 
@@ -1178,7 +1799,7 @@ mod tests {
             assert_eq!(queued_work_count(), 1);
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::EffectBatch(ref effects))
+                Some(ScheduledWorkUnit::EffectBatch(ref effects))
                     if contains_observation_base_request(effects)
             ));
         }
@@ -1209,7 +1830,7 @@ mod tests {
             );
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::EffectBatch(ref effects))
+                Some(ScheduledWorkUnit::EffectBatch(ref effects))
                     if contains_observation_base_request(effects)
             ));
         }
@@ -1257,7 +1878,8 @@ mod tests {
             assert_eq!(queued_work_count(), 1, "probe work should remain queued");
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::EffectBatch(ref effects)) if contains_probe_request(effects)
+                Some(ScheduledWorkUnit::EffectBatch(ref effects))
+                    if contains_probe_request(effects)
             ));
         }
 
@@ -1324,7 +1946,7 @@ mod tests {
                 if has_more_items {
                     matches!(
                         queued_follow_up,
-                        Some(ScheduledWorkItem::EffectBatch(ref effects))
+                        Some(ScheduledWorkUnit::EffectBatch(ref effects))
                             if contains_render_plan_request(effects)
                                 || effects.iter().any(is_apply_proposal)
                     )
@@ -1401,7 +2023,7 @@ mod tests {
             );
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::EffectBatch(ref effects))
+                Some(ScheduledWorkUnit::EffectBatch(ref effects))
                     if only_cursor_color_probe_request(effects)
             ));
         }
@@ -1421,7 +2043,7 @@ mod tests {
             assert_eq!(queued_work_count(), 1);
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::EffectBatch(ref effects))
+                Some(ScheduledWorkUnit::EffectBatch(ref effects))
                     if only_background_probe_request_for_chunk(effects, first_background_chunk)
             ));
         }
@@ -1461,7 +2083,7 @@ mod tests {
             assert_eq!(queued_work_count(), 1);
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::EffectBatch(ref effects))
+                Some(ScheduledWorkUnit::EffectBatch(ref effects))
                     if only_background_probe_request_for_chunk(effects, second_background_chunk)
             ));
         }
@@ -1515,7 +2137,7 @@ mod tests {
             assert_eq!(queued_work_count(), 1, "planning work should remain queued");
             assert!(matches!(
                 queued_front_work_item(),
-                Some(ScheduledWorkItem::EffectBatch(ref effects))
+                Some(ScheduledWorkUnit::EffectBatch(ref effects))
                     if contains_render_plan_request(effects)
             ));
         }

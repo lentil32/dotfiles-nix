@@ -155,12 +155,14 @@ pub(crate) struct PlannerState {
     arc_len_q16: ArcLenQ16,
     last_trail_stroke_id: Option<StrokeId>,
     last_pose: Option<latent_field::Pose>,
-    history_revision: u64,
-    history: VecDeque<DepositedSlice>,
     latent_cache: LatentFieldCache,
     center_history: VecDeque<CenterPathSample>,
     previous_cells: BTreeMap<(i64, i64), DecodedCellState>,
     compiled_cache: CompiledFieldCache,
+    // Production planner truth lives in `latent_cache`; tests keep a mirrored slice log for
+    // assertions over staged metadata without forcing the runtime to retain the trail twice.
+    #[cfg(test)]
+    history: VecDeque<DepositedSlice>,
 }
 
 impl PlannerState {
@@ -169,7 +171,7 @@ impl PlannerState {
     }
 
     pub(crate) const fn history_revision(&self) -> u64 {
-        self.history_revision
+        self.latent_cache.revision()
     }
 }
 
@@ -192,11 +194,31 @@ pub(crate) struct CompiledPlannerFrame {
     compiled: Arc<BTreeMap<(i64, i64), CompiledCell>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 struct CompiledFieldCache {
     latest_step: Option<StepIndex>,
-    history_revision: u64,
+    latent_revision: u64,
     field: Arc<BTreeMap<(i64, i64), CompiledCell>>,
+    scratch: latent_field::CompileScratch,
+}
+
+impl Clone for CompiledFieldCache {
+    fn clone(&self) -> Self {
+        Self {
+            latest_step: self.latest_step,
+            latent_revision: self.latent_revision,
+            field: Arc::clone(&self.field),
+            scratch: latent_field::CompileScratch::default(),
+        }
+    }
+}
+
+impl PartialEq for CompiledFieldCache {
+    fn eq(&self, other: &Self) -> bool {
+        self.latest_step == other.latest_step
+            && self.latent_revision == other.latent_revision
+            && self.field == other.field
+    }
 }
 
 pub(crate) struct PlanBuilder {
@@ -308,8 +330,7 @@ pub(super) struct PlanResources<'a> {
 #[derive(Clone, Copy, Debug)]
 struct GlyphProfile {
     glyph: DecodedGlyph,
-    occupancy: [u8; MICRO_TILE_SAMPLES],
-    sample_count: u16,
+    sample_count: usize,
     complexity: u8,
 }
 
@@ -330,6 +351,45 @@ struct LocalCellProfile {
 struct CellCandidate {
     state: Option<DecodedCellState>,
     unary_cost: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GlyphBucketLayout {
+    matrix_bucket_for_sample: [u8; MICRO_TILE_SAMPLES],
+    octant_bucket_for_sample: [u8; MICRO_TILE_SAMPLES],
+    matrix_sample_counts_by_mask: [u8; MATRIX_MASK_LIMIT],
+    octant_sample_counts_by_mask: [u8; OCTANT_MASK_LIMIT],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PatchCandidateBasis {
+    empty_residual: u64,
+    total_mass: u64,
+    matrix_bucket_sums: [u64; MATRIX_BUCKET_COUNT],
+    octant_bucket_sums: [u64; OCTANT_BUCKET_COUNT],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ShadeProfileIndexSet {
+    indices: [usize; MAX_SHADE_PROFILE_CANDIDATES],
+    len: usize,
+}
+
+impl ShadeProfileIndexSet {
+    fn push_unique(&mut self, index: usize) {
+        if self.indices[..self.len].contains(&index) {
+            return;
+        }
+        if self.len >= self.indices.len() {
+            return;
+        }
+        self.indices[self.len] = index;
+        self.len += 1;
+    }
+
+    fn as_slice(&self) -> &[usize] {
+        &self.indices[..self.len]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -507,8 +567,13 @@ struct VoteStats {
 const MATRIX_CHARACTERS: [&str; 16] = [
     "", "▘", "▝", "▀", "▖", "▌", "▞", "▛", "▗", "▚", "▐", "▜", "▄", "▙", "▟", "█",
 ];
+const MATRIX_BUCKET_COUNT: usize = 4;
+const MATRIX_MASK_LIMIT: usize = 1 << MATRIX_BUCKET_COUNT;
+const OCTANT_BUCKET_COUNT: usize = 8;
+const OCTANT_MASK_LIMIT: usize = 1 << OCTANT_BUCKET_COUNT;
 const MIN_VISIBLE_SAMPLE_Q12: u16 = 6;
 const SHADE_PROFILE_NEIGHBORHOOD: usize = 1;
+const MAX_SHADE_PROFILE_CANDIDATES: usize = SHADE_PROFILE_NEIGHBORHOOD * 2 + 2;
 const PRIOR_COMPLEXITY_WEIGHT: u64 = 48;
 const TRANSITION_SCALE: f64 = 1024.0;
 const RIBBON_SAMPLE_SPACING_CELLS: f64 = 0.5;
@@ -552,7 +617,7 @@ const CATCH_SALIENCE_DIM_PENALTY: u64 = 100;
 const MATRIX_BIT_WEIGHTS: [[u8; 2]; 2] = [[1, 2], [4, 8]];
 const OCTANT_BIT_WEIGHTS: [[u8; 2]; 4] = [[1, 2], [4, 8], [16, 32], [64, 128]];
 
-static GLYPH_PROFILES: LazyLock<Vec<GlyphProfile>> = LazyLock::new(build_glyph_profiles);
+static GLYPH_BUCKET_LAYOUT: LazyLock<GlyphBucketLayout> = LazyLock::new(build_glyph_bucket_layout);
 
 fn saturating_q16_offset(base: i32, delta: i32) -> i32 {
     (i64::from(base) + i64::from(delta)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
@@ -601,70 +666,38 @@ fn frame_sample_poses(frame: &RenderFrame) -> impl Iterator<Item = latent_field:
         .map(|sample| pose_for_step_sample(sample, frame))
 }
 
-fn build_block_profile() -> GlyphProfile {
-    GlyphProfile {
-        glyph: DecodedGlyph::Block,
-        occupancy: [1_u8; MICRO_TILE_SAMPLES],
-        sample_count: MICRO_TILE_SAMPLES as u16,
-        complexity: MICRO_TILE_SAMPLES as u8,
-    }
-}
+fn build_glyph_bucket_layout() -> GlyphBucketLayout {
+    let mut matrix_bucket_for_sample = [0_u8; MICRO_TILE_SAMPLES];
+    let mut octant_bucket_for_sample = [0_u8; MICRO_TILE_SAMPLES];
+    let mut matrix_bucket_sample_counts = [0_u8; MATRIX_BUCKET_COUNT];
+    let mut octant_bucket_sample_counts = [0_u8; OCTANT_BUCKET_COUNT];
 
-fn build_matrix_profile(mask: u8) -> GlyphProfile {
-    let mut occupancy = [0_u8; MICRO_TILE_SAMPLES];
     for sample_row in 0..MICRO_H {
         for sample_col in 0..MICRO_W {
-            let row_bucket = (sample_row * 2) / MICRO_H;
-            let col_bucket = (sample_col * 2) / MICRO_W;
-            let bit = MATRIX_BIT_WEIGHTS[row_bucket][col_bucket];
             let index = sample_row * MICRO_W + sample_col;
-            occupancy[index] = u8::from(mask & bit != 0);
+
+            let matrix_row_bucket = (sample_row * 2) / MICRO_H;
+            let matrix_col_bucket = (sample_col * 2) / MICRO_W;
+            let matrix_bucket = matrix_row_bucket * 2 + matrix_col_bucket;
+            matrix_bucket_for_sample[index] = u8::try_from(matrix_bucket).unwrap_or(u8::MAX);
+            matrix_bucket_sample_counts[matrix_bucket] =
+                matrix_bucket_sample_counts[matrix_bucket].saturating_add(1);
+
+            let octant_row_bucket = (sample_row * 4) / MICRO_H;
+            let octant_col_bucket = (sample_col * 2) / MICRO_W;
+            let octant_bucket = octant_row_bucket * 2 + octant_col_bucket;
+            octant_bucket_for_sample[index] = u8::try_from(octant_bucket).unwrap_or(u8::MAX);
+            octant_bucket_sample_counts[octant_bucket] =
+                octant_bucket_sample_counts[octant_bucket].saturating_add(1);
         }
     }
-    let sample_count = occupancy.iter().copied().map(u16::from).sum::<u16>();
-    let complexity = mask.count_ones() as u8;
-    GlyphProfile {
-        glyph: DecodedGlyph::Matrix(mask),
-        occupancy,
-        sample_count,
-        complexity,
-    }
-}
 
-fn build_octant_profile(mask: u8) -> GlyphProfile {
-    let mut occupancy = [0_u8; MICRO_TILE_SAMPLES];
-    for sample_row in 0..MICRO_H {
-        for sample_col in 0..MICRO_W {
-            let row_bucket = (sample_row * 4) / MICRO_H;
-            let col_bucket = (sample_col * 2) / MICRO_W;
-            let bit = OCTANT_BIT_WEIGHTS[row_bucket][col_bucket];
-            let index = sample_row * MICRO_W + sample_col;
-            occupancy[index] = u8::from(mask & bit != 0);
-        }
+    GlyphBucketLayout {
+        matrix_bucket_for_sample,
+        octant_bucket_for_sample,
+        matrix_sample_counts_by_mask: build_mask_sample_counts(&matrix_bucket_sample_counts),
+        octant_sample_counts_by_mask: build_mask_sample_counts(&octant_bucket_sample_counts),
     }
-    let sample_count = occupancy.iter().copied().map(u16::from).sum::<u16>();
-    let complexity = mask.count_ones() as u8;
-    GlyphProfile {
-        glyph: DecodedGlyph::Octant(mask),
-        occupancy,
-        sample_count,
-        complexity,
-    }
-}
-
-fn build_glyph_profiles() -> Vec<GlyphProfile> {
-    let mut profiles = Vec::with_capacity(1 + 14 + 254);
-    profiles.push(build_block_profile());
-
-    for mask in 1_u8..=14_u8 {
-        profiles.push(build_matrix_profile(mask));
-    }
-
-    for mask in 1_u8..=254_u8 {
-        profiles.push(build_octant_profile(mask));
-    }
-
-    profiles
 }
 
 fn build_shade_profiles(color_levels: u32) -> Vec<ShadeProfile> {
@@ -704,12 +737,117 @@ impl LocalCellProfile {
     }
 }
 
+impl GlyphProfile {
+    fn block() -> Self {
+        Self {
+            glyph: DecodedGlyph::Block,
+            sample_count: MICRO_TILE_SAMPLES,
+            complexity: u8::try_from(MICRO_TILE_SAMPLES).unwrap_or(u8::MAX),
+        }
+    }
+
+    fn matrix(mask: u8, sample_count: usize) -> Self {
+        Self {
+            glyph: DecodedGlyph::Matrix(mask),
+            sample_count,
+            complexity: mask.count_ones() as u8,
+        }
+    }
+
+    fn octant(mask: u8, sample_count: usize) -> Self {
+        Self {
+            glyph: DecodedGlyph::Octant(mask),
+            sample_count,
+            complexity: mask.count_ones() as u8,
+        }
+    }
+}
+
+impl GlyphBucketLayout {
+    fn matrix_sample_count(&self, mask: u8) -> usize {
+        usize::from(self.matrix_sample_counts_by_mask[usize::from(mask)])
+    }
+
+    fn octant_sample_count(&self, mask: u8) -> usize {
+        usize::from(self.octant_sample_counts_by_mask[usize::from(mask)])
+    }
+}
+
+impl PatchCandidateBasis {
+    fn from_patch(patch: MicroTile) -> Self {
+        let layout = &*GLYPH_BUCKET_LAYOUT;
+        let mut basis = Self::default();
+
+        // All glyph families are unions of these micro-buckets, so one patch pass recovers the
+        // exact per-glyph dot products that the old occupied-sample scan computed.
+        for (index, sample_q12) in patch.samples_q12.iter().copied().enumerate() {
+            let value = u64::from(sample_q12);
+            basis.empty_residual = basis
+                .empty_residual
+                .saturating_add(value.saturating_mul(value));
+            basis.total_mass = basis.total_mass.saturating_add(value);
+
+            let matrix_bucket = usize::from(layout.matrix_bucket_for_sample[index]);
+            basis.matrix_bucket_sums[matrix_bucket] =
+                basis.matrix_bucket_sums[matrix_bucket].saturating_add(value);
+
+            let octant_bucket = usize::from(layout.octant_bucket_for_sample[index]);
+            basis.octant_bucket_sums[octant_bucket] =
+                basis.octant_bucket_sums[octant_bucket].saturating_add(value);
+        }
+
+        basis
+    }
+}
+
+fn build_mask_sample_counts<const BUCKETS: usize, const MASK_LIMIT: usize>(
+    bucket_sample_counts: &[u8; BUCKETS],
+) -> [u8; MASK_LIMIT] {
+    let mut sample_counts = [0_u8; MASK_LIMIT];
+    let mut mask = 1_usize;
+    while mask < MASK_LIMIT {
+        let lsb_index = mask.trailing_zeros() as usize;
+        let previous = mask & (mask - 1);
+        sample_counts[mask] =
+            sample_counts[previous].saturating_add(bucket_sample_counts[lsb_index]);
+        mask += 1;
+    }
+    sample_counts
+}
+
+fn build_subset_sums<const BUCKETS: usize, const MASK_LIMIT: usize>(
+    bucket_sums: &[u64; BUCKETS],
+) -> [u64; MASK_LIMIT] {
+    let mut subset_sums = [0_u64; MASK_LIMIT];
+    let mut mask = 1_usize;
+    while mask < MASK_LIMIT {
+        let lsb_index = mask.trailing_zeros() as usize;
+        let previous = mask & (mask - 1);
+        subset_sums[mask] = subset_sums[previous].saturating_add(bucket_sums[lsb_index]);
+        mask += 1;
+    }
+    subset_sums
+}
+
 fn nearest_shade_profile_index(shades: &[ShadeProfile], alpha_q12: u16) -> Option<usize> {
-    shades
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, shade)| shade.sample_q12.abs_diff(alpha_q12))
-        .map(|(index, _)| index)
+    let shade_count = shades.len();
+    if shade_count == 0 {
+        return None;
+    }
+
+    let shade_count_u64 = u64::try_from(shade_count).unwrap_or(u64::MAX);
+    let rounded_level = u64::from(alpha_q12)
+        .saturating_mul(shade_count_u64)
+        .saturating_add(2047)
+        .saturating_div(4095)
+        .clamp(1, shade_count_u64);
+    let candidate_index = usize::try_from(rounded_level.saturating_sub(1)).unwrap_or(0);
+    let start = candidate_index.saturating_sub(1);
+    let end = candidate_index
+        .saturating_add(1)
+        .min(shade_count.saturating_sub(1));
+
+    (start..=end).min_by_key(|index| shades[*index].sample_q12.abs_diff(alpha_q12))
 }
 
 fn previous_shade_profile_index(
@@ -734,43 +872,40 @@ fn shade_profile_indices_for_glyph(
     alpha_q12: u16,
     previous: Option<DecodedCellState>,
     glyph: DecodedGlyph,
-) -> Vec<usize> {
+) -> ShadeProfileIndexSet {
     let Some(nearest_index) = nearest_shade_profile_index(shades, alpha_q12) else {
-        return Vec::new();
+        return ShadeProfileIndexSet::default();
     };
     let start = nearest_index.saturating_sub(SHADE_PROFILE_NEIGHBORHOOD);
     let end = nearest_index
         .saturating_add(SHADE_PROFILE_NEIGHBORHOOD)
         .min(shades.len().saturating_sub(1));
-    let mut indices = (start..=end).collect::<Vec<_>>();
+    let previous_index = previous_shade_profile_index(shades, previous, glyph);
+    let mut indices = ShadeProfileIndexSet::default();
+
+    if let Some(previous_index) = previous_index.filter(|index| *index < start) {
+        indices.push_unique(previous_index);
+    }
+
+    for index in start..=end {
+        indices.push_unique(index);
+    }
 
     // Surprising: temporal stability cannot suppress shade flicker if local fitting only offers
     // one quantized level per glyph, so we keep a tiny neighboring shade ladder alive here.
-    if let Some(previous_index) = previous_shade_profile_index(shades, previous, glyph) {
-        indices.push(previous_index);
+    if let Some(previous_index) = previous_index.filter(|index| *index > end) {
+        indices.push_unique(previous_index);
     }
-
-    indices.sort_unstable();
-    indices.dedup();
     indices
 }
 
-fn residual_cost(patch: &MicroTile, profile: LocalCellProfile) -> u64 {
-    patch
-        .samples_q12
-        .iter()
-        .copied()
-        .zip(profile.glyph.occupancy.iter().copied())
-        .map(|(patch_sample, coverage)| {
-            let expected = if coverage == 0 {
-                0_i64
-            } else {
-                i64::from(profile.shade.sample_q12)
-            };
-            let delta = i64::from(patch_sample) - expected;
-            (delta * delta) as u64
-        })
-        .sum::<u64>()
+fn residual_cost(empty_residual: u64, dot: u64, profile: LocalCellProfile) -> u64 {
+    let shade = i128::from(profile.shade.sample_q12);
+    let occupied_mass = i128::try_from(profile.glyph.sample_count).unwrap_or(i128::MAX);
+    let residual = i128::from(empty_residual) + occupied_mass * shade * shade
+        - 2_i128 * shade * i128::from(dot);
+    debug_assert!(residual >= 0);
+    residual.max(0) as u64
 }
 
 fn state_sort_key(state: Option<DecodedCellState>) -> u32 {
@@ -844,6 +979,78 @@ fn candidate_cmp(
         .then_with(|| state_sort_key(lhs.state).cmp(&state_sort_key(rhs.state)))
 }
 
+fn insert_best_non_empty_candidate(
+    candidates: &mut Vec<CellCandidate>,
+    candidate: CellCandidate,
+    previous: Option<DecodedCellState>,
+    keep_non_empty: usize,
+) {
+    if keep_non_empty == 0 {
+        return;
+    }
+
+    let insert_at = candidates.partition_point(|existing| {
+        candidate_cmp(*existing, candidate, previous) != Ordering::Greater
+    });
+    if candidates.len() >= keep_non_empty && insert_at == candidates.len() {
+        return;
+    }
+
+    candidates.insert(insert_at, candidate);
+    if candidates.len() > keep_non_empty {
+        let _ = candidates.pop();
+    }
+}
+
+fn evaluate_non_empty_glyph_candidate(
+    candidates: &mut Vec<CellCandidate>,
+    glyph: GlyphProfile,
+    dot: u64,
+    empty_residual: u64,
+    age: AgeMoment,
+    previous: Option<DecodedCellState>,
+    shade_profiles: &[ShadeProfile],
+    temporal_stability_weight: f64,
+    keep_non_empty: usize,
+) {
+    if glyph.sample_count == 0 || dot == 0 {
+        return;
+    }
+
+    let alpha_q12 = (dot / u64::try_from(glyph.sample_count).unwrap_or(u64::MAX))
+        .min(u64::from(u16::MAX)) as u16;
+    if alpha_q12 < MIN_VISIBLE_SAMPLE_Q12 {
+        return;
+    }
+
+    let prior = u64::from(glyph.complexity)
+        .saturating_mul(u64::from(glyph.complexity))
+        .saturating_mul(PRIOR_COMPLEXITY_WEIGHT);
+    let shade_indices =
+        shade_profile_indices_for_glyph(shade_profiles, alpha_q12, previous, glyph.glyph);
+    for shade_index in shade_indices.as_slice().iter().copied() {
+        let shade = shade_profiles[shade_index];
+        let profile = LocalCellProfile::new(glyph, shade);
+        let residual = residual_cost(empty_residual, dot, profile);
+        let state = Some(profile.state);
+        let total_cost = residual.saturating_add(prior).saturating_add(temporal_cost(
+            previous,
+            state,
+            age,
+            temporal_stability_weight,
+        ));
+        insert_best_non_empty_candidate(
+            candidates,
+            CellCandidate {
+                state,
+                unary_cost: total_cost,
+            },
+            previous,
+            keep_non_empty,
+        );
+    }
+}
+
 fn cell_candidates_for_patch(
     patch: MicroTile,
     age: AgeMoment,
@@ -852,15 +1059,8 @@ fn cell_candidates_for_patch(
     temporal_stability_weight: f64,
     top_k: usize,
 ) -> Vec<CellCandidate> {
-    let empty_residual = patch
-        .samples_q12
-        .iter()
-        .copied()
-        .map(|sample| {
-            let value = u64::from(sample);
-            value.saturating_mul(value)
-        })
-        .sum::<u64>();
+    let patch_basis = PatchCandidateBasis::from_patch(patch);
+    let empty_residual = patch_basis.empty_residual;
 
     let empty_candidate = CellCandidate {
         state: None,
@@ -871,70 +1071,61 @@ fn cell_candidates_for_patch(
             temporal_stability_weight,
         )),
     };
-    if patch.max_sample_q12() < MIN_VISIBLE_SAMPLE_Q12 {
+    let keep_non_empty = top_k.saturating_sub(1);
+    if patch.max_sample_q12() < MIN_VISIBLE_SAMPLE_Q12
+        || keep_non_empty == 0
+        || shade_profiles.is_empty()
+    {
         return vec![empty_candidate];
     }
-    let mut non_empty = Vec::<CellCandidate>::new();
+    let mut non_empty = Vec::<CellCandidate>::with_capacity(keep_non_empty);
 
-    for glyph in GLYPH_PROFILES.iter().copied() {
-        if glyph.sample_count == 0 || shade_profiles.is_empty() {
-            continue;
-        }
+    evaluate_non_empty_glyph_candidate(
+        &mut non_empty,
+        GlyphProfile::block(),
+        patch_basis.total_mass,
+        empty_residual,
+        age,
+        previous,
+        shade_profiles,
+        temporal_stability_weight,
+        keep_non_empty,
+    );
 
-        let dot = patch
-            .samples_q12
-            .iter()
-            .copied()
-            .zip(glyph.occupancy.iter().copied())
-            .map(|(sample, coverage)| {
-                if coverage == 0 {
-                    0_u64
-                } else {
-                    u64::from(sample)
-                }
-            })
-            .sum::<u64>();
-        if dot == 0 {
-            continue;
-        }
-
-        let alpha_q12 = (dot / u64::from(glyph.sample_count)).min(u64::from(u16::MAX)) as u16;
-        if alpha_q12 < MIN_VISIBLE_SAMPLE_Q12 {
-            continue;
-        }
-
-        for shade_index in
-            shade_profile_indices_for_glyph(shade_profiles, alpha_q12, previous, glyph.glyph)
-        {
-            let Some(shade) = shade_profiles.get(shade_index).copied() else {
-                continue;
-            };
-            let profile = LocalCellProfile::new(glyph, shade);
-            let residual = residual_cost(&patch, profile);
-            let prior = u64::from(profile.glyph.complexity)
-                .saturating_mul(u64::from(profile.glyph.complexity))
-                .saturating_mul(PRIOR_COMPLEXITY_WEIGHT);
-            let state = Some(profile.state);
-            let total_cost = residual.saturating_add(prior).saturating_add(temporal_cost(
-                previous,
-                state,
-                age,
-                temporal_stability_weight,
-            ));
-            non_empty.push(CellCandidate {
-                state,
-                unary_cost: total_cost,
-            });
-        }
+    let layout = &*GLYPH_BUCKET_LAYOUT;
+    let matrix_dots: [u64; MATRIX_MASK_LIMIT] = build_subset_sums(&patch_basis.matrix_bucket_sums);
+    for mask in 1_u8..=14_u8 {
+        evaluate_non_empty_glyph_candidate(
+            &mut non_empty,
+            GlyphProfile::matrix(mask, layout.matrix_sample_count(mask)),
+            matrix_dots[usize::from(mask)],
+            empty_residual,
+            age,
+            previous,
+            shade_profiles,
+            temporal_stability_weight,
+            keep_non_empty,
+        );
     }
 
-    non_empty.sort_by(|lhs, rhs| candidate_cmp(*lhs, *rhs, previous));
-    non_empty.dedup_by_key(|candidate| candidate.state);
+    let octant_dots: [u64; OCTANT_MASK_LIMIT] = build_subset_sums(&patch_basis.octant_bucket_sums);
+    for mask in 1_u8..=254_u8 {
+        evaluate_non_empty_glyph_candidate(
+            &mut non_empty,
+            GlyphProfile::octant(mask, layout.octant_sample_count(mask)),
+            octant_dots[usize::from(mask)],
+            empty_residual,
+            age,
+            previous,
+            shade_profiles,
+            temporal_stability_weight,
+            keep_non_empty,
+        );
+    }
 
-    let keep_non_empty = top_k.saturating_sub(1);
     let mut kept = Vec::with_capacity(1 + keep_non_empty);
     kept.push(empty_candidate);
-    kept.extend(non_empty.into_iter().take(keep_non_empty));
+    kept.extend(non_empty);
     kept.sort_by(|lhs, rhs| candidate_cmp(*lhs, *rhs, previous));
     kept
 }
@@ -997,4 +1188,186 @@ fn non_empty_candidates(candidates: &[CellCandidate]) -> Vec<CellCandidate> {
         .copied()
         .filter(|candidate| candidate.state.is_some())
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod candidate_generation_complexity {
+    use super::*;
+
+    fn varied_patch() -> MicroTile {
+        let mut patch = MicroTile::default();
+        for sample_row in 0..MICRO_H {
+            for sample_col in 0..MICRO_W {
+                let index = sample_row * MICRO_W + sample_col;
+                let base = ((sample_row * 521 + sample_col * 193 + index * 17) % 4096) as u16;
+                patch.samples_q12[index] = if (sample_row + sample_col) % 5 == 0 {
+                    base / 16
+                } else {
+                    base
+                };
+            }
+        }
+        patch
+    }
+
+    fn legacy_glyph_dot(patch: MicroTile, glyph: GlyphProfile) -> u64 {
+        match glyph.glyph {
+            DecodedGlyph::Block => patch
+                .samples_q12
+                .iter()
+                .copied()
+                .map(u64::from)
+                .sum::<u64>(),
+            DecodedGlyph::Matrix(mask) => {
+                let mut dot = 0_u64;
+                for sample_row in 0..MICRO_H {
+                    for sample_col in 0..MICRO_W {
+                        let row_bucket = (sample_row * 2) / MICRO_H;
+                        let col_bucket = (sample_col * 2) / MICRO_W;
+                        let bit = MATRIX_BIT_WEIGHTS[row_bucket][col_bucket];
+                        if mask & bit != 0 {
+                            let index = sample_row * MICRO_W + sample_col;
+                            dot = dot.saturating_add(u64::from(patch.samples_q12[index]));
+                        }
+                    }
+                }
+                dot
+            }
+            DecodedGlyph::Octant(mask) => {
+                let mut dot = 0_u64;
+                for sample_row in 0..MICRO_H {
+                    for sample_col in 0..MICRO_W {
+                        let row_bucket = (sample_row * 4) / MICRO_H;
+                        let col_bucket = (sample_col * 2) / MICRO_W;
+                        let bit = OCTANT_BIT_WEIGHTS[row_bucket][col_bucket];
+                        if mask & bit != 0 {
+                            let index = sample_row * MICRO_W + sample_col;
+                            dot = dot.saturating_add(u64::from(patch.samples_q12[index]));
+                        }
+                    }
+                }
+                dot
+            }
+        }
+    }
+
+    fn legacy_cell_candidates_for_patch(
+        patch: MicroTile,
+        age: AgeMoment,
+        previous: Option<DecodedCellState>,
+        shade_profiles: &[ShadeProfile],
+        temporal_stability_weight: f64,
+        top_k: usize,
+    ) -> Vec<CellCandidate> {
+        let empty_residual = patch
+            .samples_q12
+            .iter()
+            .copied()
+            .map(|sample| {
+                let value = u64::from(sample);
+                value.saturating_mul(value)
+            })
+            .sum::<u64>();
+
+        let empty_candidate = CellCandidate {
+            state: None,
+            unary_cost: empty_residual.saturating_add(temporal_cost(
+                previous,
+                None,
+                age,
+                temporal_stability_weight,
+            )),
+        };
+        let keep_non_empty = top_k.saturating_sub(1);
+        if patch.max_sample_q12() < MIN_VISIBLE_SAMPLE_Q12
+            || keep_non_empty == 0
+            || shade_profiles.is_empty()
+        {
+            return vec![empty_candidate];
+        }
+
+        let layout = &*GLYPH_BUCKET_LAYOUT;
+        let mut non_empty = Vec::<CellCandidate>::with_capacity(keep_non_empty);
+        let mut glyphs = Vec::with_capacity(1 + 14 + 254);
+        glyphs.push(GlyphProfile::block());
+        for mask in 1_u8..=14_u8 {
+            glyphs.push(GlyphProfile::matrix(mask, layout.matrix_sample_count(mask)));
+        }
+        for mask in 1_u8..=254_u8 {
+            glyphs.push(GlyphProfile::octant(mask, layout.octant_sample_count(mask)));
+        }
+
+        for glyph in glyphs {
+            let dot = legacy_glyph_dot(patch, glyph);
+            evaluate_non_empty_glyph_candidate(
+                &mut non_empty,
+                glyph,
+                dot,
+                empty_residual,
+                age,
+                previous,
+                shade_profiles,
+                temporal_stability_weight,
+                keep_non_empty,
+            );
+        }
+
+        let mut kept = Vec::with_capacity(1 + keep_non_empty);
+        kept.push(empty_candidate);
+        kept.extend(non_empty);
+        kept.sort_by(|lhs, rhs| candidate_cmp(*lhs, *rhs, previous));
+        kept
+    }
+
+    #[test]
+    fn patch_candidate_basis_matches_legacy_mask_dots_for_all_families() {
+        let patch = varied_patch();
+        let patch_basis = PatchCandidateBasis::from_patch(patch);
+        let matrix_dots: [u64; MATRIX_MASK_LIMIT] =
+            build_subset_sums(&patch_basis.matrix_bucket_sums);
+        let octant_dots: [u64; OCTANT_MASK_LIMIT] =
+            build_subset_sums(&patch_basis.octant_bucket_sums);
+        let layout = &*GLYPH_BUCKET_LAYOUT;
+
+        assert_eq!(
+            patch_basis.total_mass,
+            legacy_glyph_dot(patch, GlyphProfile::block())
+        );
+
+        for mask in 1_u8..=14_u8 {
+            let glyph = GlyphProfile::matrix(mask, layout.matrix_sample_count(mask));
+            assert_eq!(
+                matrix_dots[usize::from(mask)],
+                legacy_glyph_dot(patch, glyph)
+            );
+        }
+
+        for mask in 1_u8..=254_u8 {
+            let glyph = GlyphProfile::octant(mask, layout.octant_sample_count(mask));
+            assert_eq!(
+                octant_dots[usize::from(mask)],
+                legacy_glyph_dot(patch, glyph)
+            );
+        }
+    }
+
+    #[test]
+    fn cell_candidates_for_patch_matches_legacy_profile_scan_with_previous_state() {
+        let patch = varied_patch();
+        let age = AgeMoment {
+            total_mass_q12: 4095,
+            recent_mass_q12: 1024,
+        };
+        let previous = Some(DecodedCellState {
+            glyph: DecodedGlyph::Octant(18),
+            level: HighlightLevel::from_raw_clamped(7),
+        });
+        let shade_profiles = build_shade_profiles(16);
+
+        let current = cell_candidates_for_patch(patch, age, previous, &shade_profiles, 0.35, 5);
+        let legacy =
+            legacy_cell_candidates_for_patch(patch, age, previous, &shade_profiles, 0.35, 5);
+
+        assert_eq!(current, legacy);
+    }
 }

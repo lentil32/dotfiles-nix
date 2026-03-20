@@ -251,12 +251,82 @@ struct SliceSearchBounds {
     max_col: i64,
 }
 
+struct IndexedRow<'a, T> {
+    row: i64,
+    entries: Box<[(i64, &'a T)]>,
+}
+
+struct CellRowIndex<'a, T> {
+    rows: Box<[IndexedRow<'a, T>]>,
+}
+
+impl<'a, T> CellRowIndex<'a, T> {
+    fn build(cells: &'a BTreeMap<(i64, i64), T>) -> Self {
+        let mut rows = Vec::<IndexedRow<'a, T>>::new();
+        let mut active_row = None;
+        let mut active_entries = Vec::<(i64, &'a T)>::new();
+
+        for (&(row, col), value) in cells {
+            if active_row != Some(row) {
+                if let Some(previous_row) = active_row.replace(row) {
+                    rows.push(IndexedRow {
+                        row: previous_row,
+                        entries: std::mem::take(&mut active_entries).into_boxed_slice(),
+                    });
+                }
+            }
+            active_entries.push((col, value));
+        }
+
+        if let Some(row) = active_row {
+            rows.push(IndexedRow {
+                row,
+                entries: active_entries.into_boxed_slice(),
+            });
+        }
+
+        Self {
+            rows: rows.into_boxed_slice(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn for_each_in_bounds(
+        &self,
+        bounds: SliceSearchBounds,
+        mut visit: impl FnMut((i64, i64), &'a T),
+    ) {
+        // CONTEXT: slice queries are local in display space; pre-index rows once so each sample
+        // visits only the columns inside its true bounds instead of rescanning whole row bands.
+        let row_start = self
+            .rows
+            .partition_point(|bucket| bucket.row < bounds.min_row);
+        let row_end = self
+            .rows
+            .partition_point(|bucket| bucket.row <= bounds.max_row);
+        for bucket in &self.rows[row_start..row_end] {
+            let col_start = bucket
+                .entries
+                .partition_point(|(col, _)| *col < bounds.min_col);
+            let col_end = bucket
+                .entries
+                .partition_point(|(col, _)| *col <= bounds.max_col);
+            for &(col, value) in &bucket.entries[col_start..col_end] {
+                visit((bucket.row, col), value);
+            }
+        }
+    }
+}
+
 fn measured_slice_support_width_cells(
     sample: CenterSample,
     normal_row: f64,
     normal_col: f64,
     band_half_width: f64,
-    compiled: &BTreeMap<(i64, i64), CompiledCell>,
+    compiled: &CellRowIndex<'_, CompiledCell>,
     frame: &RenderFrame,
     bounds: SliceSearchBounds,
 ) -> Option<f64> {
@@ -270,13 +340,7 @@ fn measured_slice_support_width_cells(
     );
     let mut support: Option<ProjectedSpanQ16> = None;
 
-    for (coord, compiled_cell) in
-        compiled.range((bounds.min_row, i64::MIN)..=(bounds.max_row, i64::MAX))
-    {
-        if coord.1 < bounds.min_col || coord.1 > bounds.max_col {
-            continue;
-        }
-
+    compiled.for_each_in_bounds(bounds, |coord, compiled_cell| {
         for sample_row in 0..MICRO_H {
             for sample_col in 0..MICRO_W {
                 let index = sample_row * MICRO_W + sample_col;
@@ -303,7 +367,7 @@ fn measured_slice_support_width_cells(
                 support = Some(support.map_or(sample_span, |existing| existing.cover(sample_span)));
             }
         }
-    }
+    });
 
     support.map(|span| {
         span.width_cells()
@@ -336,6 +400,8 @@ fn build_ribbon_slices_with_compiled(
         return Vec::new();
     }
 
+    let compiled_index = CellRowIndex::build(compiled);
+    let candidate_index = CellRowIndex::build(cell_candidates);
     let mut slices = Vec::<RibbonSlice>::new();
     let safe_aspect = crate::types::display_metric_row_scale(frame.block_aspect_ratio);
 
@@ -364,7 +430,7 @@ fn build_ribbon_slices_with_compiled(
             normal_row,
             normal_col,
             band_half_width,
-            compiled,
+            &compiled_index,
             frame,
             bounds,
         );
@@ -376,13 +442,7 @@ fn build_ribbon_slices_with_compiled(
             (COMET_MIN_RESOLVABLE_WIDTH * COMET_TIP_CAP_MULTIPLIER).min(target_width_cells);
         let transverse_width_penalty = filament_blend_factor(tail_u).clamp(0.0, 1.0);
 
-        for (coord, candidates) in
-            cell_candidates.range((bounds.min_row, i64::MIN)..=(bounds.max_row, i64::MAX))
-        {
-            if coord.1 < bounds.min_col || coord.1 > bounds.max_col {
-                continue;
-            }
-
+        candidate_index.for_each_in_bounds(bounds, |coord, candidates| {
             let row_center = coord.0 as f64 + 0.5;
             let col_center = coord.1 as f64 + 0.5;
             let delta_row = row_center - sample.pos.row;
@@ -392,24 +452,24 @@ fn build_ribbon_slices_with_compiled(
             let across = delta_row_display * normal_row + delta_col * normal_col;
 
             if along.abs() > RIBBON_SLICE_HALF_SPAN || across.abs() > band_half_width {
-                continue;
+                return;
             }
 
             let Some(empty_cost) = candidates
                 .iter()
                 .find_map(|candidate| (candidate.state.is_none()).then_some(candidate.unary_cost))
             else {
-                continue;
+                return;
             };
             let normal_q16 = to_q16(across);
             cells.push(SliceCell::new(
-                *coord,
+                coord,
                 normal_q16,
                 cell_half_span_q16,
                 empty_cost,
                 non_empty_candidates(candidates),
             ));
-        }
+        });
 
         if cells.is_empty() {
             continue;
@@ -521,7 +581,12 @@ fn state_for_slice_cell(
         .and_then(|candidate| candidate.state)
 }
 
-fn cell_cost_for_state(slice: &RibbonSlice, state: SliceState, cell_index: usize) -> u64 {
+fn cell_cost_for_state_with_peak(
+    slice: &RibbonSlice,
+    state: SliceState,
+    cell_index: usize,
+    peak_highlight_level: u32,
+) -> u64 {
     let Some(candidate_index) = state.candidate_offset_for(cell_index) else {
         return slice.cells[cell_index].empty_cost;
     };
@@ -529,7 +594,7 @@ fn cell_cost_for_state(slice: &RibbonSlice, state: SliceState, cell_index: usize
         .non_empty_candidates
         .get(candidate_index)
         .map_or(u64::MAX / 4, |candidate| {
-            adjusted_candidate_cost(slice, *candidate)
+            adjusted_candidate_cost(slice, peak_highlight_level, *candidate)
         })
 }
 
@@ -576,7 +641,11 @@ fn slice_peak_highlight_level(slice: &RibbonSlice) -> u32 {
         .unwrap_or(0)
 }
 
-fn destination_catch_penalty(slice: &RibbonSlice, state: Option<DecodedCellState>) -> u64 {
+fn destination_catch_penalty(
+    slice: &RibbonSlice,
+    peak_highlight_level: u32,
+    state: Option<DecodedCellState>,
+) -> u64 {
     let Some(decoded) = state else {
         return 0;
     };
@@ -584,7 +653,7 @@ fn destination_catch_penalty(slice: &RibbonSlice, state: Option<DecodedCellState
     let headward_factor_q10 = (smoothstep01(1.0 - slice.tail_u) * 1024.0)
         .round()
         .clamp(0.0, 1024.0) as u32;
-    let dim_delta = slice_peak_highlight_level(slice).saturating_sub(decoded.level.value());
+    let dim_delta = peak_highlight_level.saturating_sub(decoded.level.value());
     // head-side catch slices need an explicit dim-state penalty or a long bridge can
     // flatten into a uniformly dull filament whenever the brighter destination option costs a bit
     // more than continuing the tail.
@@ -594,21 +663,128 @@ fn destination_catch_penalty(slice: &RibbonSlice, state: Option<DecodedCellState
     )
 }
 
-fn adjusted_candidate_cost(slice: &RibbonSlice, candidate: CellCandidate) -> u64 {
+fn adjusted_candidate_cost(
+    slice: &RibbonSlice,
+    peak_highlight_level: u32,
+    candidate: CellCandidate,
+) -> u64 {
     candidate
         .unary_cost
-        .saturating_add(destination_catch_penalty(slice, candidate.state))
+        .saturating_add(destination_catch_penalty(
+            slice,
+            peak_highlight_level,
+            candidate.state,
+        ))
 }
 
-fn build_slice_states(slice: &RibbonSlice, spatial_weight_q10: u32) -> Vec<SliceState> {
+fn slice_state_cmp(lhs: SliceState, rhs: SliceState) -> std::cmp::Ordering {
+    lhs.local_cost
+        .cmp(&rhs.local_cost)
+        .then_with(|| lhs.tie_break_key().cmp(&rhs.tie_break_key()))
+}
+
+// CONTEXT: Keep slice-state enumeration bounded to the post-truncation top-k so the ribbon solver
+// never materializes the full combinatorial frontier before sorting it back down.
+struct SliceStateCollector {
+    states: Vec<SliceState>,
+    #[cfg(test)]
+    peak_len: usize,
+}
+
+impl SliceStateCollector {
+    fn new(seed: SliceState) -> Self {
+        Self {
+            states: vec![seed],
+            #[cfg(test)]
+            peak_len: 1,
+        }
+    }
+
+    fn insert(&mut self, state: SliceState) {
+        let insert_at = self
+            .states
+            .partition_point(|existing| slice_state_cmp(*existing, state).is_le());
+        if self.states.len() >= RIBBON_MAX_STATES_PER_SLICE && insert_at == self.states.len() {
+            return;
+        }
+
+        self.states.insert(insert_at, state);
+        if self.states.len() > RIBBON_MAX_STATES_PER_SLICE {
+            let _ = self.states.pop();
+        }
+        #[cfg(test)]
+        {
+            self.peak_len = self.peak_len.max(self.states.len());
+        }
+    }
+
+    fn should_prune_branch(&self, optimistic_cost: u64) -> bool {
+        self.states.len() >= RIBBON_MAX_STATES_PER_SLICE
+            && self
+                .states
+                .last()
+                .is_some_and(|worst| optimistic_cost > worst.local_cost)
+    }
+
+    fn finish(self) -> Vec<SliceState> {
+        self.states
+    }
+
+    #[cfg(test)]
+    fn peak_len(&self) -> usize {
+        self.peak_len
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RunEnumerationBounds {
+    remaining_empty_costs: [u64; RIBBON_MAX_RUN_LENGTH + 1],
+    remaining_min_adjusted_costs: [u64; RIBBON_MAX_RUN_LENGTH + 1],
+}
+
+impl RunEnumerationBounds {
+    fn try_new(slice: &RibbonSlice, run: RunSpan, peak_highlight_level: u32) -> Option<Self> {
+        let mut bounds = Self {
+            remaining_empty_costs: [0; RIBBON_MAX_RUN_LENGTH + 1],
+            remaining_min_adjusted_costs: [0; RIBBON_MAX_RUN_LENGTH + 1],
+        };
+        let run_len = run.end.saturating_sub(run.start).saturating_add(1);
+        for offset in (0..run_len).rev() {
+            let cell = &slice.cells[run.start + offset];
+            let min_adjusted_cost = cell
+                .non_empty_candidates
+                .iter()
+                .copied()
+                .map(|candidate| adjusted_candidate_cost(slice, peak_highlight_level, candidate))
+                .min()?;
+            bounds.remaining_empty_costs[offset] =
+                bounds.remaining_empty_costs[offset + 1].saturating_add(cell.empty_cost);
+            bounds.remaining_min_adjusted_costs[offset] =
+                bounds.remaining_min_adjusted_costs[offset + 1].saturating_add(min_adjusted_cost);
+        }
+        Some(bounds)
+    }
+
+    fn optimistic_cost(self, running_cost: u64, offset: usize) -> u64 {
+        running_cost
+            .saturating_sub(self.remaining_empty_costs[offset])
+            .saturating_add(self.remaining_min_adjusted_costs[offset])
+    }
+}
+
+fn build_slice_state_collector(
+    slice: &RibbonSlice,
+    spatial_weight_q10: u32,
+) -> SliceStateCollector {
     let baseline = slice
         .cells
         .iter()
         .fold(0_u64, |acc, cell| acc.saturating_add(cell.empty_cost));
+    let peak_highlight_level = slice_peak_highlight_level(slice);
     let empty_state = SliceState::empty(0);
-    let mut states = vec![SliceState::empty(
+    let mut states = SliceStateCollector::new(SliceState::empty(
         baseline.saturating_add(state_local_prior(slice, empty_state, spatial_weight_q10)),
-    )];
+    ));
 
     for start in 0..slice.cells.len() {
         let max_end = (start + RIBBON_MAX_RUN_LENGTH).min(slice.cells.len());
@@ -617,10 +793,16 @@ fn build_slice_states(slice: &RibbonSlice, spatial_weight_q10: u32) -> Vec<Slice
             let Some(run) = RunSpan::try_new(start, end) else {
                 continue;
             };
+            let Some(bounds) = RunEnumerationBounds::try_new(slice, run, peak_highlight_level)
+            else {
+                continue;
+            };
             enumerate_run_candidate_states(
                 slice,
                 run,
+                bounds,
                 spatial_weight_q10,
+                peak_highlight_level,
                 start,
                 baseline,
                 &mut [0; RIBBON_MAX_RUN_LENGTH],
@@ -629,27 +811,37 @@ fn build_slice_states(slice: &RibbonSlice, spatial_weight_q10: u32) -> Vec<Slice
         }
     }
 
-    states.sort_by(|lhs, rhs| {
-        lhs.local_cost
-            .cmp(&rhs.local_cost)
-            .then_with(|| lhs.tie_break_key().cmp(&rhs.tie_break_key()))
-    });
-    states.truncate(RIBBON_MAX_STATES_PER_SLICE);
     states
+}
+
+fn build_slice_states(slice: &RibbonSlice, spatial_weight_q10: u32) -> Vec<SliceState> {
+    build_slice_state_collector(slice, spatial_weight_q10).finish()
+}
+
+#[cfg(test)]
+fn build_slice_states_with_peak_working_set(
+    slice: &RibbonSlice,
+    spatial_weight_q10: u32,
+) -> (Vec<SliceState>, usize) {
+    let collector = build_slice_state_collector(slice, spatial_weight_q10);
+    let peak_len = collector.peak_len();
+    (collector.finish(), peak_len)
 }
 
 fn enumerate_run_candidate_states(
     slice: &RibbonSlice,
     run: RunSpan,
+    bounds: RunEnumerationBounds,
     spatial_weight_q10: u32,
+    peak_highlight_level: u32,
     cell_index: usize,
     running_cost: u64,
     candidate_offsets: &mut [u8; RIBBON_MAX_RUN_LENGTH],
-    states: &mut Vec<SliceState>,
+    states: &mut SliceStateCollector,
 ) {
     if cell_index > run.end {
         let state = SliceState::with_run(run, *candidate_offsets, 0);
-        states.push(SliceState::with_run(
+        states.insert(SliceState::with_run(
             run,
             *candidate_offsets,
             running_cost.saturating_add(state_local_prior(slice, state, spatial_weight_q10)),
@@ -662,19 +854,29 @@ fn enumerate_run_candidate_states(
     if cell.non_empty_candidates.is_empty() {
         return;
     }
+    if states.should_prune_branch(bounds.optimistic_cost(running_cost, offset)) {
+        return;
+    }
 
     for (candidate_index, candidate) in cell.non_empty_candidates.iter().copied().enumerate() {
         let Ok(candidate_index) = u8::try_from(candidate_index) else {
             continue;
         };
         candidate_offsets[offset] = candidate_index;
-        let next_cost = running_cost
-            .saturating_sub(cell.empty_cost)
-            .saturating_add(adjusted_candidate_cost(slice, candidate));
+        let next_cost =
+            running_cost
+                .saturating_sub(cell.empty_cost)
+                .saturating_add(adjusted_candidate_cost(
+                    slice,
+                    peak_highlight_level,
+                    candidate,
+                ));
         enumerate_run_candidate_states(
             slice,
             run,
+            bounds,
             spatial_weight_q10,
+            peak_highlight_level,
             cell_index + 1,
             next_cost,
             candidate_offsets,
@@ -696,38 +898,77 @@ fn overlap_penalty(previous: Option<DecodedCellState>, next: Option<DecodedCellS
     }
 }
 
-fn run_center_q16(slice: &RibbonSlice, state: SliceState) -> Option<i32> {
-    slice
-        .run_projected_span_q16(state)
-        .map(ProjectedSpanQ16::center_q16)
+#[derive(Clone, Copy)]
+struct PreparedSliceState {
+    state: SliceState,
+    width_cells: f64,
+    center_q16: Option<i32>,
 }
 
-fn transition_cost(
+impl PreparedSliceState {
+    fn new(slice: &RibbonSlice, state: SliceState) -> Self {
+        let projected_span = slice.run_projected_span_q16(state);
+        Self {
+            state,
+            width_cells: projected_span.map_or(0.0, ProjectedSpanQ16::width_cells),
+            center_q16: projected_span.map(ProjectedSpanQ16::center_q16),
+        }
+    }
+}
+
+fn prepare_slice_states(slice: &RibbonSlice, spatial_weight_q10: u32) -> Vec<PreparedSliceState> {
+    build_slice_states(slice, spatial_weight_q10)
+        .into_iter()
+        .map(|state| PreparedSliceState::new(slice, state))
+        .collect::<Vec<_>>()
+}
+
+fn build_slice_overlap_pairs(
     previous_slice: &RibbonSlice,
-    previous_state: SliceState,
     next_slice: &RibbonSlice,
-    next_state: SliceState,
-    spatial_weight_q10: u32,
-) -> u64 {
-    let mut cost = 0_u64;
+) -> Box<[(usize, usize)]> {
+    let previous_indices = previous_slice
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| (cell.coord, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut overlap_pairs = Vec::<(usize, usize)>::with_capacity(
+        previous_slice.cells.len().min(next_slice.cells.len()),
+    );
+
+    // Match coordinates once per slice pair so the DP only walks true overlaps inside the
+    // state-pair loop instead of rescanning the previous slice for every compared cell.
     for (next_index, next_cell) in next_slice.cells.iter().enumerate() {
-        let next_value = state_for_slice_cell(next_slice, next_state, next_index);
-        if let Some(previous_index) = previous_slice
-            .cells
-            .iter()
-            .position(|previous_cell| previous_cell.coord == next_cell.coord)
-        {
-            let previous_value =
-                state_for_slice_cell(previous_slice, previous_state, previous_index);
-            cost = cost.saturating_add(scale_penalty(
-                overlap_penalty(previous_value, next_value),
-                spatial_weight_q10,
-            ));
+        if let Some(&previous_index) = previous_indices.get(&next_cell.coord) {
+            overlap_pairs.push((previous_index, next_index));
         }
     }
 
-    let prev_width = run_width_cells(previous_slice, previous_state);
-    let next_width = run_width_cells(next_slice, next_state);
+    overlap_pairs.into_boxed_slice()
+}
+
+fn transition_cost_prepared(
+    previous_slice: &RibbonSlice,
+    previous_state: PreparedSliceState,
+    next_slice: &RibbonSlice,
+    next_state: PreparedSliceState,
+    overlap_pairs: &[(usize, usize)],
+    spatial_weight_q10: u32,
+) -> u64 {
+    let mut cost = 0_u64;
+    for &(previous_index, next_index) in overlap_pairs {
+        let previous_value =
+            state_for_slice_cell(previous_slice, previous_state.state, previous_index);
+        let next_value = state_for_slice_cell(next_slice, next_state.state, next_index);
+        cost = cost.saturating_add(scale_penalty(
+            overlap_penalty(previous_value, next_value),
+            spatial_weight_q10,
+        ));
+    }
+
+    let prev_width = previous_state.width_cells;
+    let next_width = next_state.width_cells;
     cost = cost.saturating_add(scale_penalty(
         linear_cells_penalty((prev_width - next_width).abs(), PENALTY_THICKNESS_DELTA),
         spatial_weight_q10,
@@ -743,10 +984,7 @@ fn transition_cost(
         spatial_weight_q10,
     ));
 
-    match (
-        run_center_q16(previous_slice, previous_state),
-        run_center_q16(next_slice, next_state),
-    ) {
+    match (previous_state.center_q16, next_state.center_q16) {
         (Some(prev_center), Some(next_center)) => {
             let shift_q16 = prev_center.abs_diff(next_center);
             let shift_penalty =
@@ -765,6 +1003,25 @@ fn transition_cost(
     cost
 }
 
+#[cfg(test)]
+fn transition_cost(
+    previous_slice: &RibbonSlice,
+    previous_state: SliceState,
+    next_slice: &RibbonSlice,
+    next_state: SliceState,
+    spatial_weight_q10: u32,
+) -> u64 {
+    let overlap_pairs = build_slice_overlap_pairs(previous_slice, next_slice);
+    transition_cost_prepared(
+        previous_slice,
+        PreparedSliceState::new(previous_slice, previous_state),
+        next_slice,
+        PreparedSliceState::new(next_slice, next_state),
+        &overlap_pairs,
+        spatial_weight_q10,
+    )
+}
+
 fn solve_ribbon_dp(slices: &[RibbonSlice], spatial_weight_q10: u32) -> Option<Vec<SliceState>> {
     if slices.len() < 2 {
         return None;
@@ -772,11 +1029,15 @@ fn solve_ribbon_dp(slices: &[RibbonSlice], spatial_weight_q10: u32) -> Option<Ve
 
     let state_sets = slices
         .iter()
-        .map(|slice| build_slice_states(slice, spatial_weight_q10))
-        .collect::<Vec<Vec<SliceState>>>();
+        .map(|slice| prepare_slice_states(slice, spatial_weight_q10))
+        .collect::<Vec<_>>();
     if state_sets.iter().any(Vec::is_empty) {
         return None;
     }
+    let overlap_pairs = slices
+        .windows(2)
+        .map(|pair| build_slice_overlap_pairs(&pair[0], &pair[1]))
+        .collect::<Vec<_>>();
 
     let mut costs = Vec::<Vec<u64>>::with_capacity(state_sets.len());
     let mut backpointers = Vec::<Vec<usize>>::with_capacity(state_sets.len());
@@ -784,7 +1045,7 @@ fn solve_ribbon_dp(slices: &[RibbonSlice], spatial_weight_q10: u32) -> Option<Ve
     costs.push(
         state_sets[0]
             .iter()
-            .map(|state| state.local_cost)
+            .map(|state| state.state.local_cost)
             .collect::<Vec<_>>(),
     );
     backpointers.push(vec![0; state_sets[0].len()]);
@@ -792,6 +1053,7 @@ fn solve_ribbon_dp(slices: &[RibbonSlice], spatial_weight_q10: u32) -> Option<Ve
     for slice_index in 1..state_sets.len() {
         let current_states = &state_sets[slice_index];
         let previous_states = &state_sets[slice_index - 1];
+        let overlap_pairs = &overlap_pairs[slice_index - 1];
         let mut current_costs = vec![u64::MAX; current_states.len()];
         let mut current_back = vec![0_usize; current_states.len()];
 
@@ -799,22 +1061,23 @@ fn solve_ribbon_dp(slices: &[RibbonSlice], spatial_weight_q10: u32) -> Option<Ve
             let mut best_prev_index = 0_usize;
             let mut best_cost = u64::MAX;
             for (previous_index, previous_state) in previous_states.iter().copied().enumerate() {
-                let trans = transition_cost(
+                let trans = transition_cost_prepared(
                     &slices[slice_index - 1],
                     previous_state,
                     &slices[slice_index],
                     current_state,
+                    overlap_pairs,
                     spatial_weight_q10,
                 );
                 let candidate = costs[slice_index - 1][previous_index]
-                    .saturating_add(current_state.local_cost)
+                    .saturating_add(current_state.state.local_cost)
                     .saturating_add(trans);
                 let should_replace = candidate < best_cost
                     || (candidate == best_cost && previous_index < best_prev_index)
                     || (candidate == best_cost
                         && previous_index == best_prev_index
-                        && previous_state.tie_break_key()
-                            < previous_states[best_prev_index].tie_break_key());
+                        && previous_state.state.tie_break_key()
+                            < previous_states[best_prev_index].state.tie_break_key());
                 if should_replace {
                     best_cost = candidate;
                     best_prev_index = previous_index;
@@ -834,11 +1097,15 @@ fn solve_ribbon_dp(slices: &[RibbonSlice], spatial_weight_q10: u32) -> Option<Ve
     for (index, total_cost) in costs[last_index].iter().copied().enumerate() {
         let should_replace = total_cost < best_total
             || (total_cost == best_total
-                && state_sets[last_index][index].tie_break_key()
-                    < state_sets[last_index][best_state_index].tie_break_key())
+                && state_sets[last_index][index].state.tie_break_key()
+                    < state_sets[last_index][best_state_index]
+                        .state
+                        .tie_break_key())
             || (total_cost == best_total
-                && state_sets[last_index][index].tie_break_key()
-                    == state_sets[last_index][best_state_index].tie_break_key()
+                && state_sets[last_index][index].state.tie_break_key()
+                    == state_sets[last_index][best_state_index]
+                        .state
+                        .tie_break_key()
                 && index < best_state_index);
         if should_replace {
             best_total = total_cost;
@@ -849,7 +1116,7 @@ fn solve_ribbon_dp(slices: &[RibbonSlice], spatial_weight_q10: u32) -> Option<Ve
     let mut path = vec![SliceState::empty(0); state_sets.len()];
     let mut cursor = best_state_index;
     for slice_index in (0..state_sets.len()).rev() {
-        path[slice_index] = state_sets[slice_index][cursor];
+        path[slice_index] = state_sets[slice_index][cursor].state;
         if slice_index > 0 {
             cursor = backpointers[slice_index][cursor];
         }
@@ -865,9 +1132,15 @@ fn merge_ribbon_assignments(
     let mut votes = BTreeMap::<(i64, i64), BTreeMap<Option<DecodedCellState>, VoteStats>>::new();
 
     for (slice, solved_state) in slices.iter().zip(solved_states.iter().copied()) {
+        let peak_highlight_level = slice_peak_highlight_level(slice);
         for cell_index in 0..slice.cells.len() {
             let state = state_for_slice_cell(slice, solved_state, cell_index);
-            let cost = cell_cost_for_state(slice, solved_state, cell_index);
+            let cost = cell_cost_for_state_with_peak(
+                slice,
+                solved_state,
+                cell_index,
+                peak_highlight_level,
+            );
             let bucket = votes
                 .entry(slice.cells[cell_index].coord)
                 .or_default()
@@ -1220,26 +1493,37 @@ fn handle_stroke_transition(state: &mut PlannerState, frame: &RenderFrame) {
     state.last_trail_stroke_id = Some(frame.trail_stroke_id);
 }
 
-fn ensure_latent_cache_current(state: &mut PlannerState) {
-    let cache_is_current = state.latent_cache.latest_step() == state.step_index
-        && state.latent_cache.history_revision() == state.history_revision;
-    if cache_is_current {
-        return;
-    }
-
-    state.latent_cache = latent_field::LatentFieldCache::rebuild(
-        &state.history,
-        state.step_index,
-        state.history_revision,
-    );
+#[cfg(test)]
+fn record_history_slice(state: &mut PlannerState, slice: &DepositedSlice) {
+    state.history.push_back(slice.clone());
 }
+
+#[cfg(not(test))]
+fn record_history_slice(_state: &mut PlannerState, _slice: &DepositedSlice) {}
+
+#[cfg(test)]
+fn prune_debug_history(state: &mut PlannerState) {
+    let mut retained = VecDeque::with_capacity(state.history.len());
+    while let Some(slice) = state.history.pop_front() {
+        let support_steps = u64::try_from(slice.support_steps).unwrap_or(u64::MAX);
+        let age_steps = state
+            .step_index
+            .value()
+            .saturating_sub(slice.step_index.value());
+        if age_steps < support_steps {
+            retained.push_back(slice);
+        }
+    }
+    state.history = retained;
+}
+
+#[cfg(not(test))]
+fn prune_debug_history(_state: &mut PlannerState) {}
 
 fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
     handle_stroke_transition(state, frame);
-    ensure_latent_cache_current(state);
 
     let mut latest_pose = state.last_pose;
-    let mut history_changed = false;
 
     for (sample, current_pose) in frame.step_samples.iter().zip(frame_sample_poses(frame)) {
         let start_pose = latest_pose.unwrap_or(current_pose);
@@ -1296,8 +1580,7 @@ fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
                 microtiles,
             };
             state.latent_cache.insert_slice(&slice);
-            state.history.push_back(slice);
-            history_changed = true;
+            record_history_slice(state, &slice);
         }
         state.center_history.push_back(CenterPathSample {
             step_index: state.step_index,
@@ -1314,21 +1597,10 @@ fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
         state.latent_cache.advance_to(state.step_index);
     }
 
+    prune_debug_history(state);
+
     let support_steps =
         latent_field::max_comet_support_steps(frame.tail_duration_ms, frame.simulation_hz);
-    let support_steps_u64 = u64::try_from(support_steps).unwrap_or(u64::MAX);
-    while state.history.front().is_some_and(|slice| {
-        state
-            .step_index
-            .value()
-            .saturating_sub(slice.step_index.value())
-            >= support_steps_u64
-    }) {
-        if let Some(removed_slice) = state.history.pop_front() {
-            state.latent_cache.remove_slice(&removed_slice);
-            history_changed = true;
-        }
-    }
     let support_steps_u64 = u64::try_from(support_steps).unwrap_or(u64::MAX);
     while state.center_history.front().is_some_and(|sample| {
         state
@@ -1341,11 +1613,5 @@ fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
     }
     if let Some(latest_pose) = latest_pose {
         state.last_pose = Some(latest_pose);
-    }
-    if history_changed {
-        state.history_revision = state.history_revision.saturating_add(1);
-        state
-            .latent_cache
-            .set_history_revision(state.history_revision);
     }
 }

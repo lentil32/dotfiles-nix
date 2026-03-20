@@ -52,6 +52,40 @@ fn remove_invalid_windows(tab_windows: &mut TabWindows, namespace_id: u32) -> us
     remove_indices.len()
 }
 
+fn remove_invalid_window_at(
+    tab_windows: &mut TabWindows,
+    namespace_id: u32,
+    index: usize,
+    expected_window_id: i32,
+) -> bool {
+    let Some(cached) = tab_windows.windows.get(index).copied() else {
+        return false;
+    };
+    if cached.handles.window_id != expected_window_id
+        || !matches!(cached.lifecycle, CachedWindowLifecycle::Invalid)
+    {
+        return false;
+    }
+
+    #[cfg(test)]
+    {
+        let _ = namespace_id;
+        // Comment: unit tests run without a live Neovim host, so this path validates the exact
+        // bookkeeping removal without reaching host option/window teardown.
+        let _ = tab_windows.swap_remove_window(index);
+        return true;
+    }
+
+    #[cfg(not(test))]
+    {
+        // Hot acquire already knows which candidate it invalidated; removing that slot directly
+        // keeps failure recovery linear and leaves bulk invalid sweeps to cleanup/prewarm paths.
+        let _event_ignore = EventIgnoreGuard::set_all();
+        remove_cached_window_at(tab_windows, namespace_id, index);
+        true
+    }
+}
+
 fn rollover_in_use_windows(tab_windows: &mut TabWindows, previous_epoch: FrameEpoch) {
     let in_use_indices = std::mem::take(&mut tab_windows.in_use_indices);
     tab_windows.in_use_slots.fill(None);
@@ -107,7 +141,11 @@ fn reusable_window_index(tab_windows: &TabWindows) -> Option<usize> {
 enum ReuseAttempt {
     NotCandidate,
     Reused(AcquiredWindow),
-    Failed(ReuseFailureReason),
+    Failed {
+        reason: ReuseFailureReason,
+        index: usize,
+        window_id: i32,
+    },
 }
 
 fn try_reuse_cached_window_at_index(
@@ -124,7 +162,11 @@ fn try_reuse_cached_window_at_index(
 
     if cached.handles.window_id <= 0 {
         let _ = mark_cached_window_invalid(tab_windows, index);
-        return ReuseAttempt::Failed(ReuseFailureReason::MissingWindow);
+        return ReuseAttempt::Failed {
+            reason: ReuseFailureReason::MissingWindow,
+            index,
+            window_id: cached.handles.window_id,
+        };
     }
 
     // Reserve the slot before host calls so one re-entrant edge cannot hand the same reusable
@@ -159,13 +201,21 @@ fn try_reuse_cached_window_at_index(
         );
         if set_existing_window_config(&mut window, config).is_err() {
             let _ = mark_cached_window_invalid(tab_windows, index);
-            return ReuseAttempt::Failed(ReuseFailureReason::ReconfigureFailed);
+            return ReuseAttempt::Failed {
+                reason: ReuseFailureReason::ReconfigureFailed,
+                index,
+                window_id: cached.handles.window_id,
+            };
         }
     }
 
     if cached.handles.buffer_id <= 0 {
         let _ = mark_cached_window_invalid(tab_windows, index);
-        return ReuseAttempt::Failed(ReuseFailureReason::MissingBuffer);
+        return ReuseAttempt::Failed {
+            reason: ReuseFailureReason::MissingBuffer,
+            index,
+            window_id: cached.handles.window_id,
+        };
     }
     // Hot path: skip nvim_buf_is_valid and rely on set_extmark failure recovery.
     let buffer = buffer_from_handle_i32_unchecked(cached.handles.buffer_id);
@@ -175,6 +225,18 @@ fn try_reuse_cached_window_at_index(
         kind: AcquireKind::Reused,
         reuse_failures: ReuseFailureCounters::default(),
     })
+}
+
+fn record_reuse_failure(
+    tab_windows: &mut TabWindows,
+    namespace_id: u32,
+    reuse_failures: &mut ReuseFailureCounters,
+    reason: ReuseFailureReason,
+    index: usize,
+    window_id: i32,
+) {
+    reuse_failures.record(reason);
+    let _ = remove_invalid_window_at(tab_windows, namespace_id, index, window_id);
 }
 
 const REUSE_ONLY_WARM_SPARE_WINDOWS: usize = 1;
@@ -223,15 +285,25 @@ pub(crate) fn acquire_in_tab(
 ) -> std::result::Result<AcquiredWindow, AcquireError> {
     let mut reuse_failures = ReuseFailureCounters::default();
 
-    if let Some(index) = available_window_index_for_placement(tab_windows, placement) {
+    while let Some(index) = available_window_index_for_placement(tab_windows, placement) {
         match try_reuse_cached_window_at_index(tab_windows, index, placement) {
             ReuseAttempt::Reused(mut acquired) => {
                 acquired.reuse_failures = reuse_failures;
                 return Ok(acquired);
             }
-            ReuseAttempt::Failed(reason) => {
-                reuse_failures.record(reason);
-                let _ = remove_invalid_windows(tab_windows, namespace_id);
+            ReuseAttempt::Failed {
+                reason,
+                index,
+                window_id,
+            } => {
+                record_reuse_failure(
+                    tab_windows,
+                    namespace_id,
+                    &mut reuse_failures,
+                    reason,
+                    index,
+                    window_id,
+                );
             }
             ReuseAttempt::NotCandidate => {}
         }
@@ -243,9 +315,19 @@ pub(crate) fn acquire_in_tab(
                 acquired.reuse_failures = reuse_failures;
                 return Ok(acquired);
             }
-            ReuseAttempt::Failed(reason) => {
-                reuse_failures.record(reason);
-                let _ = remove_invalid_windows(tab_windows, namespace_id);
+            ReuseAttempt::Failed {
+                reason,
+                index,
+                window_id,
+            } => {
+                record_reuse_failure(
+                    tab_windows,
+                    namespace_id,
+                    &mut reuse_failures,
+                    reason,
+                    index,
+                    window_id,
+                );
             }
             ReuseAttempt::NotCandidate => break,
         }

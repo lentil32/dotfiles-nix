@@ -503,6 +503,86 @@ fn prepared_pool_supports_expected_number_of_reuse_acquires() {
 }
 
 #[test]
+fn acquire_failure_removes_only_failed_candidate_and_defers_other_invalid_cleanup() {
+    let placement = WindowPlacement {
+        row: 10,
+        col: 20,
+        width: 1,
+        zindex: 300,
+    };
+    let mut tab_windows = TabWindows {
+        windows: vec![
+            CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: -90,
+                    buffer_id: -190,
+                },
+                lifecycle: CachedWindowLifecycle::Invalid,
+                placement: None,
+            },
+            CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: -11,
+                    buffer_id: -111,
+                },
+                lifecycle: CachedWindowLifecycle::AvailableVisible {
+                    last_used_epoch: FrameEpoch(1),
+                },
+                placement: Some(placement),
+            },
+            CachedRenderWindow {
+                handles: WindowBufferHandle {
+                    window_id: -12,
+                    buffer_id: -112,
+                },
+                lifecycle: CachedWindowLifecycle::AvailableVisible {
+                    last_used_epoch: FrameEpoch(1),
+                },
+                placement: Some(placement),
+            },
+        ],
+        ..TabWindows::default()
+    };
+    tab_windows.seed_tracking_from_windows_for_test();
+    let mut reuse_failures = ReuseFailureCounters::default();
+
+    match super::try_reuse_cached_window_at_index(&mut tab_windows, 2, placement) {
+        super::ReuseAttempt::Failed {
+            reason,
+            index,
+            window_id,
+        } => {
+            super::record_reuse_failure(
+                &mut tab_windows,
+                1,
+                &mut reuse_failures,
+                reason,
+                index,
+                window_id,
+            );
+        }
+        super::ReuseAttempt::Reused(_) | super::ReuseAttempt::NotCandidate => {
+            panic!("expected the stale reuse candidate to fail")
+        }
+    }
+
+    assert_eq!(
+        reuse_failures,
+        ReuseFailureCounters {
+            missing_window: 1,
+            ..ReuseFailureCounters::default()
+        }
+    );
+    assert_eq!(
+        tab_windows.windows.len(),
+        2,
+        "acquire should remove only the failed candidate from the hot path"
+    );
+    assert!(tab_windows.has_invalid_windows());
+    tab_windows.assert_tracking_consistent();
+}
+
+#[test]
 fn frame_capacity_target_keeps_one_reuse_only_spare() {
     assert_eq!(
         frame_capacity_target(0, 3, 16, AllocationPolicy::ReuseOnly),

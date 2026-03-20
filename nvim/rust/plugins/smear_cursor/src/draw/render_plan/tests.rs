@@ -121,6 +121,94 @@ fn ordered_candidates(mut candidates: Vec<CellCandidate>) -> Vec<CellCandidate> 
     candidates
 }
 
+fn build_slice_states_reference(slice: &RibbonSlice, spatial_weight_q10: u32) -> Vec<SliceState> {
+    let baseline = slice
+        .cells
+        .iter()
+        .fold(0_u64, |acc, cell| acc.saturating_add(cell.empty_cost));
+    let peak_highlight_level = slice_peak_highlight_level(slice);
+    let empty_state = SliceState::empty(0);
+    let mut states = vec![SliceState::empty(
+        baseline.saturating_add(state_local_prior(slice, empty_state, spatial_weight_q10)),
+    )];
+
+    for start in 0..slice.cells.len() {
+        let max_end = (start + RIBBON_MAX_RUN_LENGTH).min(slice.cells.len());
+        for end_exclusive in (start + 1)..=max_end {
+            let end = end_exclusive - 1;
+            let Some(run) = RunSpan::try_new(start, end) else {
+                continue;
+            };
+            enumerate_run_candidate_states_reference(
+                slice,
+                run,
+                spatial_weight_q10,
+                peak_highlight_level,
+                start,
+                baseline,
+                &mut [0; RIBBON_MAX_RUN_LENGTH],
+                &mut states,
+            );
+        }
+    }
+
+    states.sort_by(|lhs, rhs| slice_state_cmp(*lhs, *rhs));
+    states.truncate(RIBBON_MAX_STATES_PER_SLICE);
+    states
+}
+
+fn enumerate_run_candidate_states_reference(
+    slice: &RibbonSlice,
+    run: RunSpan,
+    spatial_weight_q10: u32,
+    peak_highlight_level: u32,
+    cell_index: usize,
+    running_cost: u64,
+    candidate_offsets: &mut [u8; RIBBON_MAX_RUN_LENGTH],
+    states: &mut Vec<SliceState>,
+) {
+    if cell_index > run.end {
+        let state = SliceState::with_run(run, *candidate_offsets, 0);
+        states.push(SliceState::with_run(
+            run,
+            *candidate_offsets,
+            running_cost.saturating_add(state_local_prior(slice, state, spatial_weight_q10)),
+        ));
+        return;
+    }
+
+    let offset = cell_index - run.start;
+    let cell = &slice.cells[cell_index];
+    if cell.non_empty_candidates.is_empty() {
+        return;
+    }
+
+    for (candidate_index, candidate) in cell.non_empty_candidates.iter().copied().enumerate() {
+        let Ok(candidate_index) = u8::try_from(candidate_index) else {
+            continue;
+        };
+        candidate_offsets[offset] = candidate_index;
+        let next_cost =
+            running_cost
+                .saturating_sub(cell.empty_cost)
+                .saturating_add(adjusted_candidate_cost(
+                    slice,
+                    peak_highlight_level,
+                    candidate,
+                ));
+        enumerate_run_candidate_states_reference(
+            slice,
+            run,
+            spatial_weight_q10,
+            peak_highlight_level,
+            cell_index + 1,
+            next_cost,
+            candidate_offsets,
+            states,
+        );
+    }
+}
+
 fn slice_cell_with_candidates(
     coord: (i64, i64),
     normal: f64,
@@ -201,6 +289,41 @@ fn count_state_toggles(states: &[DecodedCellState]) -> usize {
     states.windows(2).filter(|pair| pair[0] != pair[1]).count()
 }
 
+fn dense_slice_with_candidate_fanout(cell_count: usize, candidate_count: usize) -> RibbonSlice {
+    let cells = (0..cell_count)
+        .map(|cell_index| {
+            let candidates = ordered_candidates(
+                (0..candidate_count)
+                    .map(|candidate_index| CellCandidate {
+                        state: Some(decoded_state(
+                            DecodedGlyph::Block,
+                            2 + ((cell_index * candidate_count + candidate_index) % 13) as u32,
+                        )),
+                        unary_cost: 40
+                            + ((cell_index * 29 + candidate_index * 17 + candidate_index) % 113)
+                                as u64,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            slice_cell_with_candidates(
+                (10, 10 + cell_index as i64),
+                cell_index as f64 * 0.7,
+                0.45,
+                180 + (cell_index as u64 * 9),
+                candidates,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    RibbonSlice {
+        cells,
+        tail_u: 0.58,
+        target_width_cells: 2.4,
+        tip_width_cap_cells: COMET_MIN_RESOLVABLE_WIDTH,
+        transverse_width_penalty: 0.35,
+    }
+}
+
 mod field_compilation_and_cache {
     use super::*;
 
@@ -214,6 +337,49 @@ mod field_compilation_and_cache {
             .expect("previous cell should stay addressable");
         assert_eq!(cell_candidates.len(), 1);
         assert_eq!(cell_candidates[0].state, None);
+    }
+
+    #[test]
+    fn visible_cell_with_top_k_one_still_keeps_only_empty_candidate() {
+        let compiled = compiled_single_cell(
+            tile_for_column_span(0, latent_field::MICRO_W - 1, 0x0FFF),
+            AgeMoment::default(),
+        );
+        let candidates = build_cell_candidates(&compiled, &BTreeMap::new(), 16, 0.0, 1);
+
+        let cell_candidates = candidates
+            .get(&(10_i64, 10_i64))
+            .expect("compiled cell should stay addressable");
+        assert_eq!(cell_candidates.len(), 1);
+        assert_eq!(cell_candidates[0].state, None);
+    }
+
+    #[test]
+    fn overlapping_previous_shade_index_does_not_duplicate_non_empty_candidates() {
+        let sample_q12 = quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(8), 16);
+        let compiled = compiled_single_cell(
+            tile_for_column_span(0, latent_field::MICRO_W - 1, sample_q12),
+            AgeMoment::default(),
+        );
+        let previous_cells = BTreeMap::from([((10_i64, 10_i64), highlight_state(8))]);
+        let candidates = build_cell_candidates(&compiled, &previous_cells, 16, 0.12, 5);
+
+        let cell_candidates = candidates
+            .get(&(10_i64, 10_i64))
+            .expect("compiled cell should stay addressable");
+        let non_empty_states = cell_candidates
+            .iter()
+            .filter_map(|candidate| candidate.state)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            non_empty_states.len(),
+            non_empty_states
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+        );
     }
 
     #[test]
@@ -542,6 +708,94 @@ mod cursor_punch_through_and_trail_strokes {
 mod ribbon_dp_and_slice_candidates {
     use super::*;
 
+    fn transition_cost_linear_baseline(
+        previous_slice: &RibbonSlice,
+        previous_state: SliceState,
+        next_slice: &RibbonSlice,
+        next_state: SliceState,
+        spatial_weight_q10: u32,
+    ) -> u64 {
+        let mut cost = 0_u64;
+        for (next_index, next_cell) in next_slice.cells.iter().enumerate() {
+            let next_value = state_for_slice_cell(next_slice, next_state, next_index);
+            if let Some(previous_index) = previous_slice
+                .cells
+                .iter()
+                .position(|previous_cell| previous_cell.coord == next_cell.coord)
+            {
+                let previous_value =
+                    state_for_slice_cell(previous_slice, previous_state, previous_index);
+                cost = cost.saturating_add(scale_penalty(
+                    overlap_penalty(previous_value, next_value),
+                    spatial_weight_q10,
+                ));
+            }
+        }
+
+        let prev_width = run_width_cells(previous_slice, previous_state);
+        let next_width = run_width_cells(next_slice, next_state);
+        cost = cost.saturating_add(scale_penalty(
+            linear_cells_penalty((prev_width - next_width).abs(), PENALTY_THICKNESS_DELTA),
+            spatial_weight_q10,
+        ));
+        let (headward_len, tailward_len) = if previous_slice.tail_u <= next_slice.tail_u {
+            (prev_width, next_width)
+        } else {
+            (next_width, prev_width)
+        };
+        let mono_violation = (tailward_len - headward_len - COMET_MONO_EPSILON_CELLS).max(0.0);
+        cost = cost.saturating_add(scale_penalty(
+            squared_cells_penalty(mono_violation, COMET_MONO_WEIGHT),
+            spatial_weight_q10,
+        ));
+
+        match (
+            previous_slice
+                .run_projected_span_q16(previous_state)
+                .map(ProjectedSpanQ16::center_q16),
+            next_slice
+                .run_projected_span_q16(next_state)
+                .map(ProjectedSpanQ16::center_q16),
+        ) {
+            (Some(prev_center), Some(next_center)) => {
+                let shift_q16 = prev_center.abs_diff(next_center);
+                let shift_penalty =
+                    (u64::from(shift_q16).saturating_mul(PENALTY_CENTER_SHIFT)) / Q16_SCALE_U64;
+                cost = cost.saturating_add(scale_penalty(shift_penalty, spatial_weight_q10));
+                if shift_q16 > ((3 * Q16_SCALE) / 2) as u32 {
+                    cost =
+                        cost.saturating_add(scale_penalty(PENALTY_DISCONNECT, spatial_weight_q10));
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => {
+                cost = cost
+                    .saturating_add(scale_penalty(PENALTY_EMPTY_TRANSITION, spatial_weight_q10));
+            }
+            (None, None) => {}
+        }
+
+        cost
+    }
+
+    #[test]
+    fn nearest_shade_lookup_matches_linear_baseline() {
+        for color_levels in 1_u32..=64_u32 {
+            let shades = build_shade_profiles(color_levels);
+            for alpha_q12 in 0_u16..=4095_u16 {
+                let expected = shades
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, shade)| shade.sample_q12.abs_diff(alpha_q12))
+                    .map(|(index, _)| index);
+                assert_eq!(
+                    nearest_shade_profile_index(&shades, alpha_q12),
+                    expected,
+                    "nearest shade mismatch for color_levels={color_levels} alpha_q12={alpha_q12}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn shade_profile_neighbors_reduce_frame_to_frame_toggling() {
         let age = AgeMoment {
@@ -730,6 +984,123 @@ mod ribbon_dp_and_slice_candidates {
 
         assert_eq!(state_for_slice_cell(&slice1, solved[1], 0), Some(block));
     }
+
+    #[test]
+    fn ribbon_transition_cost_matches_linear_coordinate_scan_baseline() {
+        let block = decoded_state(DecodedGlyph::Block, 8);
+        let matrix = decoded_state(DecodedGlyph::Matrix(0x3), 8);
+        let dim_block = decoded_state(DecodedGlyph::Block, 6);
+
+        let previous_slice = RibbonSlice {
+            cells: vec![
+                slice_cell_with_candidates(
+                    (10, 10),
+                    -1.0,
+                    0.5,
+                    800,
+                    vec![CellCandidate {
+                        state: Some(block),
+                        unary_cost: 0,
+                    }],
+                ),
+                slice_cell_with_candidates(
+                    (10, 11),
+                    0.0,
+                    0.5,
+                    800,
+                    vec![CellCandidate {
+                        state: Some(matrix),
+                        unary_cost: 0,
+                    }],
+                ),
+                slice_cell_with_candidates(
+                    (10, 12),
+                    1.0,
+                    0.5,
+                    800,
+                    vec![CellCandidate {
+                        state: Some(dim_block),
+                        unary_cost: 0,
+                    }],
+                ),
+            ],
+            tail_u: 0.8,
+            target_width_cells: 2.0,
+            tip_width_cap_cells: COMET_MIN_RESOLVABLE_WIDTH,
+            transverse_width_penalty: 0.0,
+        };
+        let next_slice = RibbonSlice {
+            cells: vec![
+                slice_cell_with_candidates(
+                    (10, 11),
+                    -0.5,
+                    0.5,
+                    800,
+                    vec![
+                        CellCandidate {
+                            state: Some(block),
+                            unary_cost: 0,
+                        },
+                        CellCandidate {
+                            state: Some(matrix),
+                            unary_cost: 50,
+                        },
+                    ],
+                ),
+                slice_cell_with_candidates(
+                    (10, 12),
+                    0.5,
+                    0.5,
+                    800,
+                    vec![CellCandidate {
+                        state: Some(dim_block),
+                        unary_cost: 0,
+                    }],
+                ),
+                slice_cell_with_candidates(
+                    (10, 13),
+                    1.5,
+                    0.5,
+                    800,
+                    vec![CellCandidate {
+                        state: Some(block),
+                        unary_cost: 0,
+                    }],
+                ),
+            ],
+            tail_u: 0.4,
+            target_width_cells: 2.0,
+            tip_width_cap_cells: COMET_MIN_RESOLVABLE_WIDTH,
+            transverse_width_penalty: 0.0,
+        };
+
+        let previous_state = SliceState::with_run(
+            RunSpan::try_new(0, 2).expect("valid run"),
+            [0; RIBBON_MAX_RUN_LENGTH],
+            0,
+        );
+        let mut next_offsets = [0; RIBBON_MAX_RUN_LENGTH];
+        next_offsets[0] = 1;
+        let next_state =
+            SliceState::with_run(RunSpan::try_new(0, 2).expect("valid run"), next_offsets, 0);
+
+        assert_eq!(
+            transition_cost(
+                &previous_slice,
+                previous_state,
+                &next_slice,
+                next_state,
+                1024
+            ),
+            transition_cost_linear_baseline(
+                &previous_slice,
+                previous_state,
+                &next_slice,
+                next_state,
+                1024,
+            )
+        );
+    }
 }
 
 mod projected_span_geometry {
@@ -829,6 +1200,34 @@ mod projected_span_geometry {
         let covered = lower.cover(upper);
 
         assert!((covered.width_cells() - 2.0).abs() < 1.0e-3);
+    }
+}
+
+mod slice_state_enumeration {
+    use super::*;
+
+    #[test]
+    fn build_slice_states_matches_reference_for_dense_candidate_slice() {
+        let slice = dense_slice_with_candidate_fanout(6, 7);
+
+        assert_eq!(
+            build_slice_states(&slice, 1536),
+            build_slice_states_reference(&slice, 1536)
+        );
+    }
+
+    #[test]
+    fn build_slice_states_peak_working_set_stays_within_top_k_cap() {
+        let slice = dense_slice_with_candidate_fanout(6, 7);
+
+        let (states, peak_len) = build_slice_states_with_peak_working_set(&slice, 1536);
+
+        assert_eq!(states.len(), RIBBON_MAX_STATES_PER_SLICE);
+        assert_eq!(states, build_slice_states_reference(&slice, 1536));
+        assert!(
+            peak_len <= RIBBON_MAX_STATES_PER_SLICE,
+            "collector should retain at most the configured top-k working set, observed {peak_len}"
+        );
     }
 }
 
@@ -1564,6 +1963,27 @@ mod ribbon_width_targets_and_taper {
     use super::*;
 
     #[test]
+    fn cell_row_index_limits_same_row_queries_to_the_requested_column_window() {
+        let cells = (0_i64..=200_i64)
+            .map(|col| ((10_i64, col), col))
+            .collect::<BTreeMap<_, _>>();
+        let index = CellRowIndex::build(&cells);
+        let mut visited = Vec::<(i64, i64)>::new();
+
+        index.for_each_in_bounds(
+            SliceSearchBounds {
+                min_row: 10,
+                max_row: 10,
+                min_col: 99,
+                max_col: 101,
+            },
+            |coord, _| visited.push(coord),
+        );
+
+        assert_eq!(visited, vec![(10, 99), (10, 100), (10, 101)]);
+    }
+
+    #[test]
     fn comet_taper_target_is_monotonic_from_head_to_tip() {
         let head_width = default_head_width_cells(&base_frame());
         let samples = (0..=100)
@@ -1764,77 +2184,31 @@ mod ribbon_width_targets_and_taper {
 mod staged_deposits_and_metric_projection {
     use super::*;
 
-    #[test]
-    fn staged_deposit_scales_sheath_band_with_speed() {
-        let mut moving_frame = base_frame();
-        set_frame_corners(
-            &mut moving_frame,
-            [
-                Point {
-                    row: 10.0,
-                    col: 14.0,
-                },
-                Point {
-                    row: 10.0,
-                    col: 15.0,
-                },
-                Point {
-                    row: 11.0,
-                    col: 15.0,
-                },
-                Point {
-                    row: 11.0,
-                    col: 14.0,
-                },
-            ],
-        );
-
-        let mut slow_state = PlannerState {
+    fn staged_deposit_band_masses(frame: &RenderFrame) -> (u32, u32, u32) {
+        let mut state = PlannerState {
             last_pose: Some(pose_for_frame(&base_frame())),
             ..PlannerState::default()
         };
-        let mut fast_state = PlannerState {
-            last_pose: Some(pose_for_frame(&base_frame())),
-            ..PlannerState::default()
+        stage_deposited_samples(&mut state, frame);
+
+        let mass_for = |band| {
+            state
+                .history
+                .iter()
+                .filter(|slice| slice.band == band)
+                .map(|slice| slice.intensity_q16)
+                .sum::<u32>()
         };
 
-        let mut stationary_frame = base_frame();
-        stationary_frame.step_samples = vec![sample_for_corners(stationary_frame.corners)].into();
-
-        stage_deposited_samples(&mut slow_state, &stationary_frame);
-        stage_deposited_samples(&mut fast_state, &moving_frame);
-
-        let slow_sheath_mass = slow_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Sheath)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
-        let fast_sheath_mass = fast_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Sheath)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
-        let slow_core_mass = slow_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Core)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
-        let fast_core_mass = fast_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Core)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
-
-        assert!(fast_sheath_mass > slow_sheath_mass);
-        assert!(fast_core_mass > slow_core_mass);
+        (
+            mass_for(latent_field::TailBand::Sheath),
+            mass_for(latent_field::TailBand::Core),
+            mass_for(latent_field::TailBand::Filament),
+        )
     }
 
     #[test]
-    fn staged_deposit_keeps_filament_tail_speed_invariant_while_head_bands_gain_mass() {
+    fn staged_deposit_band_masses_shift_with_speed() {
         let mut moving_frame = base_frame();
         set_frame_corners(
             &mut moving_frame,
@@ -1858,50 +2232,19 @@ mod staged_deposits_and_metric_projection {
             ],
         );
 
-        let mut slow_state = PlannerState {
-            last_pose: Some(pose_for_frame(&base_frame())),
-            ..PlannerState::default()
-        };
-        let mut fast_state = PlannerState {
-            last_pose: Some(pose_for_frame(&base_frame())),
-            ..PlannerState::default()
-        };
-
         let mut stationary_frame = base_frame();
         stationary_frame.step_samples = vec![sample_for_corners(stationary_frame.corners)].into();
 
-        stage_deposited_samples(&mut slow_state, &stationary_frame);
-        stage_deposited_samples(&mut fast_state, &moving_frame);
-
-        let slow_sheath_mass = slow_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Sheath)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
-        let fast_sheath_mass = fast_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Sheath)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
-        let slow_filament_mass = slow_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Filament)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
-        let fast_filament_mass = fast_state
-            .history
-            .iter()
-            .filter(|slice| slice.band == latent_field::TailBand::Filament)
-            .map(|slice| slice.intensity_q16)
-            .sum::<u32>();
+        let (slow_sheath_mass, slow_core_mass, slow_filament_mass) =
+            staged_deposit_band_masses(&stationary_frame);
+        let (fast_sheath_mass, fast_core_mass, fast_filament_mass) =
+            staged_deposit_band_masses(&moving_frame);
 
         assert!(
             fast_sheath_mass > slow_sheath_mass,
             "head-adjacent sheath band should still respond to speed"
         );
+        assert!(fast_core_mass > slow_core_mass);
         assert_eq!(
             fast_filament_mass, slow_filament_mass,
             "far-tail filament band should stay speed-invariant"

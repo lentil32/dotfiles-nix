@@ -654,10 +654,9 @@ impl TabWindows {
             .available_window_placement_slots
             .get(from)
             .and_then(|slot| *slot)
+            && let Some(indices) = self.available_windows_by_placement.get_mut(&slot.placement)
         {
-            if let Some(indices) = self.available_windows_by_placement.get_mut(&slot.placement) {
-                indices[slot.slot] = to;
-            }
+            indices[slot.slot] = to;
         }
     }
 
