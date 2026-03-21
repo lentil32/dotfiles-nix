@@ -98,17 +98,18 @@
 
     let
       # ---------------- Common user data ----------------
-      username = "starush";
       useremail = "lentil32@icloud.com";
 
       # ---------------- Per-host declarations ----------------
-      macBookProHost = "lentil32-MacBookPro";
+      m5ProHost = "lentil32-M5Pro";
+      m5ProModulesDir = ./. + "/modules/${m5ProHost}";
       machines = {
-        ${macBookProHost} = {
+        ${m5ProHost} = {
           system = "aarch64-darwin";
-          hostname = macBookProHost;
-          uid = 502;
-          extraModulesDir = ./. + "/modules/${macBookProHost}";
+          hostname = m5ProHost;
+          username = "lentil32";
+          uid = 501;
+          extraModulesDir = m5ProModulesDir;
         };
 
         # ${macMiniM1Host} = {
@@ -118,7 +119,7 @@
         # };
       };
 
-      defaultMachine = machines.${macBookProHost};
+      defaultMachine = machines.${m5ProHost};
 
       nixpkgsConfig = {
         overlays = [
@@ -161,7 +162,6 @@
         inherit
           inputs
           pkgs-unstable
-          username
           useremail
           ;
       };
@@ -176,7 +176,12 @@
         let
           system = machine.system;
           specialArgs = baseSpecialArgs // {
-            inherit (machine) hostname uid system;
+            inherit (machine)
+              hostname
+              username
+              uid
+              system
+              ;
           };
         in
         nix-darwin.lib.darwinSystem {
@@ -206,14 +211,14 @@
               home-manager.useGlobalPkgs = true;
               home-manager.useUserPackages = true;
               home-manager.extraSpecialArgs = specialArgs;
-              home-manager.users.${username} = import ./home;
+              home-manager.users.${machine.username} = import ./home;
             }
             # Homebrew management
             nix-homebrew.darwinModules.nix-homebrew
             {
               nix-homebrew = {
                 enable = true;
-                user = username;
+                user = machine.username;
                 mutableTaps = false;
                 # In Homebrew, the repo part of all taps always have homebrew- prepended.
                 taps = {

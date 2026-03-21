@@ -20,6 +20,9 @@ in
     "flakes"
   ];
 
+  # Follow the current Nix / Home Manager XDG-based state layout.
+  nix.settings.use-xdg-base-directories = true;
+
   # Enable trusted binary caches globally (not just per-flake).
   nix.settings.substituters = binaryCaches;
   nix.settings.trusted-public-keys = trustedPublicKeys;

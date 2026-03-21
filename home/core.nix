@@ -105,7 +105,6 @@ in
     #   withBedrock = true;
     # })
     bats # Bash automated testing
-    cmake
     llvm
     mysql84
     mermaid-cli

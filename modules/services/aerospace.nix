@@ -5,16 +5,16 @@ let
   terminalAppId = "com.github.wez.wezterm";
   terminalAppName = "WezTerm";
   workspaces = {
-    term = "1-TERM";
-    code = "2-CODE";
-    web = "3-WEB_";
-    comms = "4-COMM";
-    docs = "5-DOCS";
-    side = "6-SIDE";
-    misc = "7-MISC";
-    notes = "8-NOTE";
-    media = "9-MEDI";
-    social = "a-SOCI";
+    term = "1-Terminal";
+    code = "2-Code";
+    web = "3-Web";
+    comms = "4-Communications";
+    docs = "5-Docs";
+    side = "6-Side";
+    misc = "7-misc.";
+    notes = "8-Note";
+    media = "9-Media";
+    social = "a-Social";
   };
 in
 {
@@ -230,28 +230,8 @@ in
 
       # open programs
       mode.programs.binding = {
-        a = [
-          "exec-and-forget open -na \"Arc\""
-          "mode main"
-        ];
         b = [
           "exec-and-forget open -na \"Zen Browser\""
-          "mode main"
-        ];
-        c = [
-          "exec-and-forget open -na \"Google Chrome\""
-          "mode main"
-        ];
-        e = [
-          "exec-and-forget ${pkgs.emacs30}/bin/emacsclient -ca \"${pkgs.emacs30}/bin/emacs\""
-          "mode main"
-        ];
-        f = [
-          "exec-and-forget open -na \"Firefox\""
-          "mode main"
-        ];
-        shift-f = [
-          "exec-and-forget open -na \"Firefox Developer Edition\""
           "mode main"
         ];
         n = [

@@ -34,9 +34,9 @@
         orientation = "right";
 
         # customize Hot Corners
-        wvous-tl-corner = 13; # top-left - Lock Screen
+        wvous-tl-corner = 1; # top-left - Disabled
         wvous-tr-corner = 2; # top-right - Mission Control
-        wvous-bl-corner = 10; # bottom-left - Put Display to Sleep
+        wvous-bl-corner = 1; # bottom-left - Disabled
         wvous-br-corner = 3; # bottom-right - Application Windows
       };
 
@@ -64,6 +64,7 @@
         # `defaults read NSGlobalDomain "xxx"`
         "com.apple.swipescrolldirection" = true; # enable natural scrolling(default to true)
         "com.apple.sound.beep.feedback" = 0; # disable beep sound when pressing volume up/down key
+        "com.apple.keyboard.fnState" = true; # use F1, F2, etc. as standard function keys
         AppleInterfaceStyle = "Dark"; # dark mode
         AppleKeyboardUIMode = 3; # Mode 3 enables full keyboard control.
         ApplePressAndHoldEnabled = false; # specific charactersx like ķ when long-pressed
@@ -100,6 +101,46 @@
           # Add a context menu item for showing the Web Inspector in web views
           WebKitDeveloperExtras = true;
           "com.apple.sound.uiaudio.enabled" = 0; # disable user interface sound effects
+        };
+        "com.apple.symbolichotkeys" = {
+          AppleSymbolicHotKeys = {
+            # 31 = Copy picture of selected area to the clipboard
+            "31" = {
+              enabled = true;
+              value = {
+                type = "standard";
+                parameters = [
+                  65535
+                  118
+                  0
+                ]; # F4
+              };
+            };
+            # 60 = Select the previous input source
+            "60" = {
+              enabled = true;
+              value = {
+                type = "standard";
+                parameters = [
+                  65535
+                  80
+                  131072
+                ]; # Shift-F19
+              };
+            };
+            # 61 = Select next source in Input menu
+            "61" = {
+              enabled = true;
+              value = {
+                type = "standard";
+                parameters = [
+                  65535
+                  80
+                  0
+                ]; # F19
+              };
+            };
+          };
         };
         "com.apple.finder" = {
           ShowExternalHardDrivesOnDesktop = true;
