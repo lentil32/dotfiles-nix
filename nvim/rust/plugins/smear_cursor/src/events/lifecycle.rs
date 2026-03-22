@@ -152,7 +152,6 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
             }
             Err(err) => {
                 runtime.disable();
-                runtime.clear_runtime_state();
                 (
                     false,
                     Some(format!(

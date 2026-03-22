@@ -614,7 +614,9 @@ const COMET_TIP_WEIGHT: u64 = 11_800;
 const COMET_TRANSVERSE_WEIGHT: u64 = 900;
 const CATCH_SALIENCE_DIM_PENALTY: u64 = 100;
 
+#[cfg(test)]
 const MATRIX_BIT_WEIGHTS: [[u8; 2]; 2] = [[1, 2], [4, 8]];
+#[cfg(test)]
 const OCTANT_BIT_WEIGHTS: [[u8; 2]; 4] = [[1, 2], [4, 8], [16, 32], [64, 128]];
 
 static GLYPH_BUCKET_LAYOUT: LazyLock<GlyphBucketLayout> = LazyLock::new(build_glyph_bucket_layout);
@@ -1002,16 +1004,20 @@ fn insert_best_non_empty_candidate(
     }
 }
 
+struct NonEmptyCandidateContext<'a> {
+    empty_residual: u64,
+    age: AgeMoment,
+    previous: Option<DecodedCellState>,
+    shade_profiles: &'a [ShadeProfile],
+    temporal_stability_weight: f64,
+    keep_non_empty: usize,
+}
+
 fn evaluate_non_empty_glyph_candidate(
     candidates: &mut Vec<CellCandidate>,
     glyph: GlyphProfile,
     dot: u64,
-    empty_residual: u64,
-    age: AgeMoment,
-    previous: Option<DecodedCellState>,
-    shade_profiles: &[ShadeProfile],
-    temporal_stability_weight: f64,
-    keep_non_empty: usize,
+    context: &NonEmptyCandidateContext<'_>,
 ) {
     if glyph.sample_count == 0 || dot == 0 {
         return;
@@ -1026,18 +1032,22 @@ fn evaluate_non_empty_glyph_candidate(
     let prior = u64::from(glyph.complexity)
         .saturating_mul(u64::from(glyph.complexity))
         .saturating_mul(PRIOR_COMPLEXITY_WEIGHT);
-    let shade_indices =
-        shade_profile_indices_for_glyph(shade_profiles, alpha_q12, previous, glyph.glyph);
+    let shade_indices = shade_profile_indices_for_glyph(
+        context.shade_profiles,
+        alpha_q12,
+        context.previous,
+        glyph.glyph,
+    );
     for shade_index in shade_indices.as_slice().iter().copied() {
-        let shade = shade_profiles[shade_index];
+        let shade = context.shade_profiles[shade_index];
         let profile = LocalCellProfile::new(glyph, shade);
-        let residual = residual_cost(empty_residual, dot, profile);
+        let residual = residual_cost(context.empty_residual, dot, profile);
         let state = Some(profile.state);
         let total_cost = residual.saturating_add(prior).saturating_add(temporal_cost(
-            previous,
+            context.previous,
             state,
-            age,
-            temporal_stability_weight,
+            context.age,
+            context.temporal_stability_weight,
         ));
         insert_best_non_empty_candidate(
             candidates,
@@ -1045,8 +1055,8 @@ fn evaluate_non_empty_glyph_candidate(
                 state,
                 unary_cost: total_cost,
             },
-            previous,
-            keep_non_empty,
+            context.previous,
+            context.keep_non_empty,
         );
     }
 }
@@ -1079,17 +1089,20 @@ fn cell_candidates_for_patch(
         return vec![empty_candidate];
     }
     let mut non_empty = Vec::<CellCandidate>::with_capacity(keep_non_empty);
-
-    evaluate_non_empty_glyph_candidate(
-        &mut non_empty,
-        GlyphProfile::block(),
-        patch_basis.total_mass,
+    let non_empty_context = NonEmptyCandidateContext {
         empty_residual,
         age,
         previous,
         shade_profiles,
         temporal_stability_weight,
         keep_non_empty,
+    };
+
+    evaluate_non_empty_glyph_candidate(
+        &mut non_empty,
+        GlyphProfile::block(),
+        patch_basis.total_mass,
+        &non_empty_context,
     );
 
     let layout = &*GLYPH_BUCKET_LAYOUT;
@@ -1099,12 +1112,7 @@ fn cell_candidates_for_patch(
             &mut non_empty,
             GlyphProfile::matrix(mask, layout.matrix_sample_count(mask)),
             matrix_dots[usize::from(mask)],
-            empty_residual,
-            age,
-            previous,
-            shade_profiles,
-            temporal_stability_weight,
-            keep_non_empty,
+            &non_empty_context,
         );
     }
 
@@ -1114,12 +1122,7 @@ fn cell_candidates_for_patch(
             &mut non_empty,
             GlyphProfile::octant(mask, layout.octant_sample_count(mask)),
             octant_dots[usize::from(mask)],
-            empty_residual,
-            age,
-            previous,
-            shade_profiles,
-            temporal_stability_weight,
-            keep_non_empty,
+            &non_empty_context,
         );
     }
 
@@ -1288,6 +1291,14 @@ mod candidate_generation_complexity {
 
         let layout = &*GLYPH_BUCKET_LAYOUT;
         let mut non_empty = Vec::<CellCandidate>::with_capacity(keep_non_empty);
+        let non_empty_context = NonEmptyCandidateContext {
+            empty_residual,
+            age,
+            previous,
+            shade_profiles,
+            temporal_stability_weight,
+            keep_non_empty,
+        };
         let mut glyphs = Vec::with_capacity(1 + 14 + 254);
         glyphs.push(GlyphProfile::block());
         for mask in 1_u8..=14_u8 {
@@ -1299,17 +1310,7 @@ mod candidate_generation_complexity {
 
         for glyph in glyphs {
             let dot = legacy_glyph_dot(patch, glyph);
-            evaluate_non_empty_glyph_candidate(
-                &mut non_empty,
-                glyph,
-                dot,
-                empty_residual,
-                age,
-                previous,
-                shade_profiles,
-                temporal_stability_weight,
-                keep_non_empty,
-            );
+            evaluate_non_empty_glyph_candidate(&mut non_empty, glyph, dot, &non_empty_context);
         }
 
         let mut kept = Vec::with_capacity(1 + keep_non_empty);

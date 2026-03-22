@@ -81,13 +81,12 @@ impl EffectOnlyAgenda {
                 true
             }
             Effect::ScheduleTimer(payload) => {
-                if let Some(EffectOnlyStep::ScheduleTimer(existing)) = self.steps.back_mut() {
-                    if TimerKind::from_timer_id(existing.token.id())
+                if let Some(EffectOnlyStep::ScheduleTimer(existing)) = self.steps.back_mut()
+                    && TimerKind::from_timer_id(existing.token.id())
                         == TimerKind::from_timer_id(payload.token.id())
-                    {
-                        *existing = payload;
-                        return false;
-                    }
+                {
+                    *existing = payload;
+                    return false;
                 }
                 self.steps.push_back(EffectOnlyStep::ScheduleTimer(payload));
                 true
@@ -281,17 +280,17 @@ impl ScheduledEffectQueueState {
             },
             ScheduledWorkItem::EffectOnlyAgenda(_) => {
                 let (step, agenda_is_empty) = {
-                    let ScheduledWorkItem::EffectOnlyAgenda(agenda) = self
-                        .items
-                        .front_mut()
-                        .expect("front agenda should remain present while borrowed")
-                    else {
-                        unreachable!("front queue item should stay stable while borrowed");
-                    };
-                    let step = agenda
-                        .pop_step()
-                        .expect("non-empty effect-only agenda should yield a step");
-                    (step, agenda.is_empty())
+                    match self.items.front_mut() {
+                        Some(ScheduledWorkItem::EffectOnlyAgenda(agenda)) => {
+                            let Some(step) = agenda.pop_step() else {
+                                unreachable!(
+                                    "non-empty effect-only agenda should yield a step"
+                                );
+                            };
+                            (step, agenda.is_empty())
+                        }
+                        _ => unreachable!("front queue item should stay stable while borrowed"),
+                    }
                 };
                 if agenda_is_empty {
                     let _ = self.items.pop_front();

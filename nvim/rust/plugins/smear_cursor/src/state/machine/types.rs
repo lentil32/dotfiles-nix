@@ -23,59 +23,6 @@ impl PluginState {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum AnimationState {
-    Uninitialized,
-    Idle,
-    Settling,
-    Running,
-    Draining,
-}
-
-impl AnimationState {
-    pub(super) fn is_initialized(self) -> bool {
-        !matches!(self, Self::Uninitialized)
-    }
-
-    pub(super) fn is_animating(self) -> bool {
-        matches!(self, Self::Running)
-    }
-
-    pub(super) fn is_settling(self) -> bool {
-        matches!(self, Self::Settling)
-    }
-
-    pub(super) fn is_draining(self) -> bool {
-        matches!(self, Self::Draining)
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(super) struct CursorTracking {
-    pub(super) location: Option<CursorLocation>,
-}
-
-impl CursorTracking {
-    pub(super) fn update(&mut self, location: &CursorLocation) {
-        self.location = Some(location.clone());
-    }
-
-    pub(super) fn tracked_location(&self) -> Option<&CursorLocation> {
-        self.location.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(super) struct AnimationTiming {
-    pub(super) last_tick_ms: Option<f64>,
-}
-
-impl AnimationTiming {
-    pub(super) fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct MotionClock {
     pub(super) next_frame_at_ms: Option<f64>,
@@ -197,14 +144,20 @@ pub(super) enum AnimationPhase {
 }
 
 impl AnimationPhase {
-    pub(super) fn state(&self) -> AnimationState {
-        match self {
-            Self::Uninitialized => AnimationState::Uninitialized,
-            Self::Idle => AnimationState::Idle,
-            Self::Settling(_) => AnimationState::Settling,
-            Self::Running(_) => AnimationState::Running,
-            Self::Draining(_) => AnimationState::Draining,
-        }
+    pub(super) fn is_initialized(&self) -> bool {
+        !matches!(self, Self::Uninitialized)
+    }
+
+    pub(super) fn is_animating(&self) -> bool {
+        matches!(self, Self::Running(_))
+    }
+
+    pub(super) fn is_settling(&self) -> bool {
+        matches!(self, Self::Settling(_))
+    }
+
+    pub(super) fn is_draining(&self) -> bool {
+        matches!(self, Self::Draining(_))
     }
 }
 
@@ -216,8 +169,8 @@ pub(super) struct TransientRuntimeState {
     pub(super) next_jump_cue_id: u64,
     pub(super) active_jump_cues: Vec<JumpCue>,
     pub(super) last_mode_was_cmdline: Option<bool>,
-    pub(super) timing: AnimationTiming,
-    pub(super) tracking: CursorTracking,
+    pub(super) last_tick_ms: Option<f64>,
+    pub(super) tracked_location: Option<CursorLocation>,
     pub(super) color_at_cursor: Option<String>,
 }
 
@@ -230,8 +183,8 @@ impl Default for TransientRuntimeState {
             next_jump_cue_id: 1,
             active_jump_cues: Vec::new(),
             last_mode_was_cmdline: None,
-            timing: AnimationTiming::default(),
-            tracking: CursorTracking::default(),
+            last_tick_ms: None,
+            tracked_location: None,
             color_at_cursor: None,
         }
     }

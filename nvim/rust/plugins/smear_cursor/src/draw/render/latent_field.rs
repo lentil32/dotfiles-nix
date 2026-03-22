@@ -1,6 +1,8 @@
 use crate::core::types::{ArcLenQ16, StepIndex, StrokeId};
 use crate::types::{BASE_TIME_INTERVAL, Point};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::VecDeque;
 
 pub(super) const MICRO_W: usize = 8;
 pub(super) const MICRO_H: usize = 8;
@@ -50,6 +52,7 @@ impl MicroTile {
         self.samples_q12.iter().copied().max().unwrap_or(0)
     }
 
+    #[cfg(test)]
     fn total_mass_q12(&self) -> u32 {
         self.samples_q12.iter().copied().map(u32::from).sum()
     }
@@ -219,6 +222,7 @@ impl BucketCell {
         self.total_mass_q12 = self.total_mass_q12.saturating_add(total_mass_q12);
     }
 
+    #[cfg(test)]
     fn remove_tile(&mut self, tile: &MicroTile) {
         let mut total_mass_q12 = 0_u32;
         for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
@@ -233,6 +237,7 @@ impl BucketCell {
         self.total_mass_q12 = self.total_mass_q12.saturating_sub(total_mass_q12);
     }
 
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.total_mass_q12 == 0
     }
@@ -465,6 +470,10 @@ fn sample_center_cell_span(
     (min_cell <= max_cell).then_some((min_cell, max_cell))
 }
 
+type AxisInterval = (f64, f64);
+type SampleIntervals<const N: usize> = [Option<AxisInterval>; N];
+type AxisCellIntervals<const N: usize> = (i64, SampleIntervals<N>);
+
 fn axis_intervals_for_cells<const N: usize>(
     min_cell: i64,
     max_cell: i64,
@@ -472,7 +481,7 @@ fn axis_intervals_for_cells<const N: usize>(
     start: f64,
     end: f64,
     half_extent: f64,
-) -> Vec<(i64, [Option<(f64, f64)>; N])> {
+) -> Vec<AxisCellIntervals<N>> {
     let cell_count =
         usize::try_from(max_cell.saturating_sub(min_cell).saturating_add(1)).unwrap_or_default();
     let mut cells = Vec::with_capacity(cell_count);
@@ -480,11 +489,11 @@ fn axis_intervals_for_cells<const N: usize>(
     for cell in min_cell..=max_cell {
         let mut intervals = [None; N];
         let mut any_coverage = false;
-        for sample_index in 0..N {
+        for (sample_index, interval_slot) in intervals.iter_mut().enumerate() {
             let sample = (cell as f64 + sample_offset(sample_index, N)) * sample_scale;
             let interval = axis_interval(sample, start, end, half_extent);
             any_coverage |= interval.is_some();
-            intervals[sample_index] = interval;
+            *interval_slot = interval;
         }
 
         if any_coverage {
@@ -875,6 +884,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) fn compile_field_from_cache(
     cache: &LatentFieldCache,
 ) -> BTreeMap<(i64, i64), CompiledCell> {

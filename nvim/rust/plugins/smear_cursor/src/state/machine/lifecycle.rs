@@ -175,11 +175,11 @@ impl RuntimeState {
     }
 
     pub(crate) fn last_tick_ms(&self) -> Option<f64> {
-        self.transient.timing.last_tick_ms
+        self.transient.last_tick_ms
     }
 
     pub(crate) fn set_last_tick_ms(&mut self, value: Option<f64>) {
-        self.transient.timing.last_tick_ms = value;
+        self.transient.last_tick_ms = value;
     }
 
     pub(crate) fn settle_deadline_ms(&self) -> Option<f64> {
@@ -241,7 +241,7 @@ impl RuntimeState {
     }
 
     pub(crate) fn reset_animation_timing(&mut self) {
-        self.transient.timing.reset();
+        self.transient.last_tick_ms = None;
         if let Some(clock) = self.motion_clock_mut() {
             clock.reset();
         }
@@ -252,7 +252,7 @@ impl RuntimeState {
     }
 
     pub(crate) fn tracked_location_ref(&self) -> Option<&CursorLocation> {
-        self.transient.tracking.tracked_location()
+        self.transient.tracked_location.as_ref()
     }
 
     pub(crate) fn update_tracking(&mut self, location: &CursorLocation) {
@@ -263,7 +263,7 @@ impl RuntimeState {
         if surface_changed {
             self.transient.retarget_epoch = self.transient.retarget_epoch.wrapping_add(1);
         }
-        self.transient.tracking.update(location);
+        self.transient.tracked_location = Some(location.clone());
     }
 
     pub(crate) fn apply_scroll_shift(

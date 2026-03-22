@@ -61,7 +61,7 @@ fn reduce_timer_signal_with_token(
     let disarmed_state = state
         .clone()
         .with_timers(state.timers().clear_matching(token));
-    let transition = match kind {
+    match kind {
         TimerKind::Animation => {
             if disarmed_state.needs_initialize() {
                 Transition::stay(&disarmed_state)
@@ -93,9 +93,7 @@ fn reduce_timer_signal_with_token(
                 }
             }
         }
-    };
-
-    transition
+    }
 }
 
 pub(super) fn reduce_timer_fired_with_token(

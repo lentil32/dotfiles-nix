@@ -73,7 +73,7 @@ fn remove_invalid_window_at(
         // Comment: unit tests run without a live Neovim host, so this path validates the exact
         // bookkeeping removal without reaching host option/window teardown.
         let _ = tab_windows.swap_remove_window(index);
-        return true;
+        true
     }
 
     #[cfg(not(test))]

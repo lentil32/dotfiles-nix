@@ -41,7 +41,7 @@ impl RuntimeState {
     }
 
     pub(crate) fn is_initialized(&self) -> bool {
-        self.animation_phase.state().is_initialized()
+        self.animation_phase.is_initialized()
     }
 
     pub(crate) fn mark_initialized(&mut self) {
@@ -55,15 +55,15 @@ impl RuntimeState {
     }
 
     pub(crate) fn is_animating(&self) -> bool {
-        self.animation_phase.state().is_animating()
+        self.animation_phase.is_animating()
     }
 
     pub(crate) fn is_settling(&self) -> bool {
-        self.animation_phase.state().is_settling()
+        self.animation_phase.is_settling()
     }
 
     pub(crate) fn is_draining(&self) -> bool {
-        self.animation_phase.state().is_draining()
+        self.animation_phase.is_draining()
     }
 
     pub(crate) fn pending_target(&self) -> Option<&PendingTarget> {
@@ -237,7 +237,6 @@ impl RuntimeState {
 
     pub(crate) fn clear_runtime_state(&mut self) {
         self.clear_initialization();
-        self.stop_animation();
         self.reset_transient_state();
     }
 

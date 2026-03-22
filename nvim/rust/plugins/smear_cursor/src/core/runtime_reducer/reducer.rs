@@ -164,6 +164,27 @@ fn draw_discontinuous_jump_frame(
     .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
 
+fn promote_settled_target(state: &mut RuntimeState, now_ms: f64) {
+    state.start_animation_towards_target();
+    state.set_last_tick_ms(Some(now_ms));
+    state.reset_settle_probe();
+}
+
+fn waiting_for_settled_target(
+    state: &RuntimeState,
+    mode: &str,
+    allow_real_cursor_updates: bool,
+    motion_class: MotionClass,
+    now_ms: f64,
+) -> CursorTransition {
+    CursorTransitions::noop(mode, allow_real_cursor_updates)
+        .with_motion_class(motion_class)
+        .with_schedule_next_animation(true)
+        .with_next_animation_at_ms(next_animation_deadline_from_settling(state, now_ms))
+        .with_cursor_visibility(CursorVisibilityEffect::Show)
+        .with_render_cleanup_action(RenderCleanupAction::Invalidate)
+}
+
 fn draw_drain_frame(
     state: &mut RuntimeState,
     mode: &str,
@@ -483,20 +504,16 @@ pub(crate) fn reduce_cursor_event(
                 target_position,
                 &event.cursor_location,
             ) {
-                state.start_animation_towards_target();
-                state.set_last_tick_ms(Some(event.now_ms));
-                state.reset_settle_probe();
+                promote_settled_target(state, event.now_ms);
                 just_started = true;
             } else {
-                return CursorTransitions::noop(mode, allow_real_cursor_updates)
-                    .with_motion_class(motion_class)
-                    .with_schedule_next_animation(true)
-                    .with_next_animation_at_ms(next_animation_deadline_from_settling(
-                        state,
-                        event.now_ms,
-                    ))
-                    .with_cursor_visibility(CursorVisibilityEffect::Show)
-                    .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+                return waiting_for_settled_target(
+                    state,
+                    mode,
+                    allow_real_cursor_updates,
+                    motion_class,
+                    event.now_ms,
+                );
             }
         } else {
             state.clear_pending_target();
@@ -518,9 +535,7 @@ pub(crate) fn reduce_cursor_event(
             target_position,
             &event.cursor_location,
         ) {
-            state.start_animation_towards_target();
-            state.set_last_tick_ms(Some(event.now_ms));
-            state.reset_settle_probe();
+            promote_settled_target(state, event.now_ms);
             just_started = true;
         } else {
             state.refresh_settling_target(
@@ -529,15 +544,13 @@ pub(crate) fn reduce_cursor_event(
                 &event.cursor_location,
                 event.now_ms,
             );
-            return CursorTransitions::noop(mode, allow_real_cursor_updates)
-                .with_motion_class(motion_class)
-                .with_schedule_next_animation(true)
-                .with_next_animation_at_ms(next_animation_deadline_from_settling(
-                    state,
-                    event.now_ms,
-                ))
-                .with_cursor_visibility(CursorVisibilityEffect::Show)
-                .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+            return waiting_for_settled_target(
+                state,
+                mode,
+                allow_real_cursor_updates,
+                motion_class,
+                event.now_ms,
+            );
         }
     }
 

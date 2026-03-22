@@ -267,13 +267,13 @@ impl<'a, T> CellRowIndex<'a, T> {
         let mut active_entries = Vec::<(i64, &'a T)>::new();
 
         for (&(row, col), value) in cells {
-            if active_row != Some(row) {
-                if let Some(previous_row) = active_row.replace(row) {
-                    rows.push(IndexedRow {
-                        row: previous_row,
-                        entries: std::mem::take(&mut active_entries).into_boxed_slice(),
-                    });
-                }
+            if active_row != Some(row)
+                && let Some(previous_row) = active_row.replace(row)
+            {
+                rows.push(IndexedRow {
+                    row: previous_row,
+                    entries: std::mem::take(&mut active_entries).into_boxed_slice(),
+                });
             }
             active_entries.push((col, value));
         }
@@ -797,14 +797,21 @@ fn build_slice_state_collector(
             else {
                 continue;
             };
-            enumerate_run_candidate_states(
-                slice,
-                run,
+            let context = RunEnumerationContext {
+                input: RunEnumerationInput {
+                    slice,
+                    run,
+                    spatial_weight_q10,
+                    peak_highlight_level,
+                },
                 bounds,
-                spatial_weight_q10,
-                peak_highlight_level,
-                start,
-                baseline,
+            };
+            enumerate_run_candidate_states(
+                &context,
+                RunEnumerationCursor {
+                    cell_index: start,
+                    running_cost: baseline,
+                },
                 &mut [0; RIBBON_MAX_RUN_LENGTH],
                 &mut states,
             );
@@ -829,32 +836,30 @@ fn build_slice_states_with_peak_working_set(
 }
 
 fn enumerate_run_candidate_states(
-    slice: &RibbonSlice,
-    run: RunSpan,
-    bounds: RunEnumerationBounds,
-    spatial_weight_q10: u32,
-    peak_highlight_level: u32,
-    cell_index: usize,
-    running_cost: u64,
+    context: &RunEnumerationContext<'_>,
+    cursor: RunEnumerationCursor,
     candidate_offsets: &mut [u8; RIBBON_MAX_RUN_LENGTH],
     states: &mut SliceStateCollector,
 ) {
-    if cell_index > run.end {
-        let state = SliceState::with_run(run, *candidate_offsets, 0);
+    let input = context.input;
+    if cursor.cell_index > input.run.end {
+        let state = SliceState::with_run(input.run, *candidate_offsets, 0);
         states.insert(SliceState::with_run(
-            run,
+            input.run,
             *candidate_offsets,
-            running_cost.saturating_add(state_local_prior(slice, state, spatial_weight_q10)),
+            cursor
+                .running_cost
+                .saturating_add(state_local_prior(input.slice, state, input.spatial_weight_q10)),
         ));
         return;
     }
 
-    let offset = cell_index - run.start;
-    let cell = &slice.cells[cell_index];
+    let offset = cursor.cell_index - input.run.start;
+    let cell = &input.slice.cells[cursor.cell_index];
     if cell.non_empty_candidates.is_empty() {
         return;
     }
-    if states.should_prune_branch(bounds.optimistic_cost(running_cost, offset)) {
+    if states.should_prune_branch(context.bounds.optimistic_cost(cursor.running_cost, offset)) {
         return;
     }
 
@@ -863,22 +868,20 @@ fn enumerate_run_candidate_states(
             continue;
         };
         candidate_offsets[offset] = candidate_index;
-        let next_cost =
-            running_cost
-                .saturating_sub(cell.empty_cost)
-                .saturating_add(adjusted_candidate_cost(
-                    slice,
-                    peak_highlight_level,
-                    candidate,
-                ));
+        let next_cost = cursor
+            .running_cost
+            .saturating_sub(cell.empty_cost)
+            .saturating_add(adjusted_candidate_cost(
+                input.slice,
+                input.peak_highlight_level,
+                candidate,
+            ));
         enumerate_run_candidate_states(
-            slice,
-            run,
-            bounds,
-            spatial_weight_q10,
-            peak_highlight_level,
-            cell_index + 1,
-            next_cost,
+            context,
+            RunEnumerationCursor {
+                cell_index: cursor.cell_index + 1,
+                running_cost: next_cost,
+            },
             candidate_offsets,
             states,
         );
@@ -903,6 +906,26 @@ struct PreparedSliceState {
     state: SliceState,
     width_cells: f64,
     center_q16: Option<i32>,
+}
+
+#[derive(Clone, Copy)]
+struct RunEnumerationInput<'a> {
+    slice: &'a RibbonSlice,
+    run: RunSpan,
+    spatial_weight_q10: u32,
+    peak_highlight_level: u32,
+}
+
+#[derive(Clone, Copy)]
+struct RunEnumerationContext<'a> {
+    input: RunEnumerationInput<'a>,
+    bounds: RunEnumerationBounds,
+}
+
+#[derive(Clone, Copy)]
+struct RunEnumerationCursor {
+    cell_index: usize,
+    running_cost: u64,
 }
 
 impl PreparedSliceState {

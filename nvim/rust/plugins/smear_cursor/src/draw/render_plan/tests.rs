@@ -139,13 +139,18 @@ fn build_slice_states_reference(slice: &RibbonSlice, spatial_weight_q10: u32) ->
             let Some(run) = RunSpan::try_new(start, end) else {
                 continue;
             };
-            enumerate_run_candidate_states_reference(
+            let enumeration_input = RunEnumerationInput {
                 slice,
                 run,
                 spatial_weight_q10,
                 peak_highlight_level,
-                start,
-                baseline,
+            };
+            enumerate_run_candidate_states_reference(
+                enumeration_input,
+                RunEnumerationCursor {
+                    cell_index: start,
+                    running_cost: baseline,
+                },
                 &mut [0; RIBBON_MAX_RUN_LENGTH],
                 &mut states,
             );
@@ -158,27 +163,27 @@ fn build_slice_states_reference(slice: &RibbonSlice, spatial_weight_q10: u32) ->
 }
 
 fn enumerate_run_candidate_states_reference(
-    slice: &RibbonSlice,
-    run: RunSpan,
-    spatial_weight_q10: u32,
-    peak_highlight_level: u32,
-    cell_index: usize,
-    running_cost: u64,
+    input: RunEnumerationInput<'_>,
+    cursor: RunEnumerationCursor,
     candidate_offsets: &mut [u8; RIBBON_MAX_RUN_LENGTH],
     states: &mut Vec<SliceState>,
 ) {
-    if cell_index > run.end {
-        let state = SliceState::with_run(run, *candidate_offsets, 0);
+    if cursor.cell_index > input.run.end {
+        let state = SliceState::with_run(input.run, *candidate_offsets, 0);
         states.push(SliceState::with_run(
-            run,
+            input.run,
             *candidate_offsets,
-            running_cost.saturating_add(state_local_prior(slice, state, spatial_weight_q10)),
+            cursor.running_cost.saturating_add(state_local_prior(
+                input.slice,
+                state,
+                input.spatial_weight_q10,
+            )),
         ));
         return;
     }
 
-    let offset = cell_index - run.start;
-    let cell = &slice.cells[cell_index];
+    let offset = cursor.cell_index - input.run.start;
+    let cell = &input.slice.cells[cursor.cell_index];
     if cell.non_empty_candidates.is_empty() {
         return;
     }
@@ -188,21 +193,20 @@ fn enumerate_run_candidate_states_reference(
             continue;
         };
         candidate_offsets[offset] = candidate_index;
-        let next_cost =
-            running_cost
-                .saturating_sub(cell.empty_cost)
-                .saturating_add(adjusted_candidate_cost(
-                    slice,
-                    peak_highlight_level,
-                    candidate,
-                ));
+        let next_cost = cursor
+            .running_cost
+            .saturating_sub(cell.empty_cost)
+            .saturating_add(adjusted_candidate_cost(
+                input.slice,
+                input.peak_highlight_level,
+                candidate,
+            ));
         enumerate_run_candidate_states_reference(
-            slice,
-            run,
-            spatial_weight_q10,
-            peak_highlight_level,
-            cell_index + 1,
-            next_cost,
+            input,
+            RunEnumerationCursor {
+                cell_index: cursor.cell_index + 1,
+                running_cost: next_cost,
+            },
             candidate_offsets,
             states,
         );
