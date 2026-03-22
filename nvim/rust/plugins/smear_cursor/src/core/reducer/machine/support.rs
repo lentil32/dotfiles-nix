@@ -90,6 +90,20 @@ fn hot_cleanup_state(
     )
 }
 
+fn scheduled_cleanup_state(
+    state: &CoreState,
+    observed_at: Millis,
+    max_kept_windows: usize,
+) -> RenderCleanupState {
+    match state.render_cleanup().thermal() {
+        crate::core::state::RenderThermalState::Cold => {
+            hot_cleanup_state(state, observed_at, max_kept_windows)
+        }
+        crate::core::state::RenderThermalState::Hot
+        | crate::core::state::RenderThermalState::Cooling => state.render_cleanup(),
+    }
+}
+
 pub(super) fn schedule_timer_with_delay(
     state: CoreState,
     kind: TimerKind,
@@ -304,12 +318,16 @@ pub(super) fn advance_cleanup_for_proposal(
             enter_hot_cleanup_state(state, observed_at, max_kept_windows)
         }
         RenderCleanupAction::Schedule => {
-            let cleanup = hot_cleanup_state(
+            let cleanup = scheduled_cleanup_state(
                 &state,
                 observed_at,
                 proposal_max_kept_windows(&state, proposal),
             );
-            arm_render_cleanup_timer(state.with_render_cleanup(cleanup), observed_at)
+            let next_state = state.with_render_cleanup(cleanup);
+            if next_state.timers().active_token(TimerId::Cleanup).is_some() {
+                return (next_state, Vec::new());
+            }
+            arm_render_cleanup_timer(next_state, observed_at)
         }
     }
 }

@@ -117,10 +117,6 @@ impl EffectOnlyAgenda {
         self.steps.pop_front()
     }
 
-    fn front_step(&self) -> Option<EffectOnlyStep> {
-        self.steps.front().cloned()
-    }
-
     fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
@@ -305,20 +301,6 @@ impl ScheduledEffectQueueState {
         };
         self.pending_work_units = self.pending_work_units.saturating_sub(1);
         Some(unit)
-    }
-
-    fn front_work_unit(&self) -> Option<ScheduledWorkUnit> {
-        match self.items.front()? {
-            ScheduledWorkItem::EffectBatch(effects) => {
-                Some(ScheduledWorkUnit::EffectBatch(effects.clone()))
-            }
-            ScheduledWorkItem::CoreEvent(event) => {
-                Some(ScheduledWorkUnit::CoreEvent(event.clone()))
-            }
-            ScheduledWorkItem::EffectOnlyAgenda(agenda) => {
-                agenda.front_step().map(ScheduledWorkUnit::EffectOnlyStep)
-            }
-        }
     }
 
     fn reset(&mut self) {
@@ -676,15 +658,17 @@ fn should_continue_effect_only_follow_up_chain(
     drained_items_total: usize,
 ) -> bool {
     if snapshot.thermal != RenderThermalState::Hot
-        || snapshot.queued_work_units == 0
-        || snapshot.budget != snapshot.queued_work_units
-        || drained_items_this_pass != snapshot.queued_work_units
+        || drained_items_this_pass != snapshot.budget
         || drained_items_total >= MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE
     {
         return false;
     }
 
     with_scheduled_effect_queue(|queue| {
+        // Mixed hot snapshots often drain their irreducible reducer work first and leave only
+        // cleanup/timer/metric/redraw tail work queued. Once that remaining queue has collapsed
+        // to effect-only agendas, continue immediately in the same callback instead of paying an
+        // extra scheduled shell edge for the tail.
         !queue.items.is_empty()
             && queue
                 .items
@@ -811,8 +795,9 @@ fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ScheduledWorkUnit, dispatch_core_event, drain_scheduled_work_with_executor,
-        reset_scheduled_effect_queue, reset_scheduled_queue_after_failure, scheduled_drain_budget,
+        ScheduledWorkItem, ScheduledWorkUnit, dispatch_core_event,
+        drain_scheduled_work_with_executor, reset_scheduled_effect_queue,
+        reset_scheduled_queue_after_failure, scheduled_drain_budget,
         scheduled_drain_budget_for_depth, scheduled_drain_budget_for_hot_effect_only_snapshot,
         scheduled_drain_budget_for_thermal, with_scheduled_effect_queue,
     };
@@ -1087,7 +1072,19 @@ mod tests {
     }
 
     fn queued_front_work_item() -> Option<ScheduledWorkUnit> {
-        with_scheduled_effect_queue(|queue| queue.front_work_unit())
+        with_scheduled_effect_queue(|queue| match queue.items.front()? {
+            ScheduledWorkItem::EffectBatch(effects) => {
+                Some(ScheduledWorkUnit::EffectBatch(effects.clone()))
+            }
+            ScheduledWorkItem::CoreEvent(event) => {
+                Some(ScheduledWorkUnit::CoreEvent(event.clone()))
+            }
+            ScheduledWorkItem::EffectOnlyAgenda(agenda) => agenda
+                .steps
+                .front()
+                .cloned()
+                .map(ScheduledWorkUnit::EffectOnlyStep),
+        })
     }
 
     fn queue_is_marked_scheduled() -> bool {
@@ -1461,6 +1458,55 @@ mod tests {
             assert!(
                 queue_is_marked_scheduled(),
                 "queue should stay armed when deferred follow-up work remains"
+            );
+        }
+
+        #[test]
+        fn hot_mixed_snapshot_continues_when_remaining_tail_is_effect_only() {
+            let _scope = CoreDispatchTestContext::new();
+            replace_core_state(ready_state_with_cleanup_thermal(RenderThermalState::Hot));
+            for index in 0..16 {
+                let should_schedule = queue_stage_batch(vec![non_coalescible_effect()]);
+                if index == 0 {
+                    assert!(should_schedule, "first staged item should arm the drain");
+                } else {
+                    assert!(
+                        !should_schedule,
+                        "later staged items should reuse the armed drain edge"
+                    );
+                }
+            }
+            assert!(!queue_stage_batch(vec![cleanup_effect(12)]));
+            assert!(!queue_stage_batch(vec![cleanup_effect(13)]));
+            let mut executor = RecordingExecutor::default();
+
+            let has_more_items = drain_next_edge(&mut executor);
+
+            assert!(
+                !has_more_items,
+                "once the mixed prefix drains, the effect-only tail should finish in the same hot callback"
+            );
+            assert_eq!(
+                executor.executed_effects.len(),
+                18,
+                "the hot drain should execute both the bounded mixed prefix and the effect-only tail"
+            );
+            assert!(
+                executor.executed_effects[..16]
+                    .iter()
+                    .all(|effect| *effect == non_coalescible_effect()),
+                "the bounded mixed prefix should preserve FIFO order before the effect-only tail"
+            );
+            assert_eq!(executor.executed_effects.get(16), Some(&cleanup_effect(12)));
+            assert_eq!(executor.executed_effects.get(17), Some(&cleanup_effect(13)));
+            assert_eq!(
+                queued_work_count(),
+                0,
+                "continued hot drain should leave no queue tail"
+            );
+            assert!(
+                !queue_is_marked_scheduled(),
+                "queue should disarm once the mixed snapshot collapses to an effect-only tail"
             );
         }
 

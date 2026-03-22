@@ -46,7 +46,6 @@ fn reduce_timer_signal_with_token(
     state: &CoreState,
     token: TimerToken,
     observed_at: Millis,
-    timer_lost_fallback: bool,
 ) -> Transition {
     let kind = TimerKind::from_timer_id(token.id());
     if !state.timers().is_active(token) {
@@ -96,7 +95,6 @@ fn reduce_timer_signal_with_token(
         }
     };
 
-    let _timer_lost_fallback = timer_lost_fallback;
     transition
 }
 
@@ -104,12 +102,12 @@ pub(super) fn reduce_timer_fired_with_token(
     state: &CoreState,
     payload: TimerFiredWithTokenEvent,
 ) -> Transition {
-    reduce_timer_signal_with_token(state, payload.token, payload.observed_at, false)
+    reduce_timer_signal_with_token(state, payload.token, payload.observed_at)
 }
 
 pub(super) fn reduce_timer_lost_with_token(
     state: &CoreState,
     payload: TimerLostWithTokenEvent,
 ) -> Transition {
-    reduce_timer_signal_with_token(state, payload.token, payload.observed_at, true)
+    reduce_timer_signal_with_token(state, payload.token, payload.observed_at)
 }
