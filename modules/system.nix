@@ -102,6 +102,49 @@
           WebKitDeveloperExtras = true;
           "com.apple.sound.uiaudio.enabled" = 0; # disable user interface sound effects
         };
+        "com.apple.HIToolbox" = {
+          # Use the classic U.S. keyboard layout instead of ABC.
+          AppleCurrentKeyboardLayoutInputSourceID = "com.apple.keylayout.US";
+          AppleEnabledInputSources = [
+            {
+              InputSourceKind = "Keyboard Layout";
+              "KeyboardLayout ID" = 0;
+              "KeyboardLayout Name" = "U.S.";
+            }
+            {
+              "Bundle ID" = "com.apple.inputmethod.Korean";
+              "Input Mode" = "com.apple.inputmethod.Korean.2SetKorean";
+              InputSourceKind = "Input Mode";
+            }
+            {
+              "Bundle ID" = "com.apple.inputmethod.Korean";
+              InputSourceKind = "Keyboard Input Method";
+            }
+            {
+              "Bundle ID" = "com.apple.CharacterPaletteIM";
+              InputSourceKind = "Non Keyboard Input Method";
+            }
+          ];
+          AppleInputSourceHistory = [
+            {
+              InputSourceKind = "Keyboard Layout";
+              "KeyboardLayout ID" = 0;
+              "KeyboardLayout Name" = "U.S.";
+            }
+            {
+              "Bundle ID" = "com.apple.inputmethod.Korean";
+              "Input Mode" = "com.apple.inputmethod.Korean.2SetKorean";
+              InputSourceKind = "Input Mode";
+            }
+          ];
+          AppleSelectedInputSources = [
+            {
+              InputSourceKind = "Keyboard Layout";
+              "KeyboardLayout ID" = 0;
+              "KeyboardLayout Name" = "U.S.";
+            }
+          ];
+        };
         "com.apple.symbolichotkeys" = {
           AppleSymbolicHotKeys = {
             # 31 = Copy picture of selected area to the clipboard
