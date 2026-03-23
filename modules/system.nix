@@ -104,6 +104,7 @@
         };
         "com.apple.HIToolbox" = {
           # Use the classic U.S. keyboard layout instead of ABC.
+          # macOS may still mutate the enabled/history lists, so avoid declaring history.
           AppleCurrentKeyboardLayoutInputSourceID = "com.apple.keylayout.US";
           AppleEnabledInputSources = [
             {
@@ -123,18 +124,6 @@
             {
               "Bundle ID" = "com.apple.CharacterPaletteIM";
               InputSourceKind = "Non Keyboard Input Method";
-            }
-          ];
-          AppleInputSourceHistory = [
-            {
-              InputSourceKind = "Keyboard Layout";
-              "KeyboardLayout ID" = 0;
-              "KeyboardLayout Name" = "U.S.";
-            }
-            {
-              "Bundle ID" = "com.apple.inputmethod.Korean";
-              "Input Mode" = "com.apple.inputmethod.Korean.2SetKorean";
-              InputSourceKind = "Input Mode";
             }
           ];
           AppleSelectedInputSources = [
