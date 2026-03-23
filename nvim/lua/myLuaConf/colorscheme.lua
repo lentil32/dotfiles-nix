@@ -7,7 +7,7 @@ local monokai = require("monokai-pro")
 ---@type rs_theme_switcher
 local rust_switcher = require("rs_theme_switcher")
 
-local DEFAULT_COLORSCHEME = "monokai-pro"
+local DEFAULT_COLORSCHEME = "kanagawa-wave"
 
 ---@type MonokaiPro.Config
 local monokai_opts = {
@@ -20,7 +20,6 @@ monokai.setup(monokai_opts)
 ---@type rs_theme_switcher.ThemeSpec[]
 local CONFIGURED_THEMES = {
   { name = "Monokai Pro", colorscheme = "monokai-pro" },
-  { name = "Kanagawa", colorscheme = "kanagawa" },
   { name = "Kanagawa Wave", colorscheme = "kanagawa-wave" },
   { name = "Kanagawa Dragon", colorscheme = "kanagawa-dragon" },
   { name = "Kanagawa Lotus", colorscheme = "kanagawa-lotus" },

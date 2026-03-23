@@ -133,6 +133,7 @@ in
     multimarkdown
     nil
     nixfmt-rfc-style
+    pkgs-unstable.ast-grep
     pkgs-unstable.typescript-go
     ruff
     shfmt
