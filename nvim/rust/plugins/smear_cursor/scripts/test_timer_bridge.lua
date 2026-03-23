@@ -46,7 +46,7 @@ local function main()
   end, 5)
 
   local revision = vim.fn["rs_smear_cursor#host_bridge#revision"]()
-  if revision ~= 2 then
+  if revision ~= 3 then
     error("unexpected host bridge revision: " .. tostring(revision))
   end
 
@@ -58,12 +58,46 @@ local function main()
     error("missing rs_smear_cursor#host_bridge#start_timer_once bridge")
   end
 
+  if vim.fn.exists("*rs_smear_cursor#host_bridge#install_probe_helpers") ~= 1 then
+    error("missing rs_smear_cursor#host_bridge#install_probe_helpers bridge")
+  end
+
+  if vim.fn.exists("*rs_smear_cursor#host_bridge#cursor_color_at_cursor") ~= 1 then
+    error("missing rs_smear_cursor#host_bridge#cursor_color_at_cursor bridge")
+  end
+
+  if vim.fn.exists("*rs_smear_cursor#host_bridge#background_allowed_mask") ~= 1 then
+    error("missing rs_smear_cursor#host_bridge#background_allowed_mask bridge")
+  end
+
   if vim.fn.exists("*rs_smear_cursor#host_bridge#set_on_key_listener") ~= 0 then
     error("legacy rs_smear_cursor#host_bridge#set_on_key_listener bridge still installed")
   end
 
   if vim.fn.luaeval("_G.__rs_smear_cursor_on_core_timer ~= nil") then
     error("legacy Lua timer callback global unexpectedly installed")
+  end
+
+  if package.loaded["rs_smear_cursor.probes"] == nil then
+    error("probe helpers were not installed during setup")
+  end
+
+  local cursor_color = vim.fn["rs_smear_cursor#host_bridge#cursor_color_at_cursor"]()
+  if cursor_color ~= nil and cursor_color ~= vim.NIL and type(cursor_color) ~= "string" then
+    error("cursor color probe returned unexpected type: " .. type(cursor_color))
+  end
+
+  local allowed_mask = vim.fn["rs_smear_cursor#host_bridge#background_allowed_mask"]({
+    1,
+    1,
+    1,
+    0x2800,
+    0x28FF,
+    0x1CD00,
+    0x1CDE7,
+  })
+  if type(allowed_mask) ~= "table" or #allowed_mask ~= 1 or type(allowed_mask[1]) ~= "boolean" then
+    error("background mask probe returned unexpected shape")
   end
 
   assert_no_log_match(os.getenv("SMEAR_CURSOR_LOG_FILE"), {

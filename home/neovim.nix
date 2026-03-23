@@ -70,7 +70,8 @@ in
           ${lib.optionalString (runtimeRoot != null) ''
             for runtimeDir in ${lib.concatStringsSep " " runtimeDirs}; do
               if [ -d "${runtimeRoot}/$runtimeDir" ]; then
-                cp -r "${runtimeRoot}/$runtimeDir" "$out/"
+                mkdir -p "$out/$runtimeDir"
+                cp -R "${runtimeRoot}/$runtimeDir"/. "$out/$runtimeDir/"
               fi
             done
           ''}
@@ -90,8 +91,8 @@ in
             exit 1
           fi
           case "$lib" in
-            *.dll) cp "$lib" "$out/lua/${outBase}.dll" ;;
-            *.dylib|*.so) cp "$lib" "$out/lua/${outBase}.so" ;;
+            *.dll) install -m755 "$lib" "$out/lua/${outBase}.dll" ;;
+            *.dylib|*.so) install -m755 "$lib" "$out/lua/${outBase}.so" ;;
             *)
               echo "${libBase} library not found: $lib" >&2
               exit 1

@@ -1,7 +1,9 @@
 use super::event_loop;
 use super::host_bridge::{InstalledHostBridge, installed_host_bridge};
 use super::logging::{set_log_level, trace_lazy, warn};
-use super::probe_cache::CursorColorCacheLookup;
+use super::probe_cache::{
+    ConcealCacheKey, ConcealCacheLookup, ConcealRegion, CursorColorCacheLookup,
+};
 use super::timers::{NvimTimerId, start_timer_once, stop_timer};
 use super::trace::{timer_kind_name, timer_token_summary};
 use super::{ENGINE_CONTEXT, EngineAccessError, EngineContext, EngineState, HostBridgeState};
@@ -24,6 +26,7 @@ use nvim_utils::mode::{
     is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
 };
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -152,7 +155,7 @@ pub(super) struct IngressReadSnapshot {
     current_corners: [Point; 4],
     tracked_location: Option<CursorLocation>,
     mode_policy: IngressModePolicySnapshot,
-    filetypes_disabled: Arc<[String]>,
+    filetypes_disabled: Arc<HashSet<String>>,
 }
 
 impl IngressReadSnapshot {
@@ -197,9 +200,7 @@ impl IngressReadSnapshot {
     }
 
     pub(super) fn filetype_disabled(&self, filetype: &str) -> bool {
-        self.filetypes_disabled
-            .iter()
-            .any(|entry| entry == filetype)
+        self.filetypes_disabled.contains(filetype)
     }
 
     #[cfg(test)]
@@ -222,7 +223,7 @@ impl IngressReadSnapshot {
                 mode_policy.2,
                 mode_policy.3,
             ]),
-            filetypes_disabled: Arc::from(filetypes_disabled),
+            filetypes_disabled: Arc::new(filetypes_disabled.into_iter().collect()),
         }
     }
 }
@@ -689,6 +690,24 @@ pub(super) fn store_cursor_color_sample(
     })
 }
 
+pub(super) fn cached_conceal_regions(
+    key: &ConcealCacheKey,
+) -> EngineAccessResult<ConcealCacheLookup> {
+    read_engine_state(|state| state.shell.cached_conceal_regions(key))
+}
+
+pub(super) fn store_conceal_regions(
+    key: ConcealCacheKey,
+    scanned_to_col1: i64,
+    regions: Arc<[ConcealRegion]>,
+) -> EngineAccessResult<()> {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .store_conceal_regions(key, scanned_to_col1, regions);
+    })
+}
+
 pub(super) fn note_cursor_color_colorscheme_change() -> EngineAccessResult<()> {
     mutate_engine_state(|state| {
         state.shell.note_cursor_color_colorscheme_change();
@@ -926,6 +945,7 @@ impl EffectExecutor for NeovimEffectExecutor {
 mod ingress_snapshot_tests {
     use super::{IngressModePolicySnapshot, IngressReadSnapshot};
     use crate::types::Point;
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     #[test]
@@ -977,7 +997,11 @@ mod ingress_snapshot_tests {
 
     #[test]
     fn ingress_read_snapshot_can_share_disabled_filetypes_arc() {
-        let filetypes_disabled: Arc<[String]> = vec!["lua".to_string(), "rust".to_string()].into();
+        let filetypes_disabled: Arc<HashSet<String>> = Arc::new(
+            ["lua".to_string(), "rust".to_string()]
+                .into_iter()
+                .collect(),
+        );
         let snapshot = IngressReadSnapshot {
             enabled: true,
             needs_initialize: false,

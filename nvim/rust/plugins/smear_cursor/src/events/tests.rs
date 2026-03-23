@@ -159,6 +159,8 @@ mod runtime_option_application {
         ColorOptionsPatch, OptionalChange, RuntimeOptionsPatch, RuntimeState, RuntimeSwitchesPatch,
     };
     use nvim_oxi::Object;
+    use std::collections::HashSet;
+    use std::sync::Arc;
 
     fn apply_options_expect_ok(
         state: &mut RuntimeState,
@@ -211,7 +213,11 @@ mod runtime_option_application {
     #[test]
     fn runtime_options_patch_apply_clears_filetypes_list() {
         let mut state = RuntimeState::default();
-        state.config.filetypes_disabled = vec!["lua".to_string(), "nix".to_string()].into();
+        state.config.filetypes_disabled = Arc::new(
+            ["lua".to_string(), "nix".to_string()]
+                .into_iter()
+                .collect::<HashSet<_>>(),
+        );
         let patch = RuntimeOptionsPatch {
             runtime: RuntimeSwitchesPatch {
                 filetypes_disabled: Some(Vec::new()),

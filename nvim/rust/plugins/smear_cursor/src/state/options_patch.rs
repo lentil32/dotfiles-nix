@@ -2,6 +2,7 @@ use super::RuntimeState;
 use crate::config::RuntimeConfig;
 use crate::lua::invalid_key;
 use nvim_oxi::Result;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -278,7 +279,7 @@ impl RuntimeSwitchesPatch {
             ]
         );
         if let Some(value) = self.filetypes_disabled.take() {
-            config.filetypes_disabled = Arc::from(value);
+            config.filetypes_disabled = Arc::new(value.into_iter().collect::<HashSet<_>>());
         }
 
         if let Some(value) = self.logging_level.take() {

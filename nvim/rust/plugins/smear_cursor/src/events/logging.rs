@@ -7,13 +7,23 @@ use std::cell::RefCell;
 use std::sync::LazyLock;
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
-    path::PathBuf,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 static LOG_FILE_PATH: LazyLock<Option<PathBuf>> =
     LazyLock::new(|| std::env::var_os("SMEAR_CURSOR_LOG_FILE").map(PathBuf::from));
+// Keep file logging buffered unless a live-tailed session explicitly opts into per-line flushes.
+static LOG_FILE_FLUSH_POLICY: LazyLock<LogFileFlushPolicy> = LazyLock::new(|| {
+    std::env::var("SMEAR_CURSOR_LOG_FLUSH")
+        .ok()
+        .as_deref()
+        .map_or(
+            LogFileFlushPolicy::Buffered,
+            LogFileFlushPolicy::from_env_value,
+        )
+});
 static PERF_SLOW_CALLBACK_THRESHOLD_MS: LazyLock<Option<f64>> = LazyLock::new(|| {
     std::env::var("SMEAR_CURSOR_PERF_SLOW_MS")
         .ok()
@@ -21,8 +31,58 @@ static PERF_SLOW_CALLBACK_THRESHOLD_MS: LazyLock<Option<f64>> = LazyLock::new(||
         .filter(|value| value.is_finite() && *value >= 0.0)
 });
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogFileFlushPolicy {
+    Buffered,
+    Always,
+}
+
+impl LogFileFlushPolicy {
+    fn from_env_value(value: &str) -> Self {
+        let normalized = value.trim();
+        if normalized == "1"
+            || normalized.eq_ignore_ascii_case("true")
+            || normalized.eq_ignore_ascii_case("always")
+            || normalized.eq_ignore_ascii_case("line")
+        {
+            Self::Always
+        } else {
+            Self::Buffered
+        }
+    }
+
+    fn should_flush(self) -> bool {
+        matches!(self, Self::Always)
+    }
+}
+
+struct LogFileWriter {
+    file: BufWriter<File>,
+}
+
+impl LogFileWriter {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: BufWriter::new(file),
+        })
+    }
+
+    fn append_line(&mut self, level_name: &str, message: &str) -> std::io::Result<()> {
+        let timestamp_ms = log_timestamp_ms();
+        writeln!(
+            self.file,
+            "[{LOG_SOURCE_NAME}][{level_name}][{timestamp_ms}] {message}"
+        )?;
+        if LOG_FILE_FLUSH_POLICY.should_flush() {
+            self.file.flush()?;
+        }
+        Ok(())
+    }
+}
+
 thread_local! {
-    static LOG_FILE_HANDLE: RefCell<Option<File>> = const { RefCell::new(None) };
+    static LOG_FILE_HANDLE: RefCell<Option<LogFileWriter>> = const { RefCell::new(None) };
 }
 
 pub(super) fn set_log_level(level: i64) {
@@ -69,9 +129,9 @@ fn append_log_line(level_name: &str, message: &str) {
         };
 
         if file_guard.is_none() {
-            match OpenOptions::new().create(true).append(true).open(path) {
-                Ok(file) => {
-                    *file_guard = Some(file);
+            match LogFileWriter::open(path) {
+                Ok(file_writer) => {
+                    *file_guard = Some(file_writer);
                 }
                 Err(err) => {
                     api::err_writeln(&format!(
@@ -83,13 +143,8 @@ fn append_log_line(level_name: &str, message: &str) {
             }
         }
 
-        let timestamp_ms = log_timestamp_ms();
-        if let Some(file) = file_guard.as_mut()
-            && let Err(err) = writeln!(
-                file,
-                "[{LOG_SOURCE_NAME}][{level_name}][{timestamp_ms}] {message}"
-            )
-            .and_then(|()| file.flush())
+        if let Some(file_writer) = file_guard.as_mut()
+            && let Err(err) = file_writer.append_line(level_name, message)
         {
             api::err_writeln(&format!(
                 "[{LOG_SOURCE_NAME}] failed to write log file: {err}"
@@ -199,7 +254,45 @@ pub(super) fn unhide_real_cursor() {
 
 #[cfg(test)]
 mod tests {
-    use super::should_notify;
+    use super::{LogFileFlushPolicy, should_notify};
+
+    #[test]
+    fn log_file_flush_policy_accepts_explicit_per_line_aliases() {
+        assert_eq!(
+            LogFileFlushPolicy::from_env_value("always"),
+            LogFileFlushPolicy::Always
+        );
+        assert_eq!(
+            LogFileFlushPolicy::from_env_value(" LINE "),
+            LogFileFlushPolicy::Always
+        );
+        assert_eq!(
+            LogFileFlushPolicy::from_env_value("true"),
+            LogFileFlushPolicy::Always
+        );
+        assert_eq!(
+            LogFileFlushPolicy::from_env_value("1"),
+            LogFileFlushPolicy::Always
+        );
+    }
+
+    #[test]
+    fn log_file_flush_policy_defaults_to_buffered_without_opt_in() {
+        assert_eq!(
+            LogFileFlushPolicy::from_env_value("buffered"),
+            LogFileFlushPolicy::Buffered
+        );
+        assert_eq!(
+            LogFileFlushPolicy::from_env_value("false"),
+            LogFileFlushPolicy::Buffered
+        );
+        assert_eq!(
+            LogFileFlushPolicy::from_env_value("unexpected"),
+            LogFileFlushPolicy::Buffered
+        );
+        assert!(!LogFileFlushPolicy::Buffered.should_flush());
+        assert!(LogFileFlushPolicy::Always.should_flush());
+    }
 
     #[test]
     fn trace_and_debug_logs_are_file_only() {

@@ -1,6 +1,7 @@
 use super::super::cursor::{
     cursor_position_for_mode, mode_string, sampled_cursor_color_at_current_position,
 };
+use super::super::host_bridge::installed_host_bridge;
 use super::super::logging::warn;
 use super::super::probe_cache::CursorColorCacheLookup;
 use super::super::runtime::{
@@ -26,28 +27,6 @@ use crate::lua::{
 };
 use nvim_oxi::{Array, Object, Result, api};
 use thiserror::Error;
-
-const BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR: &str = r"(function(request)
-  local start_row = request[1]
-  local row_count = request[2]
-  local max_col = request[3]
-  local braille_min = request[4]
-  local braille_max = request[5]
-  local octant_min = request[6]
-  local octant_max = request[7]
-  local result = {}
-  local index = 1
-  for row = start_row, start_row + row_count - 1 do
-    for col = 1, max_col do
-      local code = vim.fn.screenchar(row, col)
-      result[index] = code == 32
-        or (code >= braille_min and code <= braille_max)
-        or (code >= octant_min and code <= octant_max)
-      index = index + 1
-    end
-  end
-  return result
-end)(_A)";
 
 fn to_core_coordinate(value: f64) -> Option<u32> {
     if !value.is_finite() || value < 0.0 || value > u32::MAX as f64 {
@@ -199,8 +178,8 @@ fn current_cursor_text_context(
 
 #[derive(Debug, Error)]
 enum BackgroundProbeMaskError {
-    #[error("background probe luaeval failed: {0}")]
-    LuaEval(#[source] nvim_oxi::Error),
+    #[error("background probe host bridge call failed: {0}")]
+    BridgeCall(#[source] nvim_oxi::Error),
     #[error("background probe mask shape mismatch: {0}")]
     Shape(#[source] LuaParseError),
     #[error("background probe mask decode failed at index {index}: {source}")]
@@ -357,12 +336,13 @@ fn batch_background_allowed_mask(
         Object::from(OCTANT_CODE_MIN),
         Object::from(OCTANT_CODE_MAX),
     ]);
-    let args = Array::from_iter([
-        Object::from(BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR),
-        Object::from(request),
-    ]);
-    let value = api::call_function("luaeval", args)
-        .map_err(|error| BackgroundProbeMaskError::LuaEval(error.into()))?;
+    let host_bridge = installed_host_bridge()
+        .map_err(nvim_oxi::Error::from)
+        .map_err(BackgroundProbeMaskError::BridgeCall)?;
+    let value = host_bridge
+        .background_allowed_mask(request)
+        .map_err(nvim_oxi::Error::from)
+        .map_err(BackgroundProbeMaskError::BridgeCall)?;
     let values = parse_indexed_objects_typed("background_probe_mask", value, Some(expected_len))
         .map_err(BackgroundProbeMaskError::Shape)?;
 

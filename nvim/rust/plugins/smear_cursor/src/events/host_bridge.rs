@@ -5,6 +5,12 @@ use thiserror::Error;
 
 const HOST_BRIDGE_REVISION_FUNCTION_NAME: &str = "rs_smear_cursor#host_bridge#revision";
 const START_TIMER_ONCE_FUNCTION_NAME: &str = "rs_smear_cursor#host_bridge#start_timer_once";
+const INSTALL_PROBE_HELPERS_FUNCTION_NAME: &str =
+    "rs_smear_cursor#host_bridge#install_probe_helpers";
+const CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME: &str =
+    "rs_smear_cursor#host_bridge#cursor_color_at_cursor";
+const BACKGROUND_ALLOWED_MASK_FUNCTION_NAME: &str =
+    "rs_smear_cursor#host_bridge#background_allowed_mask";
 #[cfg(test)]
 const CORE_TIMER_CALLBACK_FUNCTION_NAME: &str = "rs_smear_cursor#host_bridge#on_core_timer";
 #[cfg(test)]
@@ -43,6 +49,12 @@ pub(super) enum HostBridgeError {
     RevisionDecode { value: i64 },
     #[error("failed to start smear cursor host bridge timer: {0}")]
     StartTimerOnce(#[source] nvim_oxi::Error),
+    #[error("failed to install smear cursor probe helpers: {0}")]
+    InstallProbeHelpers(#[source] nvim_oxi::Error),
+    #[error("failed to call smear cursor cursor-color probe: {0}")]
+    CursorColorProbe(#[source] nvim_oxi::Error),
+    #[error("failed to call smear cursor background-mask probe: {0}")]
+    BackgroundAllowedMask(#[source] nvim_oxi::Error),
     #[error("engine state access failed while resolving host bridge state: {0}")]
     EngineAccess(#[from] EngineAccessError),
 }
@@ -61,6 +73,23 @@ impl InstalledHostBridge {
         let args = Array::from_iter([Object::from(timeout_ms)]);
         api::call_function(START_TIMER_ONCE_FUNCTION_NAME, args)
             .map_err(|error| HostBridgeError::StartTimerOnce(error.into()))
+    }
+
+    pub(super) fn install_probe_helpers(self) -> HostBridgeResult<()> {
+        let _: i64 = api::call_function(INSTALL_PROBE_HELPERS_FUNCTION_NAME, Array::new())
+            .map_err(|error| HostBridgeError::InstallProbeHelpers(error.into()))?;
+        Ok(())
+    }
+
+    pub(super) fn cursor_color_at_cursor(self) -> HostBridgeResult<Object> {
+        api::call_function(CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME, Array::new())
+            .map_err(|error| HostBridgeError::CursorColorProbe(error.into()))
+    }
+
+    pub(super) fn background_allowed_mask(self, request: Array) -> HostBridgeResult<Object> {
+        let args = Array::from_iter([Object::from(request)]);
+        api::call_function(BACKGROUND_ALLOWED_MASK_FUNCTION_NAME, args)
+            .map_err(|error| HostBridgeError::BackgroundAllowedMask(error.into()))
     }
 }
 
@@ -90,7 +119,10 @@ struct HostBridge;
 impl HostBridge {
     fn verify() -> HostBridgeResult<InstalledHostBridge> {
         match installed_host_bridge_from_state() {
-            Ok(host_bridge) => Ok(host_bridge),
+            Ok(host_bridge) => {
+                host_bridge.install_probe_helpers()?;
+                Ok(host_bridge)
+            }
             Err(_) => {
                 let revision = query_host_bridge_revision()?;
                 if revision != HostBridgeRevision::CURRENT {
@@ -100,8 +132,10 @@ impl HostBridge {
                     });
                 }
 
+                let host_bridge = InstalledHostBridge;
+                host_bridge.install_probe_helpers()?;
                 note_host_bridge_verified(revision)?;
-                Ok(InstalledHostBridge)
+                Ok(host_bridge)
             }
         }
     }
@@ -139,6 +173,9 @@ mod tests {
         assert!(script.contains(HOST_BRIDGE_REVISION_FUNCTION_NAME));
         assert!(script.contains(CORE_TIMER_CALLBACK_FUNCTION_NAME));
         assert!(script.contains(START_TIMER_ONCE_FUNCTION_NAME));
+        assert!(script.contains(INSTALL_PROBE_HELPERS_FUNCTION_NAME));
+        assert!(script.contains(CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME));
+        assert!(script.contains(BACKGROUND_ALLOWED_MASK_FUNCTION_NAME));
     }
 
     #[test]
@@ -160,5 +197,13 @@ mod tests {
         let script = HOST_BRIDGE_SCRIPT;
         assert!(!script.contains("v:lua."));
         assert!(!script.contains("_G.__rs_smear_cursor"));
+    }
+
+    #[test]
+    fn host_bridge_script_loads_probe_helpers_from_runtime_module() {
+        let script = HOST_BRIDGE_SCRIPT;
+        assert!(script.contains("require('rs_smear_cursor.probes')"));
+        assert!(!script.contains("CURSOR_COLOR_LUAEVAL_EXPR"));
+        assert!(!script.contains("BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR"));
     }
 }

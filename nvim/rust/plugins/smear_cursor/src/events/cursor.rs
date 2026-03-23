@@ -1,5 +1,7 @@
-use super::CURSOR_COLOR_LUAEVAL_EXPR;
-use super::logging::trace_lazy;
+use super::host_bridge::installed_host_bridge;
+use super::logging::{trace_lazy, warn};
+use super::probe_cache::{ConcealCacheKey, ConcealCacheLookup, ConcealRegion};
+use super::runtime::{cached_conceal_regions, store_conceal_regions};
 use crate::lua::{
     LuaParseError, i64_from_object_ref_with_typed, i64_from_object_typed, string_from_object_typed,
 };
@@ -7,7 +9,11 @@ use crate::types::Point;
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::conversion::FromObject;
 use nvim_oxi::{Array, Dictionary, Object, Result, String as NvimString, api};
-use nvim_utils::mode::is_cmdline_mode;
+use nvim_utils::mode::{
+    is_cmdline_mode, is_insert_like_mode, is_replace_like_mode, is_terminal_like_mode,
+    is_visual_like_mode,
+};
+use std::sync::Arc;
 use thiserror::Error;
 
 type ScreenCell = (i64, i64);
@@ -144,14 +150,6 @@ impl BufferCursorRead {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ConcealRegion {
-    start_col1: i64,
-    end_col1: i64,
-    match_id: i64,
-    replacement_width: i64,
-}
-
 fn screenpos_field_summary(dict: &Dictionary, field: &str) -> String {
     match dictionary_i64_field(dict, "screenpos", field) {
         Ok(Some(value)) => value.to_string(),
@@ -232,31 +230,146 @@ fn parse_synconcealed(value: Object) -> CursorResult<Option<(String, i64)>> {
     Ok(Some((replacement, match_id)))
 }
 
-fn concealed_regions_before_cursor(line: usize, column: usize) -> CursorResult<Vec<ConcealRegion>> {
-    let mut regions: Vec<ConcealRegion> = Vec::new();
+fn merge_conceal_region(
+    regions: &mut Vec<ConcealRegion>,
+    col1: i64,
+    match_id: i64,
+    replacement_width: i64,
+) {
+    if let Some(last) = regions.last_mut()
+        && last.match_id == match_id
+        && last.replacement_width == replacement_width
+        && last.end_col1.saturating_add(1) == col1
+    {
+        last.end_col1 = col1;
+        return;
+    }
+
+    regions.push(ConcealRegion {
+        start_col1: col1,
+        end_col1: col1,
+        match_id,
+        replacement_width,
+    });
+}
+
+fn extend_concealed_regions(
+    line: usize,
+    start_col1: i64,
+    end_col1: i64,
+    regions: &mut Vec<ConcealRegion>,
+) -> CursorResult<()> {
+    if start_col1 > end_col1 {
+        return Ok(());
+    }
+
     let line = i64::try_from(line).unwrap_or(i64::MAX);
-    let max_col1 = i64::try_from(column).unwrap_or(i64::MAX);
-    for col1 in 1..=max_col1 {
+    for col1 in start_col1..=end_col1 {
         let args = Array::from_iter([Object::from(line), Object::from(col1)]);
         let concealed = parse_synconcealed(api::call_function("synconcealed", args)?)?;
         let Some((replacement, match_id)) = concealed else {
             continue;
         };
 
-        if let Some(last) = regions.last_mut()
-            && last.match_id == match_id
-            && last.end_col1.saturating_add(1) == col1
-        {
-            last.end_col1 = col1;
-            continue;
-        }
+        let replacement_width = replacement_display_width(&replacement)?;
+        merge_conceal_region(regions, col1, match_id, replacement_width);
+    }
+    Ok(())
+}
 
-        regions.push(ConcealRegion {
-            start_col1: col1,
-            end_col1: col1,
-            match_id,
-            replacement_width: replacement_display_width(&replacement)?,
-        });
+fn current_buffer_changedtick(buffer_handle: i64) -> CursorResult<u64> {
+    let args = Array::from_iter([Object::from(buffer_handle), Object::from("changedtick")]);
+    let value = api::call_function("getbufvar", args)?;
+    let changedtick = i64_from_object_typed("getbufvar(changedtick)", value)
+        .map_err(|source| cursor_parse_error("getbufvar(changedtick)", source))?;
+    if changedtick < 0 {
+        return Err(
+            nvim_oxi::api::Error::Other("conceal changedtick must be non-negative".into()).into(),
+        );
+    }
+
+    Ok(changedtick as u64)
+}
+
+fn window_buffer_handle(window: &api::Window) -> CursorResult<i64> {
+    Ok(i64::from(window.get_buf()?.handle()))
+}
+
+fn current_window_option<T>(window: &api::Window, option_name: &str) -> Result<T>
+where
+    T: FromObject,
+{
+    let opts = OptionOpts::builder().win(window.clone()).build();
+    Ok(api::get_option_value(option_name, &opts)?)
+}
+
+fn concealcursor_mode_key(mode: &str) -> Option<char> {
+    if is_cmdline_mode(mode) {
+        Some('c')
+    } else if is_insert_like_mode(mode) || is_replace_like_mode(mode) {
+        Some('i')
+    } else if is_visual_like_mode(mode) {
+        Some('v')
+    } else if is_terminal_like_mode(mode) {
+        None
+    } else {
+        Some('n')
+    }
+}
+
+fn concealcursor_allows_mode(concealcursor: &str, mode: &str) -> bool {
+    concealcursor_mode_key(mode).is_some_and(|mode_key| concealcursor.contains(mode_key))
+}
+
+fn conceal_can_affect_cursor_line(window: &api::Window, mode: &str) -> CursorResult<bool> {
+    let conceallevel: i64 = current_window_option(window, "conceallevel")?;
+    if conceallevel <= 0 {
+        return Ok(false);
+    }
+
+    let concealcursor: String = current_window_option(window, "concealcursor")?;
+    Ok(concealcursor_allows_mode(&concealcursor, mode))
+}
+
+fn conceal_cache_key(window: &api::Window, line: usize) -> CursorResult<ConcealCacheKey> {
+    let buffer_handle = window_buffer_handle(window)?;
+    let changedtick = current_buffer_changedtick(buffer_handle)?;
+    Ok(ConcealCacheKey::new(buffer_handle, changedtick, line))
+}
+
+fn cached_concealed_regions_for_cursor(
+    window: &api::Window,
+    line: usize,
+    column: usize,
+) -> CursorResult<Arc<[ConcealRegion]>> {
+    let key = conceal_cache_key(window, line)?;
+    let required_col1 = i64::try_from(column).unwrap_or(i64::MAX);
+    let cached = match cached_conceal_regions(&key) {
+        Ok(ConcealCacheLookup::Hit(cached)) => Some(cached),
+        Ok(ConcealCacheLookup::Miss) => None,
+        Err(err) => {
+            warn(&format!("conceal cache read failed: {err}"));
+            None
+        }
+    };
+
+    if let Some(cached) = cached.as_ref()
+        && cached.scanned_to_col1() >= required_col1
+    {
+        return Ok(Arc::clone(cached.regions()));
+    }
+
+    let mut regions = cached
+        .as_ref()
+        .map_or_else(Vec::new, |cached| cached.regions().to_vec());
+    let scan_start_col1 = cached
+        .as_ref()
+        .map_or(1, |cached| cached.scanned_to_col1().saturating_add(1));
+    extend_concealed_regions(line, scan_start_col1, required_col1, &mut regions)?;
+
+    let regions: Arc<[ConcealRegion]> = regions.into();
+    if let Err(err) = store_conceal_regions(key, required_col1, Arc::clone(&regions)) {
+        warn(&format!("conceal cache write failed: {err}"));
     }
     Ok(regions)
 }
@@ -277,39 +390,31 @@ fn apply_conceal_delta(raw_cell: ScreenCell, conceal_delta: i64) -> ScreenPoint 
     )
 }
 
-fn resolve_buffer_cursor_position(
-    window: &api::Window,
-    line: usize,
-    column: usize,
+fn conceal_delta_for_regions(
+    current_col1: i64,
     raw_cell: ScreenCell,
-) -> CursorResult<ScreenPoint> {
-    if column == 0 {
-        return Ok(screen_cell_to_point(raw_cell));
-    }
-
-    let current_col1 = buffer_column_to_col1(column);
+    regions: &[ConcealRegion],
+    mut screen_cell_for_col1: impl FnMut(i64) -> CursorResult<Option<ScreenCell>>,
+) -> CursorResult<Option<i64>> {
     let mut conceal_delta = 0_i64;
-    for region in concealed_regions_before_cursor(line, column)? {
-        let start = parse_screenpos_cell(screenpos_for_buffer_column(
-            window,
-            line,
-            region.start_col1,
-        )?)?;
-        let next_col1 = region.end_col1.saturating_add(1);
+    for region in regions
+        .iter()
+        .take_while(|region| region.start_col1 < current_col1)
+    {
+        let start = screen_cell_for_col1(region.start_col1)?;
+        let effective_end_col1 = region.end_col1.min(current_col1.saturating_sub(1));
+        let next_col1 = effective_end_col1.saturating_add(1);
         let end = if next_col1 == current_col1 {
             Some(raw_cell)
         } else {
-            parse_screenpos_cell(screenpos_for_buffer_column(window, line, next_col1)?)?
+            screen_cell_for_col1(next_col1)?
         };
 
         let (Some((start_row, start_col)), Some((end_row, end_col))) = (start, end) else {
             continue;
         };
         if start_row != end_row {
-            // this conceal correction is proven for same-row drift. If a concealed region
-            // crosses a soft-wrap boundary, keep the shell-authoritative raw screenpos until we
-            // model wrapped line offsets explicitly.
-            return Ok(screen_cell_to_point(raw_cell));
+            return Ok(None);
         }
 
         let raw_width = end_col.saturating_sub(start_col);
@@ -317,10 +422,48 @@ fn resolve_buffer_cursor_position(
             conceal_delta.saturating_add(raw_width.saturating_sub(region.replacement_width).max(0));
     }
 
+    Ok(Some(conceal_delta))
+}
+
+fn resolve_buffer_cursor_position(
+    window: &api::Window,
+    line: usize,
+    column: usize,
+    mode: &str,
+    raw_cell: ScreenCell,
+) -> CursorResult<ScreenPoint> {
+    if column == 0 {
+        return Ok(screen_cell_to_point(raw_cell));
+    }
+
+    if !conceal_can_affect_cursor_line(window, mode)? {
+        return Ok(screen_cell_to_point(raw_cell));
+    }
+
+    let regions = cached_concealed_regions_for_cursor(window, line, column)?;
+    if regions.is_empty() {
+        return Ok(screen_cell_to_point(raw_cell));
+    }
+
+    let current_col1 = buffer_column_to_col1(column);
+    let Some(conceal_delta) =
+        conceal_delta_for_regions(current_col1, raw_cell, regions.as_ref(), |col1| {
+            parse_screenpos_cell(screenpos_for_buffer_column(window, line, col1)?)
+        })?
+    else {
+        // this conceal correction is proven for same-row drift. If a concealed region
+        // crosses a soft-wrap boundary, keep the shell-authoritative raw screenpos until we
+        // model wrapped line offsets explicitly.
+        return Ok(screen_cell_to_point(raw_cell));
+    };
+
     Ok(apply_conceal_delta(raw_cell, conceal_delta))
 }
 
-fn buffer_screen_cursor_position(window: &api::Window) -> CursorResult<BufferCursorRead> {
+fn buffer_screen_cursor_position(
+    window: &api::Window,
+    mode: &str,
+) -> CursorResult<BufferCursorRead> {
     let (line, column) = window.get_cursor()?;
     let screenpos = screenpos_for_buffer_column(window, line, buffer_column_to_col1(column))?;
     let screenpos = screenpos_dictionary(screenpos)?;
@@ -330,7 +473,7 @@ fn buffer_screen_cursor_position(window: &api::Window) -> CursorResult<BufferCur
     let raw_cell = parse_screenpos_cell_from_dict(&screenpos)?;
     let raw_position = raw_cell.map(screen_cell_to_point);
     let resolved_position = raw_cell
-        .map(|raw_cell| resolve_buffer_cursor_position(window, line, column, raw_cell))
+        .map(|raw_cell| resolve_buffer_cursor_position(window, line, column, mode, raw_cell))
         .transpose()?;
     Ok(BufferCursorRead {
         line,
@@ -341,8 +484,8 @@ fn buffer_screen_cursor_position(window: &api::Window) -> CursorResult<BufferCur
     })
 }
 
-fn screen_cursor_position(window: &api::Window) -> CursorResult<Option<ScreenPoint>> {
-    let buffer_read = buffer_screen_cursor_position(window)?;
+fn screen_cursor_position(window: &api::Window, mode: &str) -> CursorResult<Option<ScreenPoint>> {
+    let buffer_read = buffer_screen_cursor_position(window, mode)?;
     // `screenpos()` is the stable callback-safe base here. The `gg` trace showed
     // `screenrow()`/`screencol()` reporting stale or command-line cells on scheduled edges, so we
     // keep the timing-sensitive live probe out of production selection and correct conceal drift
@@ -372,7 +515,7 @@ fn cmdline_cursor_position(window: &api::Window) -> CursorResult<Option<(f64, f6
         // showcmd and normal-mode prefix keys can transiently report `mode=c` while the
         // rendered cursor is still in the buffer. Falling back to the buffer cursor avoids
         // animating bottom-row showcmd columns for motions like `gg`.
-        return Ok(buffer_screen_cursor_position(window)?.selected_position());
+        return Ok(buffer_screen_cursor_position(window, "n")?.selected_position());
     }
 
     let screen_col_value = api::call_function("getcmdscreenpos", Array::new())?;
@@ -396,7 +539,7 @@ pub(super) fn cursor_position_for_mode(
         }
         return cmdline_cursor_position(window).map_err(nvim_oxi::Error::from);
     }
-    screen_cursor_position(window).map_err(nvim_oxi::Error::from)
+    screen_cursor_position(window, mode).map_err(nvim_oxi::Error::from)
 }
 
 fn current_buffer_option_string(buffer: &api::Buffer, option_name: &str) -> Result<String> {
@@ -410,13 +553,12 @@ pub(super) fn current_buffer_filetype(buffer: &api::Buffer) -> Result<String> {
 }
 
 fn cursor_color_at_current_position() -> Result<Option<String>> {
-    let args = Array::from_iter([Object::from(CURSOR_COLOR_LUAEVAL_EXPR)]);
-    let value: Object = api::call_function("luaeval", args)?;
+    let value = installed_host_bridge()?.cursor_color_at_cursor()?;
     if value.is_nil() {
         return Ok(None);
     }
-    let parsed = string_from_object_typed("cursor_color_luaeval", value).map_err(|source| {
-        nvim_oxi::Error::from(cursor_parse_error("cursor_color_luaeval", source))
+    let parsed = string_from_object_typed("cursor_color_host_bridge", value).map_err(|source| {
+        nvim_oxi::Error::from(cursor_parse_error("cursor_color_host_bridge", source))
     })?;
     Ok(Some(parsed))
 }
@@ -447,8 +589,9 @@ pub(super) fn smear_outside_cmd_row(corners: &[Point; 4]) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BufferCursorRead, apply_conceal_delta, command_row_from_dimensions, parse_screenpos_cell,
-        screen_cell_to_point, should_use_real_cmdline_cursor,
+        BufferCursorRead, ConcealRegion, apply_conceal_delta, command_row_from_dimensions,
+        conceal_delta_for_regions, concealcursor_allows_mode, merge_conceal_region,
+        parse_screenpos_cell, screen_cell_to_point, should_use_real_cmdline_cursor,
     };
     use nvim_oxi::{Dictionary, Object};
 
@@ -459,6 +602,20 @@ mod tests {
         dict.insert("endcol", Object::from(endcol));
         dict.insert("curscol", Object::from(curscol));
         Object::from(dict)
+    }
+
+    fn conceal_region(
+        start_col1: i64,
+        end_col1: i64,
+        match_id: i64,
+        replacement_width: i64,
+    ) -> ConcealRegion {
+        ConcealRegion {
+            start_col1,
+            end_col1,
+            match_id,
+            replacement_width,
+        }
     }
 
     #[test]
@@ -490,6 +647,60 @@ mod tests {
         let adjusted = apply_conceal_delta((2, 38), 5);
 
         assert_eq!(adjusted, (2.0, 33.0));
+    }
+
+    #[test]
+    fn merge_conceal_region_merges_adjacent_cells_with_same_match_and_width() {
+        let mut regions = Vec::new();
+
+        merge_conceal_region(&mut regions, 3, 17, 1);
+        merge_conceal_region(&mut regions, 4, 17, 1);
+        merge_conceal_region(&mut regions, 7, 18, 0);
+
+        assert_eq!(
+            regions,
+            vec![conceal_region(3, 4, 17, 1), conceal_region(7, 7, 18, 0)],
+        );
+    }
+
+    #[test]
+    fn concealcursor_allows_expected_mode_families() {
+        assert!(concealcursor_allows_mode("nvc", "n"));
+        assert!(concealcursor_allows_mode("i", "R"));
+        assert!(concealcursor_allows_mode("v", "V"));
+        assert!(!concealcursor_allows_mode("", "n"));
+        assert!(!concealcursor_allows_mode("n", "c"));
+        assert!(!concealcursor_allows_mode("n", "t"));
+    }
+
+    #[test]
+    fn conceal_delta_for_regions_accumulates_same_row_drift() {
+        let regions = vec![conceal_region(2, 3, 11, 1), conceal_region(5, 5, 12, 0)];
+        let delta = conceal_delta_for_regions(6, (4, 10), &regions, |col1| {
+            Ok(match col1 {
+                2 => Some((4, 4)),
+                4 => Some((4, 8)),
+                5 => Some((4, 9)),
+                _ => None,
+            })
+        })
+        .expect("same-row conceal delta should parse");
+
+        assert_eq!(delta, Some(4));
+    }
+
+    #[test]
+    fn conceal_delta_for_regions_returns_none_when_region_wraps_rows() {
+        let regions = vec![conceal_region(2, 3, 11, 1)];
+        let delta = conceal_delta_for_regions(4, (5, 2), &regions, |col1| {
+            Ok(match col1 {
+                2 => Some((4, 80)),
+                _ => None,
+            })
+        })
+        .expect("wrapped conceal region should parse");
+
+        assert_eq!(delta, None);
     }
 
     #[test]
