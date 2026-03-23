@@ -15,6 +15,13 @@
 
     # activationScripts are executed every time you boot the system or run `nixos-rebuild` / `darwin-rebuild`.
     activationScripts.postActivation.text = ''
+      screenshot_dir="/Users/${username}/Pictures/Screenshots"
+      screenshot_group="$(/usr/bin/id -gn ${username})"
+
+      # The screencapture default does not create missing directories.
+      # Ensure the target exists and stays writable by the login user.
+      /usr/bin/install -d -m 0755 -o ${username} -g "$screenshot_group" "$screenshot_dir"
+
       # activateSettings -u will reload the settings from the database and apply them to the current session,
       # so we do not need to logout and login again to make the changes take effect.
       /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
@@ -48,6 +55,16 @@
         QuitMenuItem = true; # enable quit menu item
         ShowPathbar = true; # show path bar
         ShowStatusBar = true; # show status bar
+      };
+
+      screensaver = {
+        askForPassword = true;
+        askForPasswordDelay = 5;
+      };
+
+      screencapture = {
+        location = "~/Pictures/Screenshots";
+        type = "png";
       };
 
       # customize trackpad
@@ -195,15 +212,6 @@
           StageManagerHideWidgets = 0;
           StandardHideWidgets = 0;
         };
-        "com.apple.screensaver" = {
-          # Require password immediately after sleep or screen saver begins
-          askForPassword = 1;
-          askForPasswordDelay = 0;
-        };
-        "com.apple.screencapture" = {
-          location = "~/Pictures/Screenshots";
-          type = "png";
-        };
         "com.apple.AdLib" = {
           allowApplePersonalizedAdvertising = false;
         };
@@ -230,6 +238,8 @@
       swapLeftCommandAndLeftAlt = false;
     };
   };
+
+  power.sleep.display = 60;
 
   # Add ability to used TouchID for sudo authentication
   security.pam.services.sudo_local.touchIdAuth = true;
