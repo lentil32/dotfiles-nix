@@ -279,7 +279,7 @@ mod tests {
     use super::super::SAMPLE_Q12_SCALE;
     use super::super::TailBand;
     use super::super::compile_field;
-    use super::super::compile_field_reference;
+    use super::super::compile_field_reference_with_scratch;
     use super::super::intensity_q16;
     use super::super::q16_from_non_negative;
     use super::super::simulation_step_ms;
@@ -293,6 +293,13 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
     use std::collections::VecDeque;
+
+    fn compile_field_reference(
+        cache: &LatentFieldCache,
+    ) -> BTreeMap<(i64, i64), super::super::CompiledCell> {
+        let mut scratch = super::super::CompileScratch::default();
+        compile_field_reference_with_scratch(cache, &mut scratch)
+    }
 
     fn fully_covered_tile() -> MicroTile {
         MicroTile {

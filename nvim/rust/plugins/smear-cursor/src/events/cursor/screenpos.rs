@@ -6,7 +6,6 @@ use super::conceal::cursor_position_sync_for_raw_screenpos;
 use super::conceal::resolve_buffer_cursor_position;
 use super::cursor_parse_error;
 use crate::core::effect::ProbePolicy;
-use crate::core::effect::ProbeQuality;
 use crate::core::state::CursorPositionSync;
 use crate::events::logging::trace_lazy;
 use crate::events::runtime::record_conceal_raw_screenpos_fallback;
@@ -367,7 +366,7 @@ pub(crate) fn cursor_position_for_mode(
         window,
         mode,
         smear_to_cmd,
-        ProbePolicy::new(ProbeQuality::Exact),
+        ProbePolicy::exact(),
     )
     .map(CursorPositionRead::position)
 }
@@ -413,173 +412,238 @@ mod tests {
     use super::parse_screenpos_cell;
     use super::screen_cell_to_point;
     use super::should_use_real_cmdline_cursor;
-    use crate::core::effect::CursorColorFallbackMode;
-    use crate::core::effect::CursorColorReuseMode;
-    use crate::core::effect::CursorPositionProbeMode;
     use crate::core::effect::ProbePolicy;
     use crate::core::effect::ProbeQuality;
     use crate::core::state::CursorPositionSync;
+    use crate::test_support::proptest::pure_config;
     use nvim_oxi::Dictionary;
     use nvim_oxi::Object;
-    use pretty_assertions::assert_eq;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
 
-    fn screenpos_object(row: i64, col: i64, endcol: i64, curscol: i64) -> Object {
+    fn screenpos_object(
+        row: Option<i64>,
+        col: Option<i64>,
+        endcol: Option<i64>,
+        curscol: Option<i64>,
+    ) -> Object {
         let mut dict = Dictionary::new();
-        dict.insert("row", Object::from(row));
-        dict.insert("col", Object::from(col));
-        dict.insert("endcol", Object::from(endcol));
-        dict.insert("curscol", Object::from(curscol));
+        if let Some(row) = row {
+            dict.insert("row", Object::from(row));
+        }
+        if let Some(col) = col {
+            dict.insert("col", Object::from(col));
+        }
+        if let Some(endcol) = endcol {
+            dict.insert("endcol", Object::from(endcol));
+        }
+        if let Some(curscol) = curscol {
+            dict.insert("curscol", Object::from(curscol));
+        }
         Object::from(dict)
     }
 
-    #[test]
-    fn parse_screenpos_cell_uses_first_screen_column() {
-        let position =
-            parse_screenpos_cell(screenpos_object(4, 3, 8, 8)).expect("screenpos should parse");
-
-        assert_eq!(position, Some((4, 3)));
+    fn sync_strategy() -> BoxedStrategy<CursorPositionSync> {
+        prop_oneof![
+            Just(CursorPositionSync::Exact),
+            Just(CursorPositionSync::ConcealDeferred),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn parse_screenpos_cell_returns_none_for_hidden_or_invalid_positions() {
-        let hidden = parse_screenpos_cell(screenpos_object(0, 0, 0, 0))
-            .expect("hidden screenpos should parse");
-        let invalid = parse_screenpos_cell(Object::from(Dictionary::new()))
-            .expect("empty screenpos dictionary should map to none");
-
-        assert_eq!(hidden, None);
-        assert_eq!(invalid, None);
+    fn cmdtype_strategy() -> BoxedStrategy<String> {
+        vec(
+            prop_oneof![Just(':'), Just('/'), Just('a'), Just('0'), Just(' '),],
+            0..=4,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+        .boxed()
     }
 
-    #[test]
-    fn screen_cell_to_point_maps_screen_cells_to_points() {
-        assert_eq!(screen_cell_to_point((16, 33)), (16.0, 33.0));
+    #[derive(Clone, Copy, Debug)]
+    enum BufferReadCase {
+        Hidden,
+        Unadjusted,
+        ConcealAdjusted,
     }
 
-    #[test]
-    fn buffer_cursor_read_prefers_conceal_adjusted_position() {
-        let read = BufferCursorRead {
-            line: 2,
-            column: 37,
-            screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
-            raw_position: Some((2.0, 38.0)),
-            resolved_position: Some((2.0, 33.0)),
-            raw_position_sync: CursorPositionSync::Exact,
-        };
-
-        assert_eq!(read.selected_position(), Some((2.0, 33.0)));
-        assert_eq!(read.conceal_adjusted_position(), Some((2.0, 33.0)));
-        assert_eq!(read.selected_source(), "screenpos_conceal_adjusted");
+    fn buffer_read_case_strategy() -> BoxedStrategy<BufferReadCase> {
+        prop_oneof![
+            Just(BufferReadCase::Hidden),
+            Just(BufferReadCase::Unadjusted),
+            Just(BufferReadCase::ConcealAdjusted),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn buffer_cursor_read_reports_screenpos_source_when_unadjusted() {
-        let read = BufferCursorRead {
-            line: 2,
-            column: 37,
-            screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
-            raw_position: Some((2.0, 38.0)),
-            resolved_position: Some((2.0, 38.0)),
-            raw_position_sync: CursorPositionSync::Exact,
-        };
+    proptest! {
+        #![proptest_config(pure_config())]
 
-        assert_eq!(read.selected_position(), Some((2.0, 38.0)));
-        assert_eq!(read.conceal_adjusted_position(), None);
-        assert_eq!(read.selected_source(), "screenpos");
-        assert_eq!(
-            read.position_sync_for_probe_policy(ProbePolicy::new(ProbeQuality::FastMotion)),
-            CursorPositionSync::Exact,
-        );
-    }
+        #[test]
+        fn prop_parse_screenpos_cell_matches_visibility_and_field_presence_rules(
+            row in proptest::option::of(-4_i64..=8),
+            col in proptest::option::of(-4_i64..=8),
+        ) {
+            let result = parse_screenpos_cell(screenpos_object(row, col, None, None));
 
-    #[test]
-    fn buffer_cursor_read_keeps_raw_screenpos_for_fast_motion_probe_quality() {
-        let read = BufferCursorRead {
-            line: 2,
-            column: 37,
-            screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
-            raw_position: Some((2.0, 38.0)),
-            resolved_position: Some((2.0, 33.0)),
-            raw_position_sync: CursorPositionSync::ConcealDeferred,
-        };
+            match (row, col) {
+                (None, None) => prop_assert_eq!(result?, None),
+                (Some(row), Some(col)) if row > 0 && col > 0 => {
+                    prop_assert_eq!(result?, Some((row, col)));
+                }
+                (Some(_), Some(_)) => prop_assert_eq!(result?, None),
+                (Some(_), None) | (None, Some(_)) => prop_assert!(result.is_err()),
+            }
+        }
 
-        assert_eq!(
-            read.selected_position_for_probe_policy(ProbePolicy::new(ProbeQuality::FastMotion)),
-            Some((2.0, 38.0)),
-        );
-        assert_eq!(
-            read.selected_source_for_probe_policy(ProbePolicy::new(ProbeQuality::FastMotion)),
-            "screenpos_fast_path",
-        );
-        assert_eq!(
-            read.position_sync_for_probe_policy(ProbePolicy::new(ProbeQuality::FastMotion)),
-            CursorPositionSync::ConcealDeferred,
-        );
-        assert!(read.uses_raw_screenpos_fallback(ProbePolicy::new(ProbeQuality::FastMotion)));
-        assert!(!read.uses_raw_screenpos_fallback(ProbePolicy::new(ProbeQuality::Exact)));
-    }
+        #[test]
+        fn prop_screen_cell_to_point_preserves_row_and_col_coordinates(
+            row in any::<i64>(),
+            col in any::<i64>(),
+        ) {
+            prop_assert_eq!(screen_cell_to_point((row, col)), (row as f64, col as f64));
+        }
 
-    #[test]
-    fn buffer_cursor_read_keeps_conceal_adjustment_when_only_cursor_color_reuse_is_compatible() {
-        let read = BufferCursorRead {
-            line: 2,
-            column: 37,
-            screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
-            raw_position: Some((2.0, 38.0)),
-            resolved_position: Some((2.0, 33.0)),
-            raw_position_sync: CursorPositionSync::ConcealDeferred,
-        };
-        let exact_compatible_policy = ProbePolicy::from_modes(
-            CursorPositionProbeMode::Exact,
-            CursorColorReuseMode::CompatibleWithinLine,
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
+        #[test]
+        fn prop_buffer_cursor_read_exact_policy_prefers_resolved_positions_and_sources(
+            case in buffer_read_case_strategy(),
+            raw_row in 1_i64..256,
+            raw_col in 1_i64..256,
+            resolved_row in 1_i64..256,
+            resolved_col in 1_i64..256,
+            raw_position_sync in sync_strategy(),
+        ) {
+            let raw_position = match case {
+                BufferReadCase::Hidden => None,
+                BufferReadCase::Unadjusted | BufferReadCase::ConcealAdjusted => {
+                    Some((raw_row as f64, raw_col as f64))
+                }
+            };
+            let resolved_position = match case {
+                BufferReadCase::Hidden => None,
+                BufferReadCase::Unadjusted => raw_position,
+                BufferReadCase::ConcealAdjusted => Some(if raw_row == resolved_row && raw_col == resolved_col {
+                    (resolved_row as f64, resolved_col.saturating_add(1) as f64)
+                } else {
+                    (resolved_row as f64, resolved_col as f64)
+                }),
+            };
+            let expected_adjusted = match case {
+                BufferReadCase::ConcealAdjusted => Some(
+                    resolved_position.expect("conceal-adjusted reads keep a resolved position"),
+                ),
+                BufferReadCase::Hidden | BufferReadCase::Unadjusted => None,
+            };
+            let expected_source = match case {
+                BufferReadCase::Hidden => "none",
+                BufferReadCase::Unadjusted => "screenpos",
+                BufferReadCase::ConcealAdjusted => "screenpos_conceal_adjusted",
+            };
+            let read = BufferCursorRead {
+                line: 2,
+                column: 37,
+                screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
+                raw_position,
+                resolved_position,
+                raw_position_sync,
+            };
+            let exact_policy = ProbePolicy::new(ProbeQuality::Exact);
 
-        assert_eq!(
-            read.selected_position_for_probe_policy(exact_compatible_policy),
-            Some((2.0, 33.0)),
-        );
-        assert_eq!(
-            read.selected_source_for_probe_policy(exact_compatible_policy),
-            "screenpos_conceal_adjusted",
-        );
-        assert_eq!(
-            read.position_sync_for_probe_policy(exact_compatible_policy),
-            CursorPositionSync::Exact,
-        );
-    }
+            prop_assert_eq!(
+                read.selected_position_for_probe_policy(exact_policy),
+                resolved_position,
+            );
+            prop_assert_eq!(
+                read.position_sync_for_probe_policy(exact_policy),
+                CursorPositionSync::Exact,
+            );
+            prop_assert_eq!(
+                read.selected_source_for_probe_policy(exact_policy),
+                expected_source,
+            );
+            prop_assert!(!read.uses_raw_screenpos_fallback(exact_policy));
 
-    #[test]
-    fn buffer_cursor_read_can_defer_fast_motion_without_resolved_conceal_adjustment() {
-        let read = BufferCursorRead {
-            line: 2,
-            column: 37,
-            screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
-            raw_position: Some((2.0, 38.0)),
-            resolved_position: Some((2.0, 38.0)),
-            raw_position_sync: CursorPositionSync::ConcealDeferred,
-        };
+            prop_assert_eq!(read.selected_position(), resolved_position);
+            prop_assert_eq!(read.conceal_adjusted_position(), expected_adjusted);
+            prop_assert_eq!(read.selected_source(), expected_source);
+        }
 
-        assert_eq!(
-            read.selected_position_for_probe_policy(ProbePolicy::new(ProbeQuality::FastMotion)),
-            Some((2.0, 38.0)),
-        );
-        assert_eq!(
-            read.position_sync_for_probe_policy(ProbePolicy::new(ProbeQuality::FastMotion)),
-            CursorPositionSync::ConcealDeferred,
-        );
-        assert_eq!(read.conceal_adjusted_position(), None);
-    }
+        #[test]
+        fn prop_buffer_cursor_read_fast_motion_keeps_raw_screenpos_only_when_available(
+            case in buffer_read_case_strategy(),
+            raw_row in 1_i64..256,
+            raw_col in 1_i64..256,
+            resolved_row in 1_i64..256,
+            resolved_col in 1_i64..256,
+            raw_position_sync in sync_strategy(),
+        ) {
+            let raw_position = match case {
+                BufferReadCase::Hidden => None,
+                BufferReadCase::Unadjusted | BufferReadCase::ConcealAdjusted => {
+                    Some((raw_row as f64, raw_col as f64))
+                }
+            };
+            let resolved_position = match case {
+                BufferReadCase::Hidden => None,
+                BufferReadCase::Unadjusted => raw_position,
+                BufferReadCase::ConcealAdjusted => Some(if raw_row == resolved_row && raw_col == resolved_col {
+                    (resolved_row as f64, resolved_col.saturating_add(1) as f64)
+                } else {
+                    (resolved_row as f64, resolved_col as f64)
+                }),
+            };
+            let read = BufferCursorRead {
+                line: 2,
+                column: 37,
+                screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
+                raw_position,
+                resolved_position,
+                raw_position_sync,
+            };
+            let fast_motion_policy = ProbePolicy::new(ProbeQuality::FastMotion);
 
-    #[test]
-    fn command_row_from_dimensions_treats_cmdheight_zero_as_visible_bottom_row() {
-        assert_eq!(command_row_from_dimensions(24, 0), 24);
-        assert_eq!(command_row_from_dimensions(24, 2), 23);
-    }
+            prop_assert_eq!(
+                read.selected_position_for_probe_policy(fast_motion_policy),
+                raw_position.or(resolved_position),
+            );
+            prop_assert_eq!(
+                read.position_sync_for_probe_policy(fast_motion_policy),
+                if raw_position.is_some() {
+                    raw_position_sync
+                } else {
+                    CursorPositionSync::Exact
+                },
+            );
+            prop_assert_eq!(
+                read.selected_source_for_probe_policy(fast_motion_policy),
+                if raw_position.is_some() {
+                    "screenpos_fast_path"
+                } else {
+                    "none"
+                },
+            );
+            prop_assert_eq!(
+                read.uses_raw_screenpos_fallback(fast_motion_policy),
+                raw_position.is_some(),
+            );
+        }
 
-    #[test]
-    fn empty_command_type_uses_buffer_cursor_fallback() {
-        assert!(!should_use_real_cmdline_cursor(""));
-        assert!(should_use_real_cmdline_cursor(":"));
+        #[test]
+        fn prop_command_row_from_dimensions_matches_visible_cmdheight_math(
+            lines in any::<i64>(),
+            cmdheight in any::<i64>(),
+        ) {
+            prop_assert_eq!(
+                command_row_from_dimensions(lines, cmdheight),
+                lines.saturating_sub(cmdheight.max(1)).saturating_add(1),
+            );
+        }
+
+        #[test]
+        fn prop_should_use_real_cmdline_cursor_depends_only_on_cmdtype_emptiness(
+            cmdtype in cmdtype_strategy(),
+        ) {
+            prop_assert_eq!(should_use_real_cmdline_cursor(&cmdtype), !cmdtype.is_empty());
+        }
     }
 }

@@ -28,15 +28,9 @@ fn ribbon_support_preserves_sparse_bridge_continuity(slices: &[RibbonSlice]) -> 
     })
 }
 
-pub(in super::super) struct DecodedField {
+#[cfg(test)]
+pub(in super::super) struct DecodedFieldTrace {
     pub(in super::super) cells: BTreeMap<(i64, i64), DecodedCellState>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "decode path trace is exercised only by render-plan tests"
-        )
-    )]
     pub(in super::super) path: DecodePathTrace,
 }
 
@@ -232,14 +226,14 @@ pub(in super::super) fn solve_pairwise_fallback(
     solve_pairwise_fallback_with_scratch(cell_candidates, spatial_weight_q10, &mut scratch)
 }
 
-pub(in super::super) fn decode_compiled_field_with_solver(
+fn decode_compiled_field_with_solver_and_path(
     compiled: &CompiledField,
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
     frame: &RenderFrame,
     scratch: &mut SolverScratch,
     solve_ribbon: impl FnOnce(&[RibbonSlice], u32) -> Option<Vec<SliceState>>,
-) -> DecodedField {
+) -> (BTreeMap<(i64, i64), DecodedCellState>, DecodePathTrace) {
     let mut baseline = decode_locally(cell_candidates);
     let spatial_weight_q10 = sanitize_spatial_weight_q10(frame);
     let slices = build_ribbon_slices_with_compiled_and_scratch(
@@ -250,45 +244,49 @@ pub(in super::super) fn decode_compiled_field_with_solver(
         scratch,
     );
     match select_decode_path(&baseline, &slices, spatial_weight_q10) {
-        DecodePathTrace::Baseline => {
-            return DecodedField {
-                cells: baseline,
-                path: DecodePathTrace::Baseline,
-            };
-        }
+        DecodePathTrace::Baseline => return (baseline, DecodePathTrace::Baseline),
         path @ (DecodePathTrace::PairwiseFallbackDisconnected
         | DecodePathTrace::PairwiseFallbackOversized) => {
             // preserve full slice support until decode-path selection so oversized ribbon
             // support can take the explicit fallback path instead of silently collapsing to local
             // decode.
-            return DecodedField {
-                cells: solve_pairwise_fallback_with_scratch(
-                    cell_candidates,
-                    spatial_weight_q10,
-                    scratch,
-                ),
+            return (
+                solve_pairwise_fallback_with_scratch(cell_candidates, spatial_weight_q10, scratch),
                 path,
-            };
+            );
         }
         DecodePathTrace::RibbonDp => {}
         DecodePathTrace::RibbonDpSolveFailed => {}
     }
 
     let Some(path) = solve_ribbon(&slices, spatial_weight_q10) else {
-        return DecodedField {
-            cells: solve_pairwise_fallback_with_scratch(
-                cell_candidates,
-                spatial_weight_q10,
-                scratch,
-            ),
-            path: DecodePathTrace::RibbonDpSolveFailed,
-        };
+        return (
+            solve_pairwise_fallback_with_scratch(cell_candidates, spatial_weight_q10, scratch),
+            DecodePathTrace::RibbonDpSolveFailed,
+        );
     };
     merge_ribbon_assignments(&mut baseline, &slices, &path, scratch);
-    DecodedField {
-        cells: baseline,
-        path: DecodePathTrace::RibbonDp,
-    }
+    (baseline, DecodePathTrace::RibbonDp)
+}
+
+#[cfg(test)]
+pub(in super::super) fn decode_compiled_field_with_solver(
+    compiled: &CompiledField,
+    cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
+    centerline: &[CenterSample],
+    frame: &RenderFrame,
+    scratch: &mut SolverScratch,
+    solve_ribbon: impl FnOnce(&[RibbonSlice], u32) -> Option<Vec<SliceState>>,
+) -> DecodedFieldTrace {
+    let (cells, path) = decode_compiled_field_with_solver_and_path(
+        compiled,
+        cell_candidates,
+        centerline,
+        frame,
+        scratch,
+        solve_ribbon,
+    );
+    DecodedFieldTrace { cells, path }
 }
 
 #[cfg(test)]
@@ -296,7 +294,7 @@ pub(in super::super) fn decode_compiled_field_trace(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
     frame: &RenderFrame,
-) -> DecodedField {
+) -> DecodedFieldTrace {
     let compiled = CompiledField::default();
     let mut scratch = SolverScratch::default();
     decode_compiled_field_trace_with_compiled_and_scratch(
@@ -309,30 +307,13 @@ pub(in super::super) fn decode_compiled_field_trace(
 }
 
 #[cfg(test)]
-fn decode_compiled_field_trace_with_compiled(
-    compiled: &BTreeMap<(i64, i64), CompiledCell>,
-    cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
-    centerline: &[CenterSample],
-    frame: &RenderFrame,
-) -> DecodedField {
-    let compiled = CompiledField::Reference(compiled.clone());
-    let mut scratch = SolverScratch::default();
-    decode_compiled_field_trace_with_compiled_and_scratch(
-        &compiled,
-        cell_candidates,
-        centerline,
-        frame,
-        &mut scratch,
-    )
-}
-
 pub(in super::super) fn decode_compiled_field_trace_with_compiled_and_scratch(
     compiled: &CompiledField,
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
     frame: &RenderFrame,
     scratch: &mut SolverScratch,
-) -> DecodedField {
+) -> DecodedFieldTrace {
     decode_compiled_field_with_solver(
         compiled,
         cell_candidates,
@@ -343,11 +324,35 @@ pub(in super::super) fn decode_compiled_field_trace_with_compiled_and_scratch(
     )
 }
 
+pub(in super::super) fn decode_compiled_field_with_compiled_and_scratch(
+    compiled: &CompiledField,
+    cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
+    centerline: &[CenterSample],
+    frame: &RenderFrame,
+    scratch: &mut SolverScratch,
+) -> BTreeMap<(i64, i64), DecodedCellState> {
+    decode_compiled_field_with_solver_and_path(
+        compiled,
+        cell_candidates,
+        centerline,
+        frame,
+        scratch,
+        solve_ribbon_dp,
+    )
+    .0
+}
+
 #[cfg(test)]
 pub(in super::super) fn decode_compiled_field(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
     frame: &RenderFrame,
 ) -> BTreeMap<(i64, i64), DecodedCellState> {
-    decode_compiled_field_trace(cell_candidates, centerline, frame).cells
+    decode_compiled_field_with_compiled_and_scratch(
+        &CompiledField::default(),
+        cell_candidates,
+        centerline,
+        frame,
+        &mut SolverScratch::default(),
+    )
 }

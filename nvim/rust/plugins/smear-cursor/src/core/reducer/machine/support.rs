@@ -1,5 +1,6 @@
 use crate::core::effect::ApplyProposalEffect;
 use crate::core::effect::ApplyRenderCleanupEffect;
+use crate::core::effect::CursorColorFallback;
 use crate::core::effect::CursorPositionReadPolicy;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
@@ -21,7 +22,6 @@ use crate::core::runtime_reducer::render_hard_cleanup_delay_ms;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
-use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemand;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
@@ -148,12 +148,15 @@ fn cursor_position_read_policy(state: &CoreState) -> CursorPositionReadPolicy {
     CursorPositionReadPolicy::new(state.runtime().config.smear_to_cmd)
 }
 
-fn retained_cursor_color_sample(
+pub(super) fn retained_cursor_color_fallback(
     observation: Option<&ObservationSnapshot>,
-) -> Option<CursorColorSample> {
-    observation
-        .and_then(ObservationSnapshot::cursor_color)
-        .map(CursorColorSample::new)
+) -> Option<CursorColorFallback> {
+    let observation = observation?;
+    let sample = observation
+        .cursor_color()
+        .map(crate::core::state::CursorColorSample::new)?;
+    let witness = observation.basis().cursor_color_witness()?.clone();
+    Some(CursorColorFallback::new(sample, witness))
 }
 
 pub(super) fn exact_boundary_refresh_required(state: &CoreState) -> bool {
@@ -210,12 +213,12 @@ fn observation_runtime_context(
     state: &CoreState,
     request: &ObservationRequest,
 ) -> ObservationRuntimeContext {
-    let cursor_color_fallback_sample = retained_cursor_color_sample(state.retained_observation());
+    let cursor_color_fallback = retained_cursor_color_fallback(state.retained_observation());
     let buffer_perf_class = request.demand().buffer_perf_class();
     let probe_policy = ProbePolicy::for_demand(
         request.demand().kind(),
         buffer_perf_class,
-        cursor_color_fallback_sample.is_some(),
+        cursor_color_fallback.is_some(),
     );
     ObservationRuntimeContext::new(
         cursor_position_read_policy(state),
@@ -258,23 +261,23 @@ fn request_probe(
     background_chunk: Option<crate::core::state::BackgroundProbeChunk>,
     demand_kind: ExternalDemandKind,
     buffer_perf_class: BufferPerfClass,
-    cursor_color_fallback_sample: Option<CursorColorSample>,
+    cursor_color_fallback: Option<CursorColorFallback>,
 ) -> Effect {
     let probe_policy = ProbePolicy::for_demand(
         demand_kind,
         buffer_perf_class,
-        cursor_color_fallback_sample.is_some(),
+        cursor_color_fallback.is_some(),
     );
     Effect::RequestProbe(RequestProbeEffect {
-        observation_basis,
+        observation_basis: Box::new(observation_basis),
         probe_request_id,
         kind,
         cursor_position_policy: cursor_position_read_policy(state),
         buffer_perf_class,
         probe_policy,
         background_chunk,
-        cursor_color_fallback_sample: if matches!(kind, ProbeKind::CursorColor) {
-            cursor_color_fallback_sample
+        cursor_color_fallback: if matches!(kind, ProbeKind::CursorColor) {
+            cursor_color_fallback
         } else {
             None
         },
@@ -297,7 +300,7 @@ pub(super) fn probe_requests_for(
 pub(super) fn next_pending_probe_effect(
     state: &CoreState,
     observation: &ObservationSnapshot,
-    cursor_color_fallback_sample: Option<CursorColorSample>,
+    cursor_color_fallback: Option<CursorColorFallback>,
 ) -> Option<Effect> {
     let basis = observation.basis();
     let demand_kind = observation.request().demand().kind();
@@ -313,7 +316,7 @@ pub(super) fn next_pending_probe_effect(
             None,
             demand_kind,
             buffer_perf_class,
-            cursor_color_fallback_sample,
+            cursor_color_fallback,
         ));
     }
 
@@ -330,7 +333,7 @@ pub(super) fn next_pending_probe_effect(
                 .and_then(crate::core::state::BackgroundProbeProgress::next_chunk),
             demand_kind,
             buffer_perf_class,
-            cursor_color_fallback_sample,
+            cursor_color_fallback,
         ));
     }
 
@@ -383,6 +386,7 @@ pub(super) fn ingress_cursor_presentation_effect(
             .map_or(IngressCursorPresentationEffect::HideCursor, |cell| {
                 IngressCursorPresentationEffect::HideCursorAndPrepaint {
                     cell,
+                    shape: request.prepaint_shape(),
                     zindex: runtime.config.windows_zindex,
                 }
             }),

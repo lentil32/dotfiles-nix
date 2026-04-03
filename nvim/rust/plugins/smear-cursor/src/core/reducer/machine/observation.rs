@@ -12,6 +12,7 @@ use super::support::probe_requests_for;
 use super::support::record_event_loop_metric;
 use super::support::request_observation_base;
 use super::support::reset_recovery_attempt;
+use super::support::retained_cursor_color_fallback;
 use super::support::schedule_timer_with_delay;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
@@ -25,7 +26,6 @@ use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::BackgroundProbePlan;
 use crate::core::state::BackgroundProbeUpdate;
 use crate::core::state::CoreState;
-use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemand;
 use crate::core::state::ObservationRequest;
 use crate::core::state::ObservationSnapshot;
@@ -90,7 +90,7 @@ pub(super) fn reduce_initialize(state: CoreState, payload: InitializeEvent) -> T
         return Transition::stay_owned(state);
     }
 
-    Transition::new(state.initialize(), Vec::new())
+    Transition::new(state.into_primed(), Vec::new())
 }
 
 fn delayed_cursor_ingress_transition(state: CoreState, observed_at: Millis) -> Option<Transition> {
@@ -226,10 +226,7 @@ pub(super) fn reduce_observation_base_collected(
     let next_cursor = basis.cursor_position().or_else(|| state.last_cursor());
     let observed_at = basis.observed_at();
     let previous_observation = state.retained_observation().cloned();
-    let cursor_color_fallback_sample = previous_observation
-        .as_ref()
-        .and_then(ObservationSnapshot::cursor_color)
-        .map(CursorColorSample::new);
+    let cursor_color_fallback = retained_cursor_color_fallback(previous_observation.as_ref());
     let next_observation = ObservationSnapshot::new(request, basis, motion);
     let next_observation = if let Some(plan) = background_probe_plan_for_observation(
         &state,
@@ -244,7 +241,7 @@ pub(super) fn reduce_observation_base_collected(
     let next_observation = complete_mode_scoped_cursor_color_probe(&state, next_observation);
     let mut base_state = reset_recovery_attempt(state.with_last_cursor(next_cursor));
     let next_probe =
-        next_pending_probe_effect(&base_state, &next_observation, cursor_color_fallback_sample);
+        next_pending_probe_effect(&base_state, &next_observation, cursor_color_fallback);
     let Some(next_probe) = next_probe else {
         return complete_observation(base_state, next_observation);
     };
@@ -506,10 +503,9 @@ pub(super) fn reduce_probe_reported(state: CoreState, payload: ProbeReportedEven
             if !observing.set_active_observation(Some((*observation).clone())) {
                 return Transition::stay_owned(observing);
             }
-            let cursor_color_fallback_sample =
-                observation.cursor_color().map(CursorColorSample::new);
+            let cursor_color_fallback = retained_cursor_color_fallback(Some(&observation));
             if let Some(next_probe) =
-                next_pending_probe_effect(&observing, &observation, cursor_color_fallback_sample)
+                next_pending_probe_effect(&observing, &observation, cursor_color_fallback)
             {
                 return Transition::new(observing, vec![next_probe]);
             }

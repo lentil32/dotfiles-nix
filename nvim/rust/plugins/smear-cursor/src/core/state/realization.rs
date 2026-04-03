@@ -538,20 +538,26 @@ impl InFlightProposal {
 #[cfg(test)]
 mod tests {
     use super::AnimationSchedule;
+    use super::DegradedApplyMetrics;
     use super::InFlightProposal;
-    use super::ProposalExecution;
     use super::ProposalShapeError;
     use super::RealizationClear;
+    use super::RealizationDivergence;
     use super::RealizationDraw;
     use super::RealizationFailure;
+    use super::RealizationLedger;
+    use super::RealizationPlan;
     use crate::core::realization::LogicalRaster;
+    use crate::core::runtime_reducer::CursorVisibilityEffect;
     use crate::core::runtime_reducer::RenderAllocationPolicy;
     use crate::core::runtime_reducer::RenderCleanupAction;
     use crate::core::runtime_reducer::RenderSideEffects;
+    use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::state::PatchBasis;
     use crate::core::state::ProjectionSnapshot;
     use crate::core::state::ProjectionWitness;
     use crate::core::state::ScenePatch;
+    use crate::core::state::ScenePatchKind;
     use crate::core::types::CursorCol;
     use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
@@ -562,13 +568,22 @@ mod tests {
     use crate::core::types::SceneRevision;
     use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::CellOp;
+    use crate::test_support::proptest::pure_config;
+    use crate::types::CursorCellShape;
+    use proptest::prelude::*;
     use std::sync::Arc;
 
-    fn projection_snapshot() -> ProjectionSnapshot {
+    #[derive(Clone, Debug)]
+    struct PatchFixture {
+        patch: ScenePatch,
+        expected_target: Option<ProjectionSnapshot>,
+    }
+
+    fn projection_snapshot_with_ingress_seq(ingress_seq: u64) -> ProjectionSnapshot {
         ProjectionSnapshot::new(
             ProjectionWitness::new(
                 SceneRevision::INITIAL,
-                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                ObservationId::from_ingress_seq(IngressSeq::new(ingress_seq)),
                 ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
                 ProjectorRevision::CURRENT,
             ),
@@ -621,127 +636,377 @@ mod tests {
         )
     }
 
-    #[test]
-    fn draw_proposal_rejects_clear_patch() {
-        let patch = ScenePatch::derive(PatchBasis::new(Some(projection_snapshot()), None));
-
-        let result = ProposalExecution::draw(patch, draw_plan());
-
-        assert_eq!(result, Err(ProposalShapeError::DrawReachedClearPatch));
+    fn render_cleanup_action_strategy() -> BoxedStrategy<RenderCleanupAction> {
+        prop_oneof![
+            Just(RenderCleanupAction::NoAction),
+            Just(RenderCleanupAction::Schedule),
+            Just(RenderCleanupAction::Invalidate),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn draw_proposal_keeps_target_projection_when_patch_kind_is_noop() {
-        let projection = projection_snapshot();
-        let patch = ScenePatch::derive(PatchBasis::new(
-            Some(projection.clone()),
-            Some(projection.clone()),
-        ));
+    fn target_cell_presentation_strategy() -> BoxedStrategy<TargetCellPresentation> {
+        prop_oneof![
+            Just(TargetCellPresentation::None),
+            Just(TargetCellPresentation::OverlayCursorCell(
+                CursorCellShape::Block
+            )),
+            Just(TargetCellPresentation::OverlayCursorCell(
+                CursorCellShape::VerticalBar,
+            )),
+            Just(TargetCellPresentation::OverlayCursorCell(
+                CursorCellShape::HorizontalBar,
+            )),
+        ]
+        .boxed()
+    }
 
-        let proposal = InFlightProposal::draw(
-            ProposalId::new(1),
-            patch,
-            draw_plan(),
-            RenderCleanupAction::NoAction,
-            RenderSideEffects::default(),
-            AnimationSchedule::Idle,
+    fn cursor_visibility_effect_strategy() -> BoxedStrategy<CursorVisibilityEffect> {
+        prop_oneof![
+            Just(CursorVisibilityEffect::Keep),
+            Just(CursorVisibilityEffect::Hide),
+            Just(CursorVisibilityEffect::Show),
+        ]
+        .boxed()
+    }
+
+    fn render_side_effects_strategy() -> BoxedStrategy<RenderSideEffects> {
+        (
+            any::<bool>(),
+            any::<bool>(),
+            target_cell_presentation_strategy(),
+            cursor_visibility_effect_strategy(),
+            any::<bool>(),
         )
-        .expect("draw proposal with noop patch should keep the target projection");
-
-        let Some((target_projection, _)) = proposal.execution().draw_realization() else {
-            panic!("expected draw proposal execution");
-        };
-        assert_eq!(target_projection, &projection);
+            .prop_map(
+                |(
+                    redraw_after_draw_if_cmdline,
+                    redraw_after_clear_if_cmdline,
+                    target_cell_presentation,
+                    cursor_visibility,
+                    allow_real_cursor_updates,
+                )| RenderSideEffects {
+                    redraw_after_draw_if_cmdline,
+                    redraw_after_clear_if_cmdline,
+                    target_cell_presentation,
+                    cursor_visibility,
+                    allow_real_cursor_updates,
+                },
+            )
+            .boxed()
     }
 
-    #[test]
-    fn clear_proposal_rejects_draw_patch() {
-        let patch = ScenePatch::derive(PatchBasis::new(None, Some(projection_snapshot())));
-
-        let result = InFlightProposal::clear(
-            ProposalId::new(1),
-            patch,
-            RealizationClear::new(12),
-            RenderCleanupAction::NoAction,
-            RenderSideEffects::default(),
-            AnimationSchedule::Idle,
-        );
-
-        assert_eq!(result, Err(ProposalShapeError::ClearReachedDrawPatch));
+    fn animation_schedule_strategy() -> BoxedStrategy<AnimationSchedule> {
+        (any::<bool>(), proptest::option::of(any::<u64>()))
+            .prop_map(|(should_schedule_next_animation, next_animation_at_ms)| {
+                AnimationSchedule::from_parts(
+                    should_schedule_next_animation,
+                    next_animation_at_ms.map(Millis::new),
+                )
+            })
+            .boxed()
     }
 
-    #[test]
-    fn noop_proposal_rejects_clear_patch() {
-        let patch = ScenePatch::derive(PatchBasis::new(Some(projection_snapshot()), None));
-
-        let result = InFlightProposal::noop(
-            ProposalId::new(1),
-            patch,
-            RenderCleanupAction::NoAction,
-            RenderSideEffects::default(),
-            AnimationSchedule::Idle,
-        );
-
-        assert_eq!(result, Err(ProposalShapeError::NoopReachedClearPatch));
+    fn proposal_patch_fixture_strategy() -> BoxedStrategy<PatchFixture> {
+        prop_oneof![
+            Just(PatchFixture {
+                patch: ScenePatch::derive(PatchBasis::new(None, None)),
+                expected_target: None,
+            }),
+            (1_u64..=u16::MAX as u64).prop_map(|seq| {
+                let target = projection_snapshot_with_ingress_seq(seq);
+                PatchFixture {
+                    patch: ScenePatch::derive(PatchBasis::new(
+                        Some(target.clone()),
+                        Some(target.clone()),
+                    )),
+                    expected_target: Some(target),
+                }
+            }),
+            (1_u64..=u16::MAX as u64).prop_map(|seq| PatchFixture {
+                patch: ScenePatch::derive(PatchBasis::new(
+                    Some(projection_snapshot_with_ingress_seq(seq)),
+                    None,
+                )),
+                expected_target: None,
+            }),
+            (1_u64..=u16::MAX as u64).prop_map(|seq| {
+                let target = projection_snapshot_with_ingress_seq(seq);
+                PatchFixture {
+                    patch: ScenePatch::derive(PatchBasis::new(None, Some(target.clone()))),
+                    expected_target: Some(target),
+                }
+            }),
+            (
+                (1_u64..=u16::MAX as u64),
+                (u16::MAX as u64 + 1)..=(u16::MAX as u64 * 2)
+            )
+                .prop_map(|(current_seq, target_seq)| {
+                    let target = projection_snapshot_with_ingress_seq(target_seq);
+                    PatchFixture {
+                        patch: ScenePatch::derive(PatchBasis::new(
+                            Some(projection_snapshot_with_ingress_seq(current_seq)),
+                            Some(target.clone()),
+                        )),
+                        expected_target: Some(target),
+                    }
+                }),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn failure_proposal_preserves_failure_without_shell_shape_validation() {
-        let failure = RealizationFailure::new(
-            crate::core::state::ApplyFailureKind::MissingProjection,
-            crate::core::state::RealizationDivergence::ShellStateUnknown,
-        );
-        let proposal = InFlightProposal::failure(
-            ProposalId::new(1),
-            ScenePatch::derive(PatchBasis::new(None, None)),
-            failure,
-            RenderCleanupAction::NoAction,
-            RenderSideEffects::default(),
-            AnimationSchedule::Idle,
-        );
-
-        assert_eq!(proposal.failure_reason(), Some(failure));
+    fn realization_divergence_strategy() -> BoxedStrategy<RealizationDivergence> {
+        prop_oneof![
+            Just(RealizationDivergence::ShellStateUnknown),
+            (
+                0_usize..=64_usize,
+                0_usize..=64_usize,
+                0_usize..=64_usize,
+                0_usize..=64_usize,
+                0_usize..=64_usize,
+                0_usize..=64_usize,
+                0_usize..=64_usize,
+            )
+                .prop_map(
+                    |(
+                        planned_ops,
+                        applied_ops,
+                        skipped_ops_capacity,
+                        reuse_failed_missing_window,
+                        reuse_failed_reconfigure,
+                        reuse_failed_missing_buffer,
+                        windows_recovered,
+                    )| {
+                        RealizationDivergence::ApplyMetrics(DegradedApplyMetrics::new(
+                            planned_ops,
+                            applied_ops,
+                            skipped_ops_capacity,
+                            reuse_failed_missing_window,
+                            reuse_failed_reconfigure,
+                            reuse_failed_missing_buffer,
+                            windows_recovered,
+                        ))
+                    },
+                ),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn acknowledge_without_target_keeps_the_ledger_cleared() {
-        assert_eq!(
-            crate::core::state::RealizationLedger::acknowledge(None),
-            crate::core::state::RealizationLedger::Cleared
-        );
+    fn realization_ledger_strategy() -> BoxedStrategy<RealizationLedger> {
+        prop_oneof![
+            Just(RealizationLedger::Cleared),
+            (1_u64..=u16::MAX as u64).prop_map(|seq| RealizationLedger::Consistent {
+                acknowledged: projection_snapshot_with_ingress_seq(seq),
+            }),
+            (
+                proptest::option::of(1_u64..=u16::MAX as u64),
+                realization_divergence_strategy(),
+            )
+                .prop_map(|(last_consistent_seq, divergence)| {
+                    RealizationLedger::Diverged {
+                        last_consistent: last_consistent_seq
+                            .map(projection_snapshot_with_ingress_seq),
+                        divergence,
+                    }
+                }),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn cleanup_applied_from_consistent_moves_the_acknowledged_snapshot_into_divergence() {
-        let acknowledged = projection_snapshot();
+    proptest! {
+        #![proptest_config(pure_config())]
 
-        let cleaned = crate::core::state::RealizationLedger::Consistent {
-            acknowledged: acknowledged.clone(),
-        }
-        .cleanup_applied();
+        #[test]
+        fn prop_proposal_constructors_accept_only_compatible_patch_shapes(
+            patch_fixture in proposal_patch_fixture_strategy(),
+            proposal_id in any::<u64>().prop_map(ProposalId::new),
+            cleanup_action in render_cleanup_action_strategy(),
+            side_effects in render_side_effects_strategy(),
+            animation_schedule in animation_schedule_strategy(),
+            max_kept_windows in 0_usize..=64_usize,
+        ) {
+            let draw_realization = draw_plan();
+            let clear_realization = RealizationClear::new(max_kept_windows);
 
-        assert_eq!(
-            cleaned,
-            crate::core::state::RealizationLedger::Diverged {
-                last_consistent: Some(acknowledged),
-                divergence: crate::core::state::RealizationDivergence::ShellStateUnknown,
+            let draw_result = InFlightProposal::draw(
+                proposal_id,
+                patch_fixture.patch.clone(),
+                draw_realization.clone(),
+                cleanup_action,
+                side_effects,
+                animation_schedule,
+            );
+
+            match (patch_fixture.patch.kind(), patch_fixture.expected_target.as_ref()) {
+                (ScenePatchKind::Clear, _) => {
+                    prop_assert_eq!(draw_result, Err(ProposalShapeError::DrawReachedClearPatch));
+                }
+                (ScenePatchKind::Noop | ScenePatchKind::Replace, None) => {
+                    prop_assert_eq!(draw_result, Err(ProposalShapeError::DrawMissingTargetProjection));
+                }
+                (ScenePatchKind::Noop | ScenePatchKind::Replace, Some(expected_target)) => {
+                    let proposal = draw_result.expect("draw-compatible patch fixture should succeed");
+                    prop_assert_eq!(proposal.proposal_id(), proposal_id);
+                    prop_assert_eq!(proposal.patch(), &patch_fixture.patch);
+                    prop_assert_eq!(proposal.cleanup_action(), cleanup_action);
+                    prop_assert_eq!(proposal.side_effects(), side_effects);
+                    prop_assert_eq!(proposal.animation_schedule(), animation_schedule);
+                    prop_assert_eq!(
+                        proposal.realization(),
+                        RealizationPlan::Draw(draw_realization.clone())
+                    );
+                    prop_assert_eq!(proposal.failure_reason(), None);
+
+                    let Some((target_projection, realization)) =
+                        proposal.execution().draw_realization()
+                    else {
+                        prop_assert!(false, "draw proposal should expose draw realization");
+                        return Ok(());
+                    };
+                    prop_assert_eq!(target_projection, expected_target);
+                    prop_assert_eq!(realization, &draw_realization);
+                }
             }
-        );
-    }
 
-    #[test]
-    fn animation_schedule_from_parts_preserves_idle_default_and_deadline_states() {
-        assert_eq!(
-            AnimationSchedule::from_parts(false, Some(Millis::new(9))),
-            AnimationSchedule::Idle
-        );
-        assert_eq!(
-            AnimationSchedule::from_parts(true, None),
-            AnimationSchedule::DefaultDelay
-        );
-        assert_eq!(
-            AnimationSchedule::from_parts(true, Some(Millis::new(11))),
-            AnimationSchedule::Deadline(Millis::new(11))
-        );
+            let clear_result = InFlightProposal::clear(
+                proposal_id,
+                patch_fixture.patch.clone(),
+                clear_realization,
+                cleanup_action,
+                side_effects,
+                animation_schedule,
+            );
+
+            match patch_fixture.patch.kind() {
+                ScenePatchKind::Replace => {
+                    prop_assert_eq!(clear_result, Err(ProposalShapeError::ClearReachedDrawPatch));
+                }
+                ScenePatchKind::Noop | ScenePatchKind::Clear => {
+                    let proposal = clear_result.expect("clear-compatible patch fixture should succeed");
+                    prop_assert_eq!(proposal.proposal_id(), proposal_id);
+                    prop_assert_eq!(proposal.patch(), &patch_fixture.patch);
+                    prop_assert_eq!(proposal.cleanup_action(), cleanup_action);
+                    prop_assert_eq!(proposal.side_effects(), side_effects);
+                    prop_assert_eq!(proposal.animation_schedule(), animation_schedule);
+                    prop_assert_eq!(proposal.realization(), RealizationPlan::Clear(clear_realization));
+                    prop_assert_eq!(proposal.failure_reason(), None);
+                }
+            }
+
+            let noop_result = InFlightProposal::noop(
+                proposal_id,
+                patch_fixture.patch.clone(),
+                cleanup_action,
+                side_effects,
+                animation_schedule,
+            );
+
+            match patch_fixture.patch.kind() {
+                ScenePatchKind::Replace => {
+                    prop_assert_eq!(noop_result, Err(ProposalShapeError::NoopReachedDrawPatch));
+                }
+                ScenePatchKind::Clear => {
+                    prop_assert_eq!(noop_result, Err(ProposalShapeError::NoopReachedClearPatch));
+                }
+                ScenePatchKind::Noop => {
+                    let proposal = noop_result.expect("noop patch fixture should succeed");
+                    prop_assert_eq!(proposal.proposal_id(), proposal_id);
+                    prop_assert_eq!(proposal.patch(), &patch_fixture.patch);
+                    prop_assert_eq!(proposal.cleanup_action(), cleanup_action);
+                    prop_assert_eq!(proposal.side_effects(), side_effects);
+                    prop_assert_eq!(proposal.animation_schedule(), animation_schedule);
+                    prop_assert_eq!(proposal.realization(), RealizationPlan::Noop);
+                    prop_assert_eq!(proposal.failure_reason(), None);
+                }
+            }
+        }
+
+        #[test]
+        fn prop_failure_proposal_preserves_failure_and_metadata_for_any_patch_shape(
+            patch_fixture in proposal_patch_fixture_strategy(),
+            proposal_id in any::<u64>().prop_map(ProposalId::new),
+            cleanup_action in render_cleanup_action_strategy(),
+            side_effects in render_side_effects_strategy(),
+            animation_schedule in animation_schedule_strategy(),
+            failure_reason in prop_oneof![
+                Just(crate::core::state::ApplyFailureKind::MissingProjection),
+                Just(crate::core::state::ApplyFailureKind::MissingRequiredProbe),
+                Just(crate::core::state::ApplyFailureKind::ShellError),
+                Just(crate::core::state::ApplyFailureKind::ViewportDrift),
+            ],
+            divergence in realization_divergence_strategy(),
+        ) {
+            let failure = RealizationFailure::new(failure_reason, divergence);
+            let proposal = InFlightProposal::failure(
+                proposal_id,
+                patch_fixture.patch.clone(),
+                failure,
+                cleanup_action,
+                side_effects,
+                animation_schedule,
+            );
+
+            prop_assert_eq!(proposal.proposal_id(), proposal_id);
+            prop_assert_eq!(proposal.patch(), &patch_fixture.patch);
+            prop_assert_eq!(proposal.cleanup_action(), cleanup_action);
+            prop_assert_eq!(proposal.side_effects(), side_effects);
+            prop_assert_eq!(proposal.animation_schedule(), animation_schedule);
+            prop_assert_eq!(proposal.realization(), RealizationPlan::Failure(failure));
+            prop_assert_eq!(proposal.failure_reason(), Some(failure));
+        }
+
+        #[test]
+        fn prop_realization_ledger_constructors_preserve_target_and_cleanup_invariants(
+            acknowledged_seq in proptest::option::of(1_u64..=u16::MAX as u64),
+            ledger in realization_ledger_strategy(),
+        ) {
+            let acknowledged = acknowledged_seq.map(projection_snapshot_with_ingress_seq);
+
+            prop_assert_eq!(
+                RealizationLedger::acknowledge(acknowledged.clone()),
+                match acknowledged {
+                    Some(acknowledged) => RealizationLedger::Consistent { acknowledged },
+                    None => RealizationLedger::Cleared,
+                }
+            );
+
+            let expected_last_consistent = ledger.last_consistent().cloned();
+            let was_cleared = matches!(ledger, RealizationLedger::Cleared);
+            let cleaned = ledger.cleanup_applied();
+
+            if was_cleared {
+                prop_assert_eq!(cleaned, RealizationLedger::Cleared);
+            } else {
+                prop_assert_eq!(
+                    cleaned,
+                    RealizationLedger::Diverged {
+                        last_consistent: expected_last_consistent,
+                        divergence: RealizationDivergence::ShellStateUnknown,
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn prop_animation_schedule_from_parts_preserves_idle_default_and_deadline_states(
+            should_schedule_next_animation in any::<bool>(),
+            next_animation_at_ms in proptest::option::of(any::<u64>()),
+        ) {
+            let next_animation_at_ms = next_animation_at_ms.map(Millis::new);
+            let schedule = AnimationSchedule::from_parts(
+                should_schedule_next_animation,
+                next_animation_at_ms,
+            );
+
+            prop_assert_eq!(
+                schedule,
+                match (should_schedule_next_animation, next_animation_at_ms) {
+                    (false, _) => AnimationSchedule::Idle,
+                    (true, None) => AnimationSchedule::DefaultDelay,
+                    (true, Some(deadline)) => AnimationSchedule::Deadline(deadline),
+                }
+            );
+            prop_assert_eq!(schedule.deadline(), next_animation_at_ms.filter(|_| matches!(schedule, AnimationSchedule::Deadline(_))));
+        }
     }
 }

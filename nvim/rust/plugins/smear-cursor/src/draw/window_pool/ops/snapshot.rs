@@ -45,102 +45,208 @@ pub(crate) fn tab_visible_window_count_from_tab(tab_windows: &TabWindows) -> usi
 mod snapshot_tests {
     use super::{
         CachedRenderWindow, CachedWindowLifecycle, FrameEpoch, TabWindows, WindowBufferHandle,
-        WindowPlacement, tab_pool_snapshot,
+        WindowPlacement, TabPoolSnapshot, tab_in_use_window_count_from_tab, tab_pool_snapshot,
+        tab_pool_snapshot_from_tab, tab_visible_window_count_from_tab,
     };
+    use crate::test_support::proptest::pure_config;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
     use std::collections::HashMap;
 
-    #[test]
-    fn tab_pool_snapshot_reads_authoritative_window_lifecycles() {
-        let placement = Some(WindowPlacement {
-            row: 2,
-            col: 4,
-            width: 1,
-            zindex: 40,
-        });
-        let mut tab_windows = TabWindows {
-            windows: vec![
-                CachedRenderWindow {
-                    handles: WindowBufferHandle {
-                        window_id: 11,
-                        buffer_id: 21,
-                    },
-                    lifecycle: CachedWindowLifecycle::AvailableHidden {
-                        last_used_epoch: FrameEpoch(1),
-                    },
-                    placement,
-                },
-                CachedRenderWindow {
-                    handles: WindowBufferHandle {
-                        window_id: 12,
-                        buffer_id: 22,
-                    },
-                    lifecycle: CachedWindowLifecycle::AvailableVisible {
-                        last_used_epoch: FrameEpoch(2),
-                    },
-                    placement,
-                },
-                CachedRenderWindow {
-                    handles: WindowBufferHandle {
-                        window_id: 13,
-                        buffer_id: 23,
-                    },
-                    lifecycle: CachedWindowLifecycle::InUse {
-                        epoch: FrameEpoch(3),
-                    },
-                    placement,
-                },
-            ],
-            ..TabWindows::default()
-        };
-        tab_windows.seed_tracking_from_windows_for_test();
-        let tabs = HashMap::from([(9_i32, tab_windows)]);
-
-        let snapshot = tab_pool_snapshot(&tabs, 9).expect("tab snapshot should exist");
-
-        assert_eq!(snapshot.total_windows, 3);
-        assert_eq!(snapshot.available_windows, 2);
-        assert_eq!(snapshot.in_use_windows, 1);
-        assert_eq!(snapshot.peak_total_windows, 3);
+    #[derive(Clone, Copy, Debug)]
+    enum WindowLifecycleSpec {
+        AvailableVisible { last_used_epoch: u8 },
+        AvailableHidden { last_used_epoch: u8 },
+        InUse { epoch: u8 },
+        Invalid,
     }
 
-    #[test]
-    fn tab_pool_snapshot_reads_maintained_counters_and_peak_telemetry() {
-        let placement = Some(WindowPlacement {
-            row: 2,
-            col: 4,
+    impl WindowLifecycleSpec {
+        fn is_available(self) -> bool {
+            matches!(
+                self,
+                Self::AvailableVisible { .. } | Self::AvailableHidden { .. }
+            )
+        }
+
+        fn is_visible(self) -> bool {
+            matches!(
+                self,
+                Self::AvailableVisible { .. } | Self::InUse { .. }
+            )
+        }
+
+        fn is_in_use(self) -> bool {
+            matches!(self, Self::InUse { .. })
+        }
+    }
+
+    fn window_lifecycle_spec() -> BoxedStrategy<WindowLifecycleSpec> {
+        prop_oneof![
+            any::<u8>().prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableVisible {
+                last_used_epoch,
+            }),
+            any::<u8>().prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableHidden {
+                last_used_epoch,
+            }),
+            any::<u8>().prop_map(|epoch| WindowLifecycleSpec::InUse { epoch }),
+            Just(WindowLifecycleSpec::Invalid),
+        ]
+        .boxed()
+    }
+
+    fn placement(index: usize) -> WindowPlacement {
+        let index = i64::try_from(index).unwrap_or(i64::MAX);
+        WindowPlacement {
+            row: index,
+            col: index.saturating_mul(3),
             width: 1,
             zindex: 40,
-        });
-        let mut tab_windows = TabWindows {
-            windows: vec![CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 12,
-                    buffer_id: 22,
+        }
+    }
+
+    fn cached_window(index: usize, lifecycle: WindowLifecycleSpec) -> CachedRenderWindow {
+        let offset = i32::try_from(index).unwrap_or(i32::MAX);
+        let handles = WindowBufferHandle {
+            window_id: 11_i32.saturating_add(offset),
+            buffer_id: 21_i32.saturating_add(offset),
+        };
+
+        match lifecycle {
+            WindowLifecycleSpec::AvailableVisible { last_used_epoch } => CachedRenderWindow {
+                handles,
+                lifecycle: CachedWindowLifecycle::AvailableVisible {
+                    last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
                 },
+                placement: Some(placement(index)),
+            },
+            WindowLifecycleSpec::AvailableHidden { last_used_epoch } => CachedRenderWindow {
+                handles,
+                lifecycle: CachedWindowLifecycle::AvailableHidden {
+                    last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
+                },
+                placement: Some(placement(index)),
+            },
+            WindowLifecycleSpec::InUse { epoch } => CachedRenderWindow {
+                handles,
                 lifecycle: CachedWindowLifecycle::InUse {
-                    epoch: FrameEpoch(2),
+                    epoch: FrameEpoch(u64::from(epoch)),
                 },
-                placement,
-            }],
-            last_frame_demand: 13,
-            peak_frame_demand: 21,
-            peak_requested_capacity: 34,
-            peak_total_windows: 55,
-            capacity_cap_hits: 2,
+                placement: Some(placement(index)),
+            },
+            WindowLifecycleSpec::Invalid => CachedRenderWindow {
+                handles,
+                lifecycle: CachedWindowLifecycle::Invalid,
+                placement: None,
+            },
+        }
+    }
+
+    fn expected_snapshot(
+        lifecycles: &[WindowLifecycleSpec],
+        cached_budget: usize,
+        last_frame_demand: usize,
+        peak_frame_demand: usize,
+        peak_requested_capacity: usize,
+        peak_total_windows: usize,
+        capacity_cap_hits: usize,
+    ) -> TabPoolSnapshot {
+        TabPoolSnapshot {
+            total_windows: lifecycles.len(),
+            available_windows: lifecycles
+                .iter()
+                .copied()
+                .filter(|lifecycle| lifecycle.is_available())
+                .count(),
+            in_use_windows: lifecycles
+                .iter()
+                .copied()
+                .filter(|lifecycle| lifecycle.is_in_use())
+                .count(),
+            cached_budget,
+            last_frame_demand,
+            peak_total_windows: peak_total_windows.max(lifecycles.len()),
+            peak_frame_demand,
+            peak_requested_capacity,
+            capacity_cap_hits,
+        }
+    }
+
+    fn build_tab_windows(
+        lifecycles: &[WindowLifecycleSpec],
+        cached_budget: usize,
+        last_frame_demand: usize,
+        peak_frame_demand: usize,
+        peak_requested_capacity: usize,
+        peak_total_windows: usize,
+        capacity_cap_hits: usize,
+    ) -> TabWindows {
+        let windows = lifecycles
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, lifecycle)| cached_window(index, lifecycle))
+            .collect();
+        let mut tab_windows = TabWindows {
+            windows,
+            cached_budget,
+            last_frame_demand,
+            peak_frame_demand,
+            peak_requested_capacity,
+            peak_total_windows,
+            capacity_cap_hits,
             ..TabWindows::default()
         };
         tab_windows.seed_tracking_from_windows_for_test();
-        let tabs = HashMap::from([(9_i32, tab_windows)]);
+        tab_windows
+    }
 
-        let snapshot = tab_pool_snapshot(&tabs, 9).expect("tab snapshot should exist");
+    proptest! {
+        #![proptest_config(pure_config())]
 
-        assert_eq!(snapshot.total_windows, 1);
-        assert_eq!(snapshot.available_windows, 0);
-        assert_eq!(snapshot.in_use_windows, 1);
-        assert_eq!(snapshot.last_frame_demand, 13);
-        assert_eq!(snapshot.peak_frame_demand, 21);
-        assert_eq!(snapshot.peak_requested_capacity, 34);
-        assert_eq!(snapshot.peak_total_windows, 55);
-        assert_eq!(snapshot.capacity_cap_hits, 2);
+        #[test]
+        fn prop_tab_pool_snapshot_matches_authoritative_lifecycles_and_counters(
+            lifecycles in vec(window_lifecycle_spec(), 0..16),
+            cached_budget in 0_usize..=64,
+            last_frame_demand in 0_usize..=64,
+            peak_frame_demand in 0_usize..=128,
+            peak_requested_capacity in 0_usize..=128,
+            peak_total_windows in 0_usize..=128,
+            capacity_cap_hits in 0_usize..=32,
+        ) {
+            let expected = expected_snapshot(
+                &lifecycles,
+                cached_budget,
+                last_frame_demand,
+                peak_frame_demand,
+                peak_requested_capacity,
+                peak_total_windows,
+                capacity_cap_hits,
+            );
+            let expected_visible_windows = lifecycles
+                .iter()
+                .copied()
+                .filter(|lifecycle| lifecycle.is_visible())
+                .count();
+            let tab_windows = build_tab_windows(
+                &lifecycles,
+                cached_budget,
+                last_frame_demand,
+                peak_frame_demand,
+                peak_requested_capacity,
+                peak_total_windows,
+                capacity_cap_hits,
+            );
+
+            prop_assert_eq!(tab_pool_snapshot_from_tab(&tab_windows), expected);
+            prop_assert_eq!(tab_in_use_window_count_from_tab(&tab_windows), expected.in_use_windows);
+            prop_assert_eq!(
+                tab_visible_window_count_from_tab(&tab_windows),
+                expected_visible_windows,
+            );
+
+            let tabs = HashMap::from([(9_i32, tab_windows)]);
+            prop_assert_eq!(tab_pool_snapshot(&tabs, 9), Some(expected));
+        }
     }
 }

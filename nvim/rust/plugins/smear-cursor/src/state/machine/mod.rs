@@ -15,8 +15,6 @@ mod transitions;
 mod types;
 
 use self::types::AnimationPhase;
-#[cfg(test)]
-pub(crate) use self::types::JumpCuePhase;
 use self::types::PluginState;
 use self::types::TransientRuntimeState;
 

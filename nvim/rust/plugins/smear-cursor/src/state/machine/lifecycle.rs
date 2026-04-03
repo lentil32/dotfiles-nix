@@ -8,11 +8,35 @@ use super::types::PendingTarget;
 use super::types::RunningPhase;
 use super::types::SettlingPhase;
 use crate::animation::center;
-use crate::animation::corners_for_cursor;
 use crate::animation::initial_velocity;
 use crate::animation::zero_velocity_corners;
 use crate::types::Point;
 use crate::types::StepOutput;
+
+fn translate_corners(corners: &mut [Point; 4], row_delta: f64, col_delta: f64) {
+    for corner in corners {
+        corner.row += row_delta;
+        corner.col += col_delta;
+    }
+}
+
+fn row_translation_to_clamp_window(corners: &[Point; 4], min_row: f64, max_row: f64) -> f64 {
+    let mut current_min_row = f64::INFINITY;
+    let mut current_max_row = f64::NEG_INFINITY;
+    for corner in corners {
+        current_min_row = current_min_row.min(corner.row);
+        current_max_row = current_max_row.max(corner.row);
+    }
+
+    let max_boundary_row = max_row + 1.0;
+    if current_min_row < min_row {
+        min_row - current_min_row
+    } else if current_max_row > max_boundary_row {
+        max_boundary_row - current_max_row
+    } else {
+        0.0
+    }
+}
 
 impl RuntimeState {
     fn motion_clock_mut(&mut self) -> Option<&mut MotionClock> {
@@ -268,6 +292,7 @@ impl RuntimeState {
         let surface_changed = self.tracked_location_ref().is_some_and(|tracked| {
             tracked.window_handle != location.window_handle
                 || tracked.buffer_handle != location.buffer_handle
+                || tracked.window_dimensions_changed(location)
         });
         if surface_changed {
             self.transient.retarget_epoch = self.transient.retarget_epoch.wrapping_add(1);
@@ -277,24 +302,22 @@ impl RuntimeState {
 
     pub(crate) fn apply_scroll_shift(
         &mut self,
-        shift: f64,
+        row_shift: f64,
+        col_shift: f64,
         min_row: f64,
         max_row: f64,
-        vertical_bar: bool,
-        horizontal_bar: bool,
     ) {
-        let shifted_row = (self.current_corners[0].row - shift)
-            .max(min_row)
-            .min(max_row);
-        let shifted_col = self.current_corners[0].col;
-        self.current_corners =
-            corners_for_cursor(shifted_row, shifted_col, vertical_bar, horizontal_bar);
-        self.previous_center = center(&self.current_corners);
-        for corner in &mut self.trail_origin_corners {
-            corner.row -= shift;
+        translate_corners(&mut self.current_corners, -row_shift, -col_shift);
+        let clamp_translation =
+            row_translation_to_clamp_window(&self.current_corners, min_row, max_row);
+        if clamp_translation != 0.0 {
+            translate_corners(&mut self.current_corners, clamp_translation, 0.0);
         }
+        self.previous_center = center(&self.current_corners);
+        translate_corners(&mut self.trail_origin_corners, -row_shift, -col_shift);
         for particle in &mut self.particles {
-            particle.position.row -= shift;
+            particle.position.row -= row_shift;
+            particle.position.col -= col_shift;
         }
     }
 

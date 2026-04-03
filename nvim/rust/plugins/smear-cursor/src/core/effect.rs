@@ -1,18 +1,9 @@
-// Surprising: the deterministic fingerprint path landed ahead of the trace consumer that will use
-// it, so these helpers stay compiled until the phased integration is complete.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "phase-scoped effect fingerprint scaffolding is intentionally retained ahead of trace wiring"
-    )
-)]
-
 use crate::core::runtime_reducer::RenderDecision;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::BackgroundProbeChunk;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
+use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
@@ -20,15 +11,14 @@ use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationRequest;
 use crate::core::state::ObservationSnapshot;
 use crate::core::state::ProbeKind;
-use crate::core::types::CursorPosition;
 use crate::core::types::DelayBudgetMs;
 use crate::core::types::Millis;
 use crate::core::types::ProbeRequestId;
 use crate::core::types::ProposalId;
-use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
 use crate::state::CursorLocation;
+use crate::types::CursorCellShape;
 use crate::types::Point;
 use crate::types::ScreenCell;
 
@@ -56,15 +46,6 @@ impl TimerKind {
             Self::Ingress => TimerId::Ingress,
             Self::Recovery => TimerId::Recovery,
             Self::Cleanup => TimerId::Cleanup,
-        }
-    }
-
-    const fn fingerprint(self) -> u64 {
-        match self {
-            Self::Animation => 1_u64,
-            Self::Ingress => 2_u64,
-            Self::Recovery => 3_u64,
-            Self::Cleanup => 4_u64,
         }
     }
 }
@@ -97,6 +78,7 @@ impl CursorPositionReadPolicy {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProbeQuality {
     Exact,
@@ -109,43 +91,17 @@ pub(crate) enum CursorPositionProbeMode {
     RawDuringMotion,
 }
 
-impl CursorPositionProbeMode {
-    const fn fingerprint(self) -> u64 {
-        match self {
-            Self::Exact => 1_u64,
-            Self::RawDuringMotion => 2_u64,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum CursorColorReuseMode {
     ExactOnly,
+    // Reuse only when the probe witness still matches on buffer, changedtick,
+    // mode, colorscheme generation, and line. Column drift is allowed.
     CompatibleWithinLine,
-}
-
-impl CursorColorReuseMode {
-    const fn fingerprint(self) -> u64 {
-        match self {
-            Self::ExactOnly => 1_u64,
-            Self::CompatibleWithinLine => 2_u64,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum CursorColorFallbackMode {
-    SyntaxOnly,
     SyntaxThenExtmarks,
-}
-
-impl CursorColorFallbackMode {
-    const fn fingerprint(self) -> u64 {
-        match self {
-            Self::SyntaxOnly => 1_u64,
-            Self::SyntaxThenExtmarks => 2_u64,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -156,6 +112,7 @@ pub(crate) struct ProbePolicy {
 }
 
 impl ProbePolicy {
+    #[cfg(test)]
     pub(crate) const fn new(quality: ProbeQuality) -> Self {
         match quality {
             ProbeQuality::Exact => Self::exact(),
@@ -171,11 +128,12 @@ impl ProbePolicy {
         )
     }
 
+    #[cfg(test)]
     pub(crate) const fn fast_motion() -> Self {
         Self::from_modes(
             CursorPositionProbeMode::RawDuringMotion,
             CursorColorReuseMode::CompatibleWithinLine,
-            CursorColorFallbackMode::SyntaxOnly,
+            CursorColorFallbackMode::SyntaxThenExtmarks,
         )
     }
 
@@ -196,6 +154,8 @@ impl ProbePolicy {
         buffer_perf_class: BufferPerfClass,
         has_cursor_color_fallback_sample: bool,
     ) -> Self {
+        // A carried fallback sample is only safe for the same-line compatible
+        // reuse path. Boundary refreshes still force an exact probe policy.
         let cursor_color_reuse_mode = if has_cursor_color_fallback_sample {
             CursorColorReuseMode::CompatibleWithinLine
         } else {
@@ -209,10 +169,13 @@ impl ProbePolicy {
                     cursor_color_reuse_mode,
                     CursorColorFallbackMode::SyntaxThenExtmarks,
                 ),
+                // Fast motion still uses the raw screen-position path, but fresh cursor-color
+                // samples must remain overlay-aware so semantic tokens and other extmarks do not
+                // smear with stale syntax-only tint.
                 BufferPerfClass::FastMotion => Self::from_modes(
                     CursorPositionProbeMode::RawDuringMotion,
                     cursor_color_reuse_mode,
-                    CursorColorFallbackMode::SyntaxOnly,
+                    CursorColorFallbackMode::SyntaxThenExtmarks,
                 ),
             },
             ExternalDemandKind::ModeChanged
@@ -221,6 +184,7 @@ impl ProbePolicy {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn quality(self) -> ProbeQuality {
         match self.cursor_position_mode {
             CursorPositionProbeMode::Exact => ProbeQuality::Exact,
@@ -228,14 +192,17 @@ impl ProbePolicy {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn cursor_position_mode(self) -> CursorPositionProbeMode {
         self.cursor_position_mode
     }
 
+    #[cfg(test)]
     pub(crate) const fn cursor_color_reuse_mode(self) -> CursorColorReuseMode {
         self.cursor_color_reuse_mode
     }
 
+    #[cfg(test)]
     pub(crate) const fn cursor_color_fallback_mode(self) -> CursorColorFallbackMode {
         self.cursor_color_fallback_mode
     }
@@ -256,26 +223,6 @@ impl ProbePolicy {
                 CursorColorReuseMode::CompatibleWithinLine,
                 CursorColorFallbackMode::SyntaxThenExtmarks,
             ) => "exact_compatible",
-            (
-                CursorPositionProbeMode::RawDuringMotion,
-                CursorColorReuseMode::ExactOnly,
-                CursorColorFallbackMode::SyntaxOnly,
-            ) => "raw_syntax",
-            (
-                CursorPositionProbeMode::RawDuringMotion,
-                CursorColorReuseMode::CompatibleWithinLine,
-                CursorColorFallbackMode::SyntaxOnly,
-            ) => "fast_motion",
-            (
-                CursorPositionProbeMode::Exact,
-                CursorColorReuseMode::ExactOnly,
-                CursorColorFallbackMode::SyntaxOnly,
-            ) => "exact_syntax",
-            (
-                CursorPositionProbeMode::Exact,
-                CursorColorReuseMode::CompatibleWithinLine,
-                CursorColorFallbackMode::SyntaxOnly,
-            ) => "exact_compatible_syntax",
             (
                 CursorPositionProbeMode::RawDuringMotion,
                 CursorColorReuseMode::ExactOnly,
@@ -308,15 +255,6 @@ impl ProbePolicy {
             self.cursor_position_mode,
             CursorPositionProbeMode::RawDuringMotion
         )
-    }
-
-    pub(crate) const fn fingerprint(self) -> u64 {
-        self.cursor_position_mode.fingerprint()
-            ^ self.cursor_color_reuse_mode.fingerprint().rotate_left(7)
-            ^ self
-                .cursor_color_fallback_mode
-                .fingerprint()
-                .rotate_left(13)
     }
 }
 
@@ -365,12 +303,9 @@ impl ObservationRuntimeContext {
         self.current_corners
     }
 
+    #[cfg(test)]
     pub(crate) const fn buffer_perf_class(&self) -> BufferPerfClass {
         self.buffer_perf_class
-    }
-
-    pub(crate) const fn probe_quality(&self) -> ProbeQuality {
-        self.probe_policy.quality()
     }
 
     pub(crate) const fn probe_policy(&self) -> ProbePolicy {
@@ -380,19 +315,39 @@ impl ObservationRuntimeContext {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RequestProbeEffect {
-    pub(crate) observation_basis: ObservationBasis,
+    pub(crate) observation_basis: Box<ObservationBasis>,
     pub(crate) probe_request_id: ProbeRequestId,
     pub(crate) kind: ProbeKind,
     pub(crate) cursor_position_policy: CursorPositionReadPolicy,
     pub(crate) buffer_perf_class: BufferPerfClass,
     pub(crate) probe_policy: ProbePolicy,
     pub(crate) background_chunk: Option<BackgroundProbeChunk>,
-    pub(crate) cursor_color_fallback_sample: Option<CursorColorSample>,
+    pub(crate) cursor_color_fallback: Option<CursorColorFallback>,
 }
 
 impl RequestProbeEffect {
     pub(crate) const fn probe_policy(&self) -> ProbePolicy {
         self.probe_policy
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct CursorColorFallback {
+    sample: CursorColorSample,
+    witness: CursorColorProbeWitness,
+}
+
+impl CursorColorFallback {
+    pub(crate) fn new(sample: CursorColorSample, witness: CursorColorProbeWitness) -> Self {
+        Self { sample, witness }
+    }
+
+    pub(crate) fn sample(&self) -> CursorColorSample {
+        self.sample
+    }
+
+    pub(crate) fn witness(&self) -> &CursorColorProbeWitness {
+        &self.witness
     }
 }
 
@@ -417,6 +372,7 @@ pub(crate) struct IngressCursorPresentationRequest {
     mode_allowed: bool,
     outside_cmdline: bool,
     prepaint_cell: Option<ScreenCell>,
+    prepaint_shape: CursorCellShape,
 }
 
 impl IngressCursorPresentationRequest {
@@ -424,11 +380,13 @@ impl IngressCursorPresentationRequest {
         mode_allowed: bool,
         outside_cmdline: bool,
         prepaint_cell: Option<ScreenCell>,
+        prepaint_shape: CursorCellShape,
     ) -> Self {
         Self {
             mode_allowed,
             outside_cmdline,
             prepaint_cell,
+            prepaint_shape,
         }
     }
 
@@ -443,12 +401,20 @@ impl IngressCursorPresentationRequest {
     pub(crate) const fn prepaint_cell(self) -> Option<ScreenCell> {
         self.prepaint_cell
     }
+
+    pub(crate) const fn prepaint_shape(self) -> CursorCellShape {
+        self.prepaint_shape
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum IngressCursorPresentationEffect {
     HideCursor,
-    HideCursorAndPrepaint { cell: ScreenCell, zindex: u32 },
+    HideCursorAndPrepaint {
+        cell: ScreenCell,
+        shape: CursorCellShape,
+        zindex: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -461,25 +427,6 @@ pub(crate) enum RenderCleanupExecution {
         max_prune_per_tick: usize,
     },
     HardPurge,
-}
-
-impl RenderCleanupExecution {
-    const fn fingerprint(self) -> u64 {
-        match self {
-            Self::SoftClear { max_kept_windows } => {
-                1_u64 ^ (max_kept_windows as u64).rotate_left(7)
-            }
-            Self::CompactToBudget {
-                target_budget,
-                max_prune_per_tick,
-            } => {
-                2_u64
-                    ^ (target_budget as u64).rotate_left(7)
-                    ^ (max_prune_per_tick as u64).rotate_left(19)
-            }
-            Self::HardPurge => 3_u64,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -500,22 +447,6 @@ pub(crate) enum EventLoopMetricEffect {
     ProbeRefreshBudgetExhausted(ProbeKind),
 }
 
-impl EventLoopMetricEffect {
-    const fn fingerprint(self) -> u64 {
-        match self {
-            Self::IngressCoalesced => 1_u64,
-            Self::DelayedIngressPendingUpdated => 2_u64,
-            Self::CleanupConvergedToCold {
-                started_at,
-                converged_at,
-            } => 3_u64 ^ started_at.value().rotate_left(7) ^ converged_at.value().rotate_left(19),
-            Self::StaleToken => 4_u64,
-            Self::ProbeRefreshRetried(kind) => 5_u64 ^ kind.fingerprint().rotate_left(7),
-            Self::ProbeRefreshBudgetExhausted(kind) => 6_u64 ^ kind.fingerprint().rotate_left(7),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Effect {
     ScheduleTimer(ScheduleTimerEffect),
@@ -529,400 +460,6 @@ pub(crate) enum Effect {
     RedrawCmdline,
 }
 
-fn cursor_location_fingerprint(location: &CursorLocation) -> u64 {
-    u64::from_ne_bytes(location.window_handle.to_ne_bytes())
-        ^ u64::from_ne_bytes(location.buffer_handle.to_ne_bytes()).rotate_left(7)
-        ^ u64::from_ne_bytes(location.top_row.to_ne_bytes()).rotate_left(13)
-        ^ u64::from_ne_bytes(location.line.to_ne_bytes()).rotate_left(19)
-}
-
-fn point_fingerprint(point: Point) -> u64 {
-    point.row.to_bits() ^ point.col.to_bits().rotate_left(11)
-}
-
-fn screen_cell_fingerprint(cell: ScreenCell) -> u64 {
-    u64::from_ne_bytes(cell.row().to_ne_bytes())
-        ^ u64::from_ne_bytes(cell.col().to_ne_bytes()).rotate_left(7)
-}
-
-fn cursor_color_sample_fingerprint(sample: Option<CursorColorSample>) -> u64 {
-    sample.map_or(0_u64, |sample| u64::from(sample.value()))
-}
-
-fn observation_context_fingerprint(context: &ObservationRuntimeContext) -> u64 {
-    let cursor_position_seed = if context.cursor_position_policy().smear_to_cmd() {
-        1_u64
-    } else {
-        0_u64
-    };
-    let scroll_seed = if context.scroll_buffer_space() {
-        1_u64
-    } else {
-        0_u64
-    };
-    let tracked_seed = context
-        .tracked_location()
-        .map_or(0_u64, |location| cursor_location_fingerprint(&location));
-    let corner_seed = context
-        .current_corners()
-        .into_iter()
-        .map(point_fingerprint)
-        .fold(0_u64, u64::wrapping_add);
-
-    cursor_position_seed
-        ^ scroll_seed.rotate_left(5)
-        ^ tracked_seed.rotate_left(11)
-        ^ corner_seed.rotate_left(17)
-        ^ context.buffer_perf_class().fingerprint().rotate_left(23)
-        ^ context.probe_policy().fingerprint().rotate_left(29)
-}
-
-fn cursor_color_witness_fingerprint(
-    witness: Option<&crate::core::state::CursorColorProbeWitness>,
-) -> u64 {
-    let Some(witness) = witness else {
-        return 0_u64;
-    };
-
-    witness.buffer_handle().unsigned_abs()
-        ^ witness.changedtick().rotate_left(7)
-        ^ witness
-            .mode()
-            .bytes()
-            .fold(0_u64, |seed, byte| seed.rotate_left(5) ^ u64::from(byte))
-            .rotate_left(13)
-        ^ witness
-            .cursor_position()
-            .map_or(0_u64, CursorPosition::fingerprint)
-            .rotate_left(19)
-        ^ witness.colorscheme_generation().value().rotate_left(23)
-}
-
-fn observed_text_rows_fingerprint(rows: &[crate::core::state::ObservedTextRow]) -> u64 {
-    rows.iter().fold(0_u64, |seed, row| {
-        seed ^ u64::from_ne_bytes(row.line().to_ne_bytes()).rotate_left(5)
-            ^ row
-                .text()
-                .bytes()
-                .fold(0_u64, |row_seed, byte| {
-                    row_seed.rotate_left(7) ^ u64::from(byte)
-                })
-                .rotate_left(11)
-    })
-}
-
-fn cursor_text_context_fingerprint(context: Option<&crate::core::state::CursorTextContext>) -> u64 {
-    let Some(context) = context else {
-        return 0_u64;
-    };
-
-    let tracked_rows_seed = context
-        .tracked_nearby_rows()
-        .map_or(0_u64, observed_text_rows_fingerprint);
-
-    u64::from_ne_bytes(context.buffer_handle().to_ne_bytes())
-        ^ context.changedtick().rotate_left(7)
-        ^ u64::from_ne_bytes(context.cursor_line().to_ne_bytes()).rotate_left(13)
-        ^ observed_text_rows_fingerprint(context.nearby_rows()).rotate_left(17)
-        ^ context
-            .tracked_cursor_line()
-            .map_or(0_u64, |line| u64::from_ne_bytes(line.to_ne_bytes()))
-            .rotate_left(23)
-        ^ tracked_rows_seed.rotate_left(29)
-}
-
-impl Effect {
-    pub(crate) fn fingerprint(&self) -> u64 {
-        match self {
-            Self::ScheduleTimer(payload) => {
-                let kind = TimerKind::from_timer_id(payload.token.id());
-                101_u64
-                    ^ kind.fingerprint()
-                    ^ payload.token.fingerprint()
-                    ^ payload.delay.value()
-                    ^ payload.requested_at.value()
-            }
-            Self::RequestObservationBase(payload) => {
-                let probe_seed = if payload.request.probes().cursor_color() {
-                    1_u64
-                } else {
-                    0_u64
-                } ^ if payload.request.probes().background() {
-                    2_u64
-                } else {
-                    0_u64
-                };
-                105_u64
-                    ^ payload.request.observation_id().value()
-                    ^ payload.request.demand().seq().value()
-                    ^ payload.request.demand().observed_at().value()
-                    ^ payload
-                        .request
-                        .demand()
-                        .buffer_perf_class()
-                        .fingerprint()
-                        .rotate_left(5)
-                    ^ probe_seed.rotate_left(11)
-                    ^ observation_context_fingerprint(&payload.context).rotate_left(17)
-                    ^ payload
-                        .request
-                        .demand()
-                        .requested_target()
-                        .map_or(0_u64, CursorPosition::fingerprint)
-            }
-            Self::RequestProbe(payload) => {
-                let basis = &payload.observation_basis;
-                let cursor_seed = basis
-                    .cursor_position()
-                    .map_or(0_u64, CursorPosition::fingerprint);
-                let viewport = basis.viewport();
-                let background_chunk_seed =
-                    payload.background_chunk.as_ref().map_or(0_u64, |chunk| {
-                        chunk.cells().iter().copied().enumerate().fold(
-                            u64::try_from(chunk.start_index()).unwrap_or(u64::MAX),
-                            |seed, (index, cell)| {
-                                seed ^ u64::try_from(index).unwrap_or(u64::MAX).rotate_left(5)
-                                    ^ screen_cell_fingerprint(cell).rotate_left(11)
-                            },
-                        )
-                    });
-                let cursor_color_witness_seed =
-                    cursor_color_witness_fingerprint(basis.cursor_color_witness());
-                let cursor_text_context_seed =
-                    cursor_text_context_fingerprint(basis.cursor_text_context());
-                let cursor_color_fallback_seed =
-                    cursor_color_sample_fingerprint(payload.cursor_color_fallback_sample);
-                109_u64
-                    ^ basis.observation_id().value()
-                    ^ basis.observed_at().value()
-                    ^ payload.probe_request_id.value().rotate_left(7)
-                    ^ payload.kind.fingerprint().rotate_left(13)
-                    ^ payload.probe_policy().fingerprint().rotate_left(17)
-                    ^ payload.buffer_perf_class.fingerprint().rotate_left(19)
-                    ^ (if payload.cursor_position_policy.smear_to_cmd() {
-                        1_u64
-                    } else {
-                        0_u64
-                    })
-                    .rotate_left(23)
-                    ^ cursor_seed.rotate_left(29)
-                    ^ u64::from(viewport.max_row.value()).rotate_left(31)
-                    ^ u64::from(viewport.max_col.value()).rotate_left(37)
-                    ^ background_chunk_seed.rotate_left(41)
-                    ^ cursor_color_witness_seed.rotate_left(43)
-                    ^ cursor_text_context_seed.rotate_left(47)
-                    ^ cursor_color_fallback_seed.rotate_left(53)
-            }
-            Self::RequestRenderPlan(payload) => {
-                111_u64
-                    ^ payload.proposal_id.value()
-                    ^ payload.planning_state.generation().value().rotate_left(7)
-                    ^ payload
-                        .observation
-                        .basis()
-                        .observation_id()
-                        .value()
-                        .rotate_left(13)
-                    ^ payload.requested_at.value().rotate_left(19)
-            }
-            Self::ApplyProposal(payload) => {
-                let proposal = &payload.proposal;
-                let basis = proposal.patch().basis();
-                let acknowledged_seed = basis.acknowledged().map_or(0_u64, |snapshot| {
-                    snapshot.witness().scene_revision().value()
-                        ^ snapshot.witness().observation_id().value()
-                });
-                let target_seed = basis.target().map_or(0_u64, |snapshot| {
-                    snapshot.witness().scene_revision().value()
-                        ^ snapshot.witness().observation_id().value()
-                });
-                let animation_seed = match proposal.animation_schedule() {
-                    AnimationSchedule::Idle => 0_u64,
-                    AnimationSchedule::DefaultDelay => 1_u64,
-                    AnimationSchedule::Deadline(deadline) => {
-                        2_u64 ^ deadline.value().rotate_left(11)
-                    }
-                };
-                113_u64
-                    ^ proposal.proposal_id().value()
-                    ^ acknowledged_seed
-                    ^ target_seed
-                    ^ animation_seed
-                    ^ payload.requested_at.value()
-            }
-            Self::ApplyRenderCleanup(payload) => {
-                127_u64 ^ payload.execution.fingerprint().rotate_left(7)
-            }
-            Self::ApplyIngressCursorPresentation(payload) => match payload {
-                IngressCursorPresentationEffect::HideCursor => 131_u64,
-                IngressCursorPresentationEffect::HideCursorAndPrepaint { cell, zindex } => {
-                    137_u64 ^ screen_cell_fingerprint(*cell) ^ u64::from(*zindex).rotate_left(11)
-                }
-            },
-            Self::RecordEventLoopMetric(metric) => 139_u64 ^ metric.fingerprint().rotate_left(7),
-            Self::RedrawCmdline => 149_u64,
-        }
-    }
-}
-
-pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
-    let at = Millis::new(1);
-    let schedule_token = TimerToken::new(TimerId::Animation, TimerGeneration::new(1));
-    let ingress_token = TimerToken::new(TimerId::Ingress, TimerGeneration::new(2));
-    let cleanup_token = TimerToken::new(TimerId::Cleanup, TimerGeneration::new(3));
-    let ingress_delay =
-        DelayBudgetMs::try_new(9).map_or(DelayBudgetMs::DEFAULT_ANIMATION, |delay| delay);
-    let cleanup_delay =
-        DelayBudgetMs::try_new(220).map_or(DelayBudgetMs::DEFAULT_ANIMATION, |delay| delay);
-    let proposal_id = ProposalId::new(3);
-    let request = ObservationRequest::new(
-        crate::core::state::ExternalDemand::new(
-            crate::core::types::IngressSeq::new(4),
-            crate::core::state::ExternalDemandKind::ExternalCursor,
-            at,
-            None,
-            BufferPerfClass::Full,
-        ),
-        crate::core::state::ProbeRequestSet::default(),
-    );
-    let observation = crate::core::state::ObservationSnapshot::new(
-        request.clone(),
-        crate::core::state::ObservationBasis::new(
-            request.observation_id(),
-            at,
-            "n".to_string(),
-            Some(CursorPosition {
-                row: crate::core::types::CursorRow(1),
-                col: crate::core::types::CursorCol(1),
-            }),
-            crate::state::CursorLocation::new(1, 1, 1, 1),
-            crate::core::types::ViewportSnapshot::new(
-                crate::core::types::CursorRow(40),
-                crate::core::types::CursorCol(120),
-            ),
-        ),
-        crate::core::state::ObservationMotion::default(),
-    );
-
-    let noop_patch =
-        crate::core::state::ScenePatch::derive(crate::core::state::PatchBasis::new(None, None));
-    let noop_proposal = match crate::core::state::InFlightProposal::noop(
-        proposal_id,
-        noop_patch,
-        crate::core::runtime_reducer::RenderCleanupAction::NoAction,
-        crate::core::runtime_reducer::RenderSideEffects::default(),
-        crate::core::state::AnimationSchedule::Idle,
-    ) {
-        Ok(proposal) => proposal,
-        Err(_) => {
-            // Keep the phase-4 fingerprint seed deterministic even if the noop fixture shape
-            // regresses unexpectedly during future refactors.
-            return 107_u64 ^ proposal_id.value().rotate_left(7);
-        }
-    };
-
-    let effects = [
-        Effect::ScheduleTimer(ScheduleTimerEffect {
-            token: schedule_token,
-            delay: DelayBudgetMs::DEFAULT_ANIMATION,
-            requested_at: at,
-        }),
-        Effect::ScheduleTimer(ScheduleTimerEffect {
-            token: ingress_token,
-            delay: ingress_delay,
-            requested_at: at,
-        }),
-        Effect::ScheduleTimer(ScheduleTimerEffect {
-            token: cleanup_token,
-            delay: cleanup_delay,
-            requested_at: at,
-        }),
-        Effect::RequestObservationBase(RequestObservationBaseEffect {
-            request,
-            context: ObservationRuntimeContext::new(
-                CursorPositionReadPolicy::new(true),
-                true,
-                Some(crate::state::CursorLocation::new(10, 11, 12, 13)),
-                [
-                    Point { row: 1.0, col: 1.0 },
-                    Point { row: 1.0, col: 2.0 },
-                    Point { row: 2.0, col: 2.0 },
-                    Point { row: 2.0, col: 1.0 },
-                ],
-                BufferPerfClass::Full,
-                ProbePolicy::fast_motion(),
-            ),
-        }),
-        Effect::RequestProbe(RequestProbeEffect {
-            observation_basis: crate::core::state::ObservationBasis::new(
-                crate::core::types::ObservationId::from_ingress_seq(
-                    crate::core::types::IngressSeq::new(4),
-                ),
-                at,
-                "n".to_string(),
-                Some(CursorPosition {
-                    row: crate::core::types::CursorRow(1),
-                    col: crate::core::types::CursorCol(1),
-                }),
-                crate::state::CursorLocation::new(1, 1, 1, 1),
-                crate::core::types::ViewportSnapshot::new(
-                    crate::core::types::CursorRow(40),
-                    crate::core::types::CursorCol(120),
-                ),
-            ),
-            probe_request_id: ProbeKind::CursorColor.request_id(
-                crate::core::types::ObservationId::from_ingress_seq(
-                    crate::core::types::IngressSeq::new(4),
-                ),
-            ),
-            kind: ProbeKind::CursorColor,
-            cursor_position_policy: CursorPositionReadPolicy::new(true),
-            buffer_perf_class: BufferPerfClass::Full,
-            probe_policy: ProbePolicy::fast_motion(),
-            background_chunk: None,
-            cursor_color_fallback_sample: Some(CursorColorSample::new(0x00AB_CDEF)),
-        }),
-        Effect::RequestRenderPlan(Box::new(RequestRenderPlanEffect {
-            proposal_id,
-            planning_state: crate::core::state::CoreState::default(),
-            observation,
-            render_decision: crate::core::runtime_reducer::RenderDecision {
-                render_action: crate::core::runtime_reducer::RenderAction::Noop,
-                render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
-                render_allocation_policy:
-                    crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
-                render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
-            },
-            animation_schedule: crate::core::state::AnimationSchedule::Idle,
-            requested_at: at,
-        })),
-        Effect::ApplyProposal(Box::new(ApplyProposalEffect {
-            proposal: noop_proposal,
-            requested_at: at,
-        })),
-        Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
-            execution: RenderCleanupExecution::SoftClear {
-                max_kept_windows: 24,
-            },
-        }),
-        Effect::ApplyIngressCursorPresentation(
-            IngressCursorPresentationEffect::HideCursorAndPrepaint {
-                cell: match ScreenCell::new(4, 5) {
-                    Some(cell) => cell,
-                    None => return 0_u64,
-                },
-                zindex: 200,
-            },
-        ),
-        Effect::RedrawCmdline,
-    ];
-
-    effects
-        .iter()
-        .map(Effect::fingerprint)
-        .fold(0_u64, u64::wrapping_add)
-}
-
 #[cfg(test)]
 mod tests {
     use super::CursorColorFallbackMode;
@@ -932,113 +469,119 @@ mod tests {
     use super::ProbeQuality;
     use crate::core::state::BufferPerfClass;
     use crate::core::state::ExternalDemandKind;
+    use crate::test_support::assertions::assert_probe_policy_shape;
+    use crate::test_support::proptest::pure_config;
     use pretty_assertions::assert_eq;
+    use proptest::prelude::*;
 
-    #[test]
-    fn probe_policy_keeps_full_buffers_exact_without_retained_cursor_color() {
-        let policy = ProbePolicy::for_demand(
-            ExternalDemandKind::ExternalCursor,
-            BufferPerfClass::Full,
-            false,
-        );
-
-        assert_eq!(policy.quality(), ProbeQuality::Exact);
-        assert_eq!(policy.diagnostic_name(), "exact");
-        assert_eq!(
-            policy.cursor_position_mode(),
-            CursorPositionProbeMode::Exact
-        );
-        assert_eq!(
-            policy.cursor_color_reuse_mode(),
-            CursorColorReuseMode::ExactOnly
-        );
-        assert_eq!(
-            policy.cursor_color_fallback_mode(),
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
-        assert!(!policy.allows_compatible_cursor_color_reuse());
-        assert!(policy.allows_cursor_color_extmark_fallback());
-        assert!(!policy.uses_raw_screenpos_fallback());
+    fn demand_kind() -> BoxedStrategy<ExternalDemandKind> {
+        prop_oneof![
+            Just(ExternalDemandKind::ExternalCursor),
+            Just(ExternalDemandKind::ModeChanged),
+            Just(ExternalDemandKind::BufferEntered),
+            Just(ExternalDemandKind::BoundaryRefresh),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn probe_policy_reuses_cursor_color_without_downgrading_full_buffers_to_raw_screenpos() {
-        let policy = ProbePolicy::for_demand(
-            ExternalDemandKind::ExternalCursor,
-            BufferPerfClass::Full,
-            true,
-        );
-
-        assert_eq!(policy.quality(), ProbeQuality::Exact);
-        assert_eq!(policy.diagnostic_name(), "exact_compatible");
-        assert_eq!(
-            policy.cursor_position_mode(),
-            CursorPositionProbeMode::Exact
-        );
-        assert_eq!(
-            policy.cursor_color_reuse_mode(),
-            CursorColorReuseMode::CompatibleWithinLine,
-        );
-        assert_eq!(
-            policy.cursor_color_fallback_mode(),
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
-        assert!(policy.allows_compatible_cursor_color_reuse());
-        assert!(policy.allows_cursor_color_extmark_fallback());
-        assert!(!policy.uses_raw_screenpos_fallback());
+    fn buffer_perf_class() -> BoxedStrategy<BufferPerfClass> {
+        prop_oneof![
+            Just(BufferPerfClass::Full),
+            Just(BufferPerfClass::FastMotion),
+            Just(BufferPerfClass::Skip),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn probe_policy_fast_motion_can_disable_extmarks_without_requiring_compatible_reuse() {
-        let policy = ProbePolicy::for_demand(
-            ExternalDemandKind::ExternalCursor,
-            BufferPerfClass::FastMotion,
-            false,
-        );
-
-        assert_eq!(policy.quality(), ProbeQuality::FastMotion);
-        assert_eq!(policy.diagnostic_name(), "raw_syntax");
-        assert_eq!(
-            policy.cursor_position_mode(),
-            CursorPositionProbeMode::RawDuringMotion,
-        );
-        assert_eq!(
-            policy.cursor_color_reuse_mode(),
-            CursorColorReuseMode::ExactOnly
-        );
-        assert_eq!(
-            policy.cursor_color_fallback_mode(),
-            CursorColorFallbackMode::SyntaxOnly,
-        );
-        assert!(!policy.allows_compatible_cursor_color_reuse());
-        assert!(!policy.allows_cursor_color_extmark_fallback());
-        assert!(policy.uses_raw_screenpos_fallback());
+    const fn expected_quality(
+        demand_kind: ExternalDemandKind,
+        buffer_perf_class: BufferPerfClass,
+    ) -> ProbeQuality {
+        if matches!(demand_kind, ExternalDemandKind::ExternalCursor)
+            && matches!(buffer_perf_class, BufferPerfClass::FastMotion)
+        {
+            ProbeQuality::FastMotion
+        } else {
+            ProbeQuality::Exact
+        }
     }
 
-    #[test]
-    fn probe_policy_keeps_boundary_refresh_exact_even_for_fast_motion() {
-        let policy = ProbePolicy::for_demand(
-            ExternalDemandKind::BoundaryRefresh,
-            BufferPerfClass::FastMotion,
-            true,
-        );
-
-        assert_eq!(policy.quality(), ProbeQuality::Exact);
-        assert_eq!(policy.diagnostic_name(), "exact");
-        assert_eq!(
-            policy.cursor_position_mode(),
+    const fn expected_position_mode(
+        demand_kind: ExternalDemandKind,
+        buffer_perf_class: BufferPerfClass,
+    ) -> CursorPositionProbeMode {
+        if matches!(demand_kind, ExternalDemandKind::ExternalCursor)
+            && matches!(buffer_perf_class, BufferPerfClass::FastMotion)
+        {
+            CursorPositionProbeMode::RawDuringMotion
+        } else {
             CursorPositionProbeMode::Exact
-        );
-        assert_eq!(
-            policy.cursor_color_reuse_mode(),
+        }
+    }
+
+    const fn expected_reuse_mode(
+        demand_kind: ExternalDemandKind,
+        has_cursor_color_fallback_sample: bool,
+    ) -> CursorColorReuseMode {
+        if matches!(demand_kind, ExternalDemandKind::ExternalCursor)
+            && has_cursor_color_fallback_sample
+        {
+            CursorColorReuseMode::CompatibleWithinLine
+        } else {
             CursorColorReuseMode::ExactOnly
-        );
-        assert_eq!(
-            policy.cursor_color_fallback_mode(),
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
-        assert!(!policy.allows_compatible_cursor_color_reuse());
-        assert!(policy.allows_cursor_color_extmark_fallback());
-        assert!(!policy.uses_raw_screenpos_fallback());
+        }
+    }
+
+    const fn expected_diagnostic_name(
+        cursor_position_mode: CursorPositionProbeMode,
+        cursor_color_reuse_mode: CursorColorReuseMode,
+    ) -> &'static str {
+        match (cursor_position_mode, cursor_color_reuse_mode) {
+            (CursorPositionProbeMode::Exact, CursorColorReuseMode::ExactOnly) => "exact",
+            (CursorPositionProbeMode::Exact, CursorColorReuseMode::CompatibleWithinLine) => {
+                "exact_compatible"
+            }
+            (CursorPositionProbeMode::RawDuringMotion, CursorColorReuseMode::ExactOnly) => {
+                "raw_extmarks"
+            }
+            (
+                CursorPositionProbeMode::RawDuringMotion,
+                CursorColorReuseMode::CompatibleWithinLine,
+            ) => "raw_compatible_extmarks",
+        }
+    }
+
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_probe_policy_matches_demand_perf_class_and_retained_color_inputs(
+            demand_kind in demand_kind(),
+            buffer_perf_class in buffer_perf_class(),
+            has_cursor_color_fallback_sample in any::<bool>(),
+        ) {
+            let policy = ProbePolicy::for_demand(
+                demand_kind,
+                buffer_perf_class,
+                has_cursor_color_fallback_sample,
+            );
+
+            let expected_quality = expected_quality(demand_kind, buffer_perf_class);
+            let expected_position_mode = expected_position_mode(demand_kind, buffer_perf_class);
+            let expected_reuse_mode =
+                expected_reuse_mode(demand_kind, has_cursor_color_fallback_sample);
+
+            assert_probe_policy_shape(
+                policy,
+                expected_quality,
+                expected_position_mode,
+                expected_reuse_mode,
+                CursorColorFallbackMode::SyntaxThenExtmarks,
+            );
+            assert_eq!(
+                policy.diagnostic_name(),
+                expected_diagnostic_name(expected_position_mode, expected_reuse_mode),
+            );
+        }
     }
 }

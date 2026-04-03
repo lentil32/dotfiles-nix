@@ -1,6 +1,7 @@
 use super::geometry::render_side_effects_for_action;
 use crate::core::state::SemanticEvent;
 use crate::state::CursorLocation;
+use crate::types::CursorCellShape;
 use crate::types::RenderFrame;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -24,7 +25,8 @@ pub(crate) struct CursorEventContext {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ScrollShift {
-    pub(crate) shift: f64,
+    pub(crate) row_shift: f64,
+    pub(crate) col_shift: f64,
     pub(crate) min_row: f64,
     pub(crate) max_row: f64,
 }
@@ -67,7 +69,7 @@ pub(crate) enum CursorVisibilityEffect {
 pub(crate) enum TargetCellPresentation {
     #[default]
     None,
-    OverlayBlockCell,
+    OverlayCursorCell(CursorCellShape),
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]

@@ -1,8 +1,9 @@
-//! Lua-to-Rust frame-step boundary for the smear cursor animation pipeline.
+//! Lua-to-Rust step harness for the smear cursor animation pipeline.
 //!
-//! The step entrypoint validates a dense dictionary payload from Neovim,
+//! `smear.step()` is kept for perf scripts and deterministic animation
+//! experiments. It validates a dense dictionary payload from Neovim,
 //! normalizes optional fields such as RNG state, and returns the next animation
-//! frame snapshot that the host bridge can apply.
+//! frame snapshot without participating in the live runtime event pipeline.
 
 use crate::animation::simulate_step;
 use crate::lua::LuaParseError;
@@ -467,8 +468,11 @@ pub(crate) fn step(args: Dictionary) -> Result<Dictionary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proptest::pure_config;
     use nvim_oxi::Array;
     use nvim_oxi::String as NvimString;
+    use pretty_assertions::assert_eq;
+    use proptest::prelude::*;
 
     fn point_object(row: f64, col: f64) -> Object {
         Object::from(Array::from_iter([Object::from(row), Object::from(col)]))
@@ -566,43 +570,113 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn parse_step_input_rejects_negative_particle_max_num() {
-        let mut args = valid_step_args();
-        set_arg(&mut args, "particle_max_num", Object::from(-1_i64));
-        let err = parse_step_input(&args).expect_err("expected parse failure");
-        assert!(matches!(
-            err,
-            StepInputError::Validation(LuaParseError::InvalidValue { ref key, expected })
-                if key == "particle_max_num" && expected == "non-negative integer"
-        ));
-    }
+    proptest! {
+        #![proptest_config(pure_config())]
 
-    #[test]
-    fn parse_step_input_accepts_integral_float_particle_max_num() {
-        let mut args = valid_step_args();
-        set_arg(&mut args, "particle_max_num", Object::from(12.0_f64));
-        let parsed = parse_step_input(&args).expect("expected parse success");
-        assert_eq!(parsed.particle_max_num, 12);
-    }
+        #[test]
+        fn prop_parse_step_input_accepts_particle_max_num_as_integer_or_integral_float(
+            particle_max_num in 0_i64..1_000_000_i64,
+        ) {
+            let expected = usize::try_from(particle_max_num)
+                .expect("strategy only generates non-negative values that fit usize");
 
-    #[test]
-    fn parse_step_input_nil_rng_uses_default() {
-        let mut args = valid_step_args();
-        args.insert("rng_state", Object::nil());
-        let parsed = parse_step_input(&args).expect("expected parse success");
-        assert_eq!(parsed.rng_state, DEFAULT_RNG_STATE);
-    }
+            let mut integer_args = valid_step_args();
+            set_arg(
+                &mut integer_args,
+                "particle_max_num",
+                Object::from(particle_max_num),
+            );
+            let integer_parsed =
+                parse_step_input(&integer_args).expect("integer payload should parse");
+            prop_assert_eq!(integer_parsed.particle_max_num, expected);
 
-    #[test]
-    fn one_based_i64_reports_typed_overflow() {
-        let err = one_based_i64(usize::MAX, "index_head").expect_err("expected overflow");
+            let mut float_args = valid_step_args();
+            set_arg(
+                &mut float_args,
+                "particle_max_num",
+                Object::from(particle_max_num as f64),
+            );
+            let float_parsed =
+                parse_step_input(&float_args).expect("integral float payload should parse");
+            prop_assert_eq!(float_parsed.particle_max_num, expected);
+        }
 
-        assert!(matches!(
-            err,
-            StepInputError::OneBasedIndexOverflow {
-                field: "index_head"
+        #[test]
+        fn prop_parse_step_input_rejects_negative_particle_max_num(
+            magnitude in 1_i64..1_000_000_i64,
+            use_float in any::<bool>(),
+        ) {
+            let mut args = valid_step_args();
+            let negative_value = -magnitude;
+            let object = if use_float {
+                Object::from(negative_value as f64)
+            } else {
+                Object::from(negative_value)
+            };
+            set_arg(&mut args, "particle_max_num", object);
+
+            let err = parse_step_input(&args).expect_err("negative values must be rejected");
+            prop_assert!(matches!(
+                err,
+                StepInputError::Validation(LuaParseError::InvalidValue { ref key, expected })
+                    if key == "particle_max_num" && expected == "non-negative integer"
+            ), "expected non-negative integer error, got {err:?}");
+        }
+
+        #[test]
+        fn prop_parse_step_input_rejects_fractional_particle_max_num(
+            whole in 0_i64..1_000_000_i64,
+            fraction in prop_oneof![0.25_f64..0.49_f64, 0.51_f64..0.75_f64],
+        ) {
+            let mut args = valid_step_args();
+            set_arg(
+                &mut args,
+                "particle_max_num",
+                Object::from(whole as f64 + fraction),
+            );
+
+            let err = parse_step_input(&args).expect_err("fractional values must be rejected");
+            prop_assert!(matches!(
+                err,
+                StepInputError::Validation(LuaParseError::InvalidValue { ref key, expected })
+                    if key == "particle_max_num" && expected == "integer"
+            ), "expected integer error, got {err:?}");
+        }
+
+        #[test]
+        fn prop_parse_step_input_defaults_rng_state_for_missing_or_nil_values(
+            use_nil in any::<bool>(),
+        ) {
+            let mut args = valid_step_args();
+            if use_nil {
+                args.insert("rng_state", Object::nil());
             }
-        ));
+
+            let parsed = parse_step_input(&args).expect("missing or nil rng_state should parse");
+            prop_assert_eq!(parsed.rng_state, DEFAULT_RNG_STATE);
+        }
+
+        #[test]
+        fn prop_one_based_i64_matches_checked_add_and_i64_conversion(
+            value in any::<usize>(),
+        ) {
+            let parsed = one_based_i64(value, "index_head");
+            let expected = value
+                .checked_add(1)
+                .and_then(|next| i64::try_from(next).ok());
+
+            match expected {
+                Some(expected) => match parsed {
+                    Ok(actual) => prop_assert_eq!(actual, expected),
+                    Err(err) => prop_assert!(false, "expected Ok({expected}), got {err:?}"),
+                },
+                None => prop_assert!(matches!(
+                    parsed,
+                    Err(StepInputError::OneBasedIndexOverflow {
+                        field: "index_head"
+                    })
+                ), "expected overflow error, got {parsed:?}"),
+            }
+        }
     }
 }

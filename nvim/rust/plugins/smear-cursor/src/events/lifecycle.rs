@@ -6,8 +6,8 @@
 
 use super::AUTOCMD_GROUP_NAME;
 use super::cursor::cursor_position_for_mode;
-use super::cursor::line_value;
 use super::cursor::mode_string;
+use super::handlers::cursor_location_for_core_render;
 use super::host_bridge::ensure_namespace_id;
 use super::host_bridge::installed_host_bridge;
 use super::host_bridge::verify_host_bridge;
@@ -25,7 +25,6 @@ use super::runtime::reset_transient_event_state;
 use crate::draw::clear_highlight_cache;
 use crate::draw::initialize_runtime_capabilities;
 use crate::draw::purge_render_windows;
-use crate::state::CursorLocation;
 use crate::state::CursorShape;
 use crate::types::Point;
 use nvim_oxi::Dictionary;
@@ -54,12 +53,7 @@ fn jump_to_current_cursor() -> Result<()> {
         return Ok(());
     };
 
-    let location = CursorLocation::new(
-        i64::from(window.handle()),
-        i64::from(buffer.handle()),
-        line_value("w0")?,
-        line_value(".")?,
-    );
+    let location = cursor_location_for_core_render(None);
 
     let hide_target_hack = mutate_engine_state(|state| {
         state.shell.set_namespace_id(namespace_id);

@@ -106,3 +106,80 @@ smear_stage_packaged_runtime() {
     *) return 1 ;;
   esac
 }
+
+smear_extract_field() {
+  local line="$1"
+  local field="$2"
+
+  printf '%s\n' "${line}" | sed -nE "s/.*${field}=([^ ]+).*/\\1/p"
+}
+
+smear_build_release() {
+  local plugin_dir="$1"
+  (
+    cd "${plugin_dir}"
+    cargo build --release >/dev/null
+  )
+}
+
+smear_compare_plugin_dir() {
+  local root_dir="$1"
+  printf '%s/nvim/rust/plugins/smear-cursor\n' "${root_dir}"
+}
+
+smear_compare_release_cpath() {
+  local plugin_dir="$1"
+  local target_directory
+
+  target_directory="$(smear_resolve_target_directory "${plugin_dir}")"
+  if [[ -z "${target_directory}" ]]; then
+    return 1
+  fi
+
+  smear_default_cpath "${target_directory}"
+}
+
+smear_compare_prepare_worktree() {
+  local repo_root="$1"
+  local base_ref="$2"
+  local worktree_prefix="$3"
+  local artifact_prefix="$4"
+  local worktree_dir
+  local artifact_dir
+
+  worktree_dir="$(mktemp -d "/tmp/${worktree_prefix}.XXXXXX")"
+  artifact_dir="$(mktemp -d "/tmp/${artifact_prefix}.XXXXXX")"
+  git -C "${repo_root}" worktree add --detach "${worktree_dir}" "${base_ref}" >/dev/null
+
+  printf '%s\t%s\n' "${worktree_dir}" "${artifact_dir}"
+}
+
+smear_compare_remove_worktree() {
+  local repo_root="$1"
+  local worktree_dir="$2"
+
+  git -C "${repo_root}" worktree remove "${worktree_dir}" >/dev/null 2>&1 || true
+}
+
+smear_report_git_commit() {
+  local repo_root="$1"
+  git -C "${repo_root}" rev-parse HEAD 2>/dev/null || printf 'unknown\n'
+}
+
+smear_report_git_state() {
+  local repo_root="$1"
+
+  if [[ -n "$(git -C "${repo_root}" status --short 2>/dev/null)" ]]; then
+    printf 'dirty\n'
+  else
+    printf 'clean\n'
+  fi
+}
+
+smear_report_nvim_version() {
+  "${NVIM_BIN:-nvim}" --version | sed -n '1p'
+}
+
+smear_report_capture_time_utc() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}

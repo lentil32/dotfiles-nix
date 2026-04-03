@@ -1,14 +1,12 @@
 mod telemetry;
 
 use super::cursor::BufferMetadata;
+use super::lru_cache::LruCache;
 use super::runtime::IngressReadSnapshot;
 use crate::config::BufferPerfMode;
 pub(super) use crate::core::state::BufferPerfClass;
 #[cfg(test)]
 use crate::types::ScreenCell;
-use nvim_oxi::Result;
-use nvim_oxi::api;
-use std::collections::VecDeque;
 pub(super) use telemetry::BufferPerfSignals;
 pub(super) use telemetry::BufferPerfTelemetry;
 pub(super) use telemetry::BufferPerfTelemetryCache;
@@ -27,15 +25,7 @@ const FAST_MOTION_CONCEAL_RAW_PRESSURE_ENTER_THRESHOLD: f64 = 2.0;
 const FAST_MOTION_CONCEAL_RAW_PRESSURE_EXIT_THRESHOLD: f64 = 1.0;
 const BUFFER_EVENT_POLICY_CACHE_CAPACITY: usize = 32;
 
-fn threshold_active_usize(value: usize, previous_active: bool, enter: usize, exit: usize) -> bool {
-    if previous_active {
-        value >= exit
-    } else {
-        value >= enter
-    }
-}
-
-fn threshold_active_f64(value: f64, previous_active: bool, enter: f64, exit: f64) -> bool {
+fn threshold_active<T: PartialOrd>(value: T, previous_active: bool, enter: T, exit: T) -> bool {
     if previous_active {
         value >= exit
     } else {
@@ -120,51 +110,36 @@ pub(super) struct BufferEventPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BufferEventPolicyInput<'a> {
-    buftype: &'a str,
-    buflisted: bool,
-    perf_mode: BufferPerfMode,
-    line_count: usize,
-    callback_duration_estimate_ms: f64,
-    signals: BufferPerfSignals,
-    filetype_disabled: bool,
+pub(super) struct BufferEventPolicyInput<'a> {
+    pub(super) buftype: &'a str,
+    pub(super) buflisted: bool,
+    pub(super) perf_mode: BufferPerfMode,
+    pub(super) line_count: usize,
+    pub(super) callback_duration_estimate_ms: f64,
+    pub(super) signals: BufferPerfSignals,
+    pub(super) filetype_disabled: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct BufferEventPolicyCacheEntry {
-    buffer_handle: i64,
-    policy: BufferEventPolicy,
-}
-
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct BufferEventPolicyCache {
-    entries: VecDeque<BufferEventPolicyCacheEntry>,
+    entries: LruCache<i64, BufferEventPolicy>,
+}
+
+impl Default for BufferEventPolicyCache {
+    fn default() -> Self {
+        Self {
+            entries: LruCache::new(BUFFER_EVENT_POLICY_CACHE_CAPACITY),
+        }
+    }
 }
 
 impl BufferEventPolicyCache {
     pub(super) fn cached_policy(&self, buffer_handle: i64) -> Option<BufferEventPolicy> {
-        self.entries
-            .iter()
-            .find(|entry| entry.buffer_handle == buffer_handle)
-            .map(|entry| entry.policy)
+        self.entries.peek_cloned(&buffer_handle)
     }
 
     pub(super) fn store_policy(&mut self, buffer_handle: i64, policy: BufferEventPolicy) {
-        if let Some(existing_index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.buffer_handle == buffer_handle)
-        {
-            let _ = self.entries.remove(existing_index);
-        }
-
-        self.entries.push_front(BufferEventPolicyCacheEntry {
-            buffer_handle,
-            policy,
-        });
-        while self.entries.len() > BUFFER_EVENT_POLICY_CACHE_CAPACITY {
-            let _ = self.entries.pop_back();
-        }
+        self.entries.insert(buffer_handle, policy);
     }
 
     pub(super) fn clear(&mut self) {
@@ -193,31 +168,31 @@ impl BufferEventPolicy {
             Self::previous_reason_active(previous, BufferPerfReason::ConcealRawScreenposFallback);
         let line_count_drives_policy = input.buflisted || input.buftype == "terminal";
         let line_count_fast_motion = line_count_drives_policy
-            && threshold_active_usize(
+            && threshold_active(
                 input.line_count,
                 previous_line_reason_active,
                 FAST_MOTION_LINE_COUNT_ENTER_THRESHOLD,
                 FAST_MOTION_LINE_COUNT_EXIT_THRESHOLD,
             );
-        let slow_callback = threshold_active_f64(
+        let slow_callback = threshold_active(
             input.callback_duration_estimate_ms,
             previous_callback_reason_active,
             FAST_MOTION_CALLBACK_MS_ENTER_THRESHOLD,
             FAST_MOTION_CALLBACK_MS_EXIT_THRESHOLD,
         );
-        let extmark_pressure = threshold_active_f64(
+        let extmark_pressure = threshold_active(
             input.signals.cursor_color_extmark_fallback_pressure(),
             previous_extmark_reason_active,
             FAST_MOTION_EXTMARK_PRESSURE_ENTER_THRESHOLD,
             FAST_MOTION_EXTMARK_PRESSURE_EXIT_THRESHOLD,
         );
-        let conceal_scan_pressure = threshold_active_f64(
+        let conceal_scan_pressure = threshold_active(
             input.signals.conceal_full_scan_pressure(),
             previous_conceal_scan_reason_active,
             FAST_MOTION_CONCEAL_SCAN_PRESSURE_ENTER_THRESHOLD,
             FAST_MOTION_CONCEAL_SCAN_PRESSURE_EXIT_THRESHOLD,
         );
-        let conceal_raw_pressure = threshold_active_f64(
+        let conceal_raw_pressure = threshold_active(
             input.signals.conceal_raw_screenpos_fallback_pressure(),
             previous_conceal_raw_reason_active,
             FAST_MOTION_CONCEAL_RAW_PRESSURE_ENTER_THRESHOLD,
@@ -293,16 +268,8 @@ impl BufferEventPolicy {
         )
     }
 
-    pub(super) const fn should_skip(self) -> bool {
-        matches!(self.perf_class, BufferPerfClass::Skip)
-    }
-
     pub(super) const fn diagnostic_class_name(self) -> &'static str {
         self.perf_class.diagnostic_name()
-    }
-
-    pub(super) const fn core_perf_class(self) -> crate::core::state::BufferPerfClass {
-        self.perf_class
     }
 
     pub(super) const fn diagnostic_effective_mode_name(
@@ -329,20 +296,13 @@ impl BufferEventPolicy {
         self.reasons.bits()
     }
 
-    pub(super) const fn reason_bits(self) -> u8 {
-        self.observed_reason_bits()
-    }
-
     pub(super) fn diagnostic_observed_reason_summary(self) -> String {
         self.reasons.diagnostic_summary()
     }
 
-    pub(super) fn diagnostic_reason_summary(self) -> String {
-        self.diagnostic_observed_reason_summary()
-    }
-
+    #[cfg(test)]
     pub(super) fn diagnostic_summary(self) -> String {
-        let reasons = self.diagnostic_reason_summary();
+        let reasons = self.diagnostic_observed_reason_summary();
         if reasons == "none" {
             self.diagnostic_class_name().to_string()
         } else {
@@ -423,43 +383,25 @@ impl BufferEventPolicy {
     #[cfg(test)]
     pub(super) fn from_test_input_with_perf_mode(
         previous: Option<Self>,
-        buftype: &str,
-        buflisted: bool,
-        perf_mode: BufferPerfMode,
-        line_count: usize,
-        callback_duration_estimate_ms: f64,
-        signals: BufferPerfSignals,
-        filetype_disabled: bool,
+        input: BufferEventPolicyInput<'_>,
     ) -> Self {
-        Self::from_input(
-            BufferEventPolicyInput {
-                buftype,
-                buflisted,
-                perf_mode,
-                line_count,
-                callback_duration_estimate_ms,
-                signals,
-                filetype_disabled,
-            },
-            previous,
-        )
+        Self::from_input(input, previous)
     }
 }
 
-pub(super) fn current_buffer_event_policy(
+pub(super) fn buffer_event_policy_from_snapshot(
     snapshot: &IngressReadSnapshot,
-    buffer: &api::Buffer,
+    metadata: &BufferMetadata,
     previous: Option<BufferEventPolicy>,
     telemetry: BufferPerfTelemetry,
     observed_at_ms: f64,
-) -> Result<BufferEventPolicy> {
-    let metadata = BufferMetadata::read(buffer)?;
-    Ok(BufferEventPolicy::from_snapshot(
+) -> BufferEventPolicy {
+    BufferEventPolicy::from_snapshot(
         snapshot,
-        &metadata,
+        metadata,
         previous,
         telemetry.signals_at(observed_at_ms),
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -511,7 +453,7 @@ impl BufferEventPolicy {
         self,
         context: IngressCursorPresentationContext,
     ) -> IngressCursorPresentationPolicy {
-        if self.should_skip()
+        if matches!(self.perf_class, BufferPerfClass::Skip)
             || !context.enabled
             || context.animating
             || !context.mode_allowed

@@ -1,4 +1,4 @@
-use super::LruCache;
+use super::super::lru_cache::LruCache;
 use crate::core::effect::ProbePolicy;
 use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
@@ -35,22 +35,28 @@ impl CachedCursorColorProbeSample {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct CursorColorMotionCacheKey {
+    window_handle: i64,
     buffer_handle: i64,
     changedtick: u64,
     mode: String,
     line: u32,
     colorscheme_generation: crate::core::types::Generation,
+    cache_generation: crate::core::types::Generation,
 }
 
 impl CursorColorMotionCacheKey {
     fn from_witness(witness: &CursorColorProbeWitness) -> Option<Self> {
+        // Mirror `CompatibleWithinLine`: motion-cache reuse collapses only
+        // column drift within the same line, never cross-line movement.
         let line = witness.cursor_position()?.row.value();
         Some(Self {
+            window_handle: witness.window_handle(),
             buffer_handle: witness.buffer_handle(),
             changedtick: witness.changedtick(),
             mode: witness.mode().to_owned(),
             line,
             colorscheme_generation: witness.colorscheme_generation(),
+            cache_generation: witness.cache_generation(),
         })
     }
 }
@@ -112,7 +118,7 @@ impl CursorColorProbeCache {
         }
     }
 
-    pub(super) fn note_colorscheme_change(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.exact.clear();
         self.motion.clear();
     }
@@ -128,175 +134,371 @@ mod tests {
     use crate::core::effect::CursorPositionProbeMode;
     use crate::core::effect::ProbePolicy;
     use crate::core::effect::ProbeQuality;
-    use crate::core::state::CursorColorProbeWitness;
     use crate::core::state::CursorColorSample;
     use crate::core::state::ProbeReuse;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorPosition;
-    use crate::core::types::CursorRow;
-    use crate::core::types::Generation;
-    use pretty_assertions::assert_eq;
+    use crate::test_support::cursor;
+    use crate::test_support::cursor_color_probe_witness_with_cache_generation as witness_with_cache_generation;
+    use crate::test_support::proptest::mode_case;
+    use crate::test_support::proptest::pure_config;
+    use proptest::prelude::*;
 
-    fn cursor(row: u32, col: u32) -> CursorPosition {
-        CursorPosition {
-            row: CursorRow(row),
-            col: CursorCol(col),
+    fn sample_strategy() -> BoxedStrategy<Option<CursorColorSample>> {
+        proptest::option::of(any::<u32>().prop_map(CursorColorSample::new)).boxed()
+    }
+
+    fn different_mode(mode: &str) -> &'static str {
+        match mode {
+            "n" | "no" => "i",
+            "i" | "ic" => "R",
+            "R" | "Rc" => "t",
+            _ => "n",
         }
     }
 
-    fn witness(
-        buffer_handle: i64,
-        changedtick: u64,
-        mode: &str,
-        cursor_position: Option<CursorPosition>,
-        colorscheme_generation: u64,
-    ) -> CursorColorProbeWitness {
-        CursorColorProbeWitness::new(
-            buffer_handle,
-            changedtick,
-            mode.to_string(),
-            cursor_position,
-            Generation::new(colorscheme_generation),
-        )
-    }
+    proptest! {
+        #![proptest_config(pure_config())]
 
-    #[test]
-    fn cursor_color_probe_cache_returns_exact_entry_only_for_identical_witness() {
-        let mut cache = CursorColorProbeCache::default();
-        let key = witness(22, 14, "n", Some(cursor(7, 8)), 0);
-        let sample = Some(CursorColorSample::new(0x00AB_CDEF));
-        cache.store_sample(key.clone(), sample);
+        #[test]
+        fn prop_cursor_color_probe_cache_exact_lookup_tracks_each_witness_field(
+            window_handle in any::<i64>(),
+            buffer_handle in any::<i64>(),
+            changedtick in any::<u64>(),
+            mode in mode_case(),
+            row in 1_u32..256,
+            col in 1_u32..256,
+            colorscheme_generation in any::<u64>(),
+            cache_generation in any::<u64>(),
+            sample in sample_strategy(),
+            mutated_field in 0_usize..8,
+        ) {
+            let mut cache = CursorColorProbeCache::default();
+            let base = witness_with_cache_generation(
+                window_handle,
+                buffer_handle,
+                changedtick,
+                mode.mode(),
+                Some(cursor(row, col)),
+                colorscheme_generation,
+                cache_generation,
+            );
+            cache.store_sample(base.clone(), sample);
 
-        assert_eq!(
-            cache.cached_sample(&key),
-            CursorColorCacheLookup::Hit(sample)
-        );
-        assert_eq!(
-            cache.cached_sample(&witness(22, 15, "n", Some(cursor(7, 8)), 0)),
-            CursorColorCacheLookup::Miss,
-        );
-        assert_eq!(
-            cache.cached_sample(&witness(22, 14, "n", Some(cursor(7, 9)), 0)),
-            CursorColorCacheLookup::Miss,
-        );
-    }
+            prop_assert_eq!(cache.cached_sample(&base), CursorColorCacheLookup::Hit(sample));
 
-    #[test]
-    fn cursor_color_probe_cache_keeps_exact_entries_distinct_while_motion_cache_reuses_line_scope()
-    {
-        let mut cache = CursorColorProbeCache::default();
-        let left = witness(22, 14, "n", Some(cursor(7, 8)), 0);
-        let right = witness(22, 14, "n", Some(cursor(7, 9)), 0);
-        let left_sample = Some(CursorColorSample::new(0x00AB_CDEF));
-        let right_sample = Some(CursorColorSample::new(0x00FE_DCBA));
-        cache.store_sample(left.clone(), left_sample);
-        cache.store_sample(right.clone(), right_sample);
+            let mutated = match mutated_field {
+                0 => witness_with_cache_generation(
+                    window_handle.wrapping_add(1),
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col)),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                1 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle.wrapping_add(1),
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col)),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                2 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick.wrapping_add(1),
+                    mode.mode(),
+                    Some(cursor(row, col)),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                3 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    different_mode(mode.mode()),
+                    Some(cursor(row, col)),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                4 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col.saturating_add(1))),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                5 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row.saturating_add(1), col)),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                6 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col)),
+                    colorscheme_generation.wrapping_add(1),
+                    cache_generation,
+                ),
+                7 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col)),
+                    colorscheme_generation,
+                    cache_generation.wrapping_add(1),
+                ),
+                _ => unreachable!(),
+            };
 
-        assert_eq!(
-            cache.cached_sample(&left),
-            CursorColorCacheLookup::Hit(left_sample)
-        );
-        assert_eq!(
-            cache.cached_sample(&right),
-            CursorColorCacheLookup::Hit(right_sample)
-        );
-        assert_eq!(
-            cache.cached_sample_for_probe(
-                &witness(22, 14, "n", Some(cursor(7, 10)), 0),
-                ProbePolicy::new(ProbeQuality::FastMotion),
-                ProbeReuse::Compatible,
-            ),
-            Some(CachedCursorColorProbeSample {
-                reuse: ProbeReuse::Compatible,
-                sample: right_sample,
-            }),
-        );
-    }
+            prop_assert_eq!(cache.cached_sample(&mutated), CursorColorCacheLookup::Miss);
+        }
 
-    #[test]
-    fn cursor_color_probe_cache_motion_key_stays_scoped_to_line_and_mode() {
-        let mut cache = CursorColorProbeCache::default();
-        let sample = Some(CursorColorSample::new(0x00AB_CDEF));
-        cache.store_sample(witness(22, 14, "n", Some(cursor(7, 8)), 0), sample);
+        #[test]
+        fn prop_cursor_color_probe_cache_compatible_reuse_is_same_line_and_policy_gated(
+            window_handle in any::<i64>(),
+            buffer_handle in any::<i64>(),
+            changedtick in any::<u64>(),
+            mode in mode_case(),
+            row in 1_u32..256,
+            col in 1_u32..256,
+            colorscheme_generation in any::<u64>(),
+            cache_generation in any::<u64>(),
+            sample in sample_strategy(),
+            column_delta in 1_u32..32,
+        ) {
+            let mut cache = CursorColorProbeCache::default();
+            let base = witness_with_cache_generation(
+                window_handle,
+                buffer_handle,
+                changedtick,
+                mode.mode(),
+                Some(cursor(row, col)),
+                colorscheme_generation,
+                cache_generation,
+            );
+            let moved = witness_with_cache_generation(
+                window_handle,
+                buffer_handle,
+                changedtick,
+                mode.mode(),
+                Some(cursor(row, col.saturating_add(column_delta))),
+                colorscheme_generation,
+                cache_generation,
+            );
+            let exact_compatible_policy = ProbePolicy::from_modes(
+                CursorPositionProbeMode::Exact,
+                CursorColorReuseMode::CompatibleWithinLine,
+                CursorColorFallbackMode::SyntaxThenExtmarks,
+            );
+            cache.store_sample(base, sample);
 
-        assert_eq!(
-            cache.cached_sample_for_probe(
-                &witness(22, 14, "n", Some(cursor(7, 9)), 0),
-                ProbePolicy::new(ProbeQuality::FastMotion),
-                ProbeReuse::Compatible,
-            ),
-            Some(CachedCursorColorProbeSample {
-                reuse: ProbeReuse::Compatible,
-                sample,
-            }),
-        );
-        assert_eq!(
-            cache.cached_sample_for_probe(
-                &witness(22, 14, "n", Some(cursor(8, 1)), 0),
-                ProbePolicy::new(ProbeQuality::FastMotion),
-                ProbeReuse::Compatible,
-            ),
-            None,
-        );
-        assert_eq!(
-            cache.cached_sample_for_probe(
-                &witness(22, 14, "i", Some(cursor(7, 9)), 0),
-                ProbePolicy::new(ProbeQuality::FastMotion),
-                ProbeReuse::Compatible,
-            ),
-            None,
-        );
-    }
+            prop_assert_eq!(cache.cached_sample(&moved), CursorColorCacheLookup::Miss);
+            prop_assert_eq!(
+                cache.cached_sample_for_probe(
+                    &moved,
+                    ProbePolicy::new(ProbeQuality::Exact),
+                    ProbeReuse::Compatible,
+                ),
+                None,
+            );
+            prop_assert_eq!(
+                cache.cached_sample_for_probe(&moved, exact_compatible_policy, ProbeReuse::Exact),
+                None,
+            );
+            prop_assert_eq!(
+                cache.cached_sample_for_probe(
+                    &moved,
+                    exact_compatible_policy,
+                    ProbeReuse::Compatible,
+                ),
+                Some(CachedCursorColorProbeSample {
+                    reuse: ProbeReuse::Compatible,
+                    sample,
+                }),
+            );
+        }
 
-    #[test]
-    fn cursor_color_probe_cache_motion_reuse_requires_compatible_reuse_and_matching_reuse_state() {
-        let mut cache = CursorColorProbeCache::default();
-        let sample = Some(CursorColorSample::new(0x00AB_CDEF));
-        cache.store_sample(witness(22, 14, "n", Some(cursor(7, 8)), 0), sample);
-        let moved = witness(22, 14, "n", Some(cursor(7, 9)), 0);
-        let exact_compatible_policy = ProbePolicy::from_modes(
-            CursorPositionProbeMode::Exact,
-            CursorColorReuseMode::CompatibleWithinLine,
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
+        #[test]
+        fn prop_cursor_color_probe_cache_motion_lookup_tracks_reduced_motion_key(
+            window_handle in any::<i64>(),
+            buffer_handle in any::<i64>(),
+            changedtick in any::<u64>(),
+            mode in mode_case(),
+            row in 1_u32..256,
+            col in 1_u32..256,
+            colorscheme_generation in any::<u64>(),
+            cache_generation in any::<u64>(),
+            sample in sample_strategy(),
+            mutated_field in 0_usize..7,
+            column_delta in 1_u32..32,
+        ) {
+            let mut cache = CursorColorProbeCache::default();
+            let base = witness_with_cache_generation(
+                window_handle,
+                buffer_handle,
+                changedtick,
+                mode.mode(),
+                Some(cursor(row, col)),
+                colorscheme_generation,
+                cache_generation,
+            );
+            cache.store_sample(base, sample);
 
-        assert_eq!(
-            cache.cached_sample_for_probe(
-                &moved,
-                ProbePolicy::new(ProbeQuality::Exact),
-                ProbeReuse::Compatible,
-            ),
-            None,
-        );
-        assert_eq!(
-            cache.cached_sample_for_probe(&moved, exact_compatible_policy, ProbeReuse::Exact,),
-            None,
-        );
-        assert_eq!(
-            cache.cached_sample_for_probe(&moved, exact_compatible_policy, ProbeReuse::Compatible),
-            Some(CachedCursorColorProbeSample {
-                reuse: ProbeReuse::Compatible,
-                sample,
-            }),
-        );
-    }
+            let compatible_policy = ProbePolicy::new(ProbeQuality::FastMotion);
+            let same_line = witness_with_cache_generation(
+                window_handle,
+                buffer_handle,
+                changedtick,
+                mode.mode(),
+                Some(cursor(row, col.saturating_add(column_delta))),
+                colorscheme_generation,
+                cache_generation,
+            );
+            prop_assert_eq!(
+                cache.cached_sample_for_probe(
+                    &same_line,
+                    compatible_policy,
+                    ProbeReuse::Compatible,
+                ),
+                Some(CachedCursorColorProbeSample {
+                    reuse: ProbeReuse::Compatible,
+                    sample,
+                }),
+            );
 
-    #[test]
-    fn cursor_color_probe_cache_clears_exact_and_motion_entries_on_colorscheme_change() {
-        let mut cache = CursorColorProbeCache::default();
-        let original = witness(22, 14, "n", Some(cursor(7, 8)), 0);
-        cache.store_sample(original.clone(), Some(CursorColorSample::new(0x00AB_CDEF)));
+            let mutated = match mutated_field {
+                0 => witness_with_cache_generation(
+                    window_handle.wrapping_add(1),
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col.saturating_add(column_delta))),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                1 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle.wrapping_add(1),
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col.saturating_add(column_delta))),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                2 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick.wrapping_add(1),
+                    mode.mode(),
+                    Some(cursor(row, col.saturating_add(column_delta))),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                3 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    different_mode(mode.mode()),
+                    Some(cursor(row, col.saturating_add(column_delta))),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                4 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row.saturating_add(1), col)),
+                    colorscheme_generation,
+                    cache_generation,
+                ),
+                5 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col.saturating_add(column_delta))),
+                    colorscheme_generation.wrapping_add(1),
+                    cache_generation,
+                ),
+                6 => witness_with_cache_generation(
+                    window_handle,
+                    buffer_handle,
+                    changedtick,
+                    mode.mode(),
+                    Some(cursor(row, col.saturating_add(column_delta))),
+                    colorscheme_generation,
+                    cache_generation.wrapping_add(1),
+                ),
+                _ => unreachable!(),
+            };
 
-        cache.note_colorscheme_change();
+            prop_assert_eq!(
+                cache.cached_sample_for_probe(
+                    &mutated,
+                    compatible_policy,
+                    ProbeReuse::Compatible,
+                ),
+                None,
+            );
+        }
 
-        assert_eq!(cache.cached_sample(&original), CursorColorCacheLookup::Miss);
-        assert_eq!(
-            cache.cached_sample_for_probe(
-                &witness(22, 14, "n", Some(cursor(7, 9)), 0),
-                ProbePolicy::new(ProbeQuality::FastMotion),
-                ProbeReuse::Compatible,
-            ),
-            None,
-        );
+        #[test]
+        fn prop_cursor_color_probe_cache_clear_resets_exact_and_motion_entries(
+            window_handle in any::<i64>(),
+            buffer_handle in any::<i64>(),
+            changedtick in any::<u64>(),
+            mode in mode_case(),
+            row in 1_u32..256,
+            col in 1_u32..256,
+            colorscheme_generation in any::<u64>(),
+            cache_generation in any::<u64>(),
+            sample in sample_strategy(),
+            column_delta in 1_u32..32,
+        ) {
+            let mut cache = CursorColorProbeCache::default();
+            let original = witness_with_cache_generation(
+                window_handle,
+                buffer_handle,
+                changedtick,
+                mode.mode(),
+                Some(cursor(row, col)),
+                colorscheme_generation,
+                cache_generation,
+            );
+            let moved = witness_with_cache_generation(
+                window_handle,
+                buffer_handle,
+                changedtick,
+                mode.mode(),
+                Some(cursor(row, col.saturating_add(column_delta))),
+                colorscheme_generation,
+                cache_generation,
+            );
+            cache.store_sample(original.clone(), sample);
+
+            cache.clear();
+
+            prop_assert_eq!(cache.cached_sample(&original), CursorColorCacheLookup::Miss);
+            prop_assert_eq!(
+                cache.cached_sample_for_probe(
+                    &moved,
+                    ProbePolicy::new(ProbeQuality::FastMotion),
+                    ProbeReuse::Compatible,
+                ),
+                None,
+            );
+        }
     }
 }

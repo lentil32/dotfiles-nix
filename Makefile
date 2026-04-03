@@ -1,4 +1,4 @@
-.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc fmt check check-lua check-smear-cursor clean help
+.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc mas-reset fmt check check-lua check-smear-cursor clean help
 
 hostname := $(shell hostname)
 user := $(shell whoami)
@@ -53,6 +53,9 @@ history:
 gc:
 	sudo nix-collect-garbage -d
 
+mas-reset:
+	mas reset
+
 fmt:
 	nix fmt
 
@@ -78,6 +81,7 @@ help:
 	@echo "update-flake - Update flake.lock"
 	@echo "deploy-flake - Update flake.lock and rebuild"
 	@echo "gc           - Full garbage collection"
+	@echo "mas-reset    - Reset mas state"
 	@echo "fmt          - Format Nix files"
 	@echo "check        - Run EmmyLua and flake checks"
 	@echo "check-lua    - Run EmmyLua checks"

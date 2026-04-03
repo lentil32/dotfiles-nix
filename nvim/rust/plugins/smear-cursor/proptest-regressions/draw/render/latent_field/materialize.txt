@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b2b3f737fba51a7abe456d535f0cf367b28b46f4ed8faea1103927e498cdaa92 # shrinks to fixture = MaterializeFixture { start: Pose { center: Point { row: -4.5, col: 0.5 }, half_height: 0.25, half_width: 0.25 }, end: Pose { center: Point { row: -4.5, col: 0.5 }, half_height: 0.25, half_width: 0.25 }, block_aspect_ratio: 0.125, band_thicknesses: [(Sheath, 0.59, 0.59), (Core, 0.29, 0.29), (Filament, 0.14, 0.14)], max_thickness_y: 0.59, max_thickness_x: 0.59 }

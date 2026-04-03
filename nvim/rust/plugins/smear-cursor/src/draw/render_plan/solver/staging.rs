@@ -131,9 +131,6 @@ fn record_history_slice(state: &mut PlannerState, slice: &DepositedSlice) {
     state.history.push_back(slice.clone());
 }
 
-#[cfg(not(test))]
-fn record_history_slice(_state: &mut PlannerState, _slice: &DepositedSlice) {}
-
 #[cfg(test)]
 fn prune_debug_history(state: &mut PlannerState) {
     let mut retained = VecDeque::with_capacity(state.history.len());
@@ -149,9 +146,6 @@ fn prune_debug_history(state: &mut PlannerState) {
     }
     state.history = retained;
 }
-
-#[cfg(not(test))]
-fn prune_debug_history(_state: &mut PlannerState) {}
 
 pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
     handle_stroke_transition(state, frame);
@@ -224,7 +218,10 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
                 microtiles,
             };
             state.latent_cache.insert_slice(&slice);
-            record_history_slice(state, &slice);
+            #[cfg(test)]
+            {
+                record_history_slice(state, &slice);
+            }
         }
         state.center_history.push_back(CenterPathSample {
             step_index: state.step_index,
@@ -241,7 +238,10 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
         state.latent_cache.advance_to(state.step_index);
     }
 
-    prune_debug_history(state);
+    #[cfg(test)]
+    {
+        prune_debug_history(state);
+    }
 
     let support_steps =
         latent_field::max_comet_support_steps(frame.tail_duration_ms, frame.simulation_hz);

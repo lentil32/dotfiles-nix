@@ -18,13 +18,7 @@ pub(super) struct PathSegmentationDecision {
     pub(super) starts_new_trail_stroke: bool,
 }
 
-fn jump_cue_min_display_distance(config: &RuntimeConfig) -> f64 {
-    if config.jump_cue_min_display_distance.is_finite() {
-        config.jump_cue_min_display_distance.max(0.0)
-    } else {
-        0.0
-    }
-}
+const DISCONTINUOUS_JUMP_BRIDGE_MIN_DISPLAY_DISTANCE: f64 = 16.0;
 
 fn classify_motion_class(
     state: &RuntimeState,
@@ -42,12 +36,7 @@ fn classify_motion_class(
         state.config.block_aspect_ratio,
     );
     let surface_changed = window_changed || buffer_changed;
-    let cross_window = window_changed;
-
-    if state.config.jump_cues_enabled
-        && display_distance >= jump_cue_min_display_distance(&state.config)
-        && (!cross_window || state.config.cross_window_jump_bridges)
-    {
+    if display_distance >= DISCONTINUOUS_JUMP_BRIDGE_MIN_DISPLAY_DISTANCE {
         MotionClass::DiscontinuousJump
     } else if surface_changed {
         MotionClass::SurfaceRetarget
@@ -70,11 +59,9 @@ pub(super) fn should_jump_to_target(
         return true;
     }
 
-    let current_corners = state.current_corners();
-    let current_row = current_corners[0].row;
-    let current_col = current_corners[0].col;
-    let delta_row = (target_row - current_row).abs();
-    let delta_col = (target_col - current_col).abs();
+    let current_anchor = state.current_visual_cursor_anchor();
+    let delta_row = (target_row - current_anchor.row).abs();
+    let delta_col = (target_col - current_anchor.col).abs();
     let row_scale = display_metric_row_scale(state.config.block_aspect_ratio);
     let display_delta_row = delta_row * row_scale;
     (!state.config.smear_between_neighbor_lines && display_delta_row <= 1.5 * row_scale)
@@ -182,11 +169,13 @@ pub(super) fn external_mode_requires_immediate_movement(
 mod tests {
     use super::*;
     use crate::state::CursorShape;
+    use crate::test_support::proptest::positive_aspect_ratio;
+    use crate::test_support::proptest::pure_config;
+    use proptest::prelude::*;
 
     fn initialized_state(block_aspect_ratio: f64) -> RuntimeState {
         let mut state = RuntimeState::default();
         state.config.block_aspect_ratio = block_aspect_ratio;
-        state.config.jump_cue_min_display_distance = 8.0;
         state.initialize_cursor(
             Point { row: 5.0, col: 5.0 },
             CursorShape::new(false, false),
@@ -196,65 +185,127 @@ mod tests {
         state
     }
 
-    #[test]
-    fn jump_thresholds_use_display_metric_distance() {
-        let mut state = initialized_state(2.0);
-        state.config.min_vertical_distance_smear = 1.0;
-        state.config.min_horizontal_distance_smear = 0.25;
-
-        assert!(
-            !should_jump_to_target(&state, false, false, 5.6, 5.2),
-            "0.6 rows becomes 1.2 display cells at aspect 2.0 and should exceed the threshold"
-        );
+    fn configure_jump_thresholds(
+        state: &mut RuntimeState,
+        min_vertical_distance_smear: f64,
+        min_horizontal_distance_smear: f64,
+    ) {
+        state.config.min_vertical_distance_smear = min_vertical_distance_smear;
+        state.config.min_horizontal_distance_smear = min_horizontal_distance_smear;
     }
 
-    #[test]
-    fn jump_thresholds_match_for_equal_display_space_motion() {
-        let mut aspect_one = initialized_state(1.0);
-        aspect_one.config.min_vertical_distance_smear = 1.0;
-        aspect_one.config.min_horizontal_distance_smear = 0.25;
-
-        let mut aspect_two = initialized_state(2.0);
-        aspect_two.config.min_vertical_distance_smear = 1.0;
-        aspect_two.config.min_horizontal_distance_smear = 0.25;
-
-        assert_eq!(
-            should_jump_to_target(&aspect_one, false, false, 5.8, 5.2),
-            should_jump_to_target(&aspect_two, false, false, 5.4, 5.2)
-        );
+    fn target_for_display_motion(
+        block_aspect_ratio: f64,
+        display_delta_row: f64,
+        delta_col: f64,
+    ) -> Point {
+        Point {
+            row: 5.0 + (display_delta_row / block_aspect_ratio),
+            col: 5.0 + delta_col,
+        }
     }
 
-    #[test]
-    fn segmentation_matches_for_equal_display_space_motion() {
-        let mut aspect_one = initialized_state(1.0);
-        aspect_one.config.min_vertical_distance_smear = 1.0;
-        aspect_one.config.min_horizontal_distance_smear = 0.25;
+    proptest! {
+        #![proptest_config(pure_config())]
 
-        let mut aspect_two = initialized_state(2.0);
-        aspect_two.config.min_vertical_distance_smear = 1.0;
-        aspect_two.config.min_horizontal_distance_smear = 0.25;
+        #[test]
+        fn prop_jump_and_segmentation_match_for_equal_display_space_motion(
+            aspect_one in positive_aspect_ratio(),
+            aspect_two in positive_aspect_ratio(),
+            display_delta_row in 0.0_f64..6.0_f64,
+            delta_col in 0.0_f64..6.0_f64,
+            min_vertical_distance_smear in 0.0_f64..6.0_f64,
+            min_horizontal_distance_smear in 0.0_f64..6.0_f64,
+        ) {
+            let mut state_one = initialized_state(aspect_one);
+            configure_jump_thresholds(
+                &mut state_one,
+                min_vertical_distance_smear,
+                min_horizontal_distance_smear,
+            );
+            let mut state_two = initialized_state(aspect_two);
+            configure_jump_thresholds(
+                &mut state_two,
+                min_vertical_distance_smear,
+                min_horizontal_distance_smear,
+            );
+            let target_one = target_for_display_motion(aspect_one, display_delta_row, delta_col);
+            let target_two = target_for_display_motion(aspect_two, display_delta_row, delta_col);
 
-        assert_eq!(
-            classify_target_transition(&aspect_one, false, false, 5.8, 5.2),
-            classify_target_transition(&aspect_two, false, false, 5.4, 5.2)
-        );
-    }
+            prop_assert_eq!(
+                should_jump_to_target(
+                    &state_one,
+                    false,
+                    false,
+                    target_one.row,
+                    target_one.col
+                ),
+                should_jump_to_target(
+                    &state_two,
+                    false,
+                    false,
+                    target_two.row,
+                    target_two.col
+                )
+            );
+            prop_assert_eq!(
+                classify_target_transition(
+                    &state_one,
+                    false,
+                    false,
+                    target_one.row,
+                    target_one.col
+                ),
+                classify_target_transition(
+                    &state_two,
+                    false,
+                    false,
+                    target_two.row,
+                    target_two.col
+                )
+            );
+        }
 
-    #[test]
-    fn large_cross_window_moves_classify_as_discontinuous_jump() {
-        let state = initialized_state(2.0);
+        #[test]
+        fn prop_cross_surface_classification_uses_display_distance_thresholds(
+            aspect_one in positive_aspect_ratio(),
+            aspect_two in positive_aspect_ratio(),
+            display_delta_row in 0.0_f64..20.0_f64,
+            delta_col in 0.0_f64..20.0_f64,
+            window_changed in any::<bool>(),
+            buffer_changed in any::<bool>(),
+        ) {
+            prop_assume!(window_changed || buffer_changed);
 
-        let decision = classify_target_transition(&state, true, false, 5.0, 25.0);
+            let state_one = initialized_state(aspect_one);
+            let state_two = initialized_state(aspect_two);
+            let target_one = target_for_display_motion(aspect_one, display_delta_row, delta_col);
+            let target_two = target_for_display_motion(aspect_two, display_delta_row, delta_col);
+            let expected_motion_class = if display_delta_row.hypot(delta_col)
+                >= DISCONTINUOUS_JUMP_BRIDGE_MIN_DISPLAY_DISTANCE
+            {
+                MotionClass::DiscontinuousJump
+            } else {
+                MotionClass::SurfaceRetarget
+            };
+            let decision_one = classify_target_transition(
+                &state_one,
+                window_changed,
+                buffer_changed,
+                target_one.row,
+                target_one.col,
+            );
+            let decision_two = classify_target_transition(
+                &state_two,
+                window_changed,
+                buffer_changed,
+                target_two.row,
+                target_two.col,
+            );
 
-        assert_eq!(decision.motion_class, MotionClass::DiscontinuousJump);
-    }
-
-    #[test]
-    fn surface_change_without_large_display_distance_classifies_as_surface_retarget() {
-        let state = initialized_state(2.0);
-
-        let decision = classify_target_transition(&state, true, false, 5.0, 8.0);
-
-        assert_eq!(decision.motion_class, MotionClass::SurfaceRetarget);
+            prop_assert_eq!(decision_one, decision_two);
+            prop_assert_eq!(decision_one.motion_class, expected_motion_class);
+            prop_assert!(decision_one.starts_new_trail_stroke);
+        }
     }
 }

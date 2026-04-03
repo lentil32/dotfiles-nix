@@ -40,8 +40,9 @@ time_interval_ms="${SMEAR_TIME_INTERVAL_MS:-8.333333333333334}"
 particle_max_num="${SMEAR_PARTICLE_MAX_NUM:-100}"
 report_file="${SMEAR_COMPARE_REPORT_FILE:-}"
 
-worktree_dir="$(mktemp -d /tmp/smear_particle_toggle_compare.XXXXXX)"
-artifact_dir="$(mktemp -d /tmp/smear_particle_toggle_compare_artifacts.XXXXXX)"
+IFS=$'\t' read -r worktree_dir artifact_dir <<EOF
+$(smear_compare_prepare_worktree "${repo_root}" "${base_ref}" "smear_particle_toggle_compare" "smear_particle_toggle_compare_artifacts")
+EOF
 results_tsv="${artifact_dir}/particle_toggle_compare_results.tsv"
 raw_results_table="${artifact_dir}/particle_toggle_compare_raw.txt"
 summary_table="${artifact_dir}/particle_toggle_compare_summary.txt"
@@ -50,26 +51,9 @@ particle_isolation_table="${artifact_dir}/particle_toggle_compare_isolation.txt"
 delta_table="${artifact_dir}/particle_toggle_compare_delta.txt"
 
 cleanup() {
-  git -C "${repo_root}" worktree remove "${worktree_dir}" >/dev/null 2>&1 || true
+  smear_compare_remove_worktree "${repo_root}" "${worktree_dir}"
 }
 trap cleanup EXIT
-
-git -C "${repo_root}" worktree add --detach "${worktree_dir}" "${base_ref}" >/dev/null
-
-build_release() {
-  local plugin_dir="$1"
-  (
-    cd "${plugin_dir}"
-    cargo build --release >/dev/null
-  )
-}
-
-extract_field() {
-  local line="$1"
-  local field="$2"
-
-  printf '%s\n' "${line}" | sed -nE "s/.*${field}=([^ ]+).*/\\1/p"
-}
 
 run_once() {
   local side_label="$1"
@@ -77,9 +61,8 @@ run_once() {
   local case_label="$3"
   local particles_enabled="$4"
   local repeat_index="$5"
-  local plugin_dir="${side_root}/nvim/rust/plugins/smear-cursor"
+  local plugin_dir
   local log_file="${artifact_dir}/run_${side_label}_${case_label}_${repeat_index}.log"
-  local target_directory
   local smear_cursor_cpath
   local summary_line
   local avg_us
@@ -87,12 +70,12 @@ run_once() {
   local max_particles
   local final_particles
 
-  target_directory="$(smear_resolve_target_directory "${plugin_dir}")"
-  if [[ -z "${target_directory}" ]]; then
-    echo "failed to resolve target_directory for ${side_label}" >&2
+  plugin_dir="$(smear_compare_plugin_dir "${side_root}")"
+  smear_cursor_cpath="$(smear_compare_release_cpath "${plugin_dir}")"
+  if [[ -z "${smear_cursor_cpath}" ]]; then
+    echo "failed to resolve release cpath for ${side_label}" >&2
     exit 1
   fi
-  smear_cursor_cpath="$(smear_default_cpath "${target_directory}")"
 
   (
     cd "${plugin_dir}"
@@ -107,10 +90,10 @@ run_once() {
   ) >"${log_file}" 2>&1
 
   summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
-  avg_us="$(extract_field "${summary_line}" "avg_us")"
-  avg_particles="$(extract_field "${summary_line}" "avg_particles")"
-  max_particles="$(extract_field "${summary_line}" "max_particles")"
-  final_particles="$(extract_field "${summary_line}" "final_particles")"
+  avg_us="$(smear_extract_field "${summary_line}" "avg_us")"
+  avg_particles="$(smear_extract_field "${summary_line}" "avg_particles")"
+  max_particles="$(smear_extract_field "${summary_line}" "max_particles")"
+  final_particles="$(smear_extract_field "${summary_line}" "final_particles")"
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${side_label}" \
@@ -135,10 +118,11 @@ run_once() {
 run_side() {
   local side_label="$1"
   local side_root="$2"
-  local plugin_dir="${side_root}/nvim/rust/plugins/smear-cursor"
+  local plugin_dir
   local repeat_index
 
-  build_release "${plugin_dir}"
+  plugin_dir="$(smear_compare_plugin_dir "${side_root}")"
+  smear_build_release "${plugin_dir}"
   for repeat_index in $(seq 1 "${repeats}"); do
     run_once "${side_label}" "${side_root}" "particles_off" "0" "${repeat_index}"
   done
@@ -299,14 +283,10 @@ write_report() {
   local capture_time
   local command_line
 
-  git_commit="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || printf 'unknown\n')"
-  if [[ -n "$(git -C "${repo_root}" status --short 2>/dev/null)" ]]; then
-    git_state="dirty"
-  else
-    git_state="clean"
-  fi
-  nvim_version="$("${NVIM_BIN:-nvim}" --version | sed -n '1p')"
-  capture_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  git_commit="$(smear_report_git_commit "${repo_root}")"
+  git_state="$(smear_report_git_state "${repo_root}")"
+  nvim_version="$(smear_report_nvim_version)"
+  capture_time="$(smear_report_capture_time_utc)"
   command_line="SMEAR_COMPARE_REPORT_FILE=${output_file} ${rust_repo_dir}/plugins/smear-cursor/scripts/compare_particle_toggle_perf.sh ${base_ref}"
 
   mkdir -p "$(dirname -- "${output_file}")"

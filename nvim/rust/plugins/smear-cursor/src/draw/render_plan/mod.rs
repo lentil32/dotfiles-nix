@@ -3,6 +3,7 @@ use crate::draw::PARTICLE_ZINDEX_OFFSET;
 use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::types::Point;
 use crate::types::RenderFrame;
+use crate::types::smoothstep01;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -32,7 +33,20 @@ use self::decode_candidates::decode_locally;
 use self::decode_candidates::non_empty_candidates;
 use self::decode_candidates::populate_cell_candidates_in_bounds_with_scratch;
 use self::decode_candidates::populate_cell_candidates_with_scratch;
-pub(crate) use self::infra::*;
+use self::infra::candidates::*;
+pub(crate) use self::infra::shared::CellOp;
+pub(crate) use self::infra::shared::ClearOp;
+pub(crate) use self::infra::shared::Glyph;
+pub(crate) use self::infra::shared::HighlightLevel;
+pub(crate) use self::infra::shared::HighlightRef;
+#[cfg(test)]
+pub(crate) use self::infra::shared::ParticleOp;
+pub(crate) use self::infra::shared::PlannerOutput;
+pub(crate) use self::infra::shared::PlannerState;
+pub(crate) use self::infra::shared::RenderPlan;
+pub(crate) use self::infra::shared::TargetCellOverlay;
+pub(crate) use self::infra::shared::Viewport;
+use self::infra::shared::*;
 use self::latent_field::AgeMoment;
 use self::latent_field::CompiledCell;
 use self::latent_field::DepositedSlice;
@@ -51,17 +65,14 @@ use self::local_envelope::build_ribbon_slices;
 use self::local_envelope::build_ribbon_slices_with_compiled;
 use self::local_envelope::build_ribbon_slices_with_compiled_and_scratch;
 #[cfg(test)]
-use self::local_envelope::centerline_curvature;
-#[cfg(test)]
 use self::local_envelope::comet_target_width_cells;
-use self::local_envelope::compute_local_query_envelope;
 #[cfg(test)]
-use self::local_envelope::default_head_width_cells;
+use self::local_envelope::compute_local_query_envelope;
 use self::local_envelope::fast_path_query_bounds;
 use self::local_envelope::populate_resampled_centerline_with_scratch;
 #[cfg(test)]
 use self::local_envelope::resample_centerline;
-use self::local_envelope::smoothstep01;
+#[cfg(test)]
 use self::local_envelope::to_q16;
 use self::particles::draw_particles;
 #[cfg(test)]
@@ -81,7 +92,9 @@ use self::solver::build_slice_states_with_peak_working_set;
 use self::solver::decode_compiled_field;
 #[cfg(test)]
 use self::solver::decode_compiled_field_trace;
+#[cfg(test)]
 use self::solver::decode_compiled_field_trace_with_compiled_and_scratch;
+use self::solver::decode_compiled_field_with_compiled_and_scratch;
 #[cfg(test)]
 use self::solver::decode_compiled_field_with_solver;
 #[cfg(test)]
@@ -120,8 +133,6 @@ use self::solver::stage_deposited_samples;
 use self::solver::state_for_slice_cell;
 #[cfg(test)]
 use self::solver::state_local_prior;
-#[cfg(test)]
-use self::solver::transition_cost;
 include!("lifecycle.rs");
 
 #[cfg(test)]

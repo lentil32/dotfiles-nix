@@ -22,13 +22,7 @@ pub(crate) enum SemanticEntityId {
     CursorTrail,
 }
 
-impl SemanticEntityId {
-    pub(crate) const fn fingerprint(self) -> u64 {
-        match self {
-            Self::CursorTrail => 1_u64,
-        }
-    }
-}
+impl SemanticEntityId {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CursorTrailProjectionPolicy {
@@ -189,10 +183,6 @@ impl CursorTrailSemantic {
     pub(crate) const fn geometry(&self) -> &CursorTrailGeometry {
         &self.geometry
     }
-
-    pub(crate) const fn target_cell_presentation(&self) -> TargetCellPresentation {
-        self.target_cell_presentation
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,10 +204,6 @@ pub(crate) struct SemanticScene {
 }
 
 impl SemanticScene {
-    pub(crate) const fn entities(&self) -> &BTreeMap<SemanticEntityId, SemanticEntity> {
-        &self.entities
-    }
-
     pub(crate) fn entity(&self, id: SemanticEntityId) -> Option<&SemanticEntity> {
         self.entities.get(&id)
     }
@@ -239,6 +225,7 @@ pub(crate) struct DirtyEntitySet {
 }
 
 impl DirtyEntitySet {
+    #[cfg(test)]
     pub(crate) const fn entities(&self) -> &BTreeSet<SemanticEntityId> {
         &self.entities
     }
@@ -538,6 +525,7 @@ impl SceneState {
         std::mem::take(&mut self.motion)
     }
 
+    #[cfg(test)]
     pub(crate) const fn dirty(&self) -> &DirtyEntitySet {
         &self.dirty
     }

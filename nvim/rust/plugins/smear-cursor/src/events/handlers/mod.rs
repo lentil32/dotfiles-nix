@@ -32,6 +32,7 @@ pub(super) use render_plan::execute_core_request_render_plan_effect;
 pub(super) use source_selection::select_core_event_source;
 #[cfg(test)]
 pub(super) use source_selection::should_request_observation_for_autocmd;
+pub(crate) use viewport::cursor_location_for_core_render;
 
 #[cfg(test)]
 mod tests;

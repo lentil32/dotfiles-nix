@@ -25,6 +25,21 @@ impl BufferMetadata {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        filetype: &str,
+        buftype: &str,
+        buflisted: bool,
+        line_count: usize,
+    ) -> Self {
+        Self {
+            filetype: filetype.to_string(),
+            buftype: buftype.to_string(),
+            buflisted,
+            line_count,
+        }
+    }
+
     pub(crate) fn filetype(&self) -> &str {
         &self.filetype
     }

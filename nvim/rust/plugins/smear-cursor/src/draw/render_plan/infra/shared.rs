@@ -2,6 +2,7 @@ use crate::core::types::ArcLenQ16;
 use crate::core::types::StepIndex;
 use crate::core::types::StrokeId;
 use crate::draw::BRAILLE_CODE_MIN;
+use crate::types::CursorCellShape;
 use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
@@ -17,6 +18,7 @@ use std::sync::LazyLock;
 use super::super::latent_field::BorrowedCellRowsScratch;
 use super::super::latent_field::CellRows;
 use super::super::latent_field::CompiledCell;
+#[cfg(test)]
 use super::super::latent_field::DepositedSlice;
 use super::super::latent_field::LatentFieldCache;
 use super::super::local_envelope::SliceSearchBounds;
@@ -107,6 +109,7 @@ pub(crate) struct TargetCellOverlay {
     pub(crate) row: i64,
     pub(crate) col: i64,
     pub(crate) zindex: u32,
+    pub(crate) shape: CursorCellShape,
     pub(crate) level: HighlightLevel,
 }
 
@@ -159,19 +162,19 @@ pub(crate) struct CellCandidate {
 
 #[derive(Debug, Default)]
 pub(crate) struct PlannerState {
-    pub(crate) step_index: StepIndex,
-    pub(crate) arc_len_q16: ArcLenQ16,
-    pub(crate) last_trail_stroke_id: Option<StrokeId>,
-    pub(crate) last_pose: Option<super::super::latent_field::Pose>,
-    pub(crate) latent_cache: LatentFieldCache,
-    pub(crate) center_history: VecDeque<CenterPathSample>,
-    pub(crate) previous_cells: BTreeMap<(i64, i64), DecodedCellState>,
-    pub(crate) compiled_cache: CompiledFieldCache,
-    pub(crate) decode_scratch: PlannerDecodeScratch,
+    pub(in crate::draw::render_plan) step_index: StepIndex,
+    pub(in crate::draw::render_plan) arc_len_q16: ArcLenQ16,
+    pub(in crate::draw::render_plan) last_trail_stroke_id: Option<StrokeId>,
+    pub(in crate::draw::render_plan) last_pose: Option<super::super::latent_field::Pose>,
+    pub(in crate::draw::render_plan) latent_cache: LatentFieldCache,
+    pub(in crate::draw::render_plan) center_history: VecDeque<CenterPathSample>,
+    pub(in crate::draw::render_plan) previous_cells: BTreeMap<(i64, i64), DecodedCellState>,
+    pub(in crate::draw::render_plan) compiled_cache: CompiledFieldCache,
+    pub(in crate::draw::render_plan) decode_scratch: PlannerDecodeScratch,
     // Production planner truth lives in `latent_cache`; tests keep a mirrored slice log for
     // assertions over staged metadata without forcing the runtime to retain the trail twice.
     #[cfg(test)]
-    pub(crate) history: VecDeque<DepositedSlice>,
+    pub(in crate::draw::render_plan) history: VecDeque<DepositedSlice>,
 }
 
 impl PlannerState {
@@ -239,14 +242,14 @@ pub(crate) struct PlannerOutput {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CompiledPlannerFrame {
-    pub(crate) next_state: PlannerState,
-    pub(crate) compiled: Arc<CompiledField>,
-    pub(crate) query_bounds: Option<SliceSearchBounds>,
+pub(in crate::draw::render_plan) struct CompiledPlannerFrame {
+    pub(in crate::draw::render_plan) next_state: PlannerState,
+    pub(in crate::draw::render_plan) compiled: Arc<CompiledField>,
+    pub(in crate::draw::render_plan) query_bounds: Option<SliceSearchBounds>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CompiledField {
+pub(in crate::draw::render_plan) enum CompiledField {
     Reference(BTreeMap<(i64, i64), CompiledCell>),
     Rows(CellRows<CompiledCell>),
 }
@@ -260,7 +263,7 @@ impl CompiledField {
     }
 
     #[cfg(test)]
-    pub(crate) fn to_btree_map(&self) -> BTreeMap<(i64, i64), CompiledCell> {
+    pub(in crate::draw::render_plan) fn to_btree_map(&self) -> BTreeMap<(i64, i64), CompiledCell> {
         match self {
             Self::Reference(cells) => cells.clone(),
             Self::Rows(cells) => cells.iter().map(|(coord, value)| (coord, *value)).collect(),
@@ -542,11 +545,6 @@ impl SliceState {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn run_start_key(self) -> Option<usize> {
-        self.run.map(|run| run.start)
-    }
-
     pub(crate) fn candidate_offset_for(self, cell_index: usize) -> Option<usize> {
         let run = self.run?;
         if !run.contains(cell_index) {
@@ -660,13 +658,6 @@ pub(crate) fn hash_f64(hasher: &mut DefaultHasher, value: f64) {
     value.to_bits().hash(hasher);
 }
 
-pub(crate) fn pose_center(corners: &[Point; 4]) -> Point {
-    Point {
-        row: (corners[0].row + corners[1].row + corners[2].row + corners[3].row) / 4.0,
-        col: (corners[0].col + corners[1].col + corners[2].col + corners[3].col) / 4.0,
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn pose_for_frame(frame: &RenderFrame) -> super::super::latent_field::Pose {
     pose_for_corners(&frame.corners, &frame.target_corners)
@@ -676,7 +667,7 @@ pub(crate) fn pose_for_corners(
     corners: &[Point; 4],
     target_corners: &[Point; 4],
 ) -> super::super::latent_field::Pose {
-    let center = pose_center(corners);
+    let center = crate::types::corners_center(corners);
     let width = (target_corners[1].col - target_corners[0].col)
         .abs()
         .max(1.0 / 8.0);

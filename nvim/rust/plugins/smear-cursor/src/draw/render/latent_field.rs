@@ -20,11 +20,9 @@ pub(super) use materialize::prepare_swept_occupancy_geometry;
 pub(super) use reference_compile::CompileScratch;
 #[cfg(test)]
 pub(super) use reference_compile::compile_field;
-#[cfg(test)]
-pub(super) use reference_compile::compile_field_in_bounds;
 pub(super) use reference_compile::compile_field_in_bounds_rows_with_scratch;
+#[cfg(test)]
 pub(super) use reference_compile::compile_field_in_bounds_with_scratch;
-pub(super) use reference_compile::compile_field_reference;
 pub(super) use reference_compile::compile_field_reference_with_scratch;
 pub(super) use spatial_index::BorrowedCellRows;
 pub(super) use spatial_index::BorrowedCellRowsScratch;
@@ -164,55 +162,58 @@ pub(super) struct CompiledCell {
 #[cfg(test)]
 mod tests {
     use super::CellRect;
+    use super::CompileScratch;
+    use super::CompiledCell;
+    use super::DepositedSlice;
     use super::LatentFieldCache;
     use super::MICRO_TILE_SAMPLES;
+    use super::MIN_COMPILED_SAMPLE_Q12;
     use super::Pose;
     use super::SAMPLE_Q12_SCALE;
     use super::TailBand;
     use super::comet_tail_profiles;
     use super::compile_field;
-    use super::compile_field_in_bounds;
     use super::compile_field_in_bounds_rows_with_scratch;
     use super::compile_field_in_bounds_with_scratch;
-    use super::compile_field_reference;
     use super::compile_field_reference_with_scratch;
     use super::deposit_swept_occupancy;
     use super::intensity_q16;
     use super::max_comet_support_steps;
     use super::q16_from_non_negative;
     use super::simulation_step_ms;
+    use super::slice_recent_weight_q16;
+    use super::slice_weight_q16;
     use super::tail_support_steps;
+    use super::weights::WEIGHT_Q16_SCALE;
     use crate::core::types::ArcLenQ16;
     use crate::core::types::StepIndex;
     use crate::core::types::StrokeId;
+    use crate::test_support::proptest::pure_config;
     use crate::types::Point;
     use pretty_assertions::assert_eq;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::collections::VecDeque;
 
-    #[test]
-    fn compile_field_ages_out_old_slices() {
-        let pose = Pose {
-            center: Point { row: 4.5, col: 5.5 },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let tiles = deposit_swept_occupancy(pose, pose, 2.0, 1.0, 1.0);
-        let mut history = VecDeque::new();
-        history.push_back(super::DepositedSlice {
-            stroke_id: StrokeId::new(1),
-            step_index: StepIndex::new(1),
-            dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
-            arc_len_q16: ArcLenQ16::ZERO,
-            bbox: CellRect::new(4, 4, 5, 5),
-            band: TailBand::Core,
-            support_steps: 4,
-            intensity_q16: intensity_q16(1.0),
-            microtiles: tiles,
-        });
+    #[derive(Clone, Debug)]
+    struct LatentHistoryFixture {
+        history: VecDeque<DepositedSlice>,
+        latest_step: StepIndex,
+        bounds: CellRect,
+    }
 
-        let empty = compile_field(&history, StepIndex::new(12));
-        assert!(empty.is_empty());
+    fn compile_field_reference(cache: &LatentFieldCache) -> BTreeMap<(i64, i64), CompiledCell> {
+        let mut scratch = CompileScratch::default();
+        compile_field_reference_with_scratch(cache, &mut scratch)
+    }
+
+    fn compile_field_in_bounds(
+        cache: &LatentFieldCache,
+        bounds: CellRect,
+    ) -> BTreeMap<(i64, i64), CompiledCell> {
+        let mut scratch = CompileScratch::default();
+        compile_field_in_bounds_with_scratch(cache, bounds, &mut scratch)
     }
 
     #[test]
@@ -240,10 +241,147 @@ mod tests {
         }
     }
 
-    fn compiled_cell_for_age(age_steps: u64, support_steps: usize) -> Option<super::CompiledCell> {
+    fn aligned_pose() -> BoxedStrategy<Pose> {
+        (-12_i64..=12_i64, -12_i64..=12_i64, 2_u8..=8_u8, 2_u8..=8_u8)
+            .prop_map(|(row, col, half_height_steps, half_width_steps)| Pose {
+                center: Point {
+                    row: row as f64 + 0.5,
+                    col: col as f64 + 0.5,
+                },
+                half_height: f64::from(half_height_steps) / 8.0,
+                half_width: f64::from(half_width_steps) / 8.0,
+            })
+            .boxed()
+    }
+
+    fn tail_band_case() -> BoxedStrategy<TailBand> {
+        prop_oneof![
+            Just(TailBand::Sheath),
+            Just(TailBand::Core),
+            Just(TailBand::Filament),
+        ]
+        .boxed()
+    }
+
+    fn supported_simulation_hz() -> BoxedStrategy<f64> {
+        prop_oneof![
+            Just(48.0),
+            Just(60.0),
+            Just(72.0),
+            Just(90.0),
+            Just(120.0),
+            Just(144.0),
+        ]
+        .boxed()
+    }
+
+    fn doubled_simulation_hz_pair() -> BoxedStrategy<(f64, f64)> {
+        prop_oneof![
+            Just((48.0, 96.0)),
+            Just((60.0, 120.0)),
+            Just((72.0, 144.0)),
+            Just((90.0, 180.0)),
+        ]
+        .boxed()
+    }
+
+    fn latent_history_fixture() -> BoxedStrategy<LatentHistoryFixture> {
+        (
+            vec(
+                (
+                    aligned_pose(),
+                    aligned_pose(),
+                    1_usize..=12_usize,
+                    supported_simulation_hz(),
+                    0.25_f64..=1.0_f64,
+                    0.5_f64..=1.5_f64,
+                    0.5_f64..=1.5_f64,
+                    tail_band_case(),
+                ),
+                1..=6,
+            ),
+            -2_i64..=2_i64,
+            -2_i64..=2_i64,
+            -2_i64..=2_i64,
+            -2_i64..=2_i64,
+        )
+            .prop_map(
+                |(slice_specs, min_row_delta, max_row_delta, min_col_delta, max_col_delta)| {
+                    let mut history = VecDeque::with_capacity(slice_specs.len());
+                    let mut overall_bounds = None::<CellRect>;
+
+                    for (
+                        index,
+                        (
+                            start,
+                            end,
+                            support_steps,
+                            simulation_hz,
+                            intensity,
+                            thickness_y,
+                            thickness_x,
+                            band,
+                        ),
+                    ) in slice_specs.into_iter().enumerate()
+                    {
+                        let microtiles =
+                            deposit_swept_occupancy(start, end, 2.0, thickness_y, thickness_x);
+                        let bbox = CellRect::from_microtiles(&microtiles)
+                            .expect("aligned poses with positive thickness should materialize");
+                        overall_bounds = Some(match overall_bounds {
+                            Some(existing) => CellRect::new(
+                                existing.min_row.min(bbox.min_row),
+                                existing.max_row.max(bbox.max_row),
+                                existing.min_col.min(bbox.min_col),
+                                existing.max_col.max(bbox.max_col),
+                            ),
+                            None => bbox,
+                        });
+
+                        history.push_back(DepositedSlice {
+                            stroke_id: StrokeId::new(u64::try_from(index + 1).unwrap_or(u64::MAX)),
+                            step_index: StepIndex::new(
+                                u64::try_from(index + 1).unwrap_or(u64::MAX),
+                            ),
+                            dt_ms_q16: q16_from_non_negative(simulation_step_ms(simulation_hz)),
+                            arc_len_q16: ArcLenQ16::ZERO,
+                            bbox,
+                            band,
+                            support_steps,
+                            intensity_q16: intensity_q16(intensity),
+                            microtiles,
+                        });
+                    }
+
+                    let overall_bounds = overall_bounds
+                        .expect("fixture generation should produce at least one slice");
+                    let mut min_row = overall_bounds.min_row + min_row_delta;
+                    let mut max_row = overall_bounds.max_row + max_row_delta;
+                    let mut min_col = overall_bounds.min_col + min_col_delta;
+                    let mut max_col = overall_bounds.max_col + max_col_delta;
+                    if min_row > max_row {
+                        std::mem::swap(&mut min_row, &mut max_row);
+                    }
+                    if min_col > max_col {
+                        std::mem::swap(&mut min_col, &mut max_col);
+                    }
+
+                    LatentHistoryFixture {
+                        latest_step: StepIndex::new(
+                            u64::try_from(history.len()).unwrap_or(u64::MAX),
+                        ),
+                        history,
+                        bounds: CellRect::new(min_row, max_row, min_col, max_col),
+                    }
+                },
+            )
+            .boxed()
+    }
+
+    fn compiled_cell_for_age(age_steps: u64, support_steps: usize) -> Option<CompiledCell> {
         let latest_step = StepIndex::new(100_u64 + age_steps);
         let mut history = VecDeque::new();
-        history.push_back(super::DepositedSlice {
+        history.push_back(DepositedSlice {
             stroke_id: StrokeId::new(1),
             step_index: StepIndex::new(100),
             dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
@@ -259,54 +397,17 @@ mod tests {
             .copied()
     }
 
-    #[test]
-    fn compile_decay_matches_normalized_age_endpoints_and_midpoint() {
-        let support_steps = 10_usize;
-
-        let head = compiled_cell_for_age(0, support_steps).expect("a=0 should contribute");
-        let midpoint =
-            compiled_cell_for_age(5, support_steps).expect("a=0.5 should still contribute");
-        let tip = compiled_cell_for_age(10, support_steps);
-
-        assert_eq!(head.age.recent_mass_q12, head.age.total_mass_q12);
-        assert!(midpoint.age.total_mass_q12 < head.age.total_mass_q12);
-        assert!(
-            midpoint.age.total_mass_q12 > head.age.total_mass_q12 / 2,
-            "midpoint mass should reflect head_weight=1-a, not fixed head window"
-        );
-        assert!(
-            u64::from(midpoint.age.recent_mass_q12).saturating_mul(5)
-                >= u64::from(midpoint.age.total_mass_q12).saturating_mul(4),
-            "midpoint recent mass should stay close to total mass"
-        );
-        assert!(tip.is_none(), "a=1 should fully age out");
-    }
-
-    #[test]
-    fn cell_rect_tracks_microtile_extent() {
-        let tiles = BTreeMap::from([
-            ((4_i64, 5_i64), fully_covered_tile()),
-            ((6_i64, 9_i64), fully_covered_tile()),
-            ((5_i64, 7_i64), fully_covered_tile()),
-        ]);
-
-        let bbox = CellRect::from_microtiles(&tiles).expect("bbox should exist for non-empty map");
-        assert_eq!(bbox, CellRect::new(4, 6, 5, 9));
-        assert!(bbox.contains((5, 7)));
-        assert!(!bbox.contains((7, 7)));
-    }
-
     fn stationary_history_for_rate(
         simulation_hz: f64,
         support_duration_ms: f64,
-    ) -> (VecDeque<super::DepositedSlice>, StepIndex) {
+    ) -> (VecDeque<DepositedSlice>, StepIndex) {
         let support_steps = tail_support_steps(support_duration_ms, simulation_hz);
         let latest_step = StepIndex::new(u64::try_from(support_steps).unwrap_or(u64::MAX));
         let dt_ms_q16 = q16_from_non_negative(simulation_step_ms(simulation_hz));
         let tile = fully_covered_tile();
         let bbox = CellRect::new(4, 4, 5, 5);
         let history = (1..=support_steps)
-            .map(|step| super::DepositedSlice {
+            .map(|step| DepositedSlice {
                 stroke_id: StrokeId::new(1),
                 step_index: StepIndex::new(u64::try_from(step).unwrap_or(u64::MAX)),
                 dt_ms_q16,
@@ -321,216 +422,231 @@ mod tests {
         (history, latest_step)
     }
 
-    #[test]
-    fn compile_field_scales_slice_weight_by_dt_for_rate_stability() {
-        let support_duration_ms = 180.0;
-        let (history_60hz, latest_60hz) = stationary_history_for_rate(60.0, support_duration_ms);
-        let (history_120hz, latest_120hz) = stationary_history_for_rate(120.0, support_duration_ms);
-
-        let cell_60hz = compile_field(&history_60hz, latest_60hz)
-            .get(&(4_i64, 5_i64))
-            .copied()
-            .expect("60Hz history should compile");
-        let cell_120hz = compile_field(&history_120hz, latest_120hz)
-            .get(&(4_i64, 5_i64))
-            .copied()
-            .expect("120Hz history should compile");
-
-        let lhs = i64::from(cell_60hz.age.total_mass_q12);
-        let rhs = i64::from(cell_120hz.age.total_mass_q12);
-        let diff = (lhs - rhs).abs();
-        let tolerance = (lhs.max(rhs) / 12).max(1);
-        assert!(
-            diff <= tolerance,
-            "dt scaling should keep total mass stable across rates: lhs={lhs} rhs={rhs} diff={diff} tolerance={tolerance}"
-        );
+    fn mass_similarity_holds(lhs: u32, rhs: u32, tolerance_divisor: u64) -> bool {
+        let diff = u64::from(lhs.abs_diff(rhs));
+        let tolerance = (u64::from(lhs.max(rhs)) / tolerance_divisor).max(1);
+        diff <= tolerance
     }
 
-    #[test]
-    fn compile_field_keeps_visible_tail_intensity_similar_across_60hz_and_120hz() {
-        let support_duration_ms = 180.0;
-        let (history_60hz, latest_60hz) = stationary_history_for_rate(60.0, support_duration_ms);
-        let (history_120hz, latest_120hz) = stationary_history_for_rate(120.0, support_duration_ms);
-
-        let cell_60hz = compile_field(&history_60hz, latest_60hz)
-            .get(&(4_i64, 5_i64))
-            .copied()
-            .expect("60Hz history should compile");
-        let cell_120hz = compile_field(&history_120hz, latest_120hz)
-            .get(&(4_i64, 5_i64))
-            .copied()
-            .expect("120Hz history should compile");
-
-        let total_diff = i64::from(cell_60hz.age.total_mass_q12)
-            .abs_diff(i64::from(cell_120hz.age.total_mass_q12));
-        let total_tolerance = (u64::from(
-            cell_60hz
-                .age
-                .total_mass_q12
-                .max(cell_120hz.age.total_mass_q12),
-        ) / 12)
-            .max(1);
-        assert!(
-            total_diff <= total_tolerance,
-            "visible total mass should stay similar across rates: 60Hz={} 120Hz={} diff={} tolerance={}",
-            cell_60hz.age.total_mass_q12,
-            cell_120hz.age.total_mass_q12,
-            total_diff,
-            total_tolerance,
-        );
-
-        let recent_diff = i64::from(cell_60hz.age.recent_mass_q12)
-            .abs_diff(i64::from(cell_120hz.age.recent_mass_q12));
-        let recent_tolerance = (u64::from(
-            cell_60hz
-                .age
-                .recent_mass_q12
-                .max(cell_120hz.age.recent_mass_q12),
-        ) / 12)
-            .max(1);
-        assert!(
-            recent_diff <= recent_tolerance,
-            "visible recent mass should stay similar across rates: 60Hz={} 120Hz={} diff={} tolerance={}",
-            cell_60hz.age.recent_mass_q12,
-            cell_120hz.age.recent_mass_q12,
-            recent_diff,
-            recent_tolerance,
-        );
-
-        let peak_diff = cell_60hz
-            .tile
-            .max_sample_q12()
-            .abs_diff(cell_120hz.tile.max_sample_q12());
-        let peak_tolerance = (u16::max(
-            cell_60hz.tile.max_sample_q12(),
-            cell_120hz.tile.max_sample_q12(),
-        ) / 12)
-            .max(1);
-        assert!(
-            peak_diff <= peak_tolerance,
-            "visible peak intensity should stay similar across rates: 60Hz={} 120Hz={} diff={} tolerance={}",
-            cell_60hz.tile.max_sample_q12(),
-            cell_120hz.tile.max_sample_q12(),
-            peak_diff,
-            peak_tolerance,
-        );
+    fn peak_similarity_holds(lhs: u16, rhs: u16, tolerance_divisor: u16) -> bool {
+        let diff = lhs.abs_diff(rhs);
+        let tolerance = (lhs.max(rhs) / tolerance_divisor).max(1);
+        diff <= tolerance
     }
 
-    #[test]
-    fn compile_field_reference_matches_direct_replay() {
-        let support_duration_ms = 180.0;
-        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
-        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
+    proptest! {
+        #![proptest_config(pure_config())]
 
-        assert_eq!(
-            compile_field_reference(&cache),
-            compile_field(&history, latest_step)
-        );
-    }
+        #[test]
+        fn prop_compile_decay_matches_curve_weights_and_ages_out(
+            support_steps in 1_usize..64_usize,
+            age_steps in 0_u64..96_u64,
+        ) {
+            let tile = fully_covered_tile();
+            let slice = DepositedSlice {
+                stroke_id: StrokeId::new(1),
+                step_index: StepIndex::new(100),
+                dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
+                arc_len_q16: ArcLenQ16::ZERO,
+                bbox: CellRect::new(4, 4, 5, 5),
+                band: TailBand::Core,
+                support_steps,
+                intensity_q16: intensity_q16(1.0),
+                microtiles: BTreeMap::from([((4_i64, 5_i64), tile)]),
+            };
+            let weighted_sample_q16 =
+                u64::from(SAMPLE_Q12_SCALE).saturating_mul(slice_weight_q16(&slice, age_steps));
+            let weighted_total_mass_q16 = u64::from(tile.total_mass_q12())
+                .saturating_mul(slice_weight_q16(&slice, age_steps));
+            let expected_sample_q12 =
+                u16::try_from(weighted_sample_q16 / WEIGHT_Q16_SCALE).unwrap_or(u16::MAX);
+            let expected_total_mass_q12 =
+                u32::try_from(weighted_total_mass_q16 / WEIGHT_Q16_SCALE).unwrap_or(u32::MAX);
+            let expected_recent_mass_q12 = u32::try_from(
+                u64::from(tile.total_mass_q12())
+                    .saturating_mul(slice_recent_weight_q16(&slice, age_steps))
+                    / WEIGHT_Q16_SCALE,
+            )
+            .unwrap_or(u32::MAX);
+            let survives = weighted_total_mass_q16
+                >= u64::from(MIN_COMPILED_SAMPLE_Q12).saturating_mul(WEIGHT_Q16_SCALE)
+                && expected_sample_q12 >= MIN_COMPILED_SAMPLE_Q12;
+            let compiled = compiled_cell_for_age(age_steps, support_steps);
 
-    #[test]
-    fn compile_field_reference_with_scratch_reuses_accumulator_capacity() {
-        let support_duration_ms = 180.0;
-        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
-        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
-        let mut scratch = super::CompileScratch::default();
+            if survives {
+                let compiled = compiled.expect("non-zero weight should compile");
+                prop_assert_eq!(compiled.age.total_mass_q12, expected_total_mass_q12);
+                prop_assert_eq!(compiled.age.recent_mass_q12, expected_recent_mass_q12);
+                prop_assert!(compiled
+                    .tile
+                    .samples_q12
+                    .iter()
+                    .copied()
+                    .all(|sample| sample == expected_sample_q12));
+                if age_steps == 0 {
+                    prop_assert_eq!(compiled.age.recent_mass_q12, compiled.age.total_mass_q12);
+                }
+            } else {
+                prop_assert_eq!(compiled, None);
+            }
+        }
 
-        let first = compile_field_reference_with_scratch(&cache, &mut scratch);
-        let first_capacity = scratch.accumulator_capacity();
-        let second = compile_field_reference_with_scratch(&cache, &mut scratch);
+        #[test]
+        fn prop_cell_rect_tracks_microtile_extent(
+            coords in vec((-12_i64..=12_i64, -12_i64..=12_i64), 1..=16),
+        ) {
+            let tiles = coords
+                .into_iter()
+                .map(|coord| (coord, fully_covered_tile()))
+                .collect::<BTreeMap<_, _>>();
+            let bbox = CellRect::from_microtiles(&tiles)
+                .expect("non-empty tiles should have an enclosing bounding box");
+            let mut keys = tiles.keys().copied();
+            let first = keys.next().expect("tiles map should stay non-empty");
+            let expected = keys.fold(
+                CellRect::new(first.0, first.0, first.1, first.1),
+                |bounds, (row, col)| {
+                    CellRect::new(
+                        bounds.min_row.min(row),
+                        bounds.max_row.max(row),
+                        bounds.min_col.min(col),
+                        bounds.max_col.max(col),
+                    )
+                },
+            );
 
-        assert_eq!(first, second);
-        assert!(
-            first_capacity > 0,
-            "first compile should reserve accumulator storage for retained cells"
-        );
-        assert_eq!(
-            scratch.accumulator_capacity(),
-            first_capacity,
-            "scratch-backed recompiles should keep the existing accumulator allocation"
-        );
-    }
+            prop_assert_eq!(bbox, expected);
+            for coord in tiles.keys().copied() {
+                prop_assert!(bbox.contains(coord));
+            }
+        }
 
-    #[test]
-    fn compile_field_in_bounds_matches_reference_filtered_to_same_rect() {
-        let support_duration_ms = 180.0;
-        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
-        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
-        let bounds = CellRect::new(4, 5, 5, 6);
+        #[test]
+        fn prop_compile_field_keeps_visible_tail_intensity_similar_across_doubled_rates(
+            support_steps_at_base_rate in 4_usize..24_usize,
+            (base_hz, doubled_hz) in doubled_simulation_hz_pair(),
+        ) {
+            let support_duration_ms =
+                support_steps_at_base_rate as f64 * simulation_step_ms(base_hz);
+            let (history_base, latest_base) =
+                stationary_history_for_rate(base_hz, support_duration_ms);
+            let (history_doubled, latest_doubled) =
+                stationary_history_for_rate(doubled_hz, support_duration_ms);
+            let cell_base = compile_field(&history_base, latest_base)
+                .get(&(4_i64, 5_i64))
+                .copied()
+                .expect("stationary field at the base rate should compile");
+            let cell_doubled = compile_field(&history_doubled, latest_doubled)
+                .get(&(4_i64, 5_i64))
+                .copied()
+                .expect("stationary field at the doubled rate should compile");
 
-        let bounded = compile_field_in_bounds(&cache, bounds);
-        let filtered_reference = compile_field_reference(&cache)
-            .into_iter()
-            .filter(|(coord, _)| bounds.contains(*coord))
-            .collect::<BTreeMap<_, _>>();
+            prop_assert!(
+                mass_similarity_holds(
+                    cell_base.age.total_mass_q12,
+                    cell_doubled.age.total_mass_q12,
+                    10,
+                ),
+                "total mass diverged too far across doubled rates: base={} doubled={}",
+                cell_base.age.total_mass_q12,
+                cell_doubled.age.total_mass_q12,
+            );
+            prop_assert!(
+                mass_similarity_holds(
+                    cell_base.age.recent_mass_q12,
+                    cell_doubled.age.recent_mass_q12,
+                    10,
+                ),
+                "recent mass diverged too far across doubled rates: base={} doubled={}",
+                cell_base.age.recent_mass_q12,
+                cell_doubled.age.recent_mass_q12,
+            );
+            prop_assert!(
+                peak_similarity_holds(cell_base.tile.max_sample_q12(), cell_doubled.tile.max_sample_q12(), 10),
+                "peak intensity diverged too far across doubled rates: base={} doubled={}",
+                cell_base.tile.max_sample_q12(),
+                cell_doubled.tile.max_sample_q12(),
+            );
+        }
 
-        assert_eq!(bounded, filtered_reference);
-    }
+        #[test]
+        fn prop_compile_field_cache_projection_matches_direct_replay_and_bounds(
+            fixture in latent_history_fixture(),
+        ) {
+            let cache = LatentFieldCache::rebuild(&fixture.history, fixture.latest_step, 17);
+            let direct = compile_field(&fixture.history, fixture.latest_step);
+            let reference = compile_field_reference(&cache);
 
-    #[test]
-    fn compile_field_in_bounds_with_scratch_reuses_accumulator_capacity() {
-        let support_duration_ms = 180.0;
-        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
-        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
-        let bounds = CellRect::new(4, 5, 5, 6);
-        let mut scratch = super::CompileScratch::default();
+            prop_assert_eq!(&reference, &direct);
 
-        let first = compile_field_in_bounds_with_scratch(&cache, bounds, &mut scratch);
-        let first_capacity = scratch.accumulator_capacity();
-        let second = compile_field_in_bounds_with_scratch(&cache, bounds, &mut scratch);
+            let mut reference_scratch = CompileScratch::default();
+            let first_reference = compile_field_reference_with_scratch(&cache, &mut reference_scratch);
+            let first_reference_capacity = reference_scratch.accumulator_capacity();
+            let second_reference = compile_field_reference_with_scratch(&cache, &mut reference_scratch);
 
-        assert_eq!(first, second);
-        assert!(
-            first_capacity > 0,
-            "bounded compile should reserve accumulator storage for the queried cells"
-        );
-        assert_eq!(
-            scratch.accumulator_capacity(),
-            first_capacity,
-            "bounded scratch-backed recompiles should keep the existing accumulator allocation"
-        );
-    }
+            prop_assert_eq!(&first_reference, &reference);
+            prop_assert_eq!(&second_reference, &reference);
+            prop_assert_eq!(
+                reference_scratch.accumulator_capacity(),
+                first_reference_capacity,
+            );
 
-    #[test]
-    fn compile_field_in_bounds_rows_matches_reference_filtered_to_same_rect() {
-        let support_duration_ms = 180.0;
-        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
-        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
-        let bounds = CellRect::new(4, 5, 5, 6);
-        let mut scratch = super::CompileScratch::default();
+            let filtered_reference = reference
+                .iter()
+                .filter(|(coord, _)| fixture.bounds.contains(**coord))
+                .map(|(coord, value)| (*coord, *value))
+                .collect::<BTreeMap<_, _>>();
+            let bounded = compile_field_in_bounds(&cache, fixture.bounds);
 
-        let rows = compile_field_in_bounds_rows_with_scratch(&cache, bounds, &mut scratch);
-        let filtered_reference = compile_field_reference(&cache)
-            .into_iter()
-            .filter(|(coord, _)| bounds.contains(*coord))
-            .collect::<BTreeMap<_, _>>();
-        let rows_as_map = rows
-            .iter()
-            .map(|(coord, value)| (coord, *value))
-            .collect::<BTreeMap<_, _>>();
+            prop_assert_eq!(&bounded, &filtered_reference);
 
-        assert_eq!(rows_as_map, filtered_reference);
-    }
+            let mut bounded_scratch = CompileScratch::default();
+            let first_bounded =
+                compile_field_in_bounds_with_scratch(&cache, fixture.bounds, &mut bounded_scratch);
+            let first_bounded_capacity = bounded_scratch.accumulator_capacity();
+            let second_bounded =
+                compile_field_in_bounds_with_scratch(&cache, fixture.bounds, &mut bounded_scratch);
 
-    #[test]
-    fn compile_field_discards_cells_below_compiled_visibility_threshold() {
-        let mut tile = super::MicroTile::default();
-        tile.samples_q12[0] = 3;
+            prop_assert_eq!(&first_bounded, &filtered_reference);
+            prop_assert_eq!(&second_bounded, &filtered_reference);
+            prop_assert_eq!(
+                bounded_scratch.accumulator_capacity(),
+                first_bounded_capacity,
+            );
 
-        let history = VecDeque::from([super::DepositedSlice {
-            stroke_id: StrokeId::new(1),
-            step_index: StepIndex::new(1),
-            dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
-            arc_len_q16: ArcLenQ16::ZERO,
-            bbox: CellRect::new(4, 4, 5, 5),
-            band: TailBand::Core,
-            support_steps: 4,
-            intensity_q16: intensity_q16(1.0),
-            microtiles: BTreeMap::from([((4_i64, 5_i64), tile)]),
-        }]);
-        let cache = LatentFieldCache::rebuild(&history, StepIndex::new(1), 17);
+            let mut rows_scratch = CompileScratch::default();
+            let rows =
+                compile_field_in_bounds_rows_with_scratch(&cache, fixture.bounds, &mut rows_scratch);
+            let rows_as_map = rows
+                .iter()
+                .map(|(coord, value)| (coord, *value))
+                .collect::<BTreeMap<_, _>>();
 
-        assert!(compile_field(&history, StepIndex::new(1)).is_empty());
-        assert!(compile_field_reference(&cache).is_empty());
+            prop_assert_eq!(&rows_as_map, &filtered_reference);
+        }
+
+        #[test]
+        fn prop_compile_field_discards_cells_below_compiled_visibility_threshold(
+            sample_q12 in 0_u16..MIN_COMPILED_SAMPLE_Q12,
+        ) {
+            let tile = super::MicroTile {
+                samples_q12: [sample_q12; MICRO_TILE_SAMPLES],
+            };
+            let history = VecDeque::from([DepositedSlice {
+                stroke_id: StrokeId::new(1),
+                step_index: StepIndex::new(1),
+                dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
+                arc_len_q16: ArcLenQ16::ZERO,
+                bbox: CellRect::new(4, 4, 5, 5),
+                band: TailBand::Core,
+                support_steps: 4,
+                intensity_q16: intensity_q16(1.0),
+                microtiles: BTreeMap::from([((4_i64, 5_i64), tile)]),
+            }]);
+            let cache = LatentFieldCache::rebuild(&history, StepIndex::new(1), 17);
+
+            prop_assert!(compile_field(&history, StepIndex::new(1)).is_empty());
+            prop_assert!(compile_field_reference(&cache).is_empty());
+        }
     }
 }

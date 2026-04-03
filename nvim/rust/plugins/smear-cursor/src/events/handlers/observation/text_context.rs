@@ -25,17 +25,7 @@ fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Arc<[Obs
 
     let rows = buffer
         .get_lines(start_index..end_index, false)?
-        .enumerate()
-        .map(|(offset, line)| {
-            let relative_line = match i64::try_from(offset) {
-                Ok(offset_line) => start_line.saturating_add(offset_line),
-                Err(_) => start_line,
-            };
-            Ok(ObservedTextRow::new(
-                relative_line,
-                line.to_string_lossy().into_owned(),
-            ))
-        })
+        .map(|line| Ok(ObservedTextRow::new(line.to_string_lossy().into_owned())))
         .collect::<Result<Vec<_>>>()?;
     Ok(rows.into())
 }
@@ -64,13 +54,9 @@ pub(super) fn current_cursor_text_context(
 
     let buffer_handle = i64::from(buffer.handle());
     let changedtick = current_buffer_changedtick(buffer_handle)?;
-    let tracked_cursor_line = tracked_cursor_text_context_line(buffer_handle, tracked_location);
-    let cache_key = CursorTextContextCacheKey::new(
-        buffer_handle,
-        changedtick,
-        cursor_line,
-        tracked_cursor_line,
-    );
+    let tracked_line = tracked_cursor_text_context_line(buffer_handle, tracked_location);
+    let cache_key =
+        CursorTextContextCacheKey::new(buffer_handle, changedtick, cursor_line, tracked_line);
     match cached_cursor_text_context(&cache_key) {
         Ok(CursorTextContextCacheLookup::Hit(context)) => return Ok(context),
         Ok(CursorTextContextCacheLookup::Miss) => {}
@@ -85,19 +71,19 @@ pub(super) fn current_cursor_text_context(
     let context = if nearby_rows.is_empty() {
         None
     } else {
-        let (tracked_cursor_line, tracked_nearby_rows) = match tracked_cursor_line {
-            Some(tracked_cursor_line) if tracked_cursor_line != cursor_line => {
+        let tracked_nearby_rows = match tracked_line {
+            Some(tracked_line_number) if tracked_line_number != cursor_line => {
                 // Surprising: edits above the cursor renumber absolute lines, so we also sample
                 // the previously tracked cursor footprint and compare by relative row order.
-                let tracked_rows = observed_text_rows(&buffer, tracked_cursor_line)?;
+                let tracked_rows = observed_text_rows(&buffer, tracked_line_number)?;
                 if tracked_rows.is_empty() {
-                    (None, None)
+                    None
                 } else {
-                    (Some(tracked_cursor_line), Some(tracked_rows))
+                    Some(tracked_rows)
                 }
             }
-            Some(_) => (Some(cursor_line), Some(Arc::clone(&nearby_rows))),
-            None => (None, None),
+            Some(_) => Some(Arc::clone(&nearby_rows)),
+            None => None,
         };
 
         Some(CursorTextContext::from_shared(
@@ -105,7 +91,6 @@ pub(super) fn current_cursor_text_context(
             changedtick,
             cursor_line,
             nearby_rows,
-            tracked_cursor_line,
             tracked_nearby_rows,
         ))
     };

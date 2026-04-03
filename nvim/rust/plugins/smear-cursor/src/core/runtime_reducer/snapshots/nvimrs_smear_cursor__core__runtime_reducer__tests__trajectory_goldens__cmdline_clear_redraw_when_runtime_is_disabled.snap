@@ -1,7 +1,0 @@
----
-source: plugins/smear-cursor/src/core/runtime_reducer/tests.rs
-assertion_line: 2227
-expression: transcript.render()
----
-00 ext t=100.000 pos=3.000,8.000 surf=10/20 motion=cont action=clear_all center=0.000,0.000 target=0.000,0.000 next=- cleanup=invalidate alloc=reuse vis=show cmdline_clear_redraw=1 sched=0 state=a0s0d0 stroke=0 epoch=0
-final center=0.000,0.000 target=0.000,0.000 state=a0s0d0 stroke=0 epoch=0

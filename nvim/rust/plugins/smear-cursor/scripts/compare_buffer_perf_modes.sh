@@ -77,20 +77,6 @@ summary_table="${artifact_dir}/buffer_perf_modes_summary.txt"
 adaptive_deltas_table="${artifact_dir}/buffer_perf_modes_adaptive_deltas.txt"
 probe_cost_table="${artifact_dir}/buffer_perf_modes_probe_cost.txt"
 
-extract_field() {
-  local line="$1"
-  local field="$2"
-
-  printf '%s\n' "${line}" | sed -nE "s/.*${field}=([^ ]+).*/\\1/p"
-}
-
-build_release() {
-  (
-    cd "${repo_dir}"
-    cargo build --release >/dev/null
-  )
-}
-
 run_mode() {
   local mode="$1"
   local scenario_name
@@ -111,7 +97,7 @@ echo "modes=${mode_csv}"
 echo "scenarios=${scenario_csv}"
 echo
 
-build_release
+smear_build_release "${repo_dir}"
 if ! smear_export_runtime_paths "${repo_dir}" >/dev/null; then
   echo "failed to resolve runtime paths for ${repo_dir}" >&2
   exit 1
@@ -177,19 +163,19 @@ run_once() {
     exit 1
   fi
 
-  baseline_us="$(extract_field "${summary_line}" "baseline_avg_us")"
-  recovery_ratio="$(extract_field "${summary_line}" "recovery_ratio")"
-  stress_max_avg_us="$(extract_field "${stress_line}" "max_avg_us")"
-  stress_max_ratio="$(extract_field "${stress_line}" "max_ratio")"
-  stress_tail_ratio="$(extract_field "${stress_line}" "tail_ratio")"
-  realized_mode="$(extract_field "${diagnostics_line}" "perf_effective_mode")"
-  perf_class="$(extract_field "${diagnostics_line}" "perf_class")"
-  probe_policy="$(extract_field "${diagnostics_line}" "probe_policy")"
-  line_count="$(extract_field "${diagnostics_line}" "buffer_line_count")"
-  callback_ewma_ms="$(extract_field "${diagnostics_line}" "callback_ewma_ms")"
-  reason_bits="$(extract_field "${diagnostics_line}" "perf_reason_bits")"
-  extmark_fallback_calls="$(extract_field "${diagnostics_line}" "cursor_color_extmark_fallback_calls")"
-  conceal_full_scan_calls="$(extract_field "${diagnostics_line}" "conceal_full_scan_calls")"
+  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
+  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
+  stress_max_avg_us="$(smear_extract_field "${stress_line}" "max_avg_us")"
+  stress_max_ratio="$(smear_extract_field "${stress_line}" "max_ratio")"
+  stress_tail_ratio="$(smear_extract_field "${stress_line}" "tail_ratio")"
+  realized_mode="$(smear_extract_field "${diagnostics_line}" "perf_effective_mode")"
+  perf_class="$(smear_extract_field "${diagnostics_line}" "perf_class")"
+  probe_policy="$(smear_extract_field "${diagnostics_line}" "probe_policy")"
+  line_count="$(smear_extract_field "${diagnostics_line}" "buffer_line_count")"
+  callback_ewma_ms="$(smear_extract_field "${diagnostics_line}" "callback_ewma_ms")"
+  reason_bits="$(smear_extract_field "${diagnostics_line}" "perf_reason_bits")"
+  extmark_fallback_calls="$(smear_extract_field "${diagnostics_line}" "cursor_color_extmark_fallback_calls")"
+  conceal_full_scan_calls="$(smear_extract_field "${diagnostics_line}" "conceal_full_scan_calls")"
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${mode}" \
@@ -393,14 +379,10 @@ write_report() {
   local capture_time
   local command_line
 
-  git_commit="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || printf 'unknown\n')"
-  if [[ -n "$(git -C "${repo_dir}" status --short 2>/dev/null)" ]]; then
-    git_state="dirty"
-  else
-    git_state="clean"
-  fi
-  nvim_version="$("${NVIM_BIN:-nvim}" --version | sed -n '1p')"
-  capture_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  git_commit="$(smear_report_git_commit "${repo_dir}")"
+  git_state="$(smear_report_git_state "${repo_dir}")"
+  nvim_version="$(smear_report_nvim_version)"
+  capture_time="$(smear_report_capture_time_utc)"
   command_line="SMEAR_COMPARE_REPORT_FILE=${output_file} ${repo_dir}/scripts/compare_buffer_perf_modes.sh"
 
   mkdir -p "$(dirname -- "${output_file}")"

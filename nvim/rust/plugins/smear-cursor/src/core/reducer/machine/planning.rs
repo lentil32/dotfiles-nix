@@ -261,12 +261,9 @@ fn project_prepared_frame(
         viewport,
         signature,
     );
-    if matches!(
-        target_cell_presentation,
-        TargetCellPresentation::OverlayBlockCell
-    ) {
+    if let TargetCellPresentation::OverlayCursorCell(shape) = target_cell_presentation {
         planner_output.plan.target_cell_overlay =
-            render_plan::plan_target_cell_overlay(&planner_frame, viewport);
+            render_plan::plan_target_cell_overlay(&planner_frame, viewport, shape);
     }
 
     let logical_raster = project_render_plan(&planner_output.plan, viewport, background_probe);
@@ -728,12 +725,16 @@ mod tests {
     use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
     use crate::state::CursorLocation;
+    use crate::test_support::proptest::pure_config;
+    use crate::types::CursorCellShape;
     use crate::types::Particle;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
     use crate::types::ScreenCell;
     use crate::types::StaticRenderConfig;
+    use pretty_assertions::assert_eq;
+    use proptest::prelude::*;
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -894,153 +895,89 @@ mod tests {
             .expect("requested background probe should accept the sampled batch")
     }
 
-    #[test]
-    fn dirty_entities_track_target_cell_presentation_explicitly() {
-        let frame = base_frame();
-        let previous = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-            CursorTrailSemantic::from_render_frame(&frame, TargetCellPresentation::None),
-        ));
-        let next = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-            CursorTrailSemantic::from_render_frame(
-                &frame,
-                TargetCellPresentation::OverlayBlockCell,
-            ),
-        ));
-
-        assert_eq!(
-            dirty_entities(&previous, &next).entities(),
-            &BTreeSet::from([SemanticEntityId::CursorTrail])
-        );
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DirtyMutationAxis {
+        None,
+        PaletteOnly,
+        Presentation,
+        Geometry,
     }
 
-    #[test]
-    fn dirty_entities_ignore_palette_only_drift() {
-        let previous_frame = base_frame();
-        let mut next_frame = previous_frame.clone();
-        next_frame.color_at_cursor = Some(0x00AB_CDEF);
-
-        let previous = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-            CursorTrailSemantic::from_render_frame(&previous_frame, TargetCellPresentation::None),
-        ));
-        let next = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-            CursorTrailSemantic::from_render_frame(&next_frame, TargetCellPresentation::None),
-        ));
-
-        assert!(dirty_entities(&previous, &next).is_empty());
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ReuseMutationAxis {
+        Exact,
+        ObservationWitness,
+        SceneRevision,
+        Presentation,
+        Policy,
     }
 
-    #[test]
-    fn reusable_projection_entry_rejects_target_cell_presentation_mismatch() {
-        let frame = base_frame();
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let cached_observation = observation(1);
-        let cached = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::None,
-        )
-        .expect("projection without probe-gated particles");
-        let current_scene = SceneState::default()
-            .with_projection(ProjectionCache::Ready(Box::new(cached)))
-            .with_semantics(
-                SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-                    CursorTrailSemantic::from_render_frame(&frame, TargetCellPresentation::None),
-                )),
-            );
-        let next_observation = observation(2);
-
-        assert!(
-            reusable_projection_entry(
-                &current_scene,
-                SceneRevision::INITIAL,
-                &next_observation,
-                &geometry,
-                &policy,
-                TargetCellPresentation::OverlayBlockCell,
-            )
-            .is_none()
-        );
+    fn dirty_mutation_axis_strategy() -> BoxedStrategy<DirtyMutationAxis> {
+        prop_oneof![
+            Just(DirtyMutationAxis::None),
+            Just(DirtyMutationAxis::PaletteOnly),
+            Just(DirtyMutationAxis::Presentation),
+            Just(DirtyMutationAxis::Geometry),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn reusable_projection_entry_rejects_observation_witness_drift() {
-        let frame = base_frame();
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let cached_observation = observation(1);
-        let cached = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::OverlayBlockCell,
-        )
-        .expect("projection without probe-gated particles");
-        let current_scene =
-            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
-        let next_observation = observation(2);
-
-        assert!(
-            reusable_projection_entry(
-                &current_scene,
-                SceneRevision::INITIAL,
-                &next_observation,
-                &geometry,
-                &policy,
-                TargetCellPresentation::OverlayBlockCell,
-            )
-            .is_none()
-        );
+    fn reuse_mutation_axis_strategy() -> BoxedStrategy<ReuseMutationAxis> {
+        prop_oneof![
+            Just(ReuseMutationAxis::Exact),
+            Just(ReuseMutationAxis::ObservationWitness),
+            Just(ReuseMutationAxis::SceneRevision),
+            Just(ReuseMutationAxis::Presentation),
+            Just(ReuseMutationAxis::Policy),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn reusable_projection_entry_preserves_matching_target_cell_presentation_for_exact_witness() {
-        let mut frame = base_frame();
-        frame.step_samples = Vec::new().into();
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let cached_observation = observation(1);
-        let cached = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::OverlayBlockCell,
-        )
-        .expect("projection without probe-gated particles");
-        let current_scene =
-            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
-
-        let reused = reusable_projection_entry(
-            &current_scene,
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::OverlayBlockCell,
-        )
-        .expect("matching presentation should remain reusable");
-
-        assert_eq!(
-            reused.reuse_key().target_cell_presentation(),
-            TargetCellPresentation::OverlayBlockCell
-        );
-        assert_eq!(
-            reused.snapshot().witness().observation_id(),
-            cached_observation.request().observation_id()
-        );
+    fn target_cell_presentation_strategy() -> BoxedStrategy<TargetCellPresentation> {
+        prop_oneof![
+            Just(TargetCellPresentation::None),
+            Just(TargetCellPresentation::OverlayCursorCell(
+                CursorCellShape::Block
+            )),
+            Just(TargetCellPresentation::OverlayCursorCell(
+                CursorCellShape::VerticalBar,
+            )),
+            Just(TargetCellPresentation::OverlayCursorCell(
+                CursorCellShape::HorizontalBar,
+            )),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn reusable_projection_entry_keeps_exact_witness_background_probe_cache() {
-        let mut frame = base_frame();
-        frame.step_samples = Vec::new().into();
+    fn perf_class_strategy() -> BoxedStrategy<BufferPerfClass> {
+        prop_oneof![
+            Just(BufferPerfClass::Full),
+            Just(BufferPerfClass::FastMotion),
+            Just(BufferPerfClass::Skip),
+        ]
+        .boxed()
+    }
+
+    fn alternate_target_cell_presentation(
+        target_cell_presentation: TargetCellPresentation,
+    ) -> TargetCellPresentation {
+        match target_cell_presentation {
+            TargetCellPresentation::None => {
+                TargetCellPresentation::OverlayCursorCell(CursorCellShape::Block)
+            }
+            TargetCellPresentation::OverlayCursorCell(CursorCellShape::Block) => {
+                TargetCellPresentation::None
+            }
+            TargetCellPresentation::OverlayCursorCell(CursorCellShape::VerticalBar) => {
+                TargetCellPresentation::OverlayCursorCell(CursorCellShape::HorizontalBar)
+            }
+            TargetCellPresentation::OverlayCursorCell(CursorCellShape::HorizontalBar) => {
+                TargetCellPresentation::OverlayCursorCell(CursorCellShape::VerticalBar)
+            }
+        }
+    }
+
+    fn frame_with_background_probe_requirement(mut frame: RenderFrame) -> RenderFrame {
         let mut static_config = (*frame.static_config).clone();
         static_config.particles_over_text = false;
         frame.static_config = Arc::new(static_config);
@@ -1053,165 +990,292 @@ mod tests {
             lifetime: 0.75,
         }]
         .into();
-
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let cached_observation = observation_with_background_probe(
-            1,
-            &[ScreenCell::new(16, 18).expect("particle cell should be visible")],
-        );
-        let cached = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::None,
-        )
-        .expect("projection with a sparse background probe should succeed");
-        let current_scene =
-            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
-
-        let reused = reusable_projection_entry(
-            &current_scene,
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::None,
-        )
-        .expect("exact-witness sparse background probes should remain reusable");
-
-        assert_eq!(
-            reused.snapshot().witness().observation_id(),
-            cached_observation.request().observation_id()
-        );
+        frame
     }
 
-    #[test]
-    fn reusable_projection_entry_rejects_advancing_frame_after_planner_clock_advance() {
-        let mut frame = base_frame();
-        frame.step_samples = Vec::new().into();
-        frame.planner_idle_steps = 1;
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let cached_observation = observation(1);
-        let cached = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::None,
-        )
-        .expect("projection without probe-gated particles");
-        let current_scene =
-            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
+    fn observation_for_projection(
+        seq: u64,
+        requires_background_probe: bool,
+    ) -> ObservationSnapshot {
+        if requires_background_probe {
+            observation_with_background_probe(
+                seq,
+                &[ScreenCell::new(16, 18).expect("particle cell should be visible")],
+            )
+        } else {
+            observation(seq)
+        }
+    }
 
-        assert!(
-            reusable_projection_entry(
-                &current_scene,
+    fn frame_with_policy_drift(mut frame: RenderFrame) -> RenderFrame {
+        let mut drifted_static_config = (*frame.static_config).clone();
+        drifted_static_config.color_levels = drifted_static_config.color_levels.saturating_add(1);
+        frame.static_config = Arc::new(drifted_static_config);
+        frame
+    }
+
+    fn particle_fixture() -> Particle {
+        Particle {
+            position: Point { row: 7.5, col: 8.5 },
+            velocity: Point::ZERO,
+            lifetime: 1.0,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_dirty_entities_track_semantic_cursor_trail_identity(
+            mutation_axis in dirty_mutation_axis_strategy(),
+            initial_presentation in target_cell_presentation_strategy(),
+            color_at_cursor in any::<u32>(),
+        ) {
+            let previous_frame = base_frame();
+            let mut next_frame = previous_frame.clone();
+            let next_presentation = match mutation_axis {
+                DirtyMutationAxis::None => initial_presentation,
+                DirtyMutationAxis::PaletteOnly => {
+                    next_frame.color_at_cursor = Some(color_at_cursor);
+                    initial_presentation
+                }
+                DirtyMutationAxis::Presentation => {
+                    alternate_target_cell_presentation(initial_presentation)
+                }
+                DirtyMutationAxis::Geometry => {
+                    next_frame.retarget_epoch = next_frame.retarget_epoch.saturating_add(1);
+                    initial_presentation
+                }
+            };
+
+            let previous = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
+                CursorTrailSemantic::from_render_frame(&previous_frame, initial_presentation),
+            ));
+            let next = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
+                CursorTrailSemantic::from_render_frame(&next_frame, next_presentation),
+            ));
+            let dirty = dirty_entities(&previous, &next);
+            let expected_dirty = previous.entity(SemanticEntityId::CursorTrail)
+                != next.entity(SemanticEntityId::CursorTrail);
+
+            prop_assert_eq!(dirty.is_empty(), !expected_dirty);
+            if expected_dirty {
+                prop_assert_eq!(
+                    dirty.entities(),
+                    &BTreeSet::from([SemanticEntityId::CursorTrail])
+                );
+            }
+
+            match mutation_axis {
+                DirtyMutationAxis::PaletteOnly => prop_assert!(dirty.is_empty()),
+                DirtyMutationAxis::Presentation | DirtyMutationAxis::Geometry => {
+                    prop_assert!(!dirty.is_empty())
+                }
+                DirtyMutationAxis::None => prop_assert!(dirty.is_empty()),
+            }
+        }
+
+        #[test]
+        fn prop_projection_reuse_and_planner_seed_follow_witness_presentation_policy_and_clock(
+            mutation_axis in reuse_mutation_axis_strategy(),
+            advances_planner in any::<bool>(),
+            requires_background_probe in any::<bool>(),
+            target_cell_presentation in target_cell_presentation_strategy(),
+            observation_seq in 1_u64..=(u16::MAX as u64 - 1),
+        ) {
+            let mut frame = base_frame();
+            if !advances_planner {
+                frame.step_samples = Vec::new().into();
+                frame.planner_idle_steps = 0;
+            }
+            if requires_background_probe {
+                frame = frame_with_background_probe_requirement(frame);
+            }
+
+            let geometry = CursorTrailGeometry::from_render_frame(&frame);
+            let cached_policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
+            let cached_observation =
+                observation_for_projection(observation_seq, requires_background_probe);
+            let cached = project_draw_frame(
+                &SceneState::default(),
                 SceneRevision::INITIAL,
                 &cached_observation,
+                &geometry,
+                &cached_policy,
+                target_cell_presentation,
+            )
+            .expect("cached projection fixture should be valid");
+            let cached_planner_state = cached.planner_state().clone();
+            let current_scene =
+                SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
+
+            let query_observation = match mutation_axis {
+                ReuseMutationAxis::ObservationWitness => {
+                    observation_for_projection(observation_seq.saturating_add(1), requires_background_probe)
+                }
+                ReuseMutationAxis::Exact
+                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::Presentation
+                | ReuseMutationAxis::Policy => cached_observation.clone(),
+            };
+            let scene_revision = match mutation_axis {
+                ReuseMutationAxis::SceneRevision => SceneRevision::INITIAL.next(),
+                ReuseMutationAxis::Exact
+                | ReuseMutationAxis::ObservationWitness
+                | ReuseMutationAxis::Presentation
+                | ReuseMutationAxis::Policy => SceneRevision::INITIAL,
+            };
+            let query_presentation = match mutation_axis {
+                ReuseMutationAxis::Presentation => {
+                    alternate_target_cell_presentation(target_cell_presentation)
+                }
+                ReuseMutationAxis::Exact
+                | ReuseMutationAxis::ObservationWitness
+                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::Policy => target_cell_presentation,
+            };
+            let query_policy = match mutation_axis {
+                ReuseMutationAxis::Policy => {
+                    CursorTrailProjectionPolicy::from_render_frame(&frame_with_policy_drift(frame))
+                }
+                ReuseMutationAxis::Exact
+                | ReuseMutationAxis::ObservationWitness
+                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::Presentation => cached_policy,
+            };
+
+            let reused = reusable_projection_entry(
+                &current_scene,
+                scene_revision,
+                &query_observation,
+                &geometry,
+                &query_policy,
+                query_presentation,
+            );
+            let expected_seed = match mutation_axis {
+                ReuseMutationAxis::Policy => ProjectionPlannerState::default(),
+                ReuseMutationAxis::Exact
+                | ReuseMutationAxis::ObservationWitness
+                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::Presentation => cached_planner_state,
+            };
+            let expected_reuse = matches!(mutation_axis, ReuseMutationAxis::Exact) && !advances_planner;
+
+            prop_assert_eq!(planner_seed(&current_scene, &query_policy), expected_seed);
+            prop_assert_eq!(reused.is_some(), expected_reuse);
+
+            if let Some(reused) = reused {
+                prop_assert_eq!(
+                    reused.reuse_key().target_cell_presentation(),
+                    target_cell_presentation
+                );
+                prop_assert_eq!(
+                    reused.snapshot().witness().observation_id(),
+                    cached_observation.request().observation_id(),
+                );
+            }
+        }
+
+        #[test]
+        fn prop_project_draw_frame_advances_planner_history_across_observations(
+            observation_seq in 1_u64..=(u16::MAX as u64 - 1),
+            target_cell_presentation in target_cell_presentation_strategy(),
+        ) {
+            let frame = base_frame();
+            let geometry = CursorTrailGeometry::from_render_frame(&frame);
+            let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
+            let first_observation = observation(observation_seq);
+            let first = project_draw_frame(
+                &SceneState::default(),
+                SceneRevision::INITIAL,
+                &first_observation,
                 &geometry,
                 &policy,
-                TargetCellPresentation::None,
+                target_cell_presentation,
             )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn planner_seed_survives_projection_witness_drift() {
-        let frame = base_frame();
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let cached_observation = observation(1);
-        let cached = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::None,
-        )
-        .expect("projection without probe-gated particles");
-        let cached_planner_state = cached.planner_state().clone();
-        assert_ne!(cached_planner_state, ProjectionPlannerState::default());
-
-        let current_scene =
-            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
-
-        assert_eq!(planner_seed(&current_scene, &policy), cached_planner_state);
-    }
-
-    #[test]
-    fn project_draw_frame_advances_planner_history_across_observations() {
-        let frame = base_frame();
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let first_observation = observation(1);
-        let first = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &first_observation,
-            &geometry,
-            &policy,
-            TargetCellPresentation::None,
-        )
-        .expect("first projection without probe-gated particles");
-        let second = project_draw_frame(
-            &SceneState::default().with_projection(ProjectionCache::Ready(Box::new(first.clone()))),
-            SceneRevision::INITIAL.next(),
-            &observation(2),
-            &geometry,
-            &policy,
-            TargetCellPresentation::None,
-        )
-        .expect("second projection should reuse planner history");
-
-        assert_ne!(first.planner_state(), second.planner_state());
-    }
-
-    #[test]
-    fn planner_seed_rejects_projection_policy_drift() {
-        let frame = base_frame();
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let cached_policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
-        let cached_observation = observation(1);
-        let cached = project_draw_frame(
-            &SceneState::default(),
-            SceneRevision::INITIAL,
-            &cached_observation,
-            &geometry,
-            &cached_policy,
-            TargetCellPresentation::None,
-        )
-        .expect("projection without probe-gated particles");
-        let current_scene =
-            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
-        let mut drifted_frame = frame;
-        let mut drifted_static_config = (*drifted_frame.static_config).clone();
-        drifted_static_config.color_levels = drifted_static_config.color_levels.saturating_add(1);
-        drifted_frame.static_config = Arc::new(drifted_static_config);
-        let drifted_policy = CursorTrailProjectionPolicy::from_render_frame(&drifted_frame);
-
-        assert_ne!(cached_policy, drifted_policy);
-        assert_eq!(
-            planner_seed(&current_scene, &drifted_policy),
-            ProjectionPlannerState::default()
-        );
-        assert!(
-            reusable_projection_entry(
+            .expect("first projection should succeed");
+            let current_scene =
+                SceneState::default().with_projection(ProjectionCache::Ready(Box::new(first.clone())));
+            let second = project_draw_frame(
                 &current_scene,
-                SceneRevision::INITIAL,
-                &cached_observation,
+                SceneRevision::INITIAL.next(),
+                &observation(observation_seq.saturating_add(1)),
                 &geometry,
-                &drifted_policy,
-                TargetCellPresentation::None,
+                &policy,
+                target_cell_presentation,
             )
-            .is_none()
-        );
+            .expect("second projection should succeed");
+
+            prop_assert_eq!(planner_seed(&current_scene, &policy), first.planner_state().clone());
+            prop_assert_ne!(first.planner_state(), second.planner_state());
+        }
+
+        #[test]
+        fn prop_suppress_particles_for_perf_class_clears_only_ornamental_state(
+            buffer_perf_class in perf_class_strategy(),
+            render_draw in any::<bool>(),
+            runtime_has_particles in any::<bool>(),
+            frame_has_particles in any::<bool>(),
+        ) {
+            let mut runtime = crate::state::RuntimeState::default();
+            runtime.apply_step_output(crate::types::StepOutput {
+                current_corners: [Point::ZERO; 4],
+                velocity_corners: [Point::ZERO; 4],
+                spring_velocity_corners: [Point::ZERO; 4],
+                trail_elapsed_ms: [0.0; 4],
+                previous_center: Point::ZERO,
+                particles: if runtime_has_particles {
+                    vec![particle_fixture()]
+                } else {
+                    Vec::new()
+                },
+                index_head: 0,
+                index_tail: 0,
+                rng_state: 7,
+            });
+
+            let render_action = if render_draw {
+                let mut frame = base_frame();
+                frame.particles = if frame_has_particles {
+                    vec![particle_fixture()].into()
+                } else {
+                    Vec::new().into()
+                };
+                RenderAction::Draw(Box::new(frame))
+            } else {
+                RenderAction::Noop
+            };
+
+            let mut render_decision = RenderDecision {
+                render_action,
+                render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+                render_allocation_policy:
+                    crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
+                render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
+            };
+
+            super::suppress_particles_for_perf_class(
+                &mut runtime,
+                &mut render_decision,
+                buffer_perf_class,
+            );
+
+            let expected_runtime_kept =
+                buffer_perf_class.keeps_ornamental_effects() && runtime_has_particles;
+            prop_assert_eq!(runtime.particles().is_empty(), !expected_runtime_kept);
+
+            match &render_decision.render_action {
+                RenderAction::Draw(frame) => {
+                    let expected_frame_kept =
+                        buffer_perf_class.keeps_ornamental_effects() && frame_has_particles;
+                    prop_assert_eq!(frame.particles.is_empty(), !expected_frame_kept);
+                }
+                RenderAction::Noop => prop_assert!(!render_draw),
+                RenderAction::ClearAll => {
+                    prop_assert!(false, "property only constructs draw or noop render actions")
+                }
+            }
+        }
     }
 
     #[test]
@@ -1255,7 +1319,7 @@ mod tests {
                 )),
             );
         let state = CoreState::default()
-            .initialize()
+            .into_primed()
             .with_scene(scene)
             .with_realization(RealizationLedger::Diverged {
                 last_consistent: Some(cached.snapshot().clone()),
@@ -1286,54 +1350,6 @@ mod tests {
             ),
             RealizationPlan::Noop
         );
-    }
-
-    #[test]
-    fn suppress_particles_for_perf_class_clears_runtime_and_draw_frame() {
-        let mut runtime = crate::state::RuntimeState::default();
-        runtime.apply_step_output(crate::types::StepOutput {
-            current_corners: [Point::ZERO; 4],
-            velocity_corners: [Point::ZERO; 4],
-            spring_velocity_corners: [Point::ZERO; 4],
-            trail_elapsed_ms: [0.0; 4],
-            previous_center: Point::ZERO,
-            particles: vec![Particle {
-                position: Point { row: 7.5, col: 8.5 },
-                velocity: Point::ZERO,
-                lifetime: 1.0,
-            }],
-            index_head: 0,
-            index_tail: 0,
-            rng_state: 7,
-        });
-        let mut render_decision = RenderDecision {
-            render_action: RenderAction::Draw(Box::new(base_frame())),
-            render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
-            render_allocation_policy:
-                crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
-            render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
-        };
-        let RenderAction::Draw(frame) = &mut render_decision.render_action else {
-            unreachable!("test constructs a draw action");
-        };
-        frame.particles = vec![Particle {
-            position: Point { row: 7.5, col: 8.5 },
-            velocity: Point::ZERO,
-            lifetime: 1.0,
-        }]
-        .into();
-
-        super::suppress_particles_for_perf_class(
-            &mut runtime,
-            &mut render_decision,
-            BufferPerfClass::FastMotion,
-        );
-
-        assert!(runtime.particles().is_empty());
-        let RenderAction::Draw(frame) = &render_decision.render_action else {
-            panic!("expected draw frame after suppression");
-        };
-        assert!(frame.particles.is_empty());
     }
 
     #[test]

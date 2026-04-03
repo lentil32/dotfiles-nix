@@ -1,11 +1,6 @@
 use crate::core::state::CoreState;
-use crate::core::state::CursorColorProbeWitness;
-use crate::core::state::CursorColorSample;
-use crate::core::state::CursorTextContext;
-use crate::core::types::Generation;
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::sync::Arc;
 use thiserror::Error;
 
 mod cursor;
@@ -15,33 +10,23 @@ mod host_bridge;
 mod ingress;
 mod lifecycle;
 mod logging;
+mod lru_cache;
 mod options;
 mod policy;
-mod probe_cache;
+pub(crate) mod probe_cache;
 mod runtime;
 mod timers;
 mod trace;
 
-use policy::BufferEventPolicy;
 use policy::BufferEventPolicyCache;
-use policy::BufferPerfTelemetry;
 use policy::BufferPerfTelemetryCache;
-use probe_cache::CachedCursorColorProbeSample;
-use probe_cache::ConcealCacheKey;
-use probe_cache::ConcealCacheLookup;
-use probe_cache::ConcealDeltaCacheKey;
-use probe_cache::ConcealDeltaCacheLookup;
-use probe_cache::ConcealRegion;
-use probe_cache::ConcealScreenCell;
-use probe_cache::ConcealScreenCellCacheKey;
-use probe_cache::ConcealScreenCellCacheLookup;
-use probe_cache::CursorTextContextCacheKey;
-use probe_cache::CursorTextContextCacheLookup;
 use probe_cache::ProbeCacheState;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use cursor::ConcealScreenCellView;
 pub(crate) use handlers::on_autocmd_event;
 pub(crate) use lifecycle::diagnostics;
 pub(crate) use lifecycle::setup;
@@ -66,6 +51,20 @@ const LOG_LEVEL_WARN: i64 = 3;
 const LOG_LEVEL_INFO: i64 = 2;
 const LOG_LEVEL_ERROR: i64 = 4;
 const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
+const CALLBACK_DURATION_EWMA_ALPHA: f64 = 0.25;
+
+fn update_callback_duration_ewma(previous_estimate_ms: f64, duration_ms: f64) -> Option<f64> {
+    if !duration_ms.is_finite() {
+        return None;
+    }
+
+    let observed = duration_ms.max(0.0);
+    Some(if previous_estimate_ms <= 0.0 {
+        observed
+    } else {
+        previous_estimate_ms + CALLBACK_DURATION_EWMA_ALPHA * (observed - previous_estimate_ms)
+    })
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct HostBridgeRevision(u32);
@@ -111,143 +110,6 @@ impl ShellState {
 
     fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
         self.host_bridge_state = HostBridgeState::Verified { revision };
-    }
-
-    fn cursor_color_colorscheme_generation(&self) -> Generation {
-        self.probe_cache.colorscheme_generation()
-    }
-
-    fn cached_cursor_color_sample_for_probe(
-        &mut self,
-        witness: &CursorColorProbeWitness,
-        probe_policy: crate::core::effect::ProbePolicy,
-        reuse: crate::core::state::ProbeReuse,
-    ) -> Option<CachedCursorColorProbeSample> {
-        self.probe_cache
-            .cached_cursor_color_sample_for_probe(witness, probe_policy, reuse)
-    }
-
-    fn store_cursor_color_sample(
-        &mut self,
-        witness: CursorColorProbeWitness,
-        sample: Option<CursorColorSample>,
-    ) {
-        self.probe_cache.store_cursor_color_sample(witness, sample);
-    }
-
-    fn cached_cursor_text_context(
-        &mut self,
-        key: &CursorTextContextCacheKey,
-    ) -> CursorTextContextCacheLookup {
-        self.probe_cache.cached_cursor_text_context(key)
-    }
-
-    fn store_cursor_text_context(
-        &mut self,
-        key: CursorTextContextCacheKey,
-        context: Option<CursorTextContext>,
-    ) {
-        self.probe_cache.store_cursor_text_context(key, context);
-    }
-
-    fn cached_conceal_regions(&mut self, key: &ConcealCacheKey) -> ConcealCacheLookup {
-        self.probe_cache.cached_conceal_regions(key)
-    }
-
-    fn cached_conceal_delta(&mut self, key: &ConcealDeltaCacheKey) -> ConcealDeltaCacheLookup {
-        self.probe_cache.cached_conceal_delta(key)
-    }
-
-    fn store_conceal_regions(
-        &mut self,
-        key: ConcealCacheKey,
-        scanned_to_col1: i64,
-        regions: Arc<[ConcealRegion]>,
-    ) {
-        self.probe_cache
-            .store_conceal_regions(key, scanned_to_col1, regions);
-    }
-
-    fn store_conceal_delta(&mut self, key: ConcealDeltaCacheKey, current_col1: i64, delta: i64) {
-        self.probe_cache
-            .store_conceal_delta(key, current_col1, delta);
-    }
-
-    fn cached_conceal_screen_cell(
-        &mut self,
-        key: &ConcealScreenCellCacheKey,
-    ) -> ConcealScreenCellCacheLookup {
-        self.probe_cache.cached_conceal_screen_cell(key)
-    }
-
-    fn store_conceal_screen_cell(
-        &mut self,
-        key: ConcealScreenCellCacheKey,
-        cell: Option<ConcealScreenCell>,
-    ) {
-        self.probe_cache.store_conceal_screen_cell(key, cell);
-    }
-
-    fn note_cursor_color_colorscheme_change(&mut self) {
-        self.probe_cache.note_cursor_color_colorscheme_change();
-    }
-
-    fn reset_probe_caches(&mut self) {
-        self.probe_cache.reset();
-    }
-
-    fn cached_buffer_event_policy(&self, buffer_handle: i64) -> Option<BufferEventPolicy> {
-        self.buffer_perf_policy_cache.cached_policy(buffer_handle)
-    }
-
-    fn store_buffer_event_policy(&mut self, buffer_handle: i64, policy: BufferEventPolicy) {
-        self.buffer_perf_policy_cache
-            .store_policy(buffer_handle, policy);
-    }
-
-    fn buffer_perf_telemetry(&self, buffer_handle: i64) -> Option<BufferPerfTelemetry> {
-        self.buffer_perf_telemetry_cache.telemetry(buffer_handle)
-    }
-
-    fn record_buffer_callback_duration(
-        &mut self,
-        buffer_handle: i64,
-        duration_ms: f64,
-    ) -> BufferPerfTelemetry {
-        self.buffer_perf_telemetry_cache
-            .record_callback_duration(buffer_handle, duration_ms)
-    }
-
-    fn record_buffer_cursor_color_extmark_fallback(
-        &mut self,
-        buffer_handle: i64,
-        observed_at_ms: f64,
-    ) -> BufferPerfTelemetry {
-        self.buffer_perf_telemetry_cache
-            .record_cursor_color_extmark_fallback(buffer_handle, observed_at_ms)
-    }
-
-    fn record_buffer_conceal_full_scan(
-        &mut self,
-        buffer_handle: i64,
-        observed_at_ms: f64,
-    ) -> BufferPerfTelemetry {
-        self.buffer_perf_telemetry_cache
-            .record_conceal_full_scan(buffer_handle, observed_at_ms)
-    }
-
-    fn record_buffer_conceal_raw_screenpos_fallback(
-        &mut self,
-        buffer_handle: i64,
-        observed_at_ms: f64,
-    ) -> BufferPerfTelemetry {
-        self.buffer_perf_telemetry_cache
-            .record_conceal_raw_screenpos_fallback(buffer_handle, observed_at_ms)
-    }
-
-    fn reset_buffer_event_policies(&mut self) {
-        self.buffer_perf_policy_cache.clear();
-        self.buffer_perf_telemetry_cache.clear();
     }
 }
 
@@ -300,7 +162,7 @@ pub(super) enum EngineAccessError {
 
 impl From<EngineAccessError> for nvim_oxi::Error {
     fn from(error: EngineAccessError) -> Self {
-        nvim_oxi::api::Error::Other(error.to_string()).into()
+        crate::other_error(error.to_string())
     }
 }
 

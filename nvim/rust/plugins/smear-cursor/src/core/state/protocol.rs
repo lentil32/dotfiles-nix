@@ -285,10 +285,6 @@ impl CoreState {
         Some(self)
     }
 
-    pub(crate) const fn generation(&self) -> Generation {
-        self.generation
-    }
-
     pub(crate) fn next_generation(&self) -> Generation {
         self.generation.next()
     }
@@ -454,12 +450,6 @@ impl CoreState {
         let (demand, result) = map(demand);
         self.protocol.shared_mut().demand = demand;
         (self, result)
-    }
-
-    pub(crate) fn initialize(self) -> Self {
-        self.map_protocol(|protocol| ProtocolState::Primed {
-            shared: protocol.into_shared(),
-        })
     }
 
     pub(crate) fn into_observing(self, request: ObservationRequest) -> Self {

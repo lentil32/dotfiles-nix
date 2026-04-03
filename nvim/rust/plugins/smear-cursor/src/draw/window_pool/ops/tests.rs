@@ -3,12 +3,16 @@ mod tests {
     use super::{
         ADAPTIVE_POOL_HARD_MAX_BUDGET, ADAPTIVE_POOL_MIN_BUDGET, AcquireError, AdaptiveBudgetState,
         AllocationPolicy, CachedRenderWindow, CachedWindowLifecycle, CompactRenderWindowsSummary,
-        EpochRollover, FrameCapacityTarget, FrameEpoch, ReuseFailureCounters, TabWindows, WindowBufferHandle,
-        WindowPlacement, acquire, available_window_index_for_placement, begin_tab_frame,
-        effective_keep_budget, frame_capacity_target, global_compaction_prune_plan,
-        has_pending_clear_work, has_visible_windows, lru_prune_indices, next_adaptive_budget,
-        rollover_in_use_windows, shell_visible_close_indices,
+        FrameCapacityTarget, FrameEpoch, ReuseFailureCounters, TabWindows,
+        WindowBufferHandle, WindowPlacement, acquire, available_window_index_for_placement,
+        begin_tab_frame, effective_keep_budget, frame_capacity_target,
+        global_compaction_prune_plan, has_pending_clear_work, has_visible_windows,
+        lru_prune_indices, next_adaptive_budget, rollover_in_use_windows,
+        shell_visible_close_indices,
     };
+    use crate::test_support::proptest::pure_config;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
     use std::collections::HashMap;
 
     fn tabs_with(mut tab_windows: TabWindows) -> HashMap<i32, TabWindows> {

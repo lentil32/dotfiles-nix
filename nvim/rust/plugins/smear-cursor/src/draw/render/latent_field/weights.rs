@@ -1,5 +1,6 @@
 use super::TailBand;
 use super::TailBandProfile;
+#[cfg(test)]
 use super::store::DepositedSlice;
 use super::store::WeightCurveKey;
 use crate::types::BASE_TIME_INTERVAL;
@@ -82,11 +83,6 @@ pub(in super::super) fn intensity_q16(intensity: f64) -> u32 {
     (intensity.clamp(0.0, 1.0) * WEIGHT_Q16_SCALE as f64).round() as u32
 }
 
-fn smoothstep01(value: f64) -> f64 {
-    let x = value.clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
-}
-
 fn band_intensity_factor(intensity_q16: u32) -> f64 {
     (f64::from(intensity_q16) / WEIGHT_Q16_SCALE as f64).max(0.0)
 }
@@ -101,7 +97,7 @@ fn age_weights(age_steps: u64, support_steps: usize) -> Option<(f64, f64)> {
     let age = normalized_age.clamp(0.0, 1.0);
     let head_weight = (1.0 - age).clamp(0.0, 1.0);
     // Keep intensity decay smoother near support expiry to reduce one-frame aging pops.
-    let age_smooth = smoothstep01(age);
+    let age_smooth = crate::types::smoothstep01(age);
     let tail_weight = (1.0 - age_smooth).powf(TAIL_WEIGHT_EXPONENT);
     Some((head_weight, tail_weight))
 }

@@ -1,0 +1,6 @@
+---
+source: plugins/smear-cursor/src/events/runtime/tests.rs
+assertion_line: 175
+expression: test_perf_diagnostics_report()
+---
+smear_cursor perf_class=na perf_mode=auto perf_effective_mode=na buffer_line_count=0 callback_ewma_ms=0 probe_policy=na perf_reason_bits=0 planner_bms=0 planner_bcs=0 planner_lqea=0 planner_local_query_cells=0 planner_compq=0 planner_candq=0 planner_compiled_cells_emitted=0 planner_candidate_cells_built=0 planner_rc=0 planner_lqc=0 cursor_color_extmark_fallback_calls=0 cursor_color_cache_hit=0 cursor_color_cache_miss=0 cursor_color_reuse_exact=0 cursor_color_reuse_compatible=0 cursor_color_reuse_refresh_required=0 conceal_region_cache_hit=0 conceal_region_cache_miss=0 conceal_screen_cell_cache_hit=0 conceal_screen_cell_cache_miss=0 conceal_full_scan_calls=0 conceal_raw_screenpos_fallback_calls=0 perf_reasons=na cleanup_thermal=cold pool_total_windows=0 pool_cached_budget=0 pool_peak_requested=0 pool_cap_hits=0 max_kept_windows=64 delayed_ingress_pending_updates=0 queue_total_backlog=0 post_burst_convergence_last_ms=none host_timer_rearms_ingress=0 scheduled_drain_reschedules_cooling=0

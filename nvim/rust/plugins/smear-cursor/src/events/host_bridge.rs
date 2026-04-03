@@ -13,12 +13,6 @@ const HOST_BRIDGE_REVISION_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridg
 const START_TIMER_ONCE_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridge#start_timer_once";
 const INSTALL_PROBE_HELPERS_FUNCTION_NAME: &str =
     "nvimrs_smear_cursor#host_bridge#install_probe_helpers";
-const LUAEVAL_FUNCTION_NAME: &str = "luaeval";
-const CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR: &str = concat!(
-    "(package.loaded['nvimrs_smear_cursor.probes'] or require('nvimrs_smear_cursor.probes'))",
-    ".cursor_color_at_cursor(_A[1], _A[2])"
-);
-#[cfg(test)]
 const CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME: &str =
     "nvimrs_smear_cursor#host_bridge#cursor_color_at_cursor";
 const BACKGROUND_ALLOWED_MASK_FUNCTION_NAME: &str =
@@ -77,7 +71,7 @@ pub(super) enum HostBridgeError {
 
 impl From<HostBridgeError> for nvim_oxi::Error {
     fn from(error: HostBridgeError) -> Self {
-        nvim_oxi::api::Error::Other(error.to_string()).into()
+        crate::other_error(error.to_string())
     }
 }
 
@@ -107,15 +101,11 @@ impl InstalledHostBridge {
                 value: colorscheme_generation.value(),
             }
         })?;
-        let probe_args = Array::from_iter([
+        let args = Array::from_iter([
             Object::from(generation),
             Object::from(allow_extmark_fallback),
         ]);
-        let args = Array::from_iter([
-            Object::from(CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR),
-            Object::from(probe_args),
-        ]);
-        api::call_function(LUAEVAL_FUNCTION_NAME, args)
+        api::call_function(CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME, args)
             .map_err(|error| HostBridgeError::CursorColorProbe(error.into()))
     }
 
@@ -200,82 +190,141 @@ pub(super) fn ensure_namespace_id() -> Result<u32, EngineAccessError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn host_bridge_script_registers_named_entrypoints() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(script.contains(HOST_BRIDGE_REVISION_FUNCTION_NAME));
-        assert!(script.contains(CORE_TIMER_CALLBACK_FUNCTION_NAME));
-        assert!(script.contains(START_TIMER_ONCE_FUNCTION_NAME));
-        assert!(script.contains(INSTALL_PROBE_HELPERS_FUNCTION_NAME));
-        assert!(script.contains(CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME));
-        assert!(script.contains(BACKGROUND_ALLOWED_MASK_FUNCTION_NAME));
+    fn assert_substring_contract(
+        script_name: &str,
+        script: &str,
+        case_name: &str,
+        required: &[&str],
+        forbidden: &[&str],
+    ) {
+        for needle in required {
+            assert!(
+                script.contains(needle),
+                "{script_name} missing required substring for {case_name}: {needle}"
+            );
+        }
+
+        for needle in forbidden {
+            assert!(
+                !script.contains(needle),
+                "{script_name} unexpectedly contained forbidden substring for {case_name}: {needle}"
+            );
+        }
     }
 
     #[test]
-    fn host_bridge_script_uses_named_vimscript_timer_callbacks() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(script.contains("timer_start("));
-        assert!(script.contains("function('nvimrs_smear_cursor#host_bridge#on_core_timer')"));
+    fn host_bridge_script_contract() {
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            (
+                "entrypoints present",
+                &[
+                    HOST_BRIDGE_REVISION_FUNCTION_NAME,
+                    CORE_TIMER_CALLBACK_FUNCTION_NAME,
+                    START_TIMER_ONCE_FUNCTION_NAME,
+                    INSTALL_PROBE_HELPERS_FUNCTION_NAME,
+                    CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME,
+                    BACKGROUND_ALLOWED_MASK_FUNCTION_NAME,
+                ],
+                &[],
+            ),
+            (
+                "legacy callback surfaces absent",
+                &[],
+                &[
+                    "vim.on_key(",
+                    "set_on_key_listener",
+                    "v:lua.",
+                    "_G.__nvimrs_smear_cursor",
+                ],
+            ),
+            (
+                "timer callback shape",
+                &[
+                    "timer_start(",
+                    "function('nvimrs_smear_cursor#host_bridge#on_core_timer')",
+                ],
+                &[],
+            ),
+            (
+                "runtime-module loading shape",
+                &["require('nvimrs_smear_cursor.probes')"],
+                &[
+                    "CURSOR_COLOR_LUAEVAL_EXPR",
+                    "BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR",
+                ],
+            ),
+        ];
+
+        for &(case_name, required, forbidden) in cases {
+            assert_substring_contract(
+                "host bridge script",
+                HOST_BRIDGE_SCRIPT,
+                case_name,
+                required,
+                forbidden,
+            );
+        }
     }
 
     #[test]
-    fn host_bridge_script_avoids_legacy_on_key_listener_hooks() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(!script.contains("vim.on_key("));
-        assert!(!script.contains("set_on_key_listener"));
-    }
+    fn probe_helpers_contract() {
+        let cases: &[(&str, &str, &str, &[&str], &[&str])] = &[
+            (
+                "host bridge script",
+                HOST_BRIDGE_SCRIPT,
+                "colorscheme generation plumbed through",
+                &[
+                    "cursor_color_at_cursor(colorscheme_generation, ...) abort",
+                    "let allow_extmark_fallback = a:0 > 0 ? a:1 : v:false",
+                    ".cursor_color_at_cursor(_A[1], _A[2])",
+                ],
+                &[],
+            ),
+            (
+                "probe helpers script",
+                PROBE_HELPERS_SCRIPT,
+                "extmark fallback gate present",
+                &[
+                    "function M.cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback)",
+                    "if not allow_extmark_fallback then",
+                ],
+                &[],
+            ),
+            (
+                "probe helpers script",
+                PROBE_HELPERS_SCRIPT,
+                "fallback usage field present",
+                &["used_extmark_fallback"],
+                &[],
+            ),
+            (
+                "probe helpers script",
+                PROBE_HELPERS_SCRIPT,
+                "uncapped retry path present",
+                &[
+                    "local EXTMARK_OVERLAP_PROBE_SOFT_LIMIT = 32",
+                    "local function overlapping_extmarks_at_cursor(cursor)",
+                    "{ details = true, overlap = true, limit = EXTMARK_OVERLAP_PROBE_SATURATION_LIMIT }",
+                    "if #extmarks < EXTMARK_OVERLAP_PROBE_SATURATION_LIMIT then",
+                    "{ details = true, overlap = true }",
+                ],
+                &[],
+            ),
+            (
+                "probe helpers script",
+                PROBE_HELPERS_SCRIPT,
+                "removed highlight-generation cache absent",
+                &[],
+                &[
+                    "hl_color_cache_generation",
+                    "reset_hl_color_cache(colorscheme_generation)",
+                    "hl_fg_cache[group]",
+                ],
+            ),
+        ];
 
-    #[test]
-    fn host_bridge_script_avoids_global_lua_callback_state() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(!script.contains("v:lua."));
-        assert!(!script.contains("_G.__nvimrs_smear_cursor"));
-    }
-
-    #[test]
-    fn host_bridge_script_loads_probe_helpers_from_runtime_module() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(script.contains("require('nvimrs_smear_cursor.probes')"));
-        assert!(!script.contains("CURSOR_COLOR_LUAEVAL_EXPR"));
-        assert!(!script.contains("BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR"));
-    }
-
-    #[test]
-    fn host_bridge_script_passes_colorscheme_generation_to_cursor_probe() {
-        let script = HOST_BRIDGE_SCRIPT;
-        assert!(script.contains(
-            "cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback) abort"
-        ));
-        assert!(script.contains(".cursor_color_at_cursor(_A[1], _A[2])"));
-    }
-
-    #[test]
-    fn cursor_color_probe_luaeval_expr_loads_probe_helpers_from_runtime_module() {
-        let expr = CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR;
-        assert!(expr.contains("require('nvimrs_smear_cursor.probes')"));
-        assert!(expr.contains(".cursor_color_at_cursor(_A[1], _A[2])"));
-    }
-
-    #[test]
-    fn probe_helpers_cache_highlight_colors_by_generation() {
-        let script = PROBE_HELPERS_SCRIPT;
-        assert!(script.contains("hl_color_cache_generation"));
-        assert!(script.contains("reset_hl_color_cache(colorscheme_generation)"));
-        assert!(script.contains("hl_fg_cache[group]"));
-    }
-
-    #[test]
-    fn probe_helpers_gate_extmark_fallback_to_exact_edges() {
-        let script = PROBE_HELPERS_SCRIPT;
-        assert!(script.contains(
-            "function M.cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback)"
-        ));
-        assert!(script.contains("if not allow_extmark_fallback then"));
-    }
-
-    #[test]
-    fn probe_helpers_report_extmark_fallback_usage_in_cursor_color_results() {
-        let script = PROBE_HELPERS_SCRIPT;
-        assert!(script.contains("used_extmark_fallback"));
+        for &(script_name, script, case_name, required, forbidden) in cases {
+            assert_substring_contract(script_name, script, case_name, required, forbidden);
+        }
     }
 }

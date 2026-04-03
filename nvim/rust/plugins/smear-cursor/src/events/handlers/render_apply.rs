@@ -34,7 +34,7 @@ use crate::draw::clear_prepaint_for_current_tab;
 use crate::draw::compact_render_windows;
 use crate::draw::draw_current;
 use crate::draw::editor_bounds;
-use crate::draw::prepaint_cursor_block;
+use crate::draw::prepaint_cursor_cell;
 use crate::draw::purge_render_windows;
 use crate::draw::redraw;
 use nvim_oxi::Result;
@@ -54,10 +54,14 @@ pub(crate) fn apply_ingress_cursor_presentation_effect(effect: IngressCursorPres
         IngressCursorPresentationEffect::HideCursor => {
             hide_real_cursor();
         }
-        IngressCursorPresentationEffect::HideCursorAndPrepaint { cell, zindex } => {
+        IngressCursorPresentationEffect::HideCursorAndPrepaint {
+            cell,
+            shape,
+            zindex,
+        } => {
             hide_real_cursor();
             match ensure_namespace_id() {
-                Ok(namespace_id) => prepaint_cursor_block(namespace_id, cell, zindex),
+                Ok(namespace_id) => prepaint_cursor_cell(namespace_id, cell, shape, zindex),
                 Err(err) => warn(&format!(
                     "engine state re-entered while preparing ingress prepaint; skipping overlay: {err}"
                 )),
@@ -276,14 +280,13 @@ pub(super) fn apply_render_action(
             if !live_viewport_matches_projection(projection)? {
                 return Err(ApplyRenderActionError::ViewportDrift);
             }
-            let draw_result = draw_current(
+            let draw_metrics = draw_current(
                 namespace_id,
                 draw.palette(),
                 projection,
                 draw.max_kept_windows(),
                 to_draw_allocation_policy(draw.allocation_policy()),
             )?;
-            let draw_metrics = draw_result.metrics;
             let draw_release_redraw = draw_release_requires_redraw(&draw_metrics);
             metrics.merge_apply_metrics(draw_metrics);
             if draw_release_redraw && !render_side_effects.redraw_after_draw_if_cmdline {
@@ -377,6 +380,8 @@ mod tests {
     use crate::draw::PurgeRenderWindowsSummary;
     use crate::draw::render_plan::CellOp;
     use crate::draw::render_plan::Viewport;
+    use crate::test_support::proptest::pure_config;
+    use proptest::prelude::*;
     use std::sync::Arc;
 
     fn projection_snapshot(viewport: ViewportSnapshot) -> ProjectionSnapshot {
@@ -391,32 +396,159 @@ mod tests {
         )
     }
 
-    #[test]
-    fn viewport_match_accepts_identical_editor_bounds() {
-        let projection = projection_snapshot(ViewportSnapshot::new(CursorRow(20), CursorCol(40)));
-        let live_viewport = Viewport {
-            max_row: 20,
-            max_col: 40,
-        };
-
-        assert!(viewport_matches_projection_witness(
-            &projection,
-            live_viewport,
-        ));
+    fn expected_cleanup_action(
+        outcome: RenderCleanupOutcome,
+    ) -> crate::core::event::RenderCleanupAppliedAction {
+        match outcome {
+            RenderCleanupOutcome::SoftClear { .. } => {
+                crate::core::event::RenderCleanupAppliedAction::SoftCleared
+            }
+            RenderCleanupOutcome::CompactToBudget(summary) => {
+                crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
+                    converged_to_idle: summary.total_windows_after <= summary.target_budget
+                        && !summary.has_visible_windows_after
+                        && !summary.has_pending_work_after,
+                }
+            }
+            RenderCleanupOutcome::HardPurge(_) => {
+                crate::core::event::RenderCleanupAppliedAction::HardPurged
+            }
+        }
     }
 
-    #[test]
-    fn viewport_match_rejects_drifted_editor_bounds() {
-        let projection = projection_snapshot(ViewportSnapshot::new(CursorRow(20), CursorCol(40)));
-        let live_viewport = Viewport {
-            max_row: 21,
-            max_col: 40,
-        };
+    fn expected_visual_change(outcome: RenderCleanupOutcome) -> bool {
+        match outcome {
+            RenderCleanupOutcome::SoftClear { render, prepaint } => {
+                (render.had_visible_windows_before_clear
+                    && (render.pruned_windows > 0
+                        || render.hidden_windows > 0
+                        || render.invalid_removed_windows > 0))
+                    || (prepaint.had_visible_prepaint_before_clear
+                        && prepaint.cleared_prepaint_overlays > 0)
+            }
+            RenderCleanupOutcome::CompactToBudget(summary) => summary.closed_visible_windows > 0,
+            RenderCleanupOutcome::HardPurge(summary) => {
+                (summary.had_visible_render_windows_before_purge && summary.purged_windows > 0)
+                    || (summary.had_visible_prepaint_before_purge
+                        && summary.cleared_prepaint_overlays > 0)
+            }
+        }
+    }
 
-        assert!(!viewport_matches_projection_witness(
-            &projection,
-            live_viewport,
-        ));
+    fn render_cleanup_outcome_strategy() -> impl Strategy<Value = RenderCleanupOutcome> {
+        prop_oneof![
+            (
+                any::<bool>(),
+                0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
+                any::<bool>(),
+                0_usize..8_usize,
+            )
+                .prop_map(
+                    |(
+                        had_visible_windows_before_clear,
+                        pruned_windows,
+                        hidden_windows,
+                        invalid_removed_windows,
+                        had_visible_prepaint_before_clear,
+                        cleared_prepaint_overlays,
+                    )| {
+                        RenderCleanupOutcome::SoftClear {
+                            render: ClearActiveRenderWindowsSummary {
+                                had_visible_windows_before_clear,
+                                pruned_windows,
+                                hidden_windows,
+                                invalid_removed_windows,
+                            },
+                            prepaint: ClearPrepaintOverlaysSummary {
+                                had_visible_prepaint_before_clear,
+                                cleared_prepaint_overlays,
+                            },
+                        }
+                    },
+                ),
+            (
+                0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
+                any::<bool>(),
+                any::<bool>(),
+            )
+                .prop_map(
+                    |(
+                        target_budget,
+                        total_windows_after,
+                        closed_visible_windows,
+                        invalid_removed_windows,
+                        has_visible_windows_after,
+                        has_pending_work_after,
+                    )| {
+                        RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
+                            target_budget,
+                            total_windows_after,
+                            closed_visible_windows,
+                            pruned_windows: 0,
+                            invalid_removed_windows,
+                            has_visible_windows_after,
+                            has_pending_work_after,
+                        })
+                    },
+                ),
+            (
+                any::<bool>(),
+                any::<bool>(),
+                0_usize..8_usize,
+                0_usize..8_usize
+            )
+                .prop_map(
+                    |(
+                        had_visible_render_windows_before_purge,
+                        had_visible_prepaint_before_purge,
+                        purged_windows,
+                        cleared_prepaint_overlays,
+                    )| {
+                        RenderCleanupOutcome::HardPurge(PurgeRenderWindowsSummary {
+                            had_visible_render_windows_before_purge,
+                            had_visible_prepaint_before_purge,
+                            purged_windows,
+                            cleared_prepaint_overlays,
+                        })
+                    },
+                ),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_viewport_match_depends_only_on_editor_bounds_equality(
+            max_row in 0_u16..256_u16,
+            max_col in 0_u16..512_u16,
+            live_row in -1_i64..258_i64,
+            live_col in -1_i64..514_i64,
+        ) {
+            let projection = projection_snapshot(ViewportSnapshot::new(
+                CursorRow(u32::from(max_row)),
+                CursorCol(u32::from(max_col)),
+            ));
+            let live_viewport = Viewport { max_row: live_row, max_col: live_col };
+
+            prop_assert_eq!(
+                viewport_matches_projection_witness(&projection, live_viewport),
+                live_row == i64::from(max_row) && live_col == i64::from(max_col)
+            );
+        }
+
+        #[test]
+        fn prop_render_cleanup_outcome_matches_apply_outcome_model(
+            outcome in render_cleanup_outcome_strategy(),
+        ) {
+            prop_assert_eq!(outcome.action(), expected_cleanup_action(outcome));
+            prop_assert_eq!(outcome.had_visual_change(), expected_visual_change(outcome));
+        }
     }
 
     #[test]
@@ -511,120 +643,6 @@ mod tests {
         };
 
         assert_eq!(draw_projection, &projection);
-    }
-
-    #[test]
-    fn render_cleanup_outcome_skips_redraw_for_noop_soft_clear() {
-        let outcome = RenderCleanupOutcome::SoftClear {
-            render: ClearActiveRenderWindowsSummary::default(),
-            prepaint: ClearPrepaintOverlaysSummary::default(),
-        };
-
-        assert!(!outcome.had_visual_change());
-    }
-
-    #[test]
-    fn render_cleanup_outcome_flushes_redraw_for_visible_soft_clear_prepaint() {
-        let outcome = RenderCleanupOutcome::SoftClear {
-            render: ClearActiveRenderWindowsSummary::default(),
-            prepaint: ClearPrepaintOverlaysSummary {
-                had_visible_prepaint_before_clear: true,
-                cleared_prepaint_overlays: 1,
-            },
-        };
-
-        assert!(outcome.had_visual_change());
-    }
-
-    #[test]
-    fn render_cleanup_outcome_maps_compaction_convergence_to_idle_action() {
-        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
-            target_budget: 2,
-            total_windows_before: 4,
-            total_windows_after: 2,
-            closed_visible_windows: 0,
-            pruned_windows: 2,
-            invalid_removed_windows: 0,
-            has_visible_windows_after: false,
-            has_pending_work_after: false,
-        });
-
-        assert_eq!(
-            outcome.action(),
-            crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
-                converged_to_idle: true,
-            }
-        );
-    }
-
-    #[test]
-    fn render_cleanup_outcome_keeps_cooling_when_visible_windows_survive_compaction() {
-        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
-            target_budget: 2,
-            total_windows_before: 4,
-            total_windows_after: 2,
-            closed_visible_windows: 0,
-            pruned_windows: 2,
-            invalid_removed_windows: 0,
-            has_visible_windows_after: true,
-            has_pending_work_after: false,
-        });
-
-        assert_eq!(
-            outcome.action(),
-            crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
-                converged_to_idle: false,
-            }
-        );
-    }
-
-    #[test]
-    fn render_cleanup_outcome_keeps_cooling_when_retained_pool_is_still_oversized() {
-        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
-            target_budget: 2,
-            total_windows_before: 5,
-            total_windows_after: 3,
-            closed_visible_windows: 0,
-            pruned_windows: 2,
-            invalid_removed_windows: 0,
-            has_visible_windows_after: false,
-            has_pending_work_after: true,
-        });
-
-        assert_eq!(
-            outcome.action(),
-            crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
-                converged_to_idle: false,
-            }
-        );
-    }
-
-    #[test]
-    fn render_cleanup_outcome_flushes_redraw_for_visible_compaction_recovery() {
-        let outcome = RenderCleanupOutcome::CompactToBudget(CompactRenderWindowsSummary {
-            target_budget: 1,
-            total_windows_before: 2,
-            total_windows_after: 1,
-            closed_visible_windows: 1,
-            pruned_windows: 0,
-            invalid_removed_windows: 0,
-            has_visible_windows_after: false,
-            has_pending_work_after: false,
-        });
-
-        assert!(outcome.had_visual_change());
-    }
-
-    #[test]
-    fn render_cleanup_outcome_flushes_redraw_for_visible_hard_purge() {
-        let outcome = RenderCleanupOutcome::HardPurge(PurgeRenderWindowsSummary {
-            had_visible_render_windows_before_purge: true,
-            had_visible_prepaint_before_purge: false,
-            purged_windows: 1,
-            cleared_prepaint_overlays: 0,
-        });
-
-        assert!(outcome.had_visual_change());
     }
 
     #[test]

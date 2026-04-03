@@ -103,18 +103,12 @@ pub(super) fn clamp_row_to_window(row: f64, scroll_shift: ScrollShift) -> f64 {
     row.max(scroll_shift.min_row).min(scroll_shift.max_row)
 }
 
-pub(super) fn apply_scroll_shift_to_state(
-    state: &mut RuntimeState,
-    vertical_bar: bool,
-    horizontal_bar: bool,
-    scroll_shift: ScrollShift,
-) {
+pub(super) fn apply_scroll_shift_to_state(state: &mut RuntimeState, scroll_shift: ScrollShift) {
     state.apply_scroll_shift(
-        scroll_shift.shift,
+        scroll_shift.row_shift,
+        scroll_shift.col_shift,
         scroll_shift.min_row,
         scroll_shift.max_row,
-        vertical_bar,
-        horizontal_bar,
     );
 }
 

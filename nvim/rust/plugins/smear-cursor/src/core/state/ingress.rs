@@ -173,14 +173,6 @@ impl Default for EntropyState {
 }
 
 impl EntropyState {
-    pub(crate) const fn next_proposal_id(self) -> ProposalId {
-        self.next_proposal_id
-    }
-
-    pub(crate) const fn next_ingress_seq(self) -> IngressSeq {
-        self.next_ingress_seq
-    }
-
     pub(crate) fn allocate_proposal_id(self) -> (Self, ProposalId) {
         let proposal_id = self.next_proposal_id.next();
         (

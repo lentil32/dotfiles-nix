@@ -45,24 +45,15 @@ settle_wait_ms="${SMEAR_COMPARE_SETTLE_WAIT_MS:-300}"
 windows_count="${SMEAR_COMPARE_WINDOWS:-8}"
 drain_every="${SMEAR_COMPARE_DRAIN_EVERY:-1}"
 
-worktree_dir="$(mktemp -d /tmp/smear_probe_compare.XXXXXX)"
-artifact_dir="$(mktemp -d /tmp/smear_probe_compare_artifacts.XXXXXX)"
+IFS=$'\t' read -r worktree_dir artifact_dir <<EOF
+$(smear_compare_prepare_worktree "${repo_root}" "${base_ref}" "smear_probe_compare" "smear_probe_compare_artifacts")
+EOF
 results_tsv="${artifact_dir}/probe_compare_results.tsv"
 
 cleanup() {
-  git -C "${repo_root}" worktree remove "${worktree_dir}" >/dev/null 2>&1 || true
+  smear_compare_remove_worktree "${repo_root}" "${worktree_dir}"
 }
 trap cleanup EXIT
-
-git -C "${repo_root}" worktree add --detach "${worktree_dir}" "${base_ref}" >/dev/null
-
-build_release() {
-  local plugin_dir="$1"
-  (
-    cd "${plugin_dir}"
-    cargo build --release >/dev/null
-  )
-}
 
 run_once() {
   local side_label="$1"
@@ -70,17 +61,16 @@ run_once() {
   local case_label="$3"
   local particles_over_text="$4"
   local repeat_index="$5"
-  local plugin_dir="${side_root}/nvim/rust/plugins/smear-cursor"
+  local plugin_dir
   local log_file="${artifact_dir}/run_${side_label}_${case_label}_${repeat_index}.log"
-  local target_directory
   local smear_cursor_cpath
-  target_directory="$(smear_resolve_target_directory "${plugin_dir}")"
 
-  if [[ -z "${target_directory}" ]]; then
-    echo "failed to resolve target_directory for ${side_label}" >&2
+  plugin_dir="$(smear_compare_plugin_dir "${side_root}")"
+  smear_cursor_cpath="$(smear_compare_release_cpath "${plugin_dir}")"
+  if [[ -z "${smear_cursor_cpath}" ]]; then
+    echo "failed to resolve release cpath for ${side_label}" >&2
     exit 1
   fi
-  smear_cursor_cpath="$(smear_default_cpath "${target_directory}")"
 
   (
     cd "${plugin_dir}"
@@ -106,9 +96,9 @@ run_once() {
   local baseline_us
   local recovery_us
   local recovery_ratio
-  baseline_us="$(printf '%s\n' "${summary_line}" | sed -E 's/.*baseline_avg_us=([0-9.]+).*/\1/')"
-  recovery_us="$(printf '%s\n' "${summary_line}" | sed -E 's/.*recovery_avg_us=([0-9.]+).*/\1/')"
-  recovery_ratio="$(printf '%s\n' "${summary_line}" | sed -E 's/.*recovery_ratio=([0-9.]+).*/\1/')"
+  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
+  recovery_us="$(smear_extract_field "${summary_line}" "recovery_avg_us")"
+  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
 
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "${side_label}" "${case_label}" "${repeat_index}" "${baseline_us}" "${recovery_ratio}" \
@@ -121,9 +111,10 @@ run_once() {
 run_side() {
   local side_label="$1"
   local side_root="$2"
-  local plugin_dir="${side_root}/nvim/rust/plugins/smear-cursor"
+  local plugin_dir
 
-  build_release "${plugin_dir}"
+  plugin_dir="$(smear_compare_plugin_dir "${side_root}")"
+  smear_build_release "${plugin_dir}"
   for repeat_index in $(seq 1 "${repeats}"); do
     run_once "${side_label}" "${side_root}" "probe_on" "false" "${repeat_index}"
   done

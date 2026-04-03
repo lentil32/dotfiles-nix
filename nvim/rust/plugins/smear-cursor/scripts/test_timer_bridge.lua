@@ -84,7 +84,8 @@ local function main()
     error("probe helpers were not installed during setup")
   end
 
-  local cursor_color = vim.fn["nvimrs_smear_cursor#host_bridge#cursor_color_at_cursor"](0)
+  local cursor_color =
+    vim.fn["nvimrs_smear_cursor#host_bridge#cursor_color_at_cursor"](0, false)
   if cursor_color ~= nil and cursor_color ~= vim.NIL and type(cursor_color) ~= "string" then
     error("cursor color probe returned unexpected type: " .. type(cursor_color))
   end

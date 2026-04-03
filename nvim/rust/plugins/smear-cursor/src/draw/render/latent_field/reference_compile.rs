@@ -213,35 +213,6 @@ where
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the explicit reference compiler stays available for future differential tests"
-    )
-)]
-pub(in super::super) fn compile_field_reference(
-    cache: &LatentFieldCache,
-) -> BTreeMap<(i64, i64), CompiledCell> {
-    let mut scratch = CompileScratch::default();
-    compile_field_reference_with_scratch(cache, &mut scratch)
-}
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the BTreeMap-based bounded compiler remains available for differential tests"
-    )
-)]
-pub(in super::super) fn compile_field_in_bounds(
-    cache: &LatentFieldCache,
-    bounds: CellRect,
-) -> BTreeMap<(i64, i64), CompiledCell> {
-    let mut scratch = CompileScratch::default();
-    compile_field_in_bounds_with_scratch(cache, bounds, &mut scratch)
-}
-
 pub(in super::super) fn compile_field_reference_with_scratch(
     cache: &LatentFieldCache,
     scratch: &mut CompileScratch,
@@ -249,6 +220,7 @@ pub(in super::super) fn compile_field_reference_with_scratch(
     compile_field_reference_in_bounds_impl_map(cache, None, scratch)
 }
 
+#[cfg(test)]
 pub(in super::super) fn compile_field_in_bounds_with_scratch(
     cache: &LatentFieldCache,
     bounds: CellRect,

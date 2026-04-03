@@ -1,32 +1,16 @@
-use super::CursorLocation;
 use super::RuntimeOptionsEffects;
 use super::RuntimeOptionsPatch;
 use super::RuntimeState;
 use super::types::AnimationPhase;
-use super::types::GlobalDisplayPose;
-use super::types::JumpCue;
-use super::types::JumpCuePhase;
 use super::types::PendingTarget;
 use crate::core::types::StrokeId;
-use crate::types::EPSILON;
 use crate::types::Particle;
 use crate::types::Point;
 use crate::types::StaticRenderConfig;
+use crate::types::current_visual_cursor_anchor;
 use std::sync::Arc;
 
 impl RuntimeState {
-    fn jump_cue_phase_for_progress(progress: f64) -> JumpCuePhase {
-        if progress < 0.18 {
-            JumpCuePhase::Launch
-        } else if progress < 0.72 {
-            JumpCuePhase::Transfer
-        } else if progress < 0.90 {
-            JumpCuePhase::Catch
-        } else {
-            JumpCuePhase::Fade
-        }
-    }
-
     pub(crate) fn render_static_config(&self) -> Arc<StaticRenderConfig> {
         Arc::clone(&self.render_static_config)
     }
@@ -102,17 +86,20 @@ impl RuntimeState {
         self.transient.target_position
     }
 
+    pub(crate) fn current_visual_cursor_anchor(&self) -> Point {
+        current_visual_cursor_anchor(
+            &self.current_corners,
+            &self.target_corners,
+            self.transient.target_position,
+        )
+    }
+
     pub(crate) fn retarget_epoch(&self) -> u64 {
         self.transient.retarget_epoch
     }
 
     pub(crate) fn trail_stroke_id(&self) -> StrokeId {
         self.transient.trail_stroke_id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_jump_cues(&self) -> &[JumpCue] {
-        &self.transient.active_jump_cues
     }
 
     #[cfg(test)]
@@ -123,78 +110,8 @@ impl RuntimeState {
         )
     }
 
-    pub(crate) fn refresh_jump_cues(&mut self, now_ms: f64) -> bool {
-        let mut changed = false;
-        self.transient.active_jump_cues.retain_mut(|cue| {
-            let duration_ms = cue.duration_ms.max(1.0);
-            let elapsed_ms = (now_ms - cue.started_at_ms).max(0.0);
-            let progress = elapsed_ms / duration_ms;
-            if !progress.is_finite() || progress >= 1.0 {
-                changed = true;
-                return false;
-            }
-
-            let next_phase = Self::jump_cue_phase_for_progress(progress);
-            if cue.phase != next_phase {
-                cue.phase = next_phase;
-                changed = true;
-            }
-            true
-        });
-        changed
-    }
-
     pub(crate) fn start_new_trail_stroke(&mut self) {
         self.transient.trail_stroke_id = self.transient.trail_stroke_id.next();
-    }
-
-    pub(crate) fn record_jump_cue(
-        &mut self,
-        from_position: Point,
-        from_location: &CursorLocation,
-        to_position: Point,
-        to_location: &CursorLocation,
-        started_at_ms: f64,
-    ) {
-        if !self.config.jump_cues_enabled {
-            return;
-        }
-        let cross_window = from_location.window_handle != to_location.window_handle;
-        if cross_window && !self.config.cross_window_jump_bridges {
-            return;
-        }
-        if from_position.distance_squared(to_position) <= EPSILON {
-            return;
-        }
-        let display_distance =
-            from_position.display_distance(to_position, self.config.block_aspect_ratio);
-        if display_distance < self.config.jump_cue_min_display_distance.max(0.0) {
-            return;
-        }
-
-        let cue = JumpCue {
-            cue_id: self.transient.next_jump_cue_id,
-            // reducer records the cue before applying the cursor transition so the cue
-            // carries the acknowledgement epoch that the upcoming state change will expose.
-            epoch: self.transient.retarget_epoch.wrapping_add(1),
-            from_pose: GlobalDisplayPose::new(from_position, from_location),
-            to_pose: GlobalDisplayPose::new(to_position, to_location),
-            started_at_ms,
-            duration_ms: self.config.jump_cue_duration_ms.max(1.0),
-            strength: if cross_window {
-                self.config.jump_cue_strength * self.config.cross_window_bridge_strength_scale
-            } else {
-                self.config.jump_cue_strength
-            },
-            phase: JumpCuePhase::Launch,
-        };
-        self.transient.next_jump_cue_id = self.transient.next_jump_cue_id.wrapping_add(1);
-        self.transient.active_jump_cues.push(cue);
-
-        let max_chain = usize::from(self.config.jump_cue_max_chain.max(1));
-        while self.transient.active_jump_cues.len() > max_chain {
-            self.transient.active_jump_cues.remove(0);
-        }
     }
 
     pub(crate) fn last_mode_was_cmdline(&self) -> Option<bool> {

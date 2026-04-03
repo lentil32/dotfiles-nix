@@ -50,7 +50,6 @@ let
       cask = "codex-app";
     }
     { cask = "steipete/tap/codexbar"; }
-    { formulae = "anomalyco/tap/opencode"; }
     { formulae = "ollama"; }
     {
       desc = "Agent terminal notifications + voice packs";
@@ -102,6 +101,10 @@ let
     {
       desc = "Node package manager shims";
       formulae = "corepack";
+    }
+    {
+      desc = "Mac App Store CLI used by homebrew.masApps and make mas-reset";
+      formulae = "mas";
     }
     {
       desc = "Slack CLI for developing Slack App";

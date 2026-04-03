@@ -1,8 +1,8 @@
 //! Lua-facing entrypoints for the `nvimrs_smear_cursor` Neovim plugin.
 //!
 //! The Rust surface stays intentionally small: setup and event callbacks forward
-//! into the state-machine runtime, while `step` handles the per-frame animation
-//! bridge used by the renderer.
+//! into the state-machine runtime, while `step` remains available as a
+//! deterministic particle-simulation harness for perf tooling and benchmarks.
 //!
 //! ```lua
 //! local smear = require("nvimrs_smear_cursor")
@@ -16,10 +16,13 @@ mod core;
 mod draw;
 mod events;
 mod lua;
+#[cfg(test)]
 mod mutex;
 mod octant_chars;
 mod state;
 mod step;
+#[cfg(test)]
+mod test_support;
 mod types;
 
 use crate::core::event::EffectFailureSource;
@@ -27,7 +30,7 @@ use nvim_oxi::Dictionary;
 use nvim_oxi::Function;
 use nvim_oxi::Result;
 
-fn plugin_error(message: impl Into<String>) -> nvim_oxi::Error {
+pub(crate) fn other_error(message: impl Into<String>) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(message.into()).into()
 }
 
@@ -37,7 +40,7 @@ fn guard_plugin_call<T>(
 ) -> Result<T> {
     let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) else {
         events::record_effect_failure(EffectFailureSource::PluginEntry, function_name);
-        return Err(plugin_error(format!(
+        return Err(other_error(format!(
             "nvimrs_smear_cursor.{function_name} panicked"
         )));
     };

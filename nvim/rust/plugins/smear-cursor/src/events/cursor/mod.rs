@@ -5,6 +5,8 @@ mod screenpos;
 
 pub(super) use buffer_meta::BufferMetadata;
 pub(super) use color_probe::sampled_cursor_color_at_current_position;
+#[cfg(test)]
+pub(crate) use conceal::ConcealScreenCellView;
 pub(super) use screenpos::cursor_position_for_mode;
 pub(super) use screenpos::cursor_position_read_for_mode_with_probe_policy;
 pub(super) use screenpos::line_value;

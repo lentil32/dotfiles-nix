@@ -34,13 +34,6 @@ impl<T> CellRows<T> {
         self.rows.clear();
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the row-oriented insert helper is landed ahead of the planner fast path"
-        )
-    )]
     pub(in super::super) fn insert(&mut self, coord: (i64, i64), value: T) -> Option<T> {
         let (row, col) = coord;
         self.rows.entry(row).or_default().insert(col, value)
@@ -54,21 +47,12 @@ impl<T> CellRows<T> {
         self.rows.entry(row).or_default().entry(col).or_default()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read-only probes will use direct row lookups once the local-query path moves over"
-        )
-    )]
-    pub(in super::super) fn get(&self, coord: (i64, i64)) -> Option<&T> {
-        self.rows.get(&coord.0)?.get(&coord.1)
-    }
-
+    #[cfg(test)]
     pub(in super::super) fn get_mut(&mut self, coord: (i64, i64)) -> Option<&mut T> {
         self.rows.get_mut(&coord.0)?.get_mut(&coord.1)
     }
 
+    #[cfg(test)]
     pub(in super::super) fn remove(&mut self, coord: (i64, i64)) -> Option<T> {
         let (row, col) = coord;
         let removed = self.rows.get_mut(&row).and_then(|cols| cols.remove(&col));
@@ -107,13 +91,6 @@ impl<T> CellRows<T> {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the row-bounded iterator lands before the planner switches to bounded field compilation"
-        )
-    )]
     pub(in super::super) fn for_each_in_bounds(
         &self,
         bounds: CellRect,
@@ -274,200 +251,207 @@ mod tests {
     use super::CellRect;
     use super::CellRowQueryStats;
     use super::CellRows;
-    use pretty_assertions::assert_eq;
+    use crate::test_support::proptest::pure_config;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
-    #[test]
-    fn cell_rows_preserve_deterministic_row_major_iteration_order() {
-        let entries = [
-            ((12_i64, 4_i64), 124_u32),
-            ((10_i64, 9_i64), 109_u32),
-            ((10_i64, 3_i64), 103_u32),
-            ((11_i64, 2_i64), 112_u32),
-        ];
-        let expected = entries.into_iter().collect::<BTreeMap<_, _>>();
-        let mut rows = CellRows::default();
+    type Coord = (i64, i64);
+    type CellMap = BTreeMap<Coord, u16>;
 
-        for (coord, value) in entries {
+    fn coord() -> impl Strategy<Value = Coord> {
+        (-8_i64..=8_i64, -8_i64..=8_i64)
+    }
+
+    fn cell_entries(max_len: usize) -> BoxedStrategy<Vec<(Coord, u16)>> {
+        vec((coord(), any::<u16>()), 0..=max_len).boxed()
+    }
+
+    fn cell_rect() -> BoxedStrategy<CellRect> {
+        (
+            -9_i64..=9_i64,
+            -9_i64..=9_i64,
+            -9_i64..=9_i64,
+            -9_i64..=9_i64,
+        )
+            .prop_map(|(row_a, row_b, col_a, col_b)| {
+                CellRect::new(
+                    row_a.min(row_b),
+                    row_a.max(row_b),
+                    col_a.min(col_b),
+                    col_a.max(col_b),
+                )
+            })
+            .boxed()
+    }
+
+    fn cell_map(entries: &[(Coord, u16)]) -> CellMap {
+        entries.iter().copied().collect()
+    }
+
+    fn cell_rows(entries: &[(Coord, u16)]) -> CellRows<u16> {
+        let mut rows = CellRows::default();
+        for &(coord, value) in entries {
             let _ = rows.insert(coord, value);
         }
+        rows
+    }
 
-        let iterated = rows
+    fn expected_entries(cells: &CellMap) -> Vec<(Coord, u16)> {
+        cells
             .iter()
-            .map(|(coord, value)| (coord, *value))
-            .collect::<Vec<_>>();
-        let expected = expected.into_iter().collect::<Vec<_>>();
-
-        assert_eq!(iterated, expected);
+            .map(|(&coord, &value)| (coord, value))
+            .collect()
     }
 
-    #[test]
-    fn cell_rows_remove_matches_btreemap_and_drops_empty_rows() {
-        let entries = [
-            ((10_i64, 1_i64), 101_u32),
-            ((10_i64, 4_i64), 104_u32),
-            ((11_i64, 2_i64), 112_u32),
-        ];
-        let mut rows = CellRows::default();
-        let mut expected = entries.into_iter().collect::<BTreeMap<_, _>>();
-
-        for (coord, value) in entries {
-            let _ = rows.insert(coord, value);
+    fn expected_query(cells: &CellMap, bounds: CellRect) -> (Vec<(Coord, u16)>, CellRowQueryStats) {
+        let mut rows = BTreeMap::<i64, BTreeMap<i64, u16>>::new();
+        for (&(row, col), &value) in cells {
+            let _ = rows.entry(row).or_default().insert(col, value);
         }
 
-        assert_eq!(rows.remove((10, 1)), expected.remove(&(10, 1)));
-        assert_eq!(
-            rows.iter()
-                .map(|(coord, value)| (coord, *value))
-                .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .map(|(&coord, &value)| (coord, value))
-                .collect::<Vec<_>>()
-        );
-
-        assert_eq!(rows.remove((10, 4)), expected.remove(&(10, 4)));
-        assert_eq!(rows.get((10, 4)), None);
-        assert_eq!(
-            rows.iter()
-                .map(|(coord, value)| (coord, *value))
-                .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .map(|(&coord, &value)| (coord, value))
-                .collect::<Vec<_>>()
-        );
-
-        assert_eq!(rows.remove((11, 2)), expected.remove(&(11, 2)));
-        assert!(rows.is_empty());
-    }
-
-    #[test]
-    fn cell_rows_for_each_in_bounds_visits_only_requested_rectangle() {
-        let mut rows = CellRows::default();
-        for row in 8_i64..=12_i64 {
-            for col in 98_i64..=102_i64 {
-                let _ = rows.insert((row, col), row * 100 + col);
+        let mut visited = Vec::new();
+        let mut stats = CellRowQueryStats::default();
+        for (&row, cols) in rows.range(bounds.min_row..=bounds.max_row) {
+            stats.bucket_maps_scanned = stats.bucket_maps_scanned.saturating_add(1);
+            stats.bucket_cells_scanned = stats.bucket_cells_scanned.saturating_add(cols.len());
+            for (&col, &value) in cols.range(bounds.min_col..=bounds.max_col) {
+                stats.local_query_cells = stats.local_query_cells.saturating_add(1);
+                visited.push(((row, col), value));
             }
         }
 
-        let bounds = CellRect::new(9, 10, 99, 101);
-        let mut visited = Vec::new();
-        rows.for_each_in_bounds(bounds, |coord, value| visited.push((coord, *value)));
-
-        let expected = (9_i64..=10_i64)
-            .flat_map(|row| (99_i64..=101_i64).map(move |col| ((row, col), row * 100 + col)))
-            .collect::<Vec<_>>();
-
-        assert_eq!(visited, expected);
+        (visited, stats)
     }
 
-    #[test]
-    fn borrowed_cell_rows_for_each_in_bounds_visits_only_requested_rectangle() {
-        let cells = (8_i64..=12_i64)
-            .flat_map(|row| (98_i64..=102_i64).map(move |col| ((row, col), row * 100 + col)))
-            .collect::<BTreeMap<_, _>>();
-        let mut scratch = BorrowedCellRowsScratch::default();
-        let rows = BorrowedCellRows::build(&cells, &mut scratch);
+    fn query_cell_rows(
+        rows: &CellRows<u16>,
+        bounds: CellRect,
+    ) -> (Vec<(Coord, u16)>, CellRowQueryStats) {
         let mut visited = Vec::new();
+        let stats = rows.for_each_in_bounds(bounds, |coord, value| visited.push((coord, *value)));
+        (visited, stats)
+    }
 
-        let stats = rows.for_each_in_bounds(CellRect::new(9, 10, 99, 101), |coord, value| {
-            visited.push((coord, *value))
-        });
+    fn query_borrowed_cell_rows(
+        cells: &CellMap,
+        scratch: &mut BorrowedCellRowsScratch<u16>,
+        bounds: CellRect,
+    ) -> (Vec<(Coord, u16)>, CellRowQueryStats, usize, usize) {
+        let (visited, stats) = {
+            let rows = BorrowedCellRows::build(cells, scratch);
+            let mut visited = Vec::new();
+            let stats =
+                rows.for_each_in_bounds(bounds, |coord, value| visited.push((coord, *value)));
+            (visited, stats)
+        };
 
-        let expected = (9_i64..=10_i64)
-            .flat_map(|row| (99_i64..=101_i64).map(move |col| ((row, col), row * 100 + col)))
-            .collect::<Vec<_>>();
-
-        assert_eq!(visited, expected);
-        assert_eq!(
+        (
+            visited,
             stats,
-            CellRowQueryStats {
-                bucket_maps_scanned: 2,
-                bucket_cells_scanned: 10,
-                local_query_cells: 6,
+            scratch.row_capacity(),
+            scratch.entry_capacity(),
+        )
+    }
+
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_cell_rows_preserve_deterministic_row_major_iteration_order(
+            entries in cell_entries(48),
+        ) {
+            let expected = cell_map(&entries);
+            let rows = cell_rows(&entries);
+
+            prop_assert_eq!(rows.len(), expected.len());
+            prop_assert_eq!(rows.is_empty(), expected.is_empty());
+            prop_assert_eq!(rows.iter().map(|(coord, value)| (coord, *value)).collect::<Vec<_>>(), expected_entries(&expected));
+
+            let mut visited = Vec::new();
+            rows.for_each(|coord, value| visited.push((coord, *value)));
+            prop_assert_eq!(visited, expected_entries(&expected));
+        }
+
+        #[test]
+        fn prop_cell_rows_remove_matches_btreemap_and_drops_empty_rows(
+            entries in cell_entries(48),
+            removals in vec(coord(), 0..=64),
+        ) {
+            let mut rows = cell_rows(&entries);
+            let mut expected = cell_map(&entries);
+
+            for coord in removals {
+                prop_assert_eq!(rows.remove(coord), expected.remove(&coord));
+                prop_assert_eq!(rows.get_mut(coord).map(|value| *value), expected.get(&coord).copied());
+                prop_assert_eq!(rows.len(), expected.len());
+                prop_assert_eq!(rows.is_empty(), expected.is_empty());
+                prop_assert_eq!(
+                    rows.iter().map(|(entry_coord, value)| (entry_coord, *value)).collect::<Vec<_>>(),
+                    expected_entries(&expected),
+                );
             }
-        );
-    }
+        }
 
-    #[test]
-    fn borrowed_cell_rows_scratch_reuses_index_storage() {
-        let cells = BTreeMap::from([
-            ((10_i64, 8_i64), 108_u32),
-            ((10_i64, 9_i64), 109_u32),
-            ((11_i64, 7_i64), 117_u32),
-        ]);
-        let mut scratch = BorrowedCellRowsScratch::default();
+        #[test]
+        fn prop_rectangle_queries_match_reference_for_owned_and_borrowed_indexes(
+            entries in cell_entries(48),
+            bounds in cell_rect(),
+        ) {
+            let cells = cell_map(&entries);
+            let rows = cell_rows(&entries);
+            let (expected_visited, expected_stats) = expected_query(&cells, bounds);
+            let iter_in_bounds = rows
+                .iter_in_bounds(bounds)
+                .map(|(coord, value)| (coord, *value))
+                .collect::<Vec<_>>();
+            let (owned_visited, owned_stats) = query_cell_rows(&rows, bounds);
 
-        let first_visited = {
-            let first = BorrowedCellRows::build(&cells, &mut scratch);
-            let mut visited = Vec::new();
-            let _ = first.for_each_in_bounds(CellRect::new(10, 11, 7, 9), |coord, value| {
-                visited.push((coord, *value))
-            });
-            visited
-        };
-        let first_rows_capacity = scratch.row_capacity();
-        let first_entries_capacity = scratch.entry_capacity();
+            prop_assert_eq!(&iter_in_bounds, &expected_visited);
+            prop_assert_eq!(&owned_visited, &expected_visited);
+            prop_assert_eq!(&owned_stats, &expected_stats);
 
-        let second_visited = {
-            let second = BorrowedCellRows::build(&cells, &mut scratch);
-            let mut visited = Vec::new();
-            let _ = second.for_each_in_bounds(CellRect::new(10, 11, 7, 9), |coord, value| {
-                visited.push((coord, *value))
-            });
-            visited
-        };
+            let mut scratch = BorrowedCellRowsScratch::default();
+            let (borrowed_visited, borrowed_stats, _, _) =
+                query_borrowed_cell_rows(&cells, &mut scratch, bounds);
+            let borrowed_is_empty = {
+                let borrowed = BorrowedCellRows::build(&cells, &mut scratch);
+                borrowed.is_empty()
+            };
 
-        assert!(first_rows_capacity > 0);
-        assert!(first_entries_capacity > 0);
-        assert_eq!(scratch.row_capacity(), first_rows_capacity);
-        assert_eq!(scratch.entry_capacity(), first_entries_capacity);
-        assert_eq!(second_visited, first_visited);
-    }
+            prop_assert_eq!(borrowed_is_empty, cells.is_empty());
+            prop_assert_eq!(&borrowed_visited, &expected_visited);
+            prop_assert_eq!(&borrowed_stats, &expected_stats);
+        }
 
-    #[test]
-    fn borrowed_cell_rows_rebuilds_from_new_source_after_borrow_scope_ends() {
-        let mut scratch = BorrowedCellRowsScratch::default();
+        #[test]
+        fn prop_borrowed_cell_rows_scratch_reuse_does_not_drift_output(
+            first_entries in cell_entries(48),
+            second_entries in cell_entries(48),
+            first_bounds in cell_rect(),
+            second_bounds in cell_rect(),
+        ) {
+            let first_cells = cell_map(&first_entries);
+            let second_cells = cell_map(&second_entries);
+            let expected_first = expected_query(&first_cells, first_bounds);
+            let expected_second = expected_query(&second_cells, second_bounds);
+            let mut scratch = BorrowedCellRowsScratch::default();
 
-        let first_visited = {
-            let first_cells =
-                BTreeMap::from([((10_i64, 8_i64), 108_u32), ((11_i64, 7_i64), 117_u32)]);
-            let rows = BorrowedCellRows::build(&first_cells, &mut scratch);
-            let mut visited = Vec::new();
-            let _ = rows.for_each_in_bounds(CellRect::new(10, 11, 7, 8), |coord, value| {
-                visited.push((coord, *value))
-            });
-            visited
-        };
+            let first =
+                query_borrowed_cell_rows(&first_cells, &mut scratch, first_bounds);
+            let repeated =
+                query_borrowed_cell_rows(&first_cells, &mut scratch, first_bounds);
+            let rebuilt =
+                query_borrowed_cell_rows(&second_cells, &mut scratch, second_bounds);
 
-        let second_visited = {
-            // The first source map and borrowed index both drop at the end of the block above, so
-            // the same scratch storage can be reused for a different map without stale pointers.
-            let second_cells = BTreeMap::from([
-                ((9_i64, 9_i64), 99_u32),
-                ((10_i64, 8_i64), 1008_u32),
-                ((12_i64, 6_i64), 1206_u32),
-            ]);
-            let rows = BorrowedCellRows::build(&second_cells, &mut scratch);
-            let mut visited = Vec::new();
-            let _ = rows.for_each_in_bounds(CellRect::new(9, 12, 6, 9), |coord, value| {
-                visited.push((coord, *value))
-            });
-            visited
-        };
-
-        assert_eq!(
-            first_visited,
-            vec![((10_i64, 8_i64), 108_u32), ((11_i64, 7_i64), 117_u32)]
-        );
-        assert_eq!(
-            second_visited,
-            vec![
-                ((9_i64, 9_i64), 99_u32),
-                ((10_i64, 8_i64), 1008_u32),
-                ((12_i64, 6_i64), 1206_u32),
-            ]
-        );
+            prop_assert_eq!(&first.0, &expected_first.0);
+            prop_assert_eq!(&first.1, &expected_first.1);
+            prop_assert_eq!(&repeated.0, &first.0);
+            prop_assert_eq!(&repeated.1, &first.1);
+            prop_assert_eq!(repeated.2, first.2);
+            prop_assert_eq!(repeated.3, first.3);
+            prop_assert_eq!(&rebuilt.0, &expected_second.0);
+            prop_assert_eq!(&rebuilt.1, &expected_second.1);
+        }
     }
 }

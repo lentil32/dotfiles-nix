@@ -1,7 +1,7 @@
 use crate::core::realization::PaletteSpec;
 use crate::core::realization::realize_logical_raster;
 use crate::core::state::ProjectionSnapshot;
-use crate::core::types::RenderOutcome;
+use crate::types::CursorCellShape;
 use crate::types::ScreenCell;
 use nvim_oxi::Result;
 use nvim_oxi::api;
@@ -26,12 +26,14 @@ mod window_pool;
 pub(crate) use apply::ApplyMetrics;
 pub(crate) use window_pool::AllocationPolicy;
 pub(crate) use window_pool::CompactRenderWindowsSummary;
+#[cfg(test)]
 pub(crate) use window_pool::TabPoolSnapshot;
+#[cfg(test)]
+pub(crate) use window_pool::WindowPlacement;
 
 pub(crate) const EXTMARK_ID: u32 = 999;
 const PREPAINT_EXTMARK_ID: u32 = 1001;
 const PREPAINT_BUFFER_FILETYPE: &str = "smear-cursor-prepaint";
-const PREPAINT_CHARACTER: &str = "█";
 const PREPAINT_HIGHLIGHT_GROUP: &str = "Cursor";
 pub(crate) const BRAILLE_CODE_MIN: i64 = 0x2800;
 pub(crate) const BRAILLE_CODE_MAX: i64 = 0x28FF;
@@ -80,20 +82,6 @@ pub(crate) struct ClearPrepaintOverlaysSummary {
 impl ClearPrepaintOverlaysSummary {
     pub(crate) fn had_visual_change(self) -> bool {
         self.had_visible_prepaint_before_clear && self.cleared_prepaint_overlays > 0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct RecoveryNamespaceCleanupSummary {
-    pub(crate) purge: PurgeRenderWindowsSummary,
-    pub(crate) orphan_render_windows_closed: usize,
-    pub(crate) cleared_buffer_namespaces: usize,
-}
-
-impl RecoveryNamespaceCleanupSummary {
-    #[cfg(test)]
-    pub(crate) fn had_visual_change(self) -> bool {
-        self.purge.had_visual_change() || self.orphan_render_windows_closed > 0
     }
 }
 
@@ -250,25 +238,6 @@ impl DrawContext {
 
 thread_local! {
     static DRAW_CONTEXT: RefCell<DrawContext> = RefCell::new(DrawContext::new());
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DrawApplyResult {
-    pub(crate) metrics: ApplyMetrics,
-    pub(crate) outcome: RenderOutcome,
-}
-
-fn classify_draw_outcome(metrics: &ApplyMetrics) -> RenderOutcome {
-    let is_fully_applied = metrics.skipped_ops_capacity == 0
-        && metrics.recovered_windows == 0
-        && metrics.reuse_failed_missing_window == 0
-        && metrics.reuse_failed_reconfigure == 0
-        && metrics.reuse_failed_missing_buffer == 0;
-    if is_fully_applied {
-        RenderOutcome::AppliedFully
-    } else {
-        RenderOutcome::Degraded
-    }
 }
 
 pub(crate) fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
@@ -455,12 +424,9 @@ pub(crate) fn draw_current(
     projection: &ProjectionSnapshot,
     max_kept_windows: usize,
     allocation_policy: AllocationPolicy,
-) -> Result<DrawApplyResult> {
+) -> Result<ApplyMetrics> {
     if namespace_id == 0 {
-        return Ok(DrawApplyResult {
-            metrics: ApplyMetrics::default(),
-            outcome: RenderOutcome::AppliedFully,
-        });
+        return Ok(ApplyMetrics::default());
     }
 
     ensure_palette(palette)?;
@@ -470,19 +436,13 @@ pub(crate) fn draw_current(
     // suppress future proposals. The core realization ledger is now the only apply authority.
     let realization = realize_logical_raster(projection.logical_raster());
     let prepared_apply = apply::prepare_apply_plan(palette.color_levels(), &realization);
-    let draw_result = apply::apply_plan(
+    apply::apply_plan(
         namespace_id,
         tab_handle,
         max_kept_windows,
         &prepared_apply,
         allocation_policy,
-    );
-    let outcome = draw_result
-        .as_ref()
-        .map(classify_draw_outcome)
-        .unwrap_or(RenderOutcome::Failed);
-
-    draw_result.map(|metrics| DrawApplyResult { metrics, outcome })
+    )
 }
 
 fn prepaint_open_window_config(placement: PrepaintPlacement, hidden: bool) -> WindowConfig {
@@ -592,7 +552,12 @@ fn hide_prepaint_overlay(namespace_id: u32, overlay: &mut PrepaintOverlay) -> bo
     true
 }
 
-pub(crate) fn prepaint_cursor_block(namespace_id: u32, cell: ScreenCell, zindex: u32) {
+pub(crate) fn prepaint_cursor_cell(
+    namespace_id: u32,
+    cell: ScreenCell,
+    shape: CursorCellShape,
+    zindex: u32,
+) {
     if namespace_id == 0 {
         return;
     }
@@ -655,7 +620,7 @@ pub(crate) fn prepaint_cursor_block(namespace_id: u32, cell: ScreenCell, zindex:
 
         let extmark_opts = SetExtmarkOpts::builder()
             .id(PREPAINT_EXTMARK_ID)
-            .virt_text([(PREPAINT_CHARACTER, PREPAINT_HIGHLIGHT_GROUP)])
+            .virt_text([(shape.glyph(), PREPAINT_HIGHLIGHT_GROUP)])
             .virt_text_pos(ExtmarkVirtTextPosition::Overlay)
             .virt_text_win_col(0)
             .build();
@@ -834,38 +799,17 @@ pub(crate) fn purge_render_windows(namespace_id: u32) -> PurgeRenderWindowsSumma
     summary
 }
 
-fn summarize_recovery_namespace_cleanup(
-    purge: PurgeRenderWindowsSummary,
-    orphan_render_windows_closed: usize,
-    cleared_buffer_namespaces: usize,
-) -> RecoveryNamespaceCleanupSummary {
-    RecoveryNamespaceCleanupSummary {
-        purge,
-        orphan_render_windows_closed,
-        cleared_buffer_namespaces,
-    }
-}
-
-pub(crate) fn recover_all_namespaces(namespace_id: u32) -> RecoveryNamespaceCleanupSummary {
-    let purge = purge_render_windows(namespace_id);
-    let orphan_render_windows_closed = window_pool::close_orphan_render_windows(namespace_id);
-    let cleared_buffer_namespaces = apply::clear_namespace_all_buffers(namespace_id);
-    summarize_recovery_namespace_cleanup(
-        purge,
-        orphan_render_windows_closed,
-        cleared_buffer_namespaces,
-    )
+pub(crate) fn recover_all_namespaces(namespace_id: u32) {
+    let _ = purge_render_windows(namespace_id);
+    let _ = window_pool::close_orphan_render_windows(namespace_id);
+    let _ = apply::clear_namespace_all_buffers(namespace_id);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ApplyMetrics;
     use super::ClearPrepaintOverlaysSummary;
     use super::PrepaintOverlay;
     use super::PurgeRenderWindowsSummary;
-    use super::RecoveryNamespaceCleanupSummary;
-    use super::RenderOutcome;
-    use super::classify_draw_outcome;
     use super::clear_active_render_windows;
     use super::clear_all_prepaint_overlays;
     use super::clear_draw_context_for_test;
@@ -876,7 +820,6 @@ mod tests {
     use super::render_pool_diagnostics;
     use super::render_tab_handles;
     use super::restore_render_tabs;
-    use super::summarize_recovery_namespace_cleanup;
     use super::summarize_tracked_purge_state;
     use super::take_render_tabs_for_test;
     use super::with_render_tab;
@@ -884,6 +827,7 @@ mod tests {
     use crate::draw::window_pool::WindowBufferHandle;
     use crate::draw::window_pool::WindowPlacement;
     use crate::types::BASE_TIME_INTERVAL;
+    use crate::types::CursorCellShape;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
@@ -896,6 +840,26 @@ mod tests {
 
     fn reset_draw_context_for_test() {
         clear_draw_context_for_test();
+    }
+
+    #[test]
+    fn cursor_shape_prepaint_glyphs_match_cursor_geometry() {
+        insta::assert_snapshot!(
+            [
+                CursorCellShape::Block,
+                CursorCellShape::VerticalBar,
+                CursorCellShape::HorizontalBar,
+            ]
+            .into_iter()
+            .map(|shape| format!("{shape:?}={}", shape.glyph()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+            @r"
+        Block=█
+        VerticalBar=▏
+        HorizontalBar=▁
+        "
+        );
     }
 
     #[test]
@@ -1020,34 +984,6 @@ mod tests {
                 windows_zindex: 200,
             }),
         }
-    }
-
-    #[test]
-    fn classify_draw_outcome_marks_clean_metrics_as_fully_applied() {
-        let metrics = ApplyMetrics {
-            planned_ops: 2,
-            applied_ops: 2,
-            ..ApplyMetrics::default()
-        };
-        assert_eq!(classify_draw_outcome(&metrics), RenderOutcome::AppliedFully);
-    }
-
-    #[test]
-    fn classify_draw_outcome_marks_capacity_skips_as_degraded() {
-        let metrics = ApplyMetrics {
-            skipped_ops_capacity: 1,
-            ..ApplyMetrics::default()
-        };
-        assert_eq!(classify_draw_outcome(&metrics), RenderOutcome::Degraded);
-    }
-
-    #[test]
-    fn classify_draw_outcome_marks_reuse_failures_as_degraded() {
-        let metrics = ApplyMetrics {
-            reuse_failed_reconfigure: 1,
-            ..ApplyMetrics::default()
-        };
-        assert_eq!(classify_draw_outcome(&metrics), RenderOutcome::Degraded);
     }
 
     #[test]
@@ -1323,21 +1259,5 @@ mod tests {
         assert!(summary.had_visual_change());
 
         reset_draw_context_for_test();
-    }
-
-    #[test]
-    fn recovery_namespace_cleanup_summary_keeps_global_sweeps_explicit() {
-        let summary =
-            summarize_recovery_namespace_cleanup(PurgeRenderWindowsSummary::default(), 2, 5);
-
-        assert_eq!(
-            summary,
-            RecoveryNamespaceCleanupSummary {
-                purge: PurgeRenderWindowsSummary::default(),
-                orphan_render_windows_closed: 2,
-                cleared_buffer_namespaces: 5,
-            }
-        );
-        assert!(summary.had_visual_change());
     }
 }

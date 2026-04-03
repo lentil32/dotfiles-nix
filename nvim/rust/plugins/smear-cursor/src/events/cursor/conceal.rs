@@ -17,9 +17,11 @@ use crate::events::probe_cache::ConcealDeltaCacheLookup;
 use crate::events::probe_cache::ConcealRegion;
 use crate::events::probe_cache::ConcealScreenCellCacheKey;
 use crate::events::probe_cache::ConcealScreenCellCacheLookup;
+use crate::events::probe_cache::ConcealWindowState;
 use crate::events::runtime::cached_conceal_delta;
 use crate::events::runtime::cached_conceal_regions;
 use crate::events::runtime::cached_conceal_screen_cell;
+use crate::events::runtime::note_conceal_read_boundary;
 use crate::events::runtime::record_conceal_full_scan;
 use crate::events::runtime::record_conceal_region_cache_hit;
 use crate::events::runtime::record_conceal_region_cache_miss;
@@ -42,7 +44,7 @@ use nvimrs_nvim_utils::mode::is_visual_like_mode;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) struct ConcealScreenCellView {
+pub(crate) struct ConcealScreenCellView {
     pub(super) window_row: i64,
     pub(super) window_col: i64,
     pub(super) window_width: i64,
@@ -53,6 +55,39 @@ pub(super) struct ConcealScreenCellView {
 }
 
 impl ConcealScreenCellView {
+    pub(crate) const fn new(
+        window_row: i64,
+        window_col: i64,
+        window_width: i64,
+        window_height: i64,
+        topline: i64,
+        leftcol: i64,
+        textoff: i64,
+    ) -> Self {
+        Self {
+            window_row,
+            window_col,
+            window_width,
+            window_height,
+            topline,
+            leftcol,
+            textoff,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn fixture_parts(self) -> (i64, i64, i64, i64, i64, i64, i64) {
+        (
+            self.window_row,
+            self.window_col,
+            self.window_width,
+            self.window_height,
+            self.topline,
+            self.leftcol,
+            self.textoff,
+        )
+    }
+
     fn capture(window: &api::Window) -> CursorResult<Self> {
         let args = Array::from_iter([Object::from(window.handle())]);
         let [entry]: [Object; 1] =
@@ -63,15 +98,15 @@ impl ConcealScreenCellView {
         let dict = nvim_oxi::Dictionary::from_object(entry)
             .map_err(|_| CursorParseError::GetwininfoDictionary)?;
 
-        Ok(Self {
-            window_row: required_dictionary_i64_field(&dict, "getwininfo", "winrow")?,
-            window_col: required_dictionary_i64_field(&dict, "getwininfo", "wincol")?,
-            window_width: required_dictionary_i64_field(&dict, "getwininfo", "width")?,
-            window_height: required_dictionary_i64_field(&dict, "getwininfo", "height")?,
-            topline: required_dictionary_i64_field(&dict, "getwininfo", "topline")?,
-            leftcol: required_dictionary_i64_field(&dict, "getwininfo", "leftcol")?,
-            textoff: required_dictionary_i64_field(&dict, "getwininfo", "textoff")?,
-        })
+        Ok(Self::new(
+            required_dictionary_i64_field(&dict, "getwininfo", "winrow")?,
+            required_dictionary_i64_field(&dict, "getwininfo", "wincol")?,
+            required_dictionary_i64_field(&dict, "getwininfo", "width")?,
+            required_dictionary_i64_field(&dict, "getwininfo", "height")?,
+            required_dictionary_i64_field(&dict, "getwininfo", "topline")?,
+            required_dictionary_i64_field(&dict, "getwininfo", "leftcol")?,
+            required_dictionary_i64_field(&dict, "getwininfo", "textoff")?,
+        ))
     }
 
     pub(super) fn cache_key(
@@ -93,6 +128,7 @@ impl ConcealScreenCellView {
             self.topline,
             self.leftcol,
             self.textoff,
+            conceal_key.window_state().clone(),
         )
     }
 
@@ -113,7 +149,79 @@ impl ConcealScreenCellView {
             self.topline,
             self.leftcol,
             self.textoff,
+            conceal_key.window_state().clone(),
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct WrappedScreenCellLayout {
+    text_start_col: i64,
+    text_width: i64,
+}
+
+impl WrappedScreenCellLayout {
+    fn from_view(view: ConcealScreenCellView) -> Option<Self> {
+        let text_width = view.window_width.saturating_sub(view.textoff);
+        if view.window_col <= 0 || text_width <= 0 {
+            return None;
+        }
+
+        Some(Self {
+            text_start_col: view.window_col.saturating_add(view.textoff),
+            text_width,
+        })
+    }
+
+    fn wrapped_cell_delta(self, start: ScreenCell, end: ScreenCell) -> Option<i64> {
+        if start.0 == end.0 {
+            return Some(end.1.saturating_sub(start.1));
+        }
+        if end.0 < start.0 || !self.contains(start.1) || !self.contains(end.1) {
+            return None;
+        }
+
+        let middle_rows = end.0.saturating_sub(start.0).saturating_sub(1);
+        let tail_width = self
+            .text_end_col()
+            .saturating_sub(start.1)
+            .saturating_add(1);
+        let head_width = end.1.saturating_sub(self.text_start_col);
+        Some(
+            tail_width
+                .saturating_add(middle_rows.saturating_mul(self.text_width))
+                .saturating_add(head_width),
+        )
+    }
+
+    fn shift_left(self, mut cell: ScreenCell, mut delta: i64) -> Option<ScreenCell> {
+        while delta > 0 {
+            if cell.0 <= 0 || !self.contains(cell.1) {
+                return None;
+            }
+
+            let cells_to_row_start = cell.1.saturating_sub(self.text_start_col);
+            if delta <= cells_to_row_start {
+                cell.1 = cell.1.saturating_sub(delta);
+                return Some(cell);
+            }
+
+            delta = delta.saturating_sub(cells_to_row_start.saturating_add(1));
+            cell.0 = cell.0.saturating_sub(1);
+            cell.1 = self.text_end_col();
+        }
+
+        Some(cell)
+    }
+
+    fn contains(self, col: i64) -> bool {
+        col >= self.text_start_col && col <= self.text_end_col()
+    }
+
+    fn text_end_col(self) -> i64 {
+        self.text_start_col
+            .saturating_add(self.text_width)
+            .saturating_sub(1)
     }
 }
 
@@ -237,20 +345,33 @@ pub(super) fn concealcursor_allows_mode(concealcursor: &str, mode: &str) -> bool
     concealcursor_mode_key(mode).is_some_and(|mode_key| concealcursor.contains(mode_key))
 }
 
-fn conceal_can_affect_cursor_line(window: &api::Window, mode: &str) -> CursorResult<bool> {
-    let conceallevel: i64 = current_window_option(window, "conceallevel")?;
-    if conceallevel <= 0 {
-        return Ok(false);
+fn conceal_window_state_allows_mode(window_state: &ConcealWindowState, mode: &str) -> bool {
+    if window_state.conceallevel() <= 0 {
+        return false;
     }
 
-    let concealcursor: String = current_window_option(window, "concealcursor")?;
-    Ok(concealcursor_allows_mode(&concealcursor, mode))
+    concealcursor_allows_mode(window_state.concealcursor(), mode)
 }
 
-fn conceal_cache_key(window: &api::Window, line: usize) -> CursorResult<ConcealCacheKey> {
+fn capture_conceal_window_state(window: &api::Window) -> CursorResult<ConcealWindowState> {
+    let conceallevel: i64 = current_window_option(window, "conceallevel")?;
+    let concealcursor: String = current_window_option(window, "concealcursor")?;
+    Ok(ConcealWindowState::new(conceallevel, concealcursor))
+}
+
+fn conceal_cache_key(
+    window: &api::Window,
+    line: usize,
+    window_state: ConcealWindowState,
+) -> CursorResult<ConcealCacheKey> {
     let buffer_handle = window_buffer_handle(window)?;
     let changedtick = current_buffer_changedtick(buffer_handle)?;
-    Ok(ConcealCacheKey::new(buffer_handle, changedtick, line))
+    Ok(ConcealCacheKey::new(
+        buffer_handle,
+        changedtick,
+        line,
+        window_state,
+    ))
 }
 
 fn cached_concealed_regions_for_cursor(
@@ -366,17 +487,22 @@ fn cached_screen_cell_for_buffer_column_hint(
     }
 }
 
-pub(super) fn apply_conceal_delta(raw_cell: ScreenCell, conceal_delta: i64) -> ScreenPoint {
-    (
-        raw_cell.0 as f64,
-        raw_cell.1.saturating_sub(conceal_delta).max(1) as f64,
-    )
+pub(super) fn apply_conceal_delta(
+    raw_cell: ScreenCell,
+    conceal_delta: i64,
+    screen_cell_view: Option<ConcealScreenCellView>,
+) -> ScreenPoint {
+    let adjusted_cell = screen_cell_view
+        .and_then(WrappedScreenCellLayout::from_view)
+        .and_then(|layout| layout.shift_left(raw_cell, conceal_delta))
+        .unwrap_or((raw_cell.0, raw_cell.1.saturating_sub(conceal_delta).max(1)));
+    screen_cell_to_point(adjusted_cell)
 }
 
 fn cached_conceal_drift_hint_from_regions_and_delta(
     current_col1: i64,
     regions: &[ConcealRegion],
-    cached_delta: Option<Option<i64>>,
+    cached_delta: Option<i64>,
 ) -> CachedConcealDriftHint {
     if regions.is_empty()
         || !regions
@@ -387,8 +513,8 @@ fn cached_conceal_drift_hint_from_regions_and_delta(
     }
 
     match cached_delta {
-        Some(Some(delta)) if delta > 0 => CachedConcealDriftHint::Drifted,
-        Some(Some(_)) | Some(None) => CachedConcealDriftHint::NoDrift,
+        Some(delta) if delta > 0 => CachedConcealDriftHint::Drifted,
+        Some(_) => CachedConcealDriftHint::NoDrift,
         None => CachedConcealDriftHint::Unknown,
     }
 }
@@ -399,7 +525,7 @@ fn cached_conceal_delta_hint(
     current_col1: i64,
     raw_cell: ScreenCell,
     regions: &[ConcealRegion],
-) -> CursorResult<Option<Option<i64>>> {
+) -> CursorResult<Option<i64>> {
     let screen_cell_view = match ConcealScreenCellView::capture(window) {
         Ok(screen_cell_view) => screen_cell_view,
         Err(err) => {
@@ -407,32 +533,37 @@ fn cached_conceal_delta_hint(
             return Ok(None);
         }
     };
+    let wrapped_layout = WrappedScreenCellLayout::from_view(screen_cell_view);
     let cache_key = screen_cell_view.delta_cache_key(i64::from(window.handle()), conceal_key);
     match cached_conceal_delta(&cache_key) {
         Ok(ConcealDeltaCacheLookup::Hit(cached)) if cached.current_col1() == current_col1 => {
-            return Ok(Some(Some(cached.delta())));
+            return Ok(Some(cached.delta()));
         }
         Ok(ConcealDeltaCacheLookup::Hit(_) | ConcealDeltaCacheLookup::Miss) => {}
         Err(err) => warn(&format!("conceal delta cache read failed: {err}")),
     }
 
     let mut cache_complete = true;
-    let conceal_delta = conceal_delta_for_regions(current_col1, raw_cell, regions, |col1| {
-        Ok(
-            match cached_screen_cell_for_buffer_column_hint(
-                window,
-                conceal_key,
-                screen_cell_view,
-                col1,
-            ) {
-                Some(cell) => cell,
-                None => {
-                    cache_complete = false;
-                    None
-                }
-            },
-        )
-    })?;
+    let Some(conceal_delta) =
+        conceal_delta_for_regions(current_col1, raw_cell, regions, wrapped_layout, |col1| {
+            Ok(
+                match cached_screen_cell_for_buffer_column_hint(
+                    window,
+                    conceal_key,
+                    screen_cell_view,
+                    col1,
+                ) {
+                    Some(cell) => cell,
+                    None => {
+                        cache_complete = false;
+                        None
+                    }
+                },
+            )
+        })?
+    else {
+        return Ok(None);
+    };
     if !cache_complete {
         return Ok(None);
     }
@@ -447,11 +578,14 @@ pub(super) fn cursor_position_sync_for_raw_screenpos(
     mode: &str,
     raw_cell: ScreenCell,
 ) -> CursorResult<CursorPositionSync> {
-    if column == 0 || !conceal_can_affect_cursor_line(window, mode)? {
+    let window_state = capture_conceal_window_state(window)?;
+    if column == 0 || !conceal_window_state_allows_mode(&window_state, mode) {
         return Ok(CursorPositionSync::Exact);
     }
 
-    let conceal_key = conceal_cache_key(window, line)?;
+    // This is a hint-only fast path. Exact conceal resolution clears cross-read cache state before
+    // re-sampling, but motion reads can reuse prior hints to avoid deferring every sample.
+    let conceal_key = conceal_cache_key(window, line, window_state)?;
     let Some(regions) = cached_concealed_regions_hint_for_cursor(&conceal_key, column) else {
         return Ok(CursorPositionSync::ConcealDeferred);
     };
@@ -484,10 +618,11 @@ pub(super) fn cursor_position_sync_for_raw_screenpos(
     )
 }
 
-pub(super) fn conceal_delta_for_regions(
+fn conceal_delta_for_regions(
     current_col1: i64,
     raw_cell: ScreenCell,
     regions: &[ConcealRegion],
+    wrapped_layout: Option<WrappedScreenCellLayout>,
     mut screen_cell_for_col1: impl FnMut(i64) -> CursorResult<Option<ScreenCell>>,
 ) -> CursorResult<Option<i64>> {
     let mut conceal_delta = 0_i64;
@@ -507,11 +642,19 @@ pub(super) fn conceal_delta_for_regions(
         let (Some((start_row, start_col)), Some((end_row, end_col))) = (start, end) else {
             continue;
         };
-        if start_row != end_row {
-            return Ok(None);
-        }
-
-        let raw_width = end_col.saturating_sub(start_col);
+        let raw_width = if start_row == end_row {
+            end_col.saturating_sub(start_col)
+        } else {
+            let Some(wrapped_layout) = wrapped_layout else {
+                return Ok(None);
+            };
+            let Some(raw_width) =
+                wrapped_layout.wrapped_cell_delta((start_row, start_col), (end_row, end_col))
+            else {
+                return Ok(None);
+            };
+            raw_width
+        };
         conceal_delta =
             conceal_delta.saturating_add(raw_width.saturating_sub(region.replacement_width).max(0));
     }
@@ -530,11 +673,19 @@ pub(super) fn resolve_buffer_cursor_position(
         return Ok(screen_cell_to_point(raw_cell));
     }
 
-    if !conceal_can_affect_cursor_line(window, mode)? {
+    let window_state = capture_conceal_window_state(window)?;
+    if !conceal_window_state_allows_mode(&window_state, mode) {
         return Ok(screen_cell_to_point(raw_cell));
     }
 
-    let conceal_key = conceal_cache_key(window, line)?;
+    // Fast-motion reads may reuse conceal hints across reads to avoid deferring every motion
+    // sample in conceal-enabled windows. Exact resolution is the authoritative path, so clear any
+    // cross-read conceal cache state here before re-sampling syntax/extmark-driven conceal.
+    if let Err(err) = note_conceal_read_boundary() {
+        warn(&format!("conceal cache boundary update failed: {err}"));
+    }
+
+    let conceal_key = conceal_cache_key(window, line, window_state)?;
     let regions = cached_concealed_regions_for_cursor(conceal_key.clone(), column)?;
     if regions.is_empty() {
         return Ok(screen_cell_to_point(raw_cell));
@@ -554,24 +705,32 @@ pub(super) fn resolve_buffer_cursor_position(
     if let Some(cache_key) = conceal_delta_cache_key.as_ref() {
         match cached_conceal_delta(cache_key) {
             Ok(ConcealDeltaCacheLookup::Hit(cached)) if cached.current_col1() == current_col1 => {
-                return Ok(apply_conceal_delta(raw_cell, cached.delta()));
+                return Ok(apply_conceal_delta(
+                    raw_cell,
+                    cached.delta(),
+                    screen_cell_view,
+                ));
             }
             Ok(ConcealDeltaCacheLookup::Hit(_) | ConcealDeltaCacheLookup::Miss) => {}
             Err(err) => warn(&format!("conceal delta cache read failed: {err}")),
         }
     }
-    let Some(conceal_delta) =
-        conceal_delta_for_regions(current_col1, raw_cell, regions.as_ref(), |col1| {
+    let Some(conceal_delta) = conceal_delta_for_regions(
+        current_col1,
+        raw_cell,
+        regions.as_ref(),
+        screen_cell_view.and_then(WrappedScreenCellLayout::from_view),
+        |col1| {
             if let Some(screen_cell_view) = screen_cell_view {
                 cached_screen_cell_for_buffer_column(window, &conceal_key, screen_cell_view, col1)
             } else {
                 screen_cell_for_buffer_column(window, line, col1)
             }
-        })?
+        },
+    )?
     else {
-        // this conceal correction is proven for same-row drift. If a concealed region crosses a
-        // soft-wrap boundary, keep the shell-authoritative raw screenpos until we model wrapped
-        // line offsets explicitly.
+        // If layout capture fails, keep the raw sample and let the next exact settle-time pass
+        // re-sync from a fresh window view instead of freezing a guessed wrapped position.
         return Ok(screen_cell_to_point(raw_cell));
     };
     if let Some(cache_key) = conceal_delta_cache_key
@@ -580,181 +739,13 @@ pub(super) fn resolve_buffer_cursor_position(
         warn(&format!("conceal delta cache write failed: {err}"));
     }
 
-    Ok(apply_conceal_delta(raw_cell, conceal_delta))
+    Ok(apply_conceal_delta(
+        raw_cell,
+        conceal_delta,
+        screen_cell_view,
+    ))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::CachedConcealDriftHint;
-    use super::ConcealScreenCellView;
-    use super::apply_conceal_delta;
-    use super::cached_conceal_drift_hint_from_regions_and_delta;
-    use super::conceal_delta_for_regions;
-    use super::concealcursor_allows_mode;
-    use super::merge_conceal_region;
-    use crate::events::probe_cache::ConcealCacheKey;
-    use crate::events::probe_cache::ConcealRegion;
-    use pretty_assertions::assert_eq;
-
-    fn conceal_region(
-        start_col1: i64,
-        end_col1: i64,
-        match_id: i64,
-        replacement_width: i64,
-    ) -> ConcealRegion {
-        ConcealRegion {
-            start_col1,
-            end_col1,
-            match_id,
-            replacement_width,
-        }
-    }
-
-    fn conceal_screen_cell_view(
-        window_row: i64,
-        window_col: i64,
-        window_width: i64,
-        window_height: i64,
-        topline: i64,
-        leftcol: i64,
-        textoff: i64,
-    ) -> ConcealScreenCellView {
-        ConcealScreenCellView {
-            window_row,
-            window_col,
-            window_width,
-            window_height,
-            topline,
-            leftcol,
-            textoff,
-        }
-    }
-
-    #[test]
-    fn apply_conceal_delta_moves_cursor_left_without_changing_row() {
-        let adjusted = apply_conceal_delta((2, 38), 5);
-
-        assert_eq!(adjusted, (2.0, 33.0));
-    }
-
-    #[test]
-    fn cached_conceal_drift_hint_ignores_regions_at_or_after_cursor() {
-        let regions = [conceal_region(8, 9, 17, 0)];
-
-        let hint = cached_conceal_drift_hint_from_regions_and_delta(8, &regions, None);
-
-        assert_eq!(hint, CachedConcealDriftHint::NoDrift);
-    }
-
-    #[test]
-    fn cached_conceal_drift_hint_marks_unknown_when_prior_regions_lack_cached_delta() {
-        let regions = [conceal_region(3, 4, 17, 1)];
-
-        let hint = cached_conceal_drift_hint_from_regions_and_delta(6, &regions, None);
-
-        assert_eq!(hint, CachedConcealDriftHint::Unknown);
-    }
-
-    #[test]
-    fn cached_conceal_drift_hint_uses_cached_delta_when_available() {
-        let regions = [conceal_region(3, 4, 17, 1)];
-
-        let drifted = cached_conceal_drift_hint_from_regions_and_delta(6, &regions, Some(Some(2)));
-        let exact = cached_conceal_drift_hint_from_regions_and_delta(6, &regions, Some(Some(0)));
-        let wrapped_raw = cached_conceal_drift_hint_from_regions_and_delta(6, &regions, Some(None));
-
-        assert_eq!(drifted, CachedConcealDriftHint::Drifted);
-        assert_eq!(exact, CachedConcealDriftHint::NoDrift);
-        assert_eq!(wrapped_raw, CachedConcealDriftHint::NoDrift);
-    }
-
-    #[test]
-    fn merge_conceal_region_merges_adjacent_cells_with_same_match_and_width() {
-        let mut regions = Vec::new();
-
-        merge_conceal_region(&mut regions, 3, 17, 1);
-        merge_conceal_region(&mut regions, 4, 17, 1);
-        merge_conceal_region(&mut regions, 7, 18, 0);
-
-        assert_eq!(
-            regions,
-            vec![conceal_region(3, 4, 17, 1), conceal_region(7, 7, 18, 0)],
-        );
-    }
-
-    #[test]
-    fn conceal_screen_cell_cache_key_tracks_window_view_state() {
-        let conceal_key = ConcealCacheKey::new(22, 14, 7);
-        let base = conceal_screen_cell_view(2, 3, 120, 40, 11, 0, 4);
-
-        let moved_view = conceal_screen_cell_view(2, 3, 120, 40, 12, 0, 4);
-        let changed_textoff = conceal_screen_cell_view(2, 3, 120, 40, 11, 0, 5);
-
-        assert_ne!(
-            base.cache_key(8, &conceal_key, 5),
-            moved_view.cache_key(8, &conceal_key, 5),
-        );
-        assert_ne!(
-            base.cache_key(8, &conceal_key, 5),
-            changed_textoff.cache_key(8, &conceal_key, 5),
-        );
-    }
-
-    #[test]
-    fn conceal_delta_cache_key_tracks_window_view_state() {
-        let conceal_key = ConcealCacheKey::new(22, 14, 7);
-        let base = conceal_screen_cell_view(2, 3, 120, 40, 11, 0, 4);
-
-        let moved_view = conceal_screen_cell_view(2, 3, 120, 40, 12, 0, 4);
-        let changed_textoff = conceal_screen_cell_view(2, 3, 120, 40, 11, 0, 5);
-
-        assert_ne!(
-            base.delta_cache_key(8, &conceal_key),
-            moved_view.delta_cache_key(8, &conceal_key),
-        );
-        assert_ne!(
-            base.delta_cache_key(8, &conceal_key),
-            changed_textoff.delta_cache_key(8, &conceal_key),
-        );
-    }
-
-    #[test]
-    fn concealcursor_allows_expected_mode_families() {
-        assert!(concealcursor_allows_mode("nvc", "n"));
-        assert!(concealcursor_allows_mode("i", "R"));
-        assert!(concealcursor_allows_mode("v", "V"));
-        assert!(!concealcursor_allows_mode("", "n"));
-        assert!(!concealcursor_allows_mode("n", "c"));
-        assert!(!concealcursor_allows_mode("n", "t"));
-    }
-
-    #[test]
-    fn conceal_delta_for_regions_accumulates_same_row_drift() {
-        let regions = vec![conceal_region(2, 3, 11, 1), conceal_region(5, 5, 12, 0)];
-        let delta = conceal_delta_for_regions(6, (4, 10), &regions, |col1| {
-            Ok(match col1 {
-                2 => Some((4, 4)),
-                4 => Some((4, 8)),
-                5 => Some((4, 9)),
-                _ => None,
-            })
-        })
-        .expect("same-row conceal delta should parse");
-
-        assert_eq!(delta, Some(4));
-    }
-
-    #[test]
-    fn conceal_delta_for_regions_returns_none_when_region_wraps_rows() {
-        let regions = vec![conceal_region(2, 3, 11, 1)];
-        let delta = conceal_delta_for_regions(4, (5, 2), &regions, |col1| {
-            Ok(match col1 {
-                2 => Some((4, 80)),
-                _ => None,
-            })
-        })
-        .expect("wrapped conceal region should parse");
-
-        assert_eq!(delta, None);
-    }
-}
+#[path = "conceal_tests.rs"]
+mod tests;

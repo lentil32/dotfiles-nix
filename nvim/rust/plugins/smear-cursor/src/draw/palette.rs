@@ -618,9 +618,20 @@ pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()
 mod tests {
     use super::*;
     use crate::core::types::StrokeId;
+    use crate::test_support::proptest::ModeCase;
+    use crate::test_support::proptest::cache_key_mutation_axis;
+    use crate::test_support::proptest::mode_case;
+    use crate::test_support::proptest::pure_config;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::StaticRenderConfig;
+    use pretty_assertions::assert_eq;
+    use proptest::collection::vec;
+    use proptest::option;
+    use proptest::prelude::*;
+
+    const RAW_KEY_COMMON_AXIS_COUNT: usize = 7;
+    const RESOLVED_PALETTE_AXIS_COUNT: usize = 8;
 
     fn test_frame() -> RenderFrame {
         RenderFrame {
@@ -663,112 +674,375 @@ mod tests {
         }
     }
 
-    #[test]
-    fn raw_palette_input_key_uses_mode_specific_cursor_setting() {
-        let mut normal = test_frame();
-        let mut insert = test_frame();
-        insert.mode = "i".to_string();
-
-        assert_ne!(
-            raw_palette_input_key(&normal),
-            raw_palette_input_key(&insert)
-        );
-
-        let mut config = (*normal.static_config).clone();
-        config.cursor_color = Some("none".to_string());
-        normal.static_config = Arc::new(config);
-        assert_eq!(
-            raw_palette_input_key(&normal),
-            raw_palette_input_key(&insert)
-        );
-    }
-
-    #[test]
-    fn raw_palette_input_key_ignores_cursor_text_when_effective_cursor_color_is_direct() {
-        let direct = test_frame();
-        let mut changed_cursor_text = test_frame();
-        changed_cursor_text.color_at_cursor = Some(0x00AB_CDEF);
-
-        assert_eq!(
-            raw_palette_input_key(&direct),
-            raw_palette_input_key(&changed_cursor_text)
-        );
-    }
-
-    #[test]
-    fn raw_palette_input_key_uses_cursor_text_when_effective_cursor_color_is_none() {
-        let mut frame = test_frame();
+    fn mutate_static_config(
+        frame: &mut RenderFrame,
+        mutator: impl FnOnce(&mut StaticRenderConfig),
+    ) {
         let mut config = (*frame.static_config).clone();
-        config.cursor_color = Some("none".to_string());
+        mutator(&mut config);
         frame.static_config = Arc::new(config);
-
-        let mut changed_cursor_text = frame.clone();
-        changed_cursor_text.color_at_cursor = Some(0x00AB_CDEF);
-
-        assert_ne!(
-            raw_palette_input_key(&frame),
-            raw_palette_input_key(&changed_cursor_text)
-        );
     }
 
-    #[test]
-    fn resolved_palette_match_uses_borrowed_cterm_colors() {
-        let resolved = ResolvedPalette {
-            cursor_color: 0x112233,
-            normal_background: Some(0x202020),
-            transparent_fallback: 0x303030,
-            non_inverted_blend: 0,
-            color_levels: 16,
-            gamma_bits: 2.2_f64.to_bits(),
-            cterm_cursor_colors: Some(&[17_u16, 42_u16]),
-            cterm_bg: Some(235_u16),
-        };
-        let cached = resolved.into_owned();
-
-        assert!(resolved_palette_matches(&cached, &resolved));
+    fn set_active_cursor_color_setting(frame: &mut RenderFrame, setting: &str) {
+        let insert_like = nvimrs_nvim_utils::mode::is_insert_like_mode(&frame.mode);
+        mutate_static_config(frame, |config| {
+            if insert_like {
+                config.cursor_color_insert_mode = Some(setting.to_string());
+            } else {
+                config.cursor_color = Some(setting.to_string());
+            }
+        });
     }
 
-    #[test]
-    fn lookup_cached_palette_distinguishes_raw_and_resolved_hits() {
-        let raw_key = RawPaletteInputKey { fingerprint: 11 };
-        let resolved = ResolvedPalette {
-            cursor_color: 0x112233,
-            normal_background: Some(0x202020),
-            transparent_fallback: 0x303030,
-            non_inverted_blend: 0,
-            color_levels: 16,
-            gamma_bits: 2.2_f64.to_bits(),
-            cterm_cursor_colors: Some(&[17_u16, 42_u16]),
-            cterm_bg: Some(235_u16),
-        };
-        let cached_key = resolved.into_owned();
+    fn set_inactive_cursor_color_setting(frame: &mut RenderFrame, setting: &str) {
+        let insert_like = nvimrs_nvim_utils::mode::is_insert_like_mode(&frame.mode);
+        mutate_static_config(frame, |config| {
+            if insert_like {
+                config.cursor_color = Some(setting.to_string());
+            } else {
+                config.cursor_color_insert_mode = Some(setting.to_string());
+            }
+        });
+    }
 
-        assert_eq!(
-            lookup_cached_palette(
-                &PaletteState {
-                    raw_input_key: Some(raw_key),
-                    palette_key: Some(cached_key.clone()),
-                    pending_refresh_key: None,
-                    group_name_cache: HashMap::new(),
-                },
-                raw_key,
-                None,
-            ),
-            PaletteCacheLookup::RawHit
+    fn frame_for_raw_key_properties(mode: &ModeCase, depends_on_cursor_text: bool) -> RenderFrame {
+        let mut frame = test_frame();
+        frame.mode = mode.mode().to_string();
+        set_active_cursor_color_setting(
+            &mut frame,
+            if depends_on_cursor_text {
+                "none"
+            } else {
+                "#112233"
+            },
         );
-        assert_eq!(
-            lookup_cached_palette(
-                &PaletteState {
-                    raw_input_key: Some(RawPaletteInputKey { fingerprint: 12 }),
-                    palette_key: Some(cached_key),
-                    pending_refresh_key: None,
-                    group_name_cache: HashMap::new(),
+        set_inactive_cursor_color_setting(&mut frame, "#445566");
+        frame.color_at_cursor = Some(0x00FF_FFFF);
+        frame
+    }
+
+    fn mutate_raw_key_common_axis(frame: &mut RenderFrame, axis: usize) {
+        match axis {
+            0 => set_active_cursor_color_setting(frame, "#ABCDEF"),
+            1 => mutate_static_config(frame, |config| {
+                config.normal_bg = Some("#202021".to_string());
+            }),
+            2 => mutate_static_config(frame, |config| {
+                config.transparent_bg_fallback_color = "#303031".to_string();
+            }),
+            3 => mutate_static_config(frame, |config| {
+                config.cterm_cursor_colors = Some(vec![18_u16, 42_u16, 99_u16]);
+            }),
+            4 => mutate_static_config(frame, |config| {
+                config.cterm_bg = Some(236_u16);
+            }),
+            5 => mutate_static_config(frame, |config| {
+                config.color_levels = 17;
+            }),
+            6 => mutate_static_config(frame, |config| {
+                config.gamma = 1.8;
+            }),
+            _ => panic!("unexpected raw key axis {axis}"),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ResolvedPaletteFixture {
+        cursor_color: u32,
+        normal_background: Option<u32>,
+        transparent_fallback: u32,
+        non_inverted_blend: u8,
+        color_levels: u32,
+        gamma_bits: u64,
+        cterm_cursor_colors: Option<Vec<u16>>,
+        cterm_bg: Option<u16>,
+    }
+
+    impl ResolvedPaletteFixture {
+        fn borrowed(&self) -> ResolvedPalette<'_> {
+            ResolvedPalette {
+                cursor_color: self.cursor_color,
+                normal_background: self.normal_background,
+                transparent_fallback: self.transparent_fallback,
+                non_inverted_blend: self.non_inverted_blend,
+                color_levels: self.color_levels,
+                gamma_bits: self.gamma_bits,
+                cterm_cursor_colors: self.cterm_cursor_colors.as_deref(),
+                cterm_bg: self.cterm_bg,
+            }
+        }
+    }
+
+    fn resolved_palette_fixture() -> BoxedStrategy<ResolvedPaletteFixture> {
+        (
+            0_u32..=0x00FF_FFFF,
+            option::of(0_u32..=0x00FF_FFFF),
+            0_u32..=0x00FF_FFFF,
+            any::<u8>(),
+            1_u32..=32_u32,
+            0.5_f64..4.0_f64,
+            option::of(vec(any::<u16>(), 1..=4)),
+            option::of(any::<u16>()),
+        )
+            .prop_map(
+                |(
+                    cursor_color,
+                    normal_background,
+                    transparent_fallback,
+                    non_inverted_blend,
+                    color_levels,
+                    gamma,
+                    cterm_cursor_colors,
+                    cterm_bg,
+                )| ResolvedPaletteFixture {
+                    cursor_color,
+                    normal_background,
+                    transparent_fallback,
+                    non_inverted_blend,
+                    color_levels,
+                    gamma_bits: gamma.to_bits(),
+                    cterm_cursor_colors,
+                    cterm_bg,
                 },
-                raw_key,
-                Some(&resolved),
-            ),
-            PaletteCacheLookup::ResolvedHit
-        );
+            )
+            .boxed()
+    }
+
+    fn different_raw_key(raw_key: RawPaletteInputKey) -> RawPaletteInputKey {
+        RawPaletteInputKey {
+            fingerprint: raw_key.fingerprint ^ 1,
+        }
+    }
+
+    fn mutate_palette_key_axis(
+        fixture: &ResolvedPaletteFixture,
+        axis: usize,
+    ) -> HighlightPaletteKey {
+        let mut cached = fixture.borrowed().into_owned();
+        match axis {
+            0 => cached.cursor_color ^= 1,
+            1 => {
+                cached.normal_background = Some(
+                    fixture
+                        .normal_background
+                        .map_or(0x0012_3456, |background| background ^ 1),
+                );
+            }
+            2 => cached.transparent_fallback ^= 1,
+            3 => cached.non_inverted_blend = cached.non_inverted_blend.wrapping_add(1),
+            4 => cached.color_levels = cached.color_levels.saturating_add(1),
+            5 => {
+                cached.gamma_bits = if cached.gamma_bits == 1.0_f64.to_bits() {
+                    2.0_f64.to_bits()
+                } else {
+                    1.0_f64.to_bits()
+                };
+            }
+            6 => {
+                cached.cterm_cursor_colors = Some(match fixture.cterm_cursor_colors.as_deref() {
+                    Some(colors) => {
+                        let mut mutated = colors.to_vec();
+                        mutated[0] = mutated[0].wrapping_add(1);
+                        mutated
+                    }
+                    None => vec![7_u16, 11_u16],
+                });
+            }
+            7 => {
+                cached.cterm_bg = Some(
+                    fixture
+                        .cterm_bg
+                        .map_or(1_u16, |value| value.wrapping_add(1)),
+                );
+            }
+            _ => panic!("unexpected resolved palette axis {axis}"),
+        }
+        cached
+    }
+
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_raw_palette_input_key_changes_when_common_effective_inputs_change(
+            mode in mode_case(),
+            depends_on_cursor_text in any::<bool>(),
+            axis in cache_key_mutation_axis(RAW_KEY_COMMON_AXIS_COUNT),
+        ) {
+            let base = frame_for_raw_key_properties(&mode, depends_on_cursor_text);
+            let mut mutated = base.clone();
+            mutate_raw_key_common_axis(&mut mutated, axis.index());
+
+            prop_assert_ne!(raw_palette_input_key(&base), raw_palette_input_key(&mutated));
+        }
+
+        #[test]
+        fn prop_raw_palette_input_key_uses_cursor_text_only_when_the_effective_setting_is_none(
+            mode in mode_case(),
+            depends_on_cursor_text in any::<bool>(),
+        ) {
+            let base = frame_for_raw_key_properties(&mode, depends_on_cursor_text);
+            let mut mutated = base.clone();
+            mutated.color_at_cursor = Some(0x00AB_CDEF);
+
+            if depends_on_cursor_text {
+                prop_assert_ne!(raw_palette_input_key(&base), raw_palette_input_key(&mutated));
+            } else {
+                prop_assert_eq!(raw_palette_input_key(&base), raw_palette_input_key(&mutated));
+            }
+        }
+
+        #[test]
+        fn prop_raw_palette_input_key_ignores_inactive_mode_specific_cursor_settings(
+            mode in mode_case(),
+            depends_on_cursor_text in any::<bool>(),
+        ) {
+            let base = frame_for_raw_key_properties(&mode, depends_on_cursor_text);
+            let mut mutated = base.clone();
+            set_inactive_cursor_color_setting(&mut mutated, "#654321");
+
+            prop_assert_eq!(raw_palette_input_key(&base), raw_palette_input_key(&mutated));
+        }
+
+        #[test]
+        fn prop_resolved_palette_matches_owned_form_and_rejects_single_axis_mismatches(
+            fixture in resolved_palette_fixture(),
+            axis in cache_key_mutation_axis(RESOLVED_PALETTE_AXIS_COUNT),
+        ) {
+            let resolved = fixture.borrowed();
+            let cached = resolved.into_owned();
+
+            prop_assert!(resolved_palette_matches(&cached, &resolved));
+            prop_assert!(!resolved_palette_matches(
+                &mutate_palette_key_axis(&fixture, axis.index()),
+                &resolved,
+            ));
+        }
+
+        #[test]
+        fn prop_lookup_cached_palette_distinguishes_raw_resolved_and_miss_paths(
+            fixture in resolved_palette_fixture(),
+            raw_matches in any::<bool>(),
+            provide_resolved in any::<bool>(),
+            resolved_matches in any::<bool>(),
+            mismatch_axis in cache_key_mutation_axis(RESOLVED_PALETTE_AXIS_COUNT),
+            query_fingerprint in any::<u64>(),
+        ) {
+            let raw_key = RawPaletteInputKey {
+                fingerprint: query_fingerprint,
+            };
+            let resolved = fixture.borrowed();
+            let palette_key = if resolved_matches {
+                resolved.into_owned()
+            } else {
+                mutate_palette_key_axis(&fixture, mismatch_axis.index())
+            };
+            let state = PaletteState {
+                raw_input_key: Some(if raw_matches {
+                    raw_key
+                } else {
+                    different_raw_key(raw_key)
+                }),
+                palette_key: Some(palette_key),
+                pending_refresh_key: None,
+                group_name_cache: HashMap::new(),
+            };
+            let expected = if raw_matches {
+                PaletteCacheLookup::RawHit
+            } else if provide_resolved && resolved_matches {
+                PaletteCacheLookup::ResolvedHit
+            } else {
+                PaletteCacheLookup::Miss
+            };
+
+            prop_assert_eq!(
+                lookup_cached_palette(
+                    &state,
+                    raw_key,
+                    provide_resolved.then_some(&resolved),
+                ),
+                expected
+            );
+        }
+
+        #[test]
+        fn prop_stage_palette_refresh_returns_ready_without_changing_pending_state(
+            fixture in resolved_palette_fixture(),
+            query_fingerprint in any::<u64>(),
+            pending_matches in any::<bool>(),
+        ) {
+            let raw_key = RawPaletteInputKey {
+                fingerprint: query_fingerprint,
+            };
+            let pending_refresh_key = Some(if pending_matches {
+                raw_key
+            } else {
+                different_raw_key(raw_key)
+            });
+            let mut state = PaletteState {
+                raw_input_key: Some(raw_key),
+                palette_key: Some(fixture.borrowed().into_owned()),
+                pending_refresh_key,
+                group_name_cache: HashMap::new(),
+            };
+
+            prop_assert_eq!(
+                stage_palette_refresh(&mut state, raw_key),
+                PaletteRefreshDisposition::Ready
+            );
+            prop_assert_eq!(state.pending_refresh_key, pending_refresh_key);
+        }
+
+        #[test]
+        fn prop_stage_palette_refresh_deduplicates_matching_pending_requests(
+            fixture in resolved_palette_fixture(),
+            query_fingerprint in any::<u64>(),
+            has_committed_palette in any::<bool>(),
+        ) {
+            let raw_key = RawPaletteInputKey {
+                fingerprint: query_fingerprint,
+            };
+            let mut state = PaletteState {
+                raw_input_key: Some(different_raw_key(raw_key)),
+                palette_key: has_committed_palette.then(|| fixture.borrowed().into_owned()),
+                pending_refresh_key: Some(raw_key),
+                group_name_cache: HashMap::new(),
+            };
+
+            prop_assert_eq!(
+                stage_palette_refresh(&mut state, raw_key),
+                PaletteRefreshDisposition::RefreshAlreadyPending
+            );
+            prop_assert_eq!(state.pending_refresh_key, Some(raw_key));
+        }
+
+        #[test]
+        fn prop_stage_palette_refresh_bootstraps_or_defers_based_on_committed_palette(
+            fixture in resolved_palette_fixture(),
+            query_fingerprint in any::<u64>(),
+            has_committed_palette in any::<bool>(),
+            had_other_pending_refresh in any::<bool>(),
+        ) {
+            let raw_key = RawPaletteInputKey {
+                fingerprint: query_fingerprint,
+            };
+            let mut state = PaletteState {
+                raw_input_key: Some(different_raw_key(raw_key)),
+                palette_key: has_committed_palette.then(|| fixture.borrowed().into_owned()),
+                pending_refresh_key: had_other_pending_refresh.then(|| different_raw_key(raw_key)),
+                group_name_cache: HashMap::new(),
+            };
+
+            prop_assert_eq!(
+                stage_palette_refresh(&mut state, raw_key),
+                if has_committed_palette {
+                    PaletteRefreshDisposition::ScheduleDeferred
+                } else {
+                    PaletteRefreshDisposition::BootstrapSynchronously
+                }
+            );
+            prop_assert_eq!(state.pending_refresh_key, Some(raw_key));
+        }
     }
 
     #[test]
@@ -796,70 +1070,6 @@ mod tests {
             assert_eq!(state.palette_key, None);
             assert_eq!(state.pending_refresh_key, None);
         });
-    }
-
-    #[test]
-    fn stage_palette_refresh_bootstraps_without_committed_palette() {
-        let raw_key = RawPaletteInputKey { fingerprint: 3 };
-        let mut state = PaletteState::default();
-
-        assert_eq!(
-            stage_palette_refresh(&mut state, raw_key),
-            PaletteRefreshDisposition::BootstrapSynchronously
-        );
-        assert_eq!(state.pending_refresh_key, Some(raw_key));
-    }
-
-    #[test]
-    fn stage_palette_refresh_defers_when_committed_palette_exists() {
-        let raw_key = RawPaletteInputKey { fingerprint: 5 };
-        let mut state = PaletteState {
-            raw_input_key: Some(RawPaletteInputKey { fingerprint: 4 }),
-            palette_key: Some(HighlightPaletteKey {
-                cursor_color: 0x112233,
-                normal_background: Some(0x202020),
-                transparent_fallback: 0x303030,
-                non_inverted_blend: 0,
-                color_levels: 16,
-                gamma_bits: 2.2_f64.to_bits(),
-                cterm_cursor_colors: Some(vec![17_u16, 42_u16]),
-                cterm_bg: Some(235_u16),
-            }),
-            pending_refresh_key: None,
-            group_name_cache: HashMap::new(),
-        };
-
-        assert_eq!(
-            stage_palette_refresh(&mut state, raw_key),
-            PaletteRefreshDisposition::ScheduleDeferred
-        );
-        assert_eq!(state.pending_refresh_key, Some(raw_key));
-    }
-
-    #[test]
-    fn stage_palette_refresh_deduplicates_matching_pending_request() {
-        let raw_key = RawPaletteInputKey { fingerprint: 6 };
-        let mut state = PaletteState {
-            raw_input_key: Some(RawPaletteInputKey { fingerprint: 4 }),
-            palette_key: Some(HighlightPaletteKey {
-                cursor_color: 0x112233,
-                normal_background: Some(0x202020),
-                transparent_fallback: 0x303030,
-                non_inverted_blend: 0,
-                color_levels: 16,
-                gamma_bits: 2.2_f64.to_bits(),
-                cterm_cursor_colors: Some(vec![17_u16, 42_u16]),
-                cterm_bg: Some(235_u16),
-            }),
-            pending_refresh_key: Some(raw_key),
-            group_name_cache: HashMap::new(),
-        };
-
-        assert_eq!(
-            stage_palette_refresh(&mut state, raw_key),
-            PaletteRefreshDisposition::RefreshAlreadyPending
-        );
-        assert_eq!(state.pending_refresh_key, Some(raw_key));
     }
 
     #[test]

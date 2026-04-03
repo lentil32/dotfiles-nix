@@ -47,8 +47,9 @@ pub(crate) fn frame_draw_signature(frame: &RenderFrame) -> Option<u64> {
 pub(crate) fn plan_target_cell_overlay(
     frame: &RenderFrame,
     viewport: Viewport,
+    shape: crate::types::CursorCellShape,
 ) -> Option<TargetCellOverlay> {
-    if !frame.hide_target_hack || frame.vertical_bar {
+    if !frame.hide_target_hack {
         return None;
     }
 
@@ -62,6 +63,7 @@ pub(crate) fn plan_target_cell_overlay(
         row,
         col,
         zindex: frame.windows_zindex,
+        shape,
         level: HighlightLevel::from_raw_clamped(frame.color_levels),
     })
 }
@@ -86,7 +88,7 @@ pub(crate) fn render_frame_to_plan_with_signature(
     decode_compiled_frame(frame, compiled, viewport, maybe_signature)
 }
 
-pub(crate) fn decode_compiled_frame(
+pub(in crate::draw::render_plan) fn decode_compiled_frame(
     frame: &RenderFrame,
     compiled_frame: CompiledPlannerFrame,
     viewport: Viewport,
@@ -118,14 +120,14 @@ pub(crate) fn decode_compiled_frame(
             &mut next_state.decode_scratch,
         );
     }
-    let decoded = {
+    let next_cells = {
         let PlannerDecodeScratch {
             cell_candidates,
             centerline,
             solver,
             ..
         } = &mut next_state.decode_scratch;
-        decode_compiled_field_trace_with_compiled_and_scratch(
+        decode_compiled_field_with_compiled_and_scratch(
             &compiled,
             cell_candidates,
             centerline,
@@ -133,7 +135,6 @@ pub(crate) fn decode_compiled_frame(
             solver,
         )
     };
-    let next_cells = decoded.cells;
 
     let target_row = frame.target.row.round() as i64;
     let target_col = frame.target.col.round() as i64;

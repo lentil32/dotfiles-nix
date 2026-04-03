@@ -125,25 +125,6 @@ fn transition_cost_prepared(
     cost
 }
 
-#[cfg(test)]
-pub(in super::super) fn transition_cost(
-    previous_slice: &RibbonSlice,
-    previous_state: SliceState,
-    next_slice: &RibbonSlice,
-    next_state: SliceState,
-    spatial_weight_q10: u32,
-) -> u64 {
-    let overlap_pairs = build_slice_overlap_pairs(previous_slice, next_slice);
-    transition_cost_prepared(
-        previous_slice,
-        PreparedSliceState::new(previous_slice, previous_state),
-        next_slice,
-        PreparedSliceState::new(next_slice, next_state),
-        &overlap_pairs,
-        spatial_weight_q10,
-    )
-}
-
 pub(in super::super) fn solve_ribbon_dp(
     slices: &[RibbonSlice],
     spatial_weight_q10: u32,

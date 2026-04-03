@@ -7,7 +7,9 @@ use crate::config::BufferPerfMode;
 use crate::config::RuntimeConfig;
 use crate::core::state::BufferPerfClass;
 use crate::state::CursorLocation;
+use crate::types::CursorCellShape;
 use crate::types::Point;
+use crate::types::ScreenCell;
 use nvim_oxi::api;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
@@ -75,12 +77,30 @@ pub(crate) struct IngressReadSnapshot {
     enabled: bool,
     needs_initialize: bool,
     current_corners: [Point; 4],
+    target_corners: [Point; 4],
+    target_position: Point,
     tracked_location: Option<CursorLocation>,
     mode_policy: IngressModePolicySnapshot,
     buffer_perf_mode: BufferPerfMode,
     callback_duration_estimate_ms: f64,
     current_buffer_event_policy: Option<BufferEventPolicy>,
     filetypes_disabled: Arc<HashSet<String>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct IngressReadSnapshotTestInput {
+    pub(crate) enabled: bool,
+    pub(crate) needs_initialize: bool,
+    pub(crate) current_corners: [Point; 4],
+    pub(crate) target_corners: [Point; 4],
+    pub(crate) target_position: Point,
+    pub(crate) tracked_location: Option<CursorLocation>,
+    pub(crate) mode_flags: [bool; 4],
+    pub(crate) buffer_perf_mode: BufferPerfMode,
+    pub(crate) callback_duration_estimate_ms: f64,
+    pub(crate) current_buffer_perf_class: Option<BufferPerfClass>,
+    pub(crate) filetypes_disabled: Vec<String>,
 }
 
 impl IngressReadSnapshot {
@@ -94,6 +114,8 @@ impl IngressReadSnapshot {
                 enabled: runtime.is_enabled(),
                 needs_initialize: state.core_state.needs_initialize(),
                 current_corners: runtime.current_corners(),
+                target_corners: runtime.target_corners(),
+                target_position: runtime.target_position(),
                 tracked_location: runtime.tracked_location(),
                 mode_policy: IngressModePolicySnapshot::from_runtime_config(config),
                 buffer_perf_mode: config.buffer_perf_mode,
@@ -118,6 +140,18 @@ impl IngressReadSnapshot {
         self.current_corners
     }
 
+    pub(crate) fn current_visual_cursor_cell(&self) -> Option<ScreenCell> {
+        ScreenCell::from_visual_cursor_anchor(
+            &self.current_corners,
+            &self.target_corners,
+            self.target_position,
+        )
+    }
+
+    pub(crate) fn current_visual_cursor_shape(&self) -> CursorCellShape {
+        CursorCellShape::from_corners(&self.target_corners)
+    }
+
     pub(crate) fn tracked_location(&self) -> Option<&CursorLocation> {
         self.tracked_location.as_ref()
     }
@@ -140,7 +174,7 @@ impl IngressReadSnapshot {
 
     pub(crate) fn current_buffer_perf_class(&self) -> Option<BufferPerfClass> {
         self.current_buffer_event_policy
-            .map(BufferEventPolicy::core_perf_class)
+            .map(BufferEventPolicy::perf_class)
     }
 
     pub(crate) fn has_disabled_filetypes(&self) -> bool {
@@ -152,32 +186,21 @@ impl IngressReadSnapshot {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_for_test(
-        enabled: bool,
-        needs_initialize: bool,
-        current_corners: [Point; 4],
-        tracked_location: Option<CursorLocation>,
-        mode_policy: (bool, bool, bool, bool),
-        buffer_perf_mode: BufferPerfMode,
-        callback_duration_estimate_ms: f64,
-        current_buffer_perf_class: Option<BufferPerfClass>,
-        filetypes_disabled: Vec<String>,
-    ) -> Self {
+    pub(crate) fn new_for_test(input: IngressReadSnapshotTestInput) -> Self {
         Self {
-            enabled,
-            needs_initialize,
-            current_corners,
-            tracked_location,
-            mode_policy: IngressModePolicySnapshot::from_mode_flags([
-                mode_policy.0,
-                mode_policy.1,
-                mode_policy.2,
-                mode_policy.3,
-            ]),
-            buffer_perf_mode,
-            callback_duration_estimate_ms,
-            current_buffer_event_policy: current_buffer_perf_class.map(test_policy_for_perf_class),
-            filetypes_disabled: Arc::new(filetypes_disabled.into_iter().collect()),
+            enabled: input.enabled,
+            needs_initialize: input.needs_initialize,
+            current_corners: input.current_corners,
+            target_corners: input.target_corners,
+            target_position: input.target_position,
+            tracked_location: input.tracked_location,
+            mode_policy: IngressModePolicySnapshot::from_mode_flags(input.mode_flags),
+            buffer_perf_mode: input.buffer_perf_mode,
+            callback_duration_estimate_ms: input.callback_duration_estimate_ms,
+            current_buffer_event_policy: input
+                .current_buffer_perf_class
+                .map(test_policy_for_perf_class),
+            filetypes_disabled: Arc::new(input.filetypes_disabled.into_iter().collect()),
         }
     }
 
@@ -214,75 +237,118 @@ fn test_policy_for_perf_class(perf_class: BufferPerfClass) -> BufferEventPolicy 
 mod tests {
     use super::IngressModePolicySnapshot;
     use super::IngressReadSnapshot;
+    use super::IngressReadSnapshotTestInput;
     use crate::config::BufferPerfMode;
     use crate::core::state::BufferPerfClass;
+    use crate::test_support::proptest::pure_config;
     use crate::types::Point;
+    use crate::types::ScreenCell;
+    use pretty_assertions::assert_eq;
+    use proptest::prelude::*;
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    #[test]
-    fn ingress_mode_policy_rejects_insert_composite_modes_without_insert_flag() {
-        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
-        assert!(!policy.mode_allowed("ic"));
+    fn current_buffer_perf_class_strategy() -> BoxedStrategy<Option<BufferPerfClass>> {
+        prop_oneof![
+            Just(None),
+            Just(Some(BufferPerfClass::Full)),
+            Just(Some(BufferPerfClass::FastMotion)),
+            Just(Some(BufferPerfClass::Skip)),
+        ]
+        .boxed()
+    }
+
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_ingress_snapshot_filetype_filter_matches_exact_entries(
+            lua_disabled in any::<bool>(),
+            rust_disabled in any::<bool>(),
+            nix_disabled in any::<bool>(),
+            go_disabled in any::<bool>(),
+            query in prop_oneof![
+                Just("lua"),
+                Just("rust"),
+                Just("nix"),
+                Just("go"),
+                Just("toml"),
+            ],
+            callback_duration_estimate_ms in 0_u16..=200_u16,
+            current_buffer_perf_class in current_buffer_perf_class_strategy(),
+        ) {
+            let mut disabled = Vec::new();
+            if lua_disabled {
+                disabled.push("lua".to_string());
+            }
+            if rust_disabled {
+                disabled.push("rust".to_string());
+            }
+            if nix_disabled {
+                disabled.push("nix".to_string());
+            }
+            if go_disabled {
+                disabled.push("go".to_string());
+            }
+
+            let snapshot = IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
+                enabled: true,
+                needs_initialize: false,
+                current_corners: [Point { row: 1.0, col: 2.0 }; 4],
+                target_corners: [Point { row: 1.0, col: 2.0 }; 4],
+                target_position: Point { row: 1.0, col: 2.0 },
+                tracked_location: None,
+                mode_flags: [true, true, true, true],
+                buffer_perf_mode: BufferPerfMode::Auto,
+                callback_duration_estimate_ms: f64::from(callback_duration_estimate_ms),
+                current_buffer_perf_class,
+                filetypes_disabled: disabled,
+            });
+            let expected_disabled = match query {
+                "lua" => lua_disabled,
+                "rust" => rust_disabled,
+                "nix" => nix_disabled,
+                "go" => go_disabled,
+                "toml" => false,
+                _ => unreachable!("filetype query strategy only generates known literals"),
+            };
+
+            prop_assert_eq!(
+                snapshot.has_disabled_filetypes(),
+                lua_disabled || rust_disabled || nix_disabled || go_disabled
+            );
+            prop_assert_eq!(snapshot.filetype_disabled(query), expected_disabled);
+            prop_assert_eq!(
+                snapshot.callback_duration_estimate_ms(),
+                f64::from(callback_duration_estimate_ms)
+            );
+            prop_assert_eq!(
+                snapshot.current_buffer_perf_class(),
+                current_buffer_perf_class
+            );
+            prop_assert_eq!(
+                snapshot
+                    .current_buffer_event_policy()
+                    .map(crate::events::policy::BufferEventPolicy::perf_class),
+                current_buffer_perf_class
+            );
+        }
     }
 
     #[test]
-    fn ingress_mode_policy_accepts_replace_visual_modes_with_replace_flag() {
+    fn ingress_mode_policy_smoke_routes_known_mode_families() {
         let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
-        assert!(policy.mode_allowed("Rv"));
-    }
 
-    #[test]
-    fn ingress_mode_policy_rejects_terminal_pending_modes_without_terminal_flag() {
-        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
-        assert!(!policy.mode_allowed("ntT"));
-    }
-
-    #[test]
-    fn ingress_mode_policy_accepts_cmdline_visual_modes_with_cmdline_flag() {
-        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
+        assert!(!policy.mode_allowed("i"));
+        assert!(policy.mode_allowed("R"));
+        assert!(!policy.mode_allowed("t"));
         assert!(policy.mode_allowed("cv"));
-    }
-
-    #[test]
-    fn ingress_mode_policy_keeps_normal_mode_enabled() {
-        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
         assert!(policy.mode_allowed("n"));
+        assert!(policy.mode_allowed("v"));
     }
 
     #[test]
-    fn ingress_snapshot_filetype_filter_matches_exact_entries() {
-        let snapshot = IngressReadSnapshot::new_for_test(
-            true,
-            false,
-            [Point { row: 1.0, col: 2.0 }; 4],
-            None,
-            (true, true, true, true),
-            BufferPerfMode::Auto,
-            0.0,
-            Some(BufferPerfClass::FastMotion),
-            vec!["lua".to_string(), "rust".to_string()],
-        );
-
-        assert!(snapshot.has_disabled_filetypes());
-        assert!(snapshot.filetype_disabled("lua"));
-        assert!(snapshot.filetype_disabled("rust"));
-        assert!(!snapshot.filetype_disabled("nix"));
-        assert_eq!(snapshot.callback_duration_estimate_ms(), 0.0);
-        assert_eq!(
-            snapshot.current_buffer_perf_class(),
-            Some(BufferPerfClass::FastMotion)
-        );
-        assert_eq!(
-            snapshot
-                .current_buffer_event_policy()
-                .map(crate::events::policy::BufferEventPolicy::core_perf_class),
-            Some(BufferPerfClass::FastMotion)
-        );
-    }
-
-    #[test]
-    fn ingress_read_snapshot_can_share_disabled_filetypes_arc() {
+    fn ingress_read_snapshot_preserves_disabled_filetypes_arc_sharing_as_a_perf_contract() {
         let filetypes_disabled: Arc<HashSet<String>> = Arc::new(
             ["lua".to_string(), "rust".to_string()]
                 .into_iter()
@@ -292,6 +358,8 @@ mod tests {
             enabled: true,
             needs_initialize: false,
             current_corners: [Point::ZERO; 4],
+            target_corners: [Point::ZERO; 4],
+            target_position: Point::ZERO,
             tracked_location: None,
             mode_policy: IngressModePolicySnapshot::from_mode_flags([true, true, true, true]),
             buffer_perf_mode: BufferPerfMode::Auto,
@@ -302,10 +370,10 @@ mod tests {
             filetypes_disabled: Arc::clone(&filetypes_disabled),
         };
 
-        assert!(Arc::ptr_eq(
-            &snapshot.filetypes_disabled,
-            &filetypes_disabled
-        ));
+        assert!(
+            Arc::ptr_eq(&snapshot.filetypes_disabled, &filetypes_disabled),
+            "snapshot should reuse the disabled-filetypes Arc instead of cloning the set"
+        );
         assert_eq!(snapshot.callback_duration_estimate_ms(), 12.5);
         assert_eq!(
             snapshot.current_buffer_perf_class(),
@@ -314,8 +382,71 @@ mod tests {
         assert_eq!(
             snapshot
                 .current_buffer_event_policy()
-                .map(crate::events::policy::BufferEventPolicy::core_perf_class),
+                .map(crate::events::policy::BufferEventPolicy::perf_class),
             Some(BufferPerfClass::FastMotion)
+        );
+    }
+
+    #[test]
+    fn ingress_snapshot_smoke_exposes_visual_cursor_accessors_from_stored_runtime_geometry() {
+        let snapshot = IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
+            enabled: true,
+            needs_initialize: false,
+            current_corners: [
+                Point {
+                    row: 9.0,
+                    col: 14.0,
+                },
+                Point {
+                    row: 10.0,
+                    col: 14.0,
+                },
+                Point {
+                    row: 10.0,
+                    col: 15.0,
+                },
+                Point {
+                    row: 9.0,
+                    col: 15.0,
+                },
+            ],
+            target_corners: [
+                Point {
+                    row: 9.0,
+                    col: 14.0,
+                },
+                Point {
+                    row: 10.0,
+                    col: 14.0,
+                },
+                Point {
+                    row: 10.0,
+                    col: 15.0,
+                },
+                Point {
+                    row: 9.0,
+                    col: 15.0,
+                },
+            ],
+            target_position: Point {
+                row: 10.0,
+                col: 15.0,
+            },
+            tracked_location: None,
+            mode_flags: [true, true, true, true],
+            buffer_perf_mode: BufferPerfMode::Auto,
+            callback_duration_estimate_ms: 0.0,
+            current_buffer_perf_class: None,
+            filetypes_disabled: Vec::new(),
+        });
+
+        assert_eq!(
+            snapshot.current_visual_cursor_cell(),
+            ScreenCell::new(10, 15)
+        );
+        assert_eq!(
+            snapshot.current_visual_cursor_shape(),
+            crate::types::CursorCellShape::Block
         );
     }
 }

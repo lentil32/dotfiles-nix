@@ -144,12 +144,13 @@ fn observation_basis_summary(basis: &ObservationBasis) -> String {
         || "none".to_string(),
         |witness| {
             format!(
-                "buf={} tick={} mode={} cursor={} colorscheme_gen={}",
+                "buf={} tick={} mode={} cursor={} colorscheme_gen={} cache_gen={}",
                 witness.buffer_handle(),
                 witness.changedtick(),
                 witness.mode(),
                 cursor_position_summary(witness.cursor_position()),
                 witness.colorscheme_generation().value(),
+                witness.cache_generation().value(),
             )
         },
     );
@@ -302,7 +303,15 @@ fn render_cleanup_action_name(action: RenderCleanupAction) -> &'static str {
 fn target_cell_presentation_name(effect: TargetCellPresentation) -> &'static str {
     match effect {
         TargetCellPresentation::None => "none",
-        TargetCellPresentation::OverlayBlockCell => "overlay_block_cell",
+        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::Block) => {
+            "overlay_block_cell"
+        }
+        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::VerticalBar) => {
+            "overlay_vertical_bar_cell"
+        }
+        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::HorizontalBar) => {
+            "overlay_horizontal_bar_cell"
+        }
     }
 }
 
@@ -623,8 +632,12 @@ pub(super) fn effect_summary(effect: &Effect) -> String {
         Effect::ApplyRenderCleanup(payload) => render_cleanup_execution_summary(payload.execution),
         Effect::ApplyIngressCursorPresentation(payload) => match payload {
             IngressCursorPresentationEffect::HideCursor => "hide_cursor".to_string(),
-            IngressCursorPresentationEffect::HideCursorAndPrepaint { cell, zindex } => format!(
-                "hide_cursor_and_prepaint(row={} col={} zindex={zindex})",
+            IngressCursorPresentationEffect::HideCursorAndPrepaint {
+                cell,
+                shape,
+                zindex,
+            } => format!(
+                "hide_cursor_and_prepaint(row={} col={} shape={shape:?} zindex={zindex})",
                 cell.row(),
                 cell.col(),
             ),

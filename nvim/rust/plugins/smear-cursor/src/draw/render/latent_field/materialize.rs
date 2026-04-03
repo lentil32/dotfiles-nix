@@ -310,184 +310,195 @@ pub(in super::super) fn deposit_swept_occupancy(
 
 #[cfg(test)]
 mod tests {
+    use super::super::CellRect;
+    use super::super::TailBand;
+    use super::super::comet_tail_profiles;
     use super::Pose;
     use super::SweepMaterializeScratch;
     use super::deposit_swept_occupancy;
     use super::materialize_swept_occupancy_with_scratch;
     use super::prepare_swept_occupancy_geometry;
+    use crate::test_support::proptest::positive_aspect_ratio;
+    use crate::test_support::proptest::pure_config;
     use crate::types::Point;
-    use pretty_assertions::assert_eq;
+    use proptest::prelude::*;
 
-    #[test]
-    fn deposit_static_pose_produces_non_empty_tile() {
-        let pose = Pose {
-            center: Point {
-                row: 10.5,
-                col: 20.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let tiles = deposit_swept_occupancy(pose, pose, 2.0, 1.0, 1.0);
-
-        assert!(!tiles.is_empty());
-        let center = tiles.get(&(10, 20)).expect("center cell should be present");
-        assert!(center.samples_q12.iter().any(|value| *value > 0));
+    #[derive(Clone, Debug)]
+    struct MaterializeFixture {
+        start: Pose,
+        end: Pose,
+        block_aspect_ratio: f64,
+        band_thicknesses: Vec<(TailBand, f64, f64)>,
+        max_thickness_y: f64,
+        max_thickness_x: f64,
     }
 
-    #[test]
-    fn deposit_static_pose_on_exact_cell_boundary_skips_empty_border_tiles() {
-        let pose = Pose {
-            center: Point {
-                row: 10.5,
-                col: 20.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-
-        let tiles = deposit_swept_occupancy(pose, pose, 2.0, 1.0, 1.0);
-        assert_eq!(tiles.keys().copied().collect::<Vec<_>>(), vec![(10, 20)]);
+    fn aligned_pose() -> BoxedStrategy<Pose> {
+        (-10_i64..=10_i64, -10_i64..=10_i64, 2_u8..=8_u8, 2_u8..=8_u8)
+            .prop_map(|(row, col, half_height_steps, half_width_steps)| Pose {
+                center: Point {
+                    row: row as f64 + 0.5,
+                    col: col as f64 + 0.5,
+                },
+                half_height: f64::from(half_height_steps) / 8.0,
+                half_width: f64::from(half_width_steps) / 8.0,
+            })
+            .boxed()
     }
 
-    #[test]
-    fn deposit_sweep_spans_multiple_cells() {
-        let start = Pose {
-            center: Point {
-                row: 10.5,
-                col: 10.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let end = Pose {
-            center: Point {
-                row: 10.5,
-                col: 14.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let tiles = deposit_swept_occupancy(start, end, 2.0, 1.0, 1.0);
-        assert!(tiles.contains_key(&(10, 10)));
-        assert!(tiles.contains_key(&(10, 14)));
+    fn materialize_fixture() -> BoxedStrategy<MaterializeFixture> {
+        (
+            aligned_pose(),
+            aligned_pose(),
+            positive_aspect_ratio(),
+            0.5_f64..=1.5_f64,
+            0.5_f64..=1.5_f64,
+            80.0_f64..=360.0_f64,
+        )
+            .prop_map(
+                |(
+                    start,
+                    end,
+                    block_aspect_ratio,
+                    base_thickness_y,
+                    base_thickness_x,
+                    tail_duration_ms,
+                )| {
+                    let profiles = comet_tail_profiles(tail_duration_ms);
+                    let band_thicknesses = profiles
+                        .into_iter()
+                        .map(|profile| {
+                            (
+                                profile.band,
+                                base_thickness_y * profile.width_scale,
+                                base_thickness_x * profile.width_scale,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let max_thickness_y = band_thicknesses
+                        .iter()
+                        .fold(0.0_f64, |max, (_, thickness_y, _)| max.max(*thickness_y));
+                    let max_thickness_x = band_thicknesses
+                        .iter()
+                        .fold(0.0_f64, |max, (_, _, thickness_x)| max.max(*thickness_x));
+
+                    MaterializeFixture {
+                        start,
+                        end,
+                        block_aspect_ratio,
+                        band_thicknesses,
+                        max_thickness_y,
+                        max_thickness_x,
+                    }
+                },
+            )
+            .boxed()
     }
 
-    #[test]
-    fn shared_sweep_geometry_matches_direct_deposit_for_tail_band_widths() {
-        let start = Pose {
-            center: Point {
-                row: 10.5,
-                col: 10.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let end = Pose {
-            center: Point {
-                row: 11.25,
-                col: 14.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let profiles = super::super::comet_tail_profiles(198.0);
-        let max_width_scale = profiles
-            .iter()
-            .fold(0.0_f64, |max, profile| max.max(profile.width_scale));
-        let geometry = prepare_swept_occupancy_geometry(
-            start,
-            end,
-            2.0,
-            1.25 * max_width_scale,
-            0.8 * max_width_scale,
-        );
-        let mut scratch = SweepMaterializeScratch::default();
+    proptest! {
+        #![proptest_config(pure_config())]
 
-        for profile in profiles {
-            let thickness_y = 1.25 * profile.width_scale;
-            let thickness_x = 0.8 * profile.width_scale;
-            assert_eq!(
-                materialize_swept_occupancy_with_scratch(
-                    &geometry,
-                    thickness_y,
-                    thickness_x,
-                    &mut scratch
-                ),
-                deposit_swept_occupancy(start, end, 2.0, thickness_y, thickness_x),
-                "shared sweep geometry should preserve direct deposition for {:?}",
-                profile.band
+        #[test]
+        fn prop_deposit_bounds_cover_endpoints_and_shared_geometry_matches_direct_materialization(
+            fixture in materialize_fixture(),
+        ) {
+            let geometry = prepare_swept_occupancy_geometry(
+                fixture.start,
+                fixture.end,
+                fixture.block_aspect_ratio,
+                fixture.max_thickness_y,
+                fixture.max_thickness_x,
             );
-        }
-    }
-
-    #[test]
-    fn shared_sweep_geometry_materialization_is_order_independent() {
-        let start = Pose {
-            center: Point {
-                row: 10.5,
-                col: 10.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let end = Pose {
-            center: Point {
-                row: 11.0,
-                col: 13.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let mut profiles = super::super::comet_tail_profiles(198.0);
-        let max_width_scale = profiles
-            .iter()
-            .fold(0.0_f64, |max, profile| max.max(profile.width_scale));
-        let geometry = prepare_swept_occupancy_geometry(
-            start,
-            end,
-            2.0,
-            1.0 * max_width_scale,
-            1.0 * max_width_scale,
-        );
-        let materialize_profile_order = |ordered_profiles: &[super::super::TailBandProfile]| {
             let mut scratch = SweepMaterializeScratch::default();
-            ordered_profiles
-                .iter()
-                .map(|profile| {
-                    (
-                        profile.band,
-                        materialize_swept_occupancy_with_scratch(
-                            &geometry,
-                            profile.width_scale,
-                            profile.width_scale,
-                            &mut scratch,
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
+            let start_cell = (
+                fixture.start.center.row.floor() as i64,
+                fixture.start.center.col.floor() as i64,
+            );
+            let end_cell = (
+                fixture.end.center.row.floor() as i64,
+                fixture.end.center.col.floor() as i64,
+            );
 
-        let forward = materialize_profile_order(&profiles);
-        profiles.reverse();
-        let reverse = materialize_profile_order(&profiles);
+            for (band, thickness_y, thickness_x) in &fixture.band_thicknesses {
+                let direct = deposit_swept_occupancy(
+                    fixture.start,
+                    fixture.end,
+                    fixture.block_aspect_ratio,
+                    *thickness_y,
+                    *thickness_x,
+                );
+                let shared = materialize_swept_occupancy_with_scratch(
+                    &geometry,
+                    *thickness_y,
+                    *thickness_x,
+                    &mut scratch,
+                );
+                prop_assert_eq!(
+                    &shared,
+                    &direct,
+                    "shared sweep geometry should preserve direct deposition for {:?}",
+                    band,
+                );
+                let Some(bbox) = CellRect::from_microtiles(&direct) else {
+                    // Thin aligned sweeps can quantize away entirely when no microtile sample
+                    // center falls inside the swept support for this band.
+                    continue;
+                };
 
-        for band in [
-            super::super::TailBand::Sheath,
-            super::super::TailBand::Core,
-            super::super::TailBand::Filament,
-        ] {
-            let forward_tiles = forward
-                .iter()
-                .find(|(candidate_band, _)| *candidate_band == band)
-                .map(|(_, tiles)| tiles)
-                .expect("forward order should include each tail band");
-            let reverse_tiles = reverse
-                .iter()
-                .find(|(candidate_band, _)| *candidate_band == band)
-                .map(|(_, tiles)| tiles)
-                .expect("reverse order should include each tail band");
-            assert_eq!(forward_tiles, reverse_tiles);
+                prop_assert!(bbox.contains(start_cell));
+                prop_assert!(bbox.contains(end_cell));
+            }
+        }
+
+        #[test]
+        fn prop_shared_sweep_geometry_materialization_is_order_independent(
+            fixture in materialize_fixture(),
+        ) {
+            let geometry = prepare_swept_occupancy_geometry(
+                fixture.start,
+                fixture.end,
+                fixture.block_aspect_ratio,
+                fixture.max_thickness_y,
+                fixture.max_thickness_x,
+            );
+            let materialize_band_order =
+                |ordered_band_thicknesses: &[(TailBand, f64, f64)]| {
+                    let mut scratch = SweepMaterializeScratch::default();
+                    ordered_band_thicknesses
+                        .iter()
+                        .map(|(band, thickness_y, thickness_x)| {
+                            (
+                                *band,
+                                materialize_swept_occupancy_with_scratch(
+                                    &geometry,
+                                    *thickness_y,
+                                    *thickness_x,
+                                    &mut scratch,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+            let forward = materialize_band_order(&fixture.band_thicknesses);
+            let mut reversed_band_thicknesses = fixture.band_thicknesses;
+            reversed_band_thicknesses.reverse();
+            let reverse = materialize_band_order(&reversed_band_thicknesses);
+
+            for band in [TailBand::Sheath, TailBand::Core, TailBand::Filament] {
+                let forward_tiles = forward
+                    .iter()
+                    .find(|(candidate_band, _)| *candidate_band == band)
+                    .map(|(_, tiles)| tiles)
+                    .expect("forward order should include each tail band");
+                let reverse_tiles = reverse
+                    .iter()
+                    .find(|(candidate_band, _)| *candidate_band == band)
+                    .map(|(_, tiles)| tiles)
+                    .expect("reverse order should include each tail band");
+
+                prop_assert_eq!(forward_tiles, reverse_tiles);
+            }
         }
     }
 }

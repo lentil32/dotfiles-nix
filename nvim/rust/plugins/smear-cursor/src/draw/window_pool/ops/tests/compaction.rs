@@ -1,150 +1,187 @@
-#[test]
-fn global_compaction_prune_plan_selects_oldest_windows_across_tabs() {
-    let mut tabs = HashMap::from([
-        (
-            1_i32,
-            TabWindows {
-                windows: vec![cached(1, 11, 1), cached(4, 14, 4)],
-                ..TabWindows::default()
+#[derive(Clone, Copy, Debug)]
+enum CompactionLifecycleSpec {
+    AvailableVisible { last_used_epoch: u8 },
+    AvailableHidden { last_used_epoch: u8 },
+    InUse { epoch: u8 },
+    Invalid,
+}
+
+#[derive(Debug)]
+struct CompactionFixture {
+    render_tabs: HashMap<i32, TabWindows>,
+    target_budget: usize,
+    max_prune_per_tick: usize,
+}
+
+fn compaction_window_lifecycle_spec() -> BoxedStrategy<CompactionLifecycleSpec> {
+    prop_oneof![
+        any::<u8>().prop_map(|last_used_epoch| CompactionLifecycleSpec::AvailableVisible {
+            last_used_epoch,
+        }),
+        any::<u8>().prop_map(|last_used_epoch| CompactionLifecycleSpec::AvailableHidden {
+            last_used_epoch,
+        }),
+        any::<u8>().prop_map(|epoch| CompactionLifecycleSpec::InUse { epoch }),
+        Just(CompactionLifecycleSpec::Invalid),
+    ]
+    .boxed()
+}
+
+fn compaction_window(index: usize, lifecycle: CompactionLifecycleSpec) -> CachedRenderWindow {
+    let offset = i32::try_from(index).unwrap_or(i32::MAX);
+    let handles = WindowBufferHandle {
+        window_id: 10_000_i32.saturating_add(offset),
+        buffer_id: 20_000_i32.saturating_add(offset),
+    };
+    let placement = WindowPlacement {
+        row: i64::try_from(index).unwrap_or(i64::MAX),
+        col: i64::try_from(index.saturating_mul(2)).unwrap_or(i64::MAX),
+        width: 1,
+        zindex: 80,
+    };
+
+    match lifecycle {
+        CompactionLifecycleSpec::AvailableVisible { last_used_epoch } => CachedRenderWindow {
+            handles,
+            lifecycle: CachedWindowLifecycle::AvailableVisible {
+                last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
             },
-        ),
-        (
-            2_i32,
-            TabWindows {
-                windows: vec![cached(2, 12, 2), cached(3, 13, 3)],
-                ..TabWindows::default()
+            placement: Some(placement),
+        },
+        CompactionLifecycleSpec::AvailableHidden { last_used_epoch } => CachedRenderWindow {
+            handles,
+            lifecycle: CachedWindowLifecycle::AvailableHidden {
+                last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
             },
-        ),
-    ]);
-    for tab_windows in tabs.values_mut() {
-        tab_windows.seed_tracking_from_windows_for_test();
+            placement: Some(placement),
+        },
+        CompactionLifecycleSpec::InUse { epoch } => CachedRenderWindow {
+            handles,
+            lifecycle: CachedWindowLifecycle::InUse {
+                epoch: FrameEpoch(u64::from(epoch)),
+            },
+            placement: Some(placement),
+        },
+        CompactionLifecycleSpec::Invalid => CachedRenderWindow {
+            handles,
+            lifecycle: CachedWindowLifecycle::Invalid,
+            placement: None,
+        },
+    }
+}
+
+fn compaction_tab_windows(
+    tab_offset: usize,
+    lifecycles: &[CompactionLifecycleSpec],
+    cached_budget: usize,
+) -> TabWindows {
+    let base_index = tab_offset.saturating_mul(32);
+    let windows = lifecycles
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, lifecycle)| compaction_window(base_index.saturating_add(index), lifecycle))
+        .collect::<Vec<_>>();
+
+    let mut tab_windows = TabWindows {
+        windows,
+        cached_budget,
+        ..TabWindows::default()
+    };
+    tab_windows.seed_tracking_from_windows_for_test();
+    tab_windows
+}
+
+fn compaction_fixture() -> BoxedStrategy<CompactionFixture> {
+    vec(
+        (0_usize..=128, vec(compaction_window_lifecycle_spec(), 0..=16)),
+        0..=6,
+    )
+    .prop_flat_map(|tab_specs| {
+        let total_windows = tab_specs
+            .iter()
+            .map(|(_, lifecycles)| lifecycles.len())
+            .sum::<usize>();
+        let budget_limit = total_windows.saturating_add(8);
+
+        (
+            Just(tab_specs),
+            0_usize..=budget_limit,
+            0_usize..=budget_limit,
+        )
+    })
+    .prop_map(|(tab_specs, target_budget, max_prune_per_tick)| {
+        let render_tabs = tab_specs
+            .into_iter()
+            .enumerate()
+            .map(|(tab_offset, (cached_budget, lifecycles))| {
+                let tab_handle = i32::try_from(tab_offset.saturating_add(1)).unwrap_or(i32::MAX);
+                (
+                    tab_handle,
+                    compaction_tab_windows(tab_offset, &lifecycles, cached_budget),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        CompactionFixture {
+            render_tabs,
+            target_budget,
+            max_prune_per_tick,
+        }
+    })
+    .boxed()
+}
+
+proptest! {
+    #![proptest_config(pure_config())]
+
+    #[test]
+    fn prop_global_compaction_prune_plan_matches_sort_baseline_on_arbitrary_fixtures(
+        fixture in compaction_fixture(),
+    ) {
+        let expected = global_compaction_prune_plan_sort_baseline(
+            &fixture.render_tabs,
+            fixture.target_budget,
+            fixture.max_prune_per_tick,
+        );
+
+        prop_assert_eq!(
+            global_compaction_prune_plan(
+                &fixture.render_tabs,
+                fixture.target_budget,
+                fixture.max_prune_per_tick,
+            ),
+            expected,
+        );
     }
 
-    let prune_plan = global_compaction_prune_plan(&tabs, 2, 4);
+    #[test]
+    fn prop_compaction_summary_converged_to_idle_matches_budget_visibility_and_pending_work(
+        target_budget in 0_usize..=64,
+        total_windows_after in 0_usize..=64,
+        closed_visible_windows in 0_usize..=64,
+        pruned_windows in 0_usize..=64,
+        invalid_removed_windows in 0_usize..=64,
+        has_visible_windows_after in any::<bool>(),
+        has_pending_work_after in any::<bool>(),
+    ) {
+        let summary = CompactRenderWindowsSummary {
+            target_budget,
+            total_windows_after,
+            closed_visible_windows,
+            pruned_windows,
+            invalid_removed_windows,
+            has_visible_windows_after,
+            has_pending_work_after,
+        };
 
-    assert_eq!(
-        prune_plan,
-        HashMap::from([(1_i32, vec![0_usize]), (2_i32, vec![0_usize])])
-    );
-}
-
-#[test]
-fn global_compaction_prune_plan_respects_max_prune_per_tick() {
-    let mut tabs = HashMap::from([(
-        1_i32,
-        TabWindows {
-            windows: vec![
-                cached(1, 11, 1),
-                cached(2, 12, 2),
-                cached(3, 13, 3),
-                cached(4, 14, 4),
-            ],
-            ..TabWindows::default()
-        },
-    )]);
-    tabs.get_mut(&1)
-        .expect("test tab should exist")
-        .seed_tracking_from_windows_for_test();
-
-    let prune_plan = global_compaction_prune_plan(&tabs, 1, 2);
-
-    assert_eq!(prune_plan, HashMap::from([(1_i32, vec![0_usize, 1_usize])]));
-}
-
-#[test]
-fn global_compaction_prune_plan_ignores_hot_cached_budget_when_targeting_idle_budget() {
-    let mut tabs = HashMap::from([(
-        1_i32,
-        TabWindows {
-            windows: vec![
-                cached(1, 11, 1),
-                cached(2, 12, 2),
-                cached(3, 13, 3),
-                cached(4, 14, 4),
-            ],
-            cached_budget: 64,
-            ..TabWindows::default()
-        },
-    )]);
-    tabs.get_mut(&1)
-        .expect("test tab should exist")
-        .seed_tracking_from_windows_for_test();
-
-    let prune_plan = global_compaction_prune_plan(&tabs, 2, 4);
-
-    assert_eq!(prune_plan, HashMap::from([(1_i32, vec![0_usize, 1_usize])]));
-}
-
-#[test]
-fn global_compaction_prune_plan_returns_all_available_when_goal_covers_candidate_pool() {
-    let placement = WindowPlacement {
-        row: 0,
-        col: 0,
-        width: 1,
-        zindex: 50,
-    };
-    let mut tabs = HashMap::from([(
-        1_i32,
-        TabWindows {
-            windows: vec![
-                cached(1, 11, 1),
-                CachedRenderWindow::new_in_use(
-                    WindowBufferHandle {
-                        window_id: 2,
-                        buffer_id: 12,
-                    },
-                    FrameEpoch(2),
-                    placement,
-                ),
-                cached(3, 13, 3),
-                CachedRenderWindow {
-                    handles: WindowBufferHandle {
-                        window_id: 4,
-                        buffer_id: 14,
-                    },
-                    lifecycle: CachedWindowLifecycle::Invalid,
-                    placement: None,
-                },
-            ],
-            ..TabWindows::default()
-        },
-    )]);
-    tabs.get_mut(&1)
-        .expect("test tab should exist")
-        .seed_tracking_from_windows_for_test();
-
-    let prune_plan = global_compaction_prune_plan(&tabs, 0, 8);
-
-    assert_eq!(prune_plan, HashMap::from([(1_i32, vec![0_usize, 2_usize])]));
-}
-
-#[test]
-fn compaction_summary_only_converges_when_idle_budget_and_visibility_are_clear() {
-    let summary = CompactRenderWindowsSummary {
-        target_budget: 2,
-        total_windows_before: 4,
-        total_windows_after: 2,
-        closed_visible_windows: 0,
-        pruned_windows: 2,
-        invalid_removed_windows: 0,
-        has_visible_windows_after: false,
-        has_pending_work_after: false,
-    };
-
-    assert!(summary.converged_to_idle());
-
-    let still_pending = CompactRenderWindowsSummary {
-        has_pending_work_after: true,
-        ..summary
-    };
-    assert!(!still_pending.converged_to_idle());
-
-    let still_visible = CompactRenderWindowsSummary {
-        has_pending_work_after: false,
-        has_visible_windows_after: true,
-        ..summary
-    };
-    assert!(!still_visible.converged_to_idle());
+        prop_assert_eq!(
+            summary.converged_to_idle(),
+            total_windows_after <= target_budget
+                && !has_visible_windows_after
+                && !has_pending_work_after,
+        );
+    }
 }
 
 fn global_compaction_prune_plan_sort_baseline(
@@ -227,7 +264,7 @@ fn run_compaction_planner_benchmark_case(
 ) {
     let expected =
         global_compaction_prune_plan_sort_baseline(tabs, target_budget, max_prune_per_tick);
-    assert_eq!(
+    pretty_assertions::assert_eq!(
         global_compaction_prune_plan(tabs, target_budget, max_prune_per_tick),
         expected,
         "planner under test must match sort baseline for benchmark case {case_name}"
@@ -286,26 +323,20 @@ fn run_compaction_planner_benchmark_case(
     }
 }
 
-#[test]
-fn global_compaction_prune_plan_matches_sort_baseline_on_large_fixture() {
-    let tabs = benchmark_fixture_tabs(16, 128);
+mod benchmarks {
+    use super::*;
 
-    assert_eq!(
-        global_compaction_prune_plan(&tabs, 2, 64),
-        global_compaction_prune_plan_sort_baseline(&tabs, 2, 64)
-    );
-}
+    #[test]
+    #[ignore = "benchmark: run with cargo test -p nvimrs-smear-cursor benchmark_global_compaction_prune_plan --release -- --ignored --nocapture"]
+    fn benchmark_global_compaction_prune_plan_cooling_tail() {
+        let tabs = benchmark_fixture_tabs(32, 256);
+        run_compaction_planner_benchmark_case("cooling_tail", &tabs, 2, 64, 250);
+    }
 
-#[test]
-#[ignore = "benchmark: run with cargo test -p nvimrs-smear-cursor benchmark_global_compaction_prune_plan --release -- --ignored --nocapture"]
-fn benchmark_global_compaction_prune_plan_cooling_tail() {
-    let tabs = benchmark_fixture_tabs(32, 256);
-    run_compaction_planner_benchmark_case("cooling_tail", &tabs, 2, 64, 250);
-}
-
-#[test]
-#[ignore = "benchmark: run with cargo test -p nvimrs-smear-cursor benchmark_global_compaction_prune_plan --release -- --ignored --nocapture"]
-fn benchmark_global_compaction_prune_plan_wide_prune_goal() {
-    let tabs = benchmark_fixture_tabs(32, 256);
-    run_compaction_planner_benchmark_case("wide_prune_goal", &tabs, 2, 256, 200);
+    #[test]
+    #[ignore = "benchmark: run with cargo test -p nvimrs-smear-cursor benchmark_global_compaction_prune_plan --release -- --ignored --nocapture"]
+    fn benchmark_global_compaction_prune_plan_wide_prune_goal() {
+        let tabs = benchmark_fixture_tabs(32, 256);
+        run_compaction_planner_benchmark_case("wide_prune_goal", &tabs, 2, 256, 200);
+    }
 }

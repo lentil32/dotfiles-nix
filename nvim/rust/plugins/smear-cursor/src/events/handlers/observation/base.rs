@@ -18,6 +18,7 @@ use crate::events::cursor::cursor_position_read_for_mode_with_probe_policy;
 use crate::events::cursor::mode_string;
 use crate::events::handlers::viewport::cursor_location_for_core_render;
 use crate::events::handlers::viewport::maybe_scroll_shift_for_core_event;
+use crate::events::runtime::note_cursor_color_observation_boundary;
 use crate::events::runtime::now_ms;
 use crate::events::runtime::to_core_millis;
 use crate::lua::i64_from_object;
@@ -139,6 +140,11 @@ fn collect_observation_basis(
     let cursor_color_witness = if payload.request.probes().cursor_color()
         && mode_requires_cursor_color_sampling(&mode)?
     {
+        if let Err(err) = note_cursor_color_observation_boundary() {
+            crate::events::logging::warn(&format!(
+                "cursor color cache boundary update failed: {err}"
+            ));
+        }
         match current_cursor_color_probe_witness(&mode, cursor_position.position) {
             Ok(witness) => Some(witness),
             Err(err) => {

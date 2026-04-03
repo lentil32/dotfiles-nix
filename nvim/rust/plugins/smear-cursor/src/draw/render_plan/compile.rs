@@ -89,7 +89,10 @@ pub(super) fn compile_field_reference_for_state(
     state: &mut PlannerState,
 ) -> std::collections::BTreeMap<(i64, i64), CompiledCell> {
     ensure_latent_cache_current(state);
-    latent_field::compile_field_reference(&state.latent_cache)
+    latent_field::compile_field_reference_with_scratch(
+        &state.latent_cache,
+        &mut state.compiled_cache.scratch,
+    )
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use super::base::current_buffer_changedtick;
 use super::base::current_core_cursor_position;
+use crate::core::effect::CursorColorFallback;
 use crate::core::effect::CursorPositionReadPolicy;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RequestProbeEffect;
@@ -13,6 +14,7 @@ use crate::core::types::CursorPosition;
 use crate::events::cursor::mode_string;
 use crate::events::cursor::sampled_cursor_color_at_current_position;
 use crate::events::runtime::cached_cursor_color_sample_for_probe;
+use crate::events::runtime::cursor_color_cache_generation;
 use crate::events::runtime::cursor_color_colorscheme_generation;
 use crate::events::runtime::read_engine_state;
 use crate::events::runtime::record_cursor_color_cache_hit;
@@ -26,24 +28,31 @@ pub(super) fn current_cursor_color_probe_witness(
     mode: &str,
     cursor_position: Option<CursorPosition>,
 ) -> Result<CursorColorProbeWitness> {
+    let window = api::get_current_win();
+    if !window.is_valid() {
+        return Err(nvim_oxi::api::Error::Other("current window invalid".into()).into());
+    }
+
     let buffer = api::get_current_buf();
     if !buffer.is_valid() {
         return Err(nvim_oxi::api::Error::Other("current buffer invalid".into()).into());
     }
 
+    let window_handle = i64::from(window.handle());
     let buffer_handle = i64::from(buffer.handle());
     let changedtick = current_buffer_changedtick(buffer_handle)?;
     let colorscheme_generation = cursor_color_colorscheme_generation()?;
-    // cursor-color sampling can also drift via extmarks or semantic-token overlays without a
-    // changedtick bump. Keep the cache tied to the cheap shell reads we can afford on every probe
-    // edge for now; if telemetry still shows stale reuse, widen the key instead of collapsing the
-    // deferred effect boundary back into a synchronous shell read.
+    let cache_generation = cursor_color_cache_generation()?;
+    // Cursor-color reuse stays observation-scoped until the plugin has a true highlight
+    // invalidation signal that covers extmarks, semantic tokens, and ad-hoc highlight writes.
     Ok(CursorColorProbeWitness::new(
+        window_handle,
         buffer_handle,
         changedtick,
         mode.to_owned(),
         cursor_position,
         colorscheme_generation,
+        cache_generation,
     ))
 }
 
@@ -88,9 +97,11 @@ fn validate_cursor_color_probe_witness(
     current_witness: &CursorColorProbeWitness,
 ) -> ProbeReuse {
     if expected_witness.mode() != current_witness.mode()
+        || expected_witness.window_handle() != current_witness.window_handle()
         || expected_witness.buffer_handle() != current_witness.buffer_handle()
         || expected_witness.changedtick() != current_witness.changedtick()
         || expected_witness.colorscheme_generation() != current_witness.colorscheme_generation()
+        || expected_witness.cache_generation() != current_witness.cache_generation()
     {
         return ProbeReuse::RefreshRequired;
     }
@@ -105,6 +116,8 @@ fn validate_cursor_color_probe_witness(
             current_witness.cursor_position(),
         )
     {
+        // Compatible reuse is intentionally line-scoped. Column drift can reuse
+        // the carried sample, but a row change must request a refresh.
         return if expected.row == current.row {
             ProbeReuse::Compatible
         } else {
@@ -127,6 +140,18 @@ fn cursor_color_probe_validation(
     }
 }
 
+fn compatible_cursor_color_fallback_sample(
+    fallback: Option<&CursorColorFallback>,
+    probe_policy: ProbePolicy,
+    current_witness: &CursorColorProbeWitness,
+) -> Option<CursorColorSample> {
+    let fallback = fallback?;
+    match validate_cursor_color_probe_witness(fallback.witness(), probe_policy, current_witness) {
+        ProbeReuse::Exact | ProbeReuse::Compatible => Some(fallback.sample()),
+        ProbeReuse::RefreshRequired => None,
+    }
+}
+
 fn current_cursor_color_probe_validation(
     expected_witness: &CursorColorProbeWitness,
     policy: CursorPositionReadPolicy,
@@ -143,15 +168,24 @@ fn current_cursor_color_probe_validation(
         return Err(nvim_oxi::api::Error::Other("current buffer invalid".into()).into());
     }
 
+    let current_window = api::get_current_win();
+    if !current_window.is_valid() {
+        return Err(nvim_oxi::api::Error::Other("current window invalid".into()).into());
+    }
+
+    let current_window_handle = i64::from(current_window.handle());
     let current_buffer_handle = i64::from(current_buffer.handle());
     let current_changedtick = current_buffer_changedtick(current_buffer_handle)?;
     let current_colorscheme_generation = cursor_color_colorscheme_generation()?;
+    let current_cache_generation = cursor_color_cache_generation()?;
     let current_witness = CursorColorProbeWitness::new(
+        current_window_handle,
         current_buffer_handle,
         current_changedtick,
         current_mode,
         current_position.position,
         current_colorscheme_generation,
+        current_cache_generation,
     );
     Ok(cursor_color_probe_validation(
         expected_witness,
@@ -232,10 +266,19 @@ pub(super) fn collect_cursor_color_report(
     }
 
     if reuse == ProbeReuse::Compatible {
-        if let Some(sample) = payload.cursor_color_fallback_sample {
+        // Compatible fallback is safe only when the carried sample still validates against the
+        // current observation boundary. A fresh boundary invalidates the runtime color cache, so a
+        // carried sample without a matching witness must force an exact refresh instead.
+        if let Some(sample) = compatible_cursor_color_fallback_sample(
+            payload.cursor_color_fallback.as_ref(),
+            probe_policy,
+            cache_witness,
+        ) {
             return cursor_color_ready_event(payload, ProbeReuse::Compatible, Some(sample));
         }
-        crate::events::logging::warn("compatible cursor color probe missing fallback sample");
+        crate::events::logging::warn(
+            "compatible cursor color probe missing boundary-matching fallback sample",
+        );
         return cursor_color_ready_event(payload, ProbeReuse::RefreshRequired, None);
     }
 
@@ -260,161 +303,82 @@ pub(super) fn collect_cursor_color_report(
 #[cfg(test)]
 mod tests {
     use super::CursorColorProbeValidation;
+    use super::compatible_cursor_color_fallback_sample;
     use super::cursor_color_probe_validation;
     use super::validate_cursor_color_probe_witness;
+    use crate::core::effect::CursorColorFallback;
     use crate::core::effect::CursorColorFallbackMode;
     use crate::core::effect::CursorColorReuseMode;
     use crate::core::effect::CursorPositionProbeMode;
     use crate::core::effect::ProbePolicy;
     use crate::core::effect::ProbeQuality;
-    use crate::core::state::CursorColorProbeWitness;
+    use crate::core::state::CursorColorSample;
     use crate::core::state::ProbeReuse;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorPosition;
-    use crate::core::types::CursorRow;
-    use crate::core::types::Generation;
+    use crate::test_support::cursor;
+    use crate::test_support::cursor_color_probe_witness_with_cache_generation as witness_with_cache_generation;
     use pretty_assertions::assert_eq;
 
-    fn cursor(row: u32, col: u32) -> CursorPosition {
-        CursorPosition {
-            row: CursorRow(row),
-            col: CursorCol(col),
-        }
-    }
-
-    fn witness(
-        buffer_handle: i64,
-        changedtick: u64,
-        mode: &str,
-        cursor_position: Option<CursorPosition>,
-        colorscheme_generation: u64,
-    ) -> CursorColorProbeWitness {
-        CursorColorProbeWitness::new(
-            buffer_handle,
-            changedtick,
-            mode.to_string(),
-            cursor_position,
-            Generation::new(colorscheme_generation),
+    fn exact_compatible_policy() -> ProbePolicy {
+        ProbePolicy::from_modes(
+            CursorPositionProbeMode::Exact,
+            CursorColorReuseMode::CompatibleWithinLine,
+            CursorColorFallbackMode::SyntaxThenExtmarks,
         )
     }
 
     #[test]
-    fn validate_cursor_color_probe_witness_reuses_captured_snapshot_when_shell_reads_match() {
-        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
+    fn cursor_color_probe_validation_smoke_keeps_the_current_witness_for_same_line_reuse() {
+        let expected = witness_with_cache_generation(11, 22, 14, "n", Some(cursor(7, 8)), 3, 5);
+        let current = witness_with_cache_generation(11, 22, 14, "n", Some(cursor(7, 9)), 3, 5);
 
         assert_eq!(
             validate_cursor_color_probe_witness(
                 &expected,
                 ProbePolicy::new(ProbeQuality::Exact),
-                &witness(22, 14, "n", Some(cursor(7, 8)), 3),
-            ),
-            ProbeReuse::Exact,
-        );
-    }
-
-    #[test]
-    fn validate_cursor_color_probe_witness_requires_refresh_when_snapshot_goes_stale() {
-        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
-
-        assert_eq!(
-            validate_cursor_color_probe_witness(
-                &expected,
-                ProbePolicy::new(ProbeQuality::FastMotion),
-                &witness(22, 15, "n", Some(cursor(7, 8)), 3),
+                &current,
             ),
             ProbeReuse::RefreshRequired,
         );
         assert_eq!(
-            validate_cursor_color_probe_witness(
-                &expected,
-                ProbePolicy::new(ProbeQuality::FastMotion),
-                &witness(22, 14, "i", Some(cursor(7, 8)), 3),
-            ),
-            ProbeReuse::RefreshRequired,
-        );
-    }
-
-    #[test]
-    fn validate_cursor_color_probe_witness_returns_compatible_for_same_line_column_drift() {
-        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
-        let exact_compatible_policy = ProbePolicy::from_modes(
-            CursorPositionProbeMode::Exact,
-            CursorColorReuseMode::CompatibleWithinLine,
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
-
-        assert_eq!(
-            validate_cursor_color_probe_witness(
-                &expected,
-                exact_compatible_policy,
-                &witness(22, 14, "n", Some(cursor(7, 9)), 3),
-            ),
-            ProbeReuse::Compatible,
-        );
-    }
-
-    #[test]
-    fn validate_cursor_color_probe_witness_requires_refresh_for_cross_line_motion() {
-        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
-        let exact_compatible_policy = ProbePolicy::from_modes(
-            CursorPositionProbeMode::Exact,
-            CursorColorReuseMode::CompatibleWithinLine,
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
-
-        assert_eq!(
-            validate_cursor_color_probe_witness(
-                &expected,
-                exact_compatible_policy,
-                &witness(22, 14, "n", Some(cursor(8, 1)), 3),
-            ),
-            ProbeReuse::RefreshRequired,
-        );
-    }
-
-    #[test]
-    fn validate_cursor_color_probe_witness_requires_refresh_for_position_drift_in_exact_mode() {
-        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
-
-        assert_eq!(
-            validate_cursor_color_probe_witness(
-                &expected,
-                ProbePolicy::new(ProbeQuality::Exact),
-                &witness(22, 14, "n", Some(cursor(7, 9)), 3),
-            ),
-            ProbeReuse::RefreshRequired,
-        );
-    }
-
-    #[test]
-    fn cursor_color_probe_validation_tracks_current_witness_for_same_line_fast_motion_reuse() {
-        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
-        let current = witness(22, 14, "n", Some(cursor(7, 9)), 3);
-        let exact_compatible_policy = ProbePolicy::from_modes(
-            CursorPositionProbeMode::Exact,
-            CursorColorReuseMode::CompatibleWithinLine,
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
-
-        assert_eq!(
-            cursor_color_probe_validation(&expected, exact_compatible_policy, current.clone()),
+            cursor_color_probe_validation(&expected, exact_compatible_policy(), current.clone()),
             CursorColorProbeValidation::Compatible(current),
         );
     }
 
     #[test]
-    fn cursor_color_probe_validation_requires_refresh_for_cross_line_fast_motion_reuse() {
-        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
-        let current = witness(22, 14, "n", Some(cursor(8, 1)), 3);
-        let exact_compatible_policy = ProbePolicy::from_modes(
-            CursorPositionProbeMode::Exact,
-            CursorColorReuseMode::CompatibleWithinLine,
-            CursorColorFallbackMode::SyntaxThenExtmarks,
-        );
+    fn compatible_cursor_color_fallback_sample_smoke_requires_a_matching_boundary() {
+        let sample = CursorColorSample::new(42);
+        let fallback_witness =
+            witness_with_cache_generation(11, 22, 14, "n", Some(cursor(7, 8)), 3, 5);
+        let fallback = CursorColorFallback::new(sample, fallback_witness);
+        let same_line_current =
+            witness_with_cache_generation(11, 22, 14, "n", Some(cursor(7, 9)), 3, 5);
+        let stale_boundary_current =
+            witness_with_cache_generation(11, 22, 14, "n", Some(cursor(7, 9)), 3, 6);
 
         assert_eq!(
-            cursor_color_probe_validation(&expected, exact_compatible_policy, current),
-            CursorColorProbeValidation::RefreshRequired,
+            compatible_cursor_color_fallback_sample(
+                Some(&fallback),
+                ProbePolicy::new(ProbeQuality::FastMotion),
+                &same_line_current,
+            ),
+            Some(sample),
+        );
+        assert_eq!(
+            compatible_cursor_color_fallback_sample(
+                Some(&fallback),
+                ProbePolicy::new(ProbeQuality::FastMotion),
+                &stale_boundary_current,
+            ),
+            None,
+        );
+        assert_eq!(
+            compatible_cursor_color_fallback_sample(
+                Some(&fallback),
+                ProbePolicy::new(ProbeQuality::Exact),
+                &same_line_current,
+            ),
+            None,
         );
     }
 }

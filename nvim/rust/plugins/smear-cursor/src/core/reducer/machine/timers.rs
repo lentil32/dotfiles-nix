@@ -12,8 +12,6 @@ use super::support::schedule_timer_with_delay;
 use super::support::start_boundary_refresh_observation;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::TimerKind;
-use crate::core::event::TimerFiredWithTokenEvent;
-use crate::core::event::TimerLostWithTokenEvent;
 use crate::core::state::CoreState;
 use crate::core::types::Millis;
 use crate::core::types::TimerToken;
@@ -51,7 +49,7 @@ fn reduce_ingress_timer_signal(state: CoreState, observed_at: Millis) -> Transit
     transition_ready_or_observe(cleared_state, observed_at)
 }
 
-fn reduce_timer_signal_with_token(
+pub(super) fn reduce_timer_signal_with_token(
     state: CoreState,
     token: TimerToken,
     observed_at: Millis,
@@ -116,18 +114,4 @@ fn reduce_timer_signal_with_token(
             }
         }
     }
-}
-
-pub(super) fn reduce_timer_fired_with_token(
-    state: CoreState,
-    payload: TimerFiredWithTokenEvent,
-) -> Transition {
-    reduce_timer_signal_with_token(state, payload.token, payload.observed_at)
-}
-
-pub(super) fn reduce_timer_lost_with_token(
-    state: CoreState,
-    payload: TimerLostWithTokenEvent,
-) -> Transition {
-    reduce_timer_signal_with_token(state, payload.token, payload.observed_at)
 }

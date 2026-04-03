@@ -2,6 +2,8 @@ use nvim_oxi::api;
 use std::collections::HashMap;
 use thiserror::Error;
 
+use crate::core::types::impl_u64_counter_methods;
+
 pub(crate) const ADAPTIVE_POOL_MIN_BUDGET: usize = 32;
 pub(crate) const ADAPTIVE_POOL_HARD_MAX_BUDGET: usize = 256;
 const ADAPTIVE_POOL_BUDGET_MARGIN: usize = 8;
@@ -36,11 +38,9 @@ struct FrameEpoch(u64);
 
 impl FrameEpoch {
     const ZERO: Self = Self(0);
-
-    fn next(self) -> Self {
-        Self(self.0.wrapping_add(1))
-    }
 }
+
+impl_u64_counter_methods!(FrameEpoch, next = wrapping_add;);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CachedWindowLifecycle {
@@ -132,6 +132,13 @@ enum EpochRollover {
     InvalidUnchanged,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrackedWindowIndex {
+    InUse,
+    VisibleAvailable,
+    Reusable,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CachedRenderWindow {
     handles: WindowBufferHandle,
@@ -140,19 +147,6 @@ struct CachedRenderWindow {
 }
 
 impl CachedRenderWindow {
-    #[cfg(test)]
-    fn new_in_use(
-        handles: WindowBufferHandle,
-        epoch: FrameEpoch,
-        placement: WindowPlacement,
-    ) -> Self {
-        Self {
-            handles,
-            lifecycle: CachedWindowLifecycle::InUse { epoch },
-            placement: Some(placement),
-        }
-    }
-
     fn new_available_hidden(handles: WindowBufferHandle, last_used_epoch: FrameEpoch) -> Self {
         Self {
             handles,
@@ -307,7 +301,6 @@ pub(crate) struct ReleaseUnusedSummary {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CompactRenderWindowsSummary {
     pub(crate) target_budget: usize,
-    pub(crate) total_windows_before: usize,
     pub(crate) total_windows_after: usize,
     pub(crate) closed_visible_windows: usize,
     pub(crate) pruned_windows: usize,
@@ -457,28 +450,26 @@ impl TabWindows {
         }
     }
 
-    fn register_in_use_index(&mut self, index: usize) {
-        Self::track_index_insert(&mut self.in_use_indices, &mut self.in_use_slots, index);
-    }
-
-    fn unregister_in_use_index(&mut self, index: usize) {
-        Self::track_index_remove(&mut self.in_use_indices, &mut self.in_use_slots, index);
-    }
-
-    fn register_visible_available_index(&mut self, index: usize) {
-        Self::track_index_insert(
-            &mut self.visible_available_indices,
-            &mut self.visible_available_slots,
-            index,
-        );
-    }
-
-    fn unregister_visible_available_index(&mut self, index: usize) {
-        Self::track_index_remove(
-            &mut self.visible_available_indices,
-            &mut self.visible_available_slots,
-            index,
-        );
+    fn track_window_index(&mut self, tracked: TrackedWindowIndex, index: usize) {
+        match tracked {
+            TrackedWindowIndex::InUse => {
+                Self::track_index_insert(&mut self.in_use_indices, &mut self.in_use_slots, index);
+            }
+            TrackedWindowIndex::VisibleAvailable => {
+                Self::track_index_insert(
+                    &mut self.visible_available_indices,
+                    &mut self.visible_available_slots,
+                    index,
+                );
+            }
+            TrackedWindowIndex::Reusable => {
+                Self::track_index_insert(
+                    &mut self.reusable_window_indices,
+                    &mut self.reusable_window_slots,
+                    index,
+                );
+            }
+        }
     }
 
     fn take_visible_available_indices_for_hide(&mut self) -> Vec<usize> {
@@ -487,20 +478,26 @@ impl TabWindows {
         indices
     }
 
-    fn register_reusable_index(&mut self, index: usize) {
-        Self::track_index_insert(
-            &mut self.reusable_window_indices,
-            &mut self.reusable_window_slots,
-            index,
-        );
-    }
-
-    fn unregister_reusable_index(&mut self, index: usize) {
-        Self::track_index_remove(
-            &mut self.reusable_window_indices,
-            &mut self.reusable_window_slots,
-            index,
-        );
+    fn untrack_window_index(&mut self, tracked: TrackedWindowIndex, index: usize) {
+        match tracked {
+            TrackedWindowIndex::InUse => {
+                Self::track_index_remove(&mut self.in_use_indices, &mut self.in_use_slots, index);
+            }
+            TrackedWindowIndex::VisibleAvailable => {
+                Self::track_index_remove(
+                    &mut self.visible_available_indices,
+                    &mut self.visible_available_slots,
+                    index,
+                );
+            }
+            TrackedWindowIndex::Reusable => {
+                Self::track_index_remove(
+                    &mut self.reusable_window_indices,
+                    &mut self.reusable_window_slots,
+                    index,
+                );
+            }
+        }
     }
 
     fn register_available_placement_index(
@@ -568,16 +565,16 @@ impl TabWindows {
             .add_assign(WindowLifecycleCounters::single(lifecycle));
         match lifecycle {
             CachedWindowLifecycle::AvailableVisible { .. } => {
-                self.register_reusable_index(index);
-                self.register_visible_available_index(index);
+                self.track_window_index(TrackedWindowIndex::Reusable, index);
+                self.track_window_index(TrackedWindowIndex::VisibleAvailable, index);
                 self.register_available_placement_index(index, placement);
             }
             CachedWindowLifecycle::AvailableHidden { .. } => {
-                self.register_reusable_index(index);
+                self.track_window_index(TrackedWindowIndex::Reusable, index);
                 self.register_available_placement_index(index, placement);
             }
             CachedWindowLifecycle::InUse { .. } => {
-                self.register_in_use_index(index);
+                self.track_window_index(TrackedWindowIndex::InUse, index);
             }
             CachedWindowLifecycle::Invalid => {}
         }
@@ -592,15 +589,15 @@ impl TabWindows {
         match lifecycle {
             CachedWindowLifecycle::AvailableVisible { .. } => {
                 self.unregister_available_placement_index(index);
-                self.unregister_visible_available_index(index);
-                self.unregister_reusable_index(index);
+                self.untrack_window_index(TrackedWindowIndex::VisibleAvailable, index);
+                self.untrack_window_index(TrackedWindowIndex::Reusable, index);
             }
             CachedWindowLifecycle::AvailableHidden { .. } => {
                 self.unregister_available_placement_index(index);
-                self.unregister_reusable_index(index);
+                self.untrack_window_index(TrackedWindowIndex::Reusable, index);
             }
             CachedWindowLifecycle::InUse { .. } => {
-                self.unregister_in_use_index(index);
+                self.untrack_window_index(TrackedWindowIndex::InUse, index);
             }
             CachedWindowLifecycle::Invalid => {
                 let _ = placement;
@@ -780,10 +777,9 @@ impl TabWindows {
 
     #[cfg(test)]
     fn assert_tracking_consistent(&self) {
-        assert_eq!(
-            self.tracking_snapshot_from_bookkeeping(),
-            self.tracking_snapshot_from_windows(),
-            "render window bookkeeping drifted from lifecycle truth"
+        crate::test_support::assertions::assert_tracking_consistent(
+            &self.tracking_snapshot_from_bookkeeping(),
+            &self.tracking_snapshot_from_windows(),
         );
     }
 

@@ -1,17 +1,16 @@
 use crate::core::state::BufferPerfClass;
 use crate::types::BASE_TIME_INTERVAL;
 use crate::types::StaticRenderConfig;
-#[cfg(test)]
-use nvimrs_nvim_utils::mode::is_cmdline_mode;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
 use nvimrs_nvim_utils::mode::is_replace_like_mode;
-#[cfg(test)]
-use nvimrs_nvim_utils::mode::is_terminal_like_mode;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 pub(crate) const DEFAULT_ANIMATION_FPS: f64 = 144.0;
 pub(crate) const DEFAULT_BLOCK_ASPECT_RATIO: f64 = 2.0;
+// Keep the default cap aligned with the measured window-switch scenarios: the
+// refreshed `perf/window-pool-cap-current.md` snapshot peaks at 18 requested
+// windows with zero cap hits, so 64 still leaves more than 3x burst headroom.
 pub(crate) const DEFAULT_MAX_KEPT_WINDOWS: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -81,14 +80,6 @@ pub(crate) struct RuntimeConfig {
     pub(crate) animate_command_line: bool,
     pub(crate) smear_to_cmd: bool,
     pub(crate) hide_target_hack: bool,
-    pub(crate) jump_cues_enabled: bool,
-    pub(crate) jump_cue_min_display_distance: f64,
-    pub(crate) jump_cue_duration_ms: f64,
-    pub(crate) jump_cue_strength: f64,
-    pub(crate) jump_cue_max_chain: u8,
-    pub(crate) jump_intent_window_ms: f64,
-    pub(crate) cross_window_jump_bridges: bool,
-    pub(crate) cross_window_bridge_strength_scale: f64,
     pub(crate) max_kept_windows: usize,
     pub(crate) windows_zindex: u32,
     pub(crate) buffer_perf_mode: BufferPerfMode,
@@ -133,21 +124,6 @@ impl RuntimeConfig {
             return BASE_TIME_INTERVAL;
         }
         (1000.0 / fps).max(1.0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mode_allowed(&self, mode: &str) -> bool {
-        if is_insert_like_mode(mode) {
-            self.smear_insert_mode
-        } else if is_replace_like_mode(mode) {
-            self.smear_replace_mode
-        } else if is_terminal_like_mode(mode) {
-            self.smear_terminal_mode
-        } else if is_cmdline_mode(mode) {
-            self.smear_to_cmd
-        } else {
-            true
-        }
     }
 
     pub(crate) fn cursor_is_vertical_bar(&self, mode: &str) -> bool {
@@ -236,14 +212,6 @@ impl Default for RuntimeConfig {
             animate_command_line: true,
             smear_to_cmd: true,
             hide_target_hack: false,
-            jump_cues_enabled: true,
-            jump_cue_min_display_distance: 16.0,
-            jump_cue_duration_ms: 84.0,
-            jump_cue_strength: 1.0,
-            jump_cue_max_chain: 3,
-            jump_intent_window_ms: 40.0,
-            cross_window_jump_bridges: true,
-            cross_window_bridge_strength_scale: 1.0,
             // Keep the peak pool cap distinct from the adaptive retained-budget ceiling.
             // Cleanup already converges retained windows toward the adaptive budget floor, but
             // one hot frame can still need more simultaneous windows than we keep warm when idle.
@@ -322,125 +290,109 @@ mod tests {
     use super::BufferPerfMode;
     use super::DEFAULT_MAX_KEPT_WINDOWS;
     use super::RuntimeConfig;
+    use crate::test_support::proptest::ModeFamily;
+    use crate::test_support::proptest::mode_family;
+    use crate::test_support::proptest::pure_config;
+    use crate::test_support::proptest::representative_mode;
+    use proptest::prelude::*;
 
-    fn mode_filter_fixture() -> RuntimeConfig {
-        RuntimeConfig {
-            smear_insert_mode: false,
-            smear_replace_mode: false,
-            smear_terminal_mode: false,
-            smear_to_cmd: false,
-            ..RuntimeConfig::default()
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_cursor_is_vertical_bar_depends_only_on_insert_mode_family(
+            mode_family in mode_family(),
+            vertical_bar_cursor in any::<bool>(),
+            vertical_bar_cursor_insert_mode in any::<bool>(),
+            horizontal_bar_cursor_replace_mode in any::<bool>(),
+            cursor_color in prop_oneof![
+                Just(None),
+                Just(Some("#112233".to_string())),
+                Just(Some("none".to_string())),
+            ],
+            cursor_color_insert_mode in prop_oneof![
+                Just(None),
+                Just(Some("#445566".to_string())),
+                Just(Some("none".to_string())),
+            ],
+        ) {
+            let config = RuntimeConfig {
+                vertical_bar_cursor,
+                vertical_bar_cursor_insert_mode,
+                horizontal_bar_cursor_replace_mode,
+                cursor_color,
+                cursor_color_insert_mode,
+                ..RuntimeConfig::default()
+            };
+            let mode = representative_mode(mode_family);
+
+            let expected = if mode_family == ModeFamily::Insert {
+                vertical_bar_cursor_insert_mode
+            } else {
+                vertical_bar_cursor
+            };
+
+            prop_assert_eq!(config.cursor_is_vertical_bar(mode), expected);
         }
-    }
 
-    #[test]
-    fn mode_allowed_rejects_insert_composite_modes_when_insert_smear_is_disabled() {
-        let config = mode_filter_fixture();
-        assert!(!config.mode_allowed("ic"));
-    }
+        #[test]
+        fn prop_cursor_is_horizontal_bar_depends_only_on_replace_mode_family(
+            mode_family in mode_family(),
+            horizontal_bar_cursor_replace_mode in any::<bool>(),
+            vertical_bar_cursor in any::<bool>(),
+            vertical_bar_cursor_insert_mode in any::<bool>(),
+        ) {
+            let config = RuntimeConfig {
+                vertical_bar_cursor,
+                vertical_bar_cursor_insert_mode,
+                horizontal_bar_cursor_replace_mode,
+                ..RuntimeConfig::default()
+            };
+            let mode = representative_mode(mode_family);
 
-    #[test]
-    fn mode_allowed_accepts_insert_composite_modes_when_insert_smear_is_enabled() {
-        let mut config = mode_filter_fixture();
-        config.smear_insert_mode = true;
-        assert!(config.mode_allowed("ic"));
-    }
+            let expected = mode_family == ModeFamily::Replace && horizontal_bar_cursor_replace_mode;
 
-    #[test]
-    fn mode_allowed_rejects_replace_composite_modes_when_replace_smear_is_disabled() {
-        let config = mode_filter_fixture();
-        assert!(!config.mode_allowed("Rc"));
-    }
+            prop_assert_eq!(config.cursor_is_horizontal_bar(mode), expected);
+        }
 
-    #[test]
-    fn mode_allowed_accepts_replace_composite_modes_when_replace_smear_is_enabled() {
-        let mut config = mode_filter_fixture();
-        config.smear_replace_mode = true;
-        assert!(config.mode_allowed("Rc"));
-    }
+        #[test]
+        fn prop_requires_cursor_color_sampling_uses_active_mode_family(
+            mode_family in mode_family(),
+            normal_mode_uses_sampling in any::<bool>(),
+            insert_mode_uses_sampling in any::<bool>(),
+            horizontal_bar_cursor_replace_mode in any::<bool>(),
+        ) {
+            let config = RuntimeConfig {
+                cursor_color: Some(if normal_mode_uses_sampling {
+                    "none".to_string()
+                } else {
+                    "#112233".to_string()
+                }),
+                cursor_color_insert_mode: Some(if insert_mode_uses_sampling {
+                    "none".to_string()
+                } else {
+                    "#445566".to_string()
+                }),
+                horizontal_bar_cursor_replace_mode,
+                ..RuntimeConfig::default()
+            };
+            let mode = representative_mode(mode_family);
 
-    #[test]
-    fn mode_allowed_rejects_cmdline_composite_modes_when_cmdline_smear_is_disabled() {
-        let config = mode_filter_fixture();
-        assert!(!config.mode_allowed("cv"));
-    }
+            let expected = if mode_family == ModeFamily::Insert {
+                insert_mode_uses_sampling
+            } else {
+                normal_mode_uses_sampling
+            };
 
-    #[test]
-    fn mode_allowed_accepts_cmdline_composite_modes_when_cmdline_smear_is_enabled() {
-        let mut config = mode_filter_fixture();
-        config.smear_to_cmd = true;
-        assert!(config.mode_allowed("cv"));
-    }
-
-    #[test]
-    fn mode_allowed_rejects_terminal_normal_mode_without_terminal_smear() {
-        let config = mode_filter_fixture();
-        assert!(!config.mode_allowed("nt"));
-    }
-
-    #[test]
-    fn mode_allowed_accepts_terminal_normal_mode_with_terminal_smear() {
-        let mut config = mode_filter_fixture();
-        config.smear_terminal_mode = true;
-        assert!(config.mode_allowed("nt"));
-    }
-
-    #[test]
-    fn mode_allowed_rejects_terminal_pending_mode_without_terminal_smear() {
-        let config = mode_filter_fixture();
-        assert!(!config.mode_allowed("ntT"));
-    }
-
-    #[test]
-    fn mode_allowed_accepts_terminal_pending_mode_with_terminal_smear() {
-        let mut config = mode_filter_fixture();
-        config.smear_terminal_mode = true;
-        assert!(config.mode_allowed("ntT"));
-    }
-
-    #[test]
-    fn mode_allowed_keeps_normal_mode_enabled_without_composite_flags() {
-        let config = mode_filter_fixture();
-        assert!(config.mode_allowed("n"));
-    }
-
-    #[test]
-    fn cursor_is_vertical_bar_uses_insert_mode_family_flag() {
-        let config = RuntimeConfig {
-            vertical_bar_cursor: false,
-            vertical_bar_cursor_insert_mode: true,
-            horizontal_bar_cursor_replace_mode: true,
-            ..RuntimeConfig::default()
-        };
-
-        assert!(config.cursor_is_vertical_bar("ic"));
-        assert!(!config.cursor_is_vertical_bar("n"));
-    }
-
-    #[test]
-    fn cursor_is_horizontal_bar_uses_replace_mode_family_flag() {
-        let config = RuntimeConfig {
-            vertical_bar_cursor: false,
-            vertical_bar_cursor_insert_mode: true,
-            horizontal_bar_cursor_replace_mode: true,
-            ..RuntimeConfig::default()
-        };
-
-        assert!(config.cursor_is_horizontal_bar("Rc"));
-        assert!(!config.cursor_is_horizontal_bar("n"));
-    }
-
-    #[test]
-    fn requires_cursor_color_sampling_uses_active_mode_family() {
-        let config = RuntimeConfig {
-            cursor_color: Some("#112233".to_string()),
-            cursor_color_insert_mode: Some("none".to_string()),
-            ..RuntimeConfig::default()
-        };
-
-        assert!(!config.requires_cursor_color_sampling_for_mode("n"));
-        assert!(config.requires_cursor_color_sampling_for_mode("ic"));
-        assert!(!config.requires_cursor_color_sampling_for_mode("Rc"));
+            prop_assert_eq!(
+                config.requires_cursor_color_sampling_for_mode(mode),
+                expected
+            );
+            prop_assert_eq!(
+                config.requires_cursor_color_sampling(),
+                normal_mode_uses_sampling || insert_mode_uses_sampling
+            );
+        }
     }
 
     #[test]

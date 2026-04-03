@@ -166,7 +166,6 @@ pub(crate) fn compact_tabs_to_budget(
 ) -> CompactRenderWindowsSummary {
     let mut summary = CompactRenderWindowsSummary {
         target_budget,
-        total_windows_before: total_window_count(render_tabs),
         ..CompactRenderWindowsSummary::default()
     };
     let mut tab_handles = render_tabs.keys().copied().collect::<Vec<_>>();

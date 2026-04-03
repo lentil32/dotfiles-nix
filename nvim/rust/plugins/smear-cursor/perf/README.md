@@ -17,9 +17,9 @@ Call that out in the commit message when it happens.
 
 Reviewers should verify these expectations after rerunning the reports:
 
-- Adaptive policy: `auto` should degrade to `auto_fast` / `raw_syntax` for the pressure-heavy scenarios, and the expensive probe counters should drop relative to `full` when pressure is driving the mode.
+- Adaptive policy: the effective buffer mode should degrade to `auto_fast` for the pressure-heavy scenarios, the probe policy should shift toward `raw_syntax` when pressure is driving it, and the expensive probe counters should drop relative to `full`.
 - Planner compile: the bounded local-query path should stay competitive on baseline time, worst-case spikes should remain explainable, and the emitted planner telemetry should match the realized path.
-- Window cap: the local side should represent the candidate default, cap hits should remain visible, and any slower scenario needs an explicit tradeoff before the smaller cap ships.
+- Window cap: the local side should represent the shipped `64` default, cap hits should remain visible, and the report should still show why that smaller cap is acceptable relative to the measured peak demand.
 - Particle toggle: both runs should share the same deterministic trajectory, only `SMEAR_PARTICLES_ENABLED` should differ, and the particle tax should stay explicit in the report.
 
 Regenerate the adaptive buffer-policy snapshot with:
@@ -55,4 +55,5 @@ plugins/smear-cursor/scripts/compare_window_pool_cap_perf.sh
 ```
 
 This capture reuses the same window-switch code on both sides and only changes
-`SMEAR_MAX_KEPT_WINDOWS` between the local (`64`) and base (`384`) runs.
+`SMEAR_MAX_KEPT_WINDOWS` between the local shipped default (`64`) and the base
+comparison value (`384`).

@@ -1,724 +1,762 @@
-#[test]
-fn available_window_index_for_placement_returns_matching_available_window() {
-    let target = WindowPlacement {
-        row: 14,
-        col: 22,
-        width: 1,
-        zindex: 300,
-    };
-    let mut tab_windows = TabWindows {
-        windows: vec![
-            cached(10, 110, 1),
-            CachedRenderWindow::new_in_use(
-                WindowBufferHandle {
-                    window_id: 20,
-                    buffer_id: 120,
-                },
-                FrameEpoch(9),
-                target,
-            ),
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 30,
-                    buffer_id: 130,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(7),
-                },
-                placement: Some(target),
+#[derive(Clone, Copy, Debug)]
+enum ReuseLifecycleSpec {
+    AvailableVisible { last_used_epoch: u8 },
+    AvailableHidden { last_used_epoch: u8 },
+    InUse { epoch: u8 },
+    Invalid,
+}
+
+impl ReuseLifecycleSpec {
+    fn is_visible_available(self) -> bool {
+        matches!(self, Self::AvailableVisible { .. })
+    }
+
+    fn as_cached_window_lifecycle(self) -> CachedWindowLifecycle {
+        match self {
+            Self::AvailableVisible { last_used_epoch } => CachedWindowLifecycle::AvailableVisible {
+                last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
             },
-        ],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
-
-    let selected = available_window_index_for_placement(&tab_windows, target);
-    assert_eq!(selected, Some(2));
-
-    let previous_lifecycle = tab_windows.windows[2].lifecycle;
-    let previous_placement = tab_windows.windows[2].placement;
-    tab_windows.windows[2].lifecycle = CachedWindowLifecycle::InUse {
-        epoch: FrameEpoch(10),
-    };
-    let next_lifecycle = tab_windows.windows[2].lifecycle;
-    let next_placement = tab_windows.windows[2].placement;
-    tab_windows.track_window_transition(
-        2,
-        previous_lifecycle,
-        previous_placement,
-        next_lifecycle,
-        next_placement,
-    );
-    assert_eq!(
-        available_window_index_for_placement(&tab_windows, target),
-        None
-    );
-}
-
-#[test]
-fn rollover_releases_in_use_window_from_previous_epoch() {
-    let handles = WindowBufferHandle {
-        window_id: 10,
-        buffer_id: 11,
-    };
-    let mut cached = CachedRenderWindow::new_in_use(
-        handles,
-        FrameEpoch(9),
-        WindowPlacement {
-            row: 4,
-            col: 8,
-            width: 1,
-            zindex: 100,
-        },
-    );
-    assert_eq!(
-        cached.rollover_to_next_epoch(FrameEpoch(9)),
-        EpochRollover::ReleasedForReuse
-    );
-    assert_eq!(cached.available_epoch(), Some(FrameEpoch(9)));
-    assert!(cached.is_available_for_reuse());
-    assert!(cached.should_hide());
-    cached.mark_hidden();
-    assert!(!cached.should_hide());
-}
-
-#[test]
-fn rollover_recovers_stale_in_use_window() {
-    let handles = WindowBufferHandle {
-        window_id: 20,
-        buffer_id: 21,
-    };
-    let mut cached = CachedRenderWindow::new_in_use(
-        handles,
-        FrameEpoch(3),
-        WindowPlacement {
-            row: 7,
-            col: 3,
-            width: 1,
-            zindex: 100,
-        },
-    );
-    assert_eq!(
-        cached.rollover_to_next_epoch(FrameEpoch(5)),
-        EpochRollover::RecoveredStaleInUse
-    );
-    assert_eq!(cached.available_epoch(), Some(FrameEpoch(3)));
-    assert!(cached.is_available_for_reuse());
-    assert!(cached.should_hide());
-    cached.mark_hidden();
-    assert!(!cached.should_hide());
-}
-
-#[test]
-fn lru_prune_indices_empty_when_budget_sufficient() {
-    let windows = vec![cached(1, 10, 7), cached(2, 20, 8)];
-    assert!(lru_prune_indices(&windows, 2).is_empty());
-}
-
-#[test]
-fn lru_prune_indices_removes_oldest_epochs_deterministically() {
-    let windows = vec![
-        cached(1, 10, 9),
-        CachedRenderWindow::new_in_use(
-            WindowBufferHandle {
-                window_id: 90,
-                buffer_id: 99,
+            Self::AvailableHidden { last_used_epoch } => CachedWindowLifecycle::AvailableHidden {
+                last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
             },
-            FrameEpoch(9),
-            WindowPlacement {
-                row: 3,
-                col: 9,
-                width: 1,
-                zindex: 100,
+            Self::InUse { epoch } => CachedWindowLifecycle::InUse {
+                epoch: FrameEpoch(u64::from(epoch)),
             },
-        ),
-        cached(2, 20, 1),
-        cached(3, 30, 4),
-        cached(4, 40, 1),
-        cached(5, 50, 7),
-    ];
+            Self::Invalid => CachedWindowLifecycle::Invalid,
+        }
+    }
 
-    assert_eq!(lru_prune_indices(&windows, 3), vec![2, 4]);
+    fn rollover(self, previous_epoch: FrameEpoch) -> Self {
+        match self {
+            Self::AvailableVisible { last_used_epoch } => Self::AvailableVisible { last_used_epoch },
+            Self::AvailableHidden { last_used_epoch } => Self::AvailableHidden { last_used_epoch },
+            Self::InUse { epoch } if u64::from(epoch) == previous_epoch.0 => {
+                Self::AvailableVisible {
+                    last_used_epoch: epoch,
+                }
+            }
+            Self::InUse { epoch } => Self::AvailableVisible {
+                last_used_epoch: epoch,
+            },
+            Self::Invalid => Self::Invalid,
+        }
+    }
 }
 
-#[test]
-fn cached_window_needs_reconfigure_only_when_placement_or_visibility_changes() {
-    let placement = WindowPlacement {
-        row: 10,
-        col: 20,
-        width: 1,
-        zindex: 30,
-    };
-    let mut cached = CachedRenderWindow {
+#[derive(Clone, Copy, Debug)]
+enum ReusePayloadOp {
+    Store { window_id: u8, payload_hash: u16 },
+    Clear { window_id: u8 },
+    Query { window_id: u8, payload_hash: u16 },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReuseAcquireCandidateSpec {
+    MatchingValid,
+    MatchingMissingWindow,
+    MatchingMissingBuffer,
+    Invalid,
+}
+
+fn reuse_lifecycle_spec() -> BoxedStrategy<ReuseLifecycleSpec> {
+    prop_oneof![
+        any::<u8>().prop_map(|last_used_epoch| ReuseLifecycleSpec::AvailableVisible {
+            last_used_epoch,
+        }),
+        any::<u8>().prop_map(|last_used_epoch| ReuseLifecycleSpec::AvailableHidden {
+            last_used_epoch,
+        }),
+        any::<u8>().prop_map(|epoch| ReuseLifecycleSpec::InUse { epoch }),
+        Just(ReuseLifecycleSpec::Invalid),
+    ]
+    .boxed()
+}
+
+fn reuse_payload_op() -> BoxedStrategy<ReusePayloadOp> {
+    prop_oneof![
+        (0_u8..=7, any::<u16>()).prop_map(|(window_id, payload_hash)| ReusePayloadOp::Store {
+            window_id,
+            payload_hash,
+        }),
+        (0_u8..=7).prop_map(|window_id| ReusePayloadOp::Clear { window_id }),
+        (0_u8..=7, any::<u16>()).prop_map(|(window_id, payload_hash)| ReusePayloadOp::Query {
+            window_id,
+            payload_hash,
+        }),
+    ]
+    .boxed()
+}
+
+fn reuse_acquire_candidate_spec() -> BoxedStrategy<ReuseAcquireCandidateSpec> {
+    prop_oneof![
+        Just(ReuseAcquireCandidateSpec::MatchingValid),
+        Just(ReuseAcquireCandidateSpec::MatchingMissingWindow),
+        Just(ReuseAcquireCandidateSpec::MatchingMissingBuffer),
+        Just(ReuseAcquireCandidateSpec::Invalid),
+    ]
+    .boxed()
+}
+
+fn reuse_remove_fixture() -> BoxedStrategy<(Vec<(ReuseLifecycleSpec, u8)>, usize)> {
+    vec((reuse_lifecycle_spec(), 0_u8..=3), 1..=16)
+        .prop_flat_map(|specs| {
+            let len = specs.len();
+            (Just(specs), 0_usize..len)
+        })
+        .boxed()
+}
+
+fn reuse_placement(key: u8) -> WindowPlacement {
+    let row_offset = i64::from(key);
+    WindowPlacement {
+        row: 10_i64.saturating_add(row_offset),
+        col: 20_i64.saturating_add(row_offset.saturating_mul(3)),
+        width: u32::from(key % 3).saturating_add(1),
+        zindex: 100_u32.saturating_add(u32::from(key)),
+    }
+}
+
+fn reuse_cached_window(
+    index: usize,
+    lifecycle: ReuseLifecycleSpec,
+    placement_key: u8,
+) -> CachedRenderWindow {
+    let offset = i32::try_from(index).unwrap_or(i32::MAX);
+    CachedRenderWindow {
         handles: WindowBufferHandle {
-            window_id: 77,
-            buffer_id: 88,
+            window_id: 1_000_i32.saturating_add(offset),
+            buffer_id: 2_000_i32.saturating_add(offset),
+        },
+        lifecycle: lifecycle.as_cached_window_lifecycle(),
+        placement: (!matches!(lifecycle, ReuseLifecycleSpec::Invalid))
+            .then_some(reuse_placement(placement_key)),
+    }
+}
+
+fn reuse_matching_visible_window(index: usize, placement: WindowPlacement) -> CachedRenderWindow {
+    let offset = i32::try_from(index).unwrap_or(i32::MAX);
+    CachedRenderWindow {
+        handles: WindowBufferHandle {
+            window_id: 10_000_i32.saturating_add(offset),
+            buffer_id: 20_000_i32.saturating_add(offset),
         },
         lifecycle: CachedWindowLifecycle::AvailableVisible {
-            last_used_epoch: FrameEpoch(5),
+            last_used_epoch: FrameEpoch(1),
         },
         placement: Some(placement),
-    };
-
-    assert!(!cached.needs_reconfigure(placement));
-    assert!(cached.needs_reconfigure(WindowPlacement {
-        row: 10,
-        col: 21,
-        width: 1,
-        zindex: 30,
-    }));
-
-    cached.mark_hidden();
-    assert!(cached.needs_reconfigure(placement));
+    }
 }
 
-#[test]
-fn tab_windows_payload_cache_matches_and_clears() {
-    let mut tab_windows = TabWindows::default();
-    assert!(!tab_windows.cached_payload_matches(101, 111));
-
-    tab_windows.cache_payload(101, 111);
-    assert!(tab_windows.cached_payload_matches(101, 111));
-    assert!(!tab_windows.cached_payload_matches(101, 222));
-
-    tab_windows.cache_payload(101, 222);
-    assert!(tab_windows.cached_payload_matches(101, 222));
-    assert!(!tab_windows.cached_payload_matches(101, 111));
-
-    tab_windows.clear_payload(101);
-    assert!(!tab_windows.cached_payload_matches(101, 222));
+fn reuse_hidden_warm_spare(index: usize) -> CachedRenderWindow {
+    let offset = i32::try_from(index).unwrap_or(i32::MAX);
+    CachedRenderWindow {
+        handles: WindowBufferHandle {
+            window_id: 30_000_i32.saturating_add(offset),
+            buffer_id: 40_000_i32.saturating_add(offset),
+        },
+        lifecycle: CachedWindowLifecycle::AvailableHidden {
+            last_used_epoch: FrameEpoch(1),
+        },
+        placement: None,
+    }
 }
 
-#[test]
-fn swap_remove_window_retains_exact_tracking_for_moved_window() {
-    let placement = WindowPlacement {
-        row: 1,
-        col: 2,
-        width: 1,
-        zindex: 90,
-    };
-    let mut tab_windows = TabWindows {
-        windows: vec![
-            CachedRenderWindow::new_in_use(
-                WindowBufferHandle {
-                    window_id: 1,
-                    buffer_id: 101,
-                },
-                FrameEpoch(1),
-                placement,
-            ),
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 2,
-                    buffer_id: 102,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(2),
-                },
-                placement: Some(placement),
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 3,
-                    buffer_id: 103,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableHidden {
-                    last_used_epoch: FrameEpoch(3),
-                },
-                placement: Some(placement),
-            },
-        ],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
-
-    let removed = tab_windows
-        .swap_remove_window(1)
-        .expect("tracked window should be removable");
-
-    assert_eq!(removed.handles.window_id, 2);
-    assert_eq!(tab_windows.windows.len(), 2);
-    assert_eq!(tab_windows.reusable_window_indices, vec![1]);
-    assert_eq!(tab_windows.in_use_indices, vec![0]);
-    assert_eq!(
-        tab_windows.placement_window_index(placement),
-        Some(1),
-        "the hidden window moved from the tail should retarget its placement entry"
-    );
-    tab_windows.assert_tracking_consistent();
-}
-
-#[test]
-fn taking_visible_available_indices_clears_slots_before_followup_hide_transition() {
-    let placement = WindowPlacement {
-        row: 8,
-        col: 9,
-        width: 2,
-        zindex: 70,
-    };
-    let mut tab_windows = TabWindows {
-        windows: vec![CachedRenderWindow {
+fn reuse_acquire_candidate_window(
+    index: usize,
+    spec: ReuseAcquireCandidateSpec,
+    placement: WindowPlacement,
+) -> CachedRenderWindow {
+    let offset = i32::try_from(index).unwrap_or(i32::MAX);
+    match spec {
+        ReuseAcquireCandidateSpec::MatchingValid => CachedRenderWindow {
             handles: WindowBufferHandle {
-                window_id: 11,
-                buffer_id: 111,
-            },
-            lifecycle: CachedWindowLifecycle::AvailableVisible {
-                last_used_epoch: FrameEpoch(4),
-            },
-            placement: Some(placement),
-        }],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
-
-    let hide_indices = tab_windows.take_visible_available_indices_for_hide();
-    assert_eq!(hide_indices, vec![0]);
-    assert_eq!(tab_windows.visible_available_indices, Vec::<usize>::new());
-    assert_eq!(tab_windows.visible_available_slots, vec![None]);
-
-    let previous_lifecycle = tab_windows.windows[0].lifecycle;
-    let previous_placement = tab_windows.windows[0].placement;
-    tab_windows.windows[0].mark_hidden();
-    let next_lifecycle = tab_windows.windows[0].lifecycle;
-    let next_placement = tab_windows.windows[0].placement;
-    tab_windows.track_window_transition(
-        0,
-        previous_lifecycle,
-        previous_placement,
-        next_lifecycle,
-        next_placement,
-    );
-
-    assert_eq!(tab_windows.visible_available_indices, Vec::<usize>::new());
-    assert_eq!(tab_windows.reusable_window_indices, vec![0]);
-    assert_eq!(
-        available_window_index_for_placement(&tab_windows, placement),
-        Some(0)
-    );
-    tab_windows.assert_tracking_consistent();
-}
-
-#[test]
-fn rollover_in_use_windows_releases_tracked_windows() {
-    let previous_epoch = FrameEpoch(12);
-    let mut tab_windows = TabWindows {
-        windows: vec![
-            CachedRenderWindow::new_in_use(
-                WindowBufferHandle {
-                    window_id: 31,
-                    buffer_id: 41,
-                },
-                previous_epoch,
-                WindowPlacement {
-                    row: 1,
-                    col: 1,
-                    width: 1,
-                    zindex: 40,
-                },
-            ),
-            CachedRenderWindow::new_in_use(
-                WindowBufferHandle {
-                    window_id: 32,
-                    buffer_id: 42,
-                },
-                previous_epoch,
-                WindowPlacement {
-                    row: 1,
-                    col: 2,
-                    width: 1,
-                    zindex: 40,
-                },
-            ),
-        ],
-        in_use_indices: vec![0, 1, 99],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
-
-    rollover_in_use_windows(&mut tab_windows, previous_epoch);
-
-    assert!(tab_windows.in_use_indices.is_empty());
-    assert_eq!(tab_windows.visible_available_indices, vec![0, 1]);
-    assert!(
-        tab_windows
-            .windows
-            .iter()
-            .all(|cached| cached.is_available_for_reuse() && cached.should_hide())
-    );
-}
-
-#[test]
-fn rollover_populates_available_placement_index_without_rebuild() {
-    let placement = WindowPlacement {
-        row: 8,
-        col: 13,
-        width: 1,
-        zindex: 40,
-    };
-    let previous_epoch = FrameEpoch(12);
-    let mut tab_windows = TabWindows {
-        windows: vec![CachedRenderWindow::new_in_use(
-            WindowBufferHandle {
-                window_id: 31,
-                buffer_id: 41,
-            },
-            previous_epoch,
-            placement,
-        )],
-        in_use_indices: vec![0],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
-
-    rollover_in_use_windows(&mut tab_windows, previous_epoch);
-
-    assert_eq!(
-        available_window_index_for_placement(&tab_windows, placement),
-        Some(0)
-    );
-}
-
-#[test]
-fn changing_reuse_placement_drops_stale_key_and_tracks_new_one_next_frame() {
-    let old_placement = WindowPlacement {
-        row: 10,
-        col: 20,
-        width: 1,
-        zindex: 300,
-    };
-    let new_placement = WindowPlacement {
-        row: 11,
-        col: 24,
-        width: 1,
-        zindex: 300,
-    };
-    let mut tab_windows = TabWindows {
-        windows: vec![CachedRenderWindow {
-            handles: WindowBufferHandle {
-                window_id: 11,
-                buffer_id: 111,
+                window_id: 50_000_i32.saturating_add(offset),
+                buffer_id: 60_000_i32.saturating_add(offset),
             },
             lifecycle: CachedWindowLifecycle::AvailableVisible {
                 last_used_epoch: FrameEpoch(1),
             },
-            placement: Some(old_placement),
-        }],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
-    let previous_lifecycle = tab_windows.windows[0].lifecycle;
-    let previous_placement = tab_windows.windows[0].placement;
-    assert!(tab_windows.windows[0].mark_in_use(FrameEpoch(2)));
-    tab_windows.windows[0].set_placement(new_placement);
-    let next_lifecycle = tab_windows.windows[0].lifecycle;
-    let next_placement = tab_windows.windows[0].placement;
-    tab_windows.track_window_transition(
-        0,
-        previous_lifecycle,
-        previous_placement,
-        next_lifecycle,
-        next_placement,
-    );
-
-    assert!(
-        !tab_windows
-            .available_windows_by_placement
-            .contains_key(&old_placement)
-    );
-
-    begin_tab_frame(&mut tab_windows, 0);
-
-    assert_eq!(
-        available_window_index_for_placement(&tab_windows, new_placement),
-        Some(0)
-    );
-    assert!(
-        !tab_windows
-            .available_windows_by_placement
-            .contains_key(&old_placement)
-    );
-    tab_windows.assert_tracking_consistent();
+            placement: Some(placement),
+        },
+        ReuseAcquireCandidateSpec::MatchingMissingWindow => CachedRenderWindow {
+            handles: WindowBufferHandle {
+                window_id: -50_000_i32.saturating_sub(offset),
+                buffer_id: 60_000_i32.saturating_add(offset),
+            },
+            lifecycle: CachedWindowLifecycle::AvailableVisible {
+                last_used_epoch: FrameEpoch(1),
+            },
+            placement: Some(placement),
+        },
+        ReuseAcquireCandidateSpec::MatchingMissingBuffer => CachedRenderWindow {
+            handles: WindowBufferHandle {
+                window_id: 50_000_i32.saturating_add(offset),
+                buffer_id: -60_000_i32.saturating_sub(offset),
+            },
+            lifecycle: CachedWindowLifecycle::AvailableVisible {
+                last_used_epoch: FrameEpoch(1),
+            },
+            placement: Some(placement),
+        },
+        ReuseAcquireCandidateSpec::Invalid => CachedRenderWindow {
+            handles: WindowBufferHandle {
+                window_id: -70_000_i32.saturating_sub(offset),
+                buffer_id: -80_000_i32.saturating_sub(offset),
+            },
+            lifecycle: CachedWindowLifecycle::Invalid,
+            placement: None,
+        },
+    }
 }
 
-#[test]
-fn prepared_pool_supports_expected_number_of_reuse_acquires() {
-    let placement = WindowPlacement {
-        row: 10,
-        col: 20,
-        width: 1,
-        zindex: 300,
-    };
+fn reuse_tab_windows_from_specs(
+    specs: &[(ReuseLifecycleSpec, u8)],
+    cached_budget: usize,
+) -> TabWindows {
+    let windows = specs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, (lifecycle, placement_key))| {
+            reuse_cached_window(index, lifecycle, placement_key)
+        })
+        .collect::<Vec<_>>();
+
     let mut tab_windows = TabWindows {
-        windows: vec![
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 11,
-                    buffer_id: 111,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 12,
-                    buffer_id: 112,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 13,
-                    buffer_id: 113,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-        ],
+        windows,
+        cached_budget,
         ..TabWindows::default()
     };
     tab_windows.seed_tracking_from_windows_for_test();
-    let mut tabs = tabs_with(tab_windows);
+    tab_windows
+}
 
-    for _ in 0..3 {
-        let acquired = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly)
-            .expect("prepared pool must satisfy expected reuse demand");
-        assert_eq!(acquired.reuse_failures, ReuseFailureCounters::default());
+fn reuse_window_signature(
+    cached: CachedRenderWindow,
+) -> (i32, i32, CachedWindowLifecycle, Option<WindowPlacement>) {
+    (
+        cached.handles.window_id,
+        cached.handles.buffer_id,
+        cached.lifecycle,
+        cached.placement,
+    )
+}
+
+fn reuse_window_signatures(
+    windows: &[CachedRenderWindow],
+) -> Vec<(i32, i32, CachedWindowLifecycle, Option<WindowPlacement>)> {
+    windows
+        .iter()
+        .copied()
+        .map(reuse_window_signature)
+        .collect()
+}
+
+fn reuse_available_window_index_baseline(
+    windows: &[CachedRenderWindow],
+    placement: WindowPlacement,
+) -> Option<usize> {
+    windows.iter().enumerate().rev().find_map(|(index, cached)| {
+        (cached.available_epoch().is_some() && cached.placement == Some(placement)).then_some(index)
+    })
+}
+
+fn reuse_lru_prune_indices_baseline(
+    windows: &[CachedRenderWindow],
+    keep_count: usize,
+) -> Vec<usize> {
+    let mut available = windows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cached)| cached.available_epoch().map(|epoch| (epoch, index)))
+        .collect::<Vec<_>>();
+    if available.len() <= keep_count {
+        return Vec::new();
     }
 
-    let err = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly)
-        .expect_err("fourth acquire should exhaust a three-window prepared pool");
-    assert_eq!(
-        err,
-        AcquireError::Exhausted {
-            allocation_policy: AllocationPolicy::ReuseOnly,
-        }
-    );
+    available.sort_unstable();
+    let remove_count = available.len().saturating_sub(keep_count);
+    let mut remove_indices = available
+        .into_iter()
+        .take(remove_count)
+        .map(|(_, index)| index)
+        .collect::<Vec<_>>();
+    remove_indices.sort_unstable();
+    remove_indices
 }
 
-#[test]
-fn acquire_failure_removes_only_failed_candidate_and_defers_other_invalid_cleanup() {
-    let placement = WindowPlacement {
-        row: 10,
-        col: 20,
-        width: 1,
-        zindex: 300,
-    };
-    let mut tab_windows = TabWindows {
-        windows: vec![
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: -90,
-                    buffer_id: -190,
-                },
-                lifecycle: CachedWindowLifecycle::Invalid,
-                placement: None,
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: -11,
-                    buffer_id: -111,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: -12,
-                    buffer_id: -112,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-        ],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
+fn reuse_single_acquire_reference(
+    mut windows: Vec<CachedRenderWindow>,
+    placement: WindowPlacement,
+) -> (
+    std::result::Result<(i32, ReuseFailureCounters), AcquireError>,
+    Vec<CachedRenderWindow>,
+) {
     let mut reuse_failures = ReuseFailureCounters::default();
 
-    match super::try_reuse_cached_window_at_index(&mut tab_windows, 2, placement) {
-        super::ReuseAttempt::Failed {
-            reason,
-            index,
-            window_id,
-        } => {
-            super::record_reuse_failure(
-                &mut tab_windows,
-                1,
-                &mut reuse_failures,
-                reason,
-                index,
-                window_id,
+    loop {
+        let candidate_index = windows.iter().enumerate().rev().find_map(|(index, cached)| {
+            (cached.available_epoch().is_some() && cached.placement == Some(placement))
+                .then_some(index)
+        });
+        let Some(index) = candidate_index else {
+            return (
+                Err(AcquireError::Exhausted {
+                    allocation_policy: AllocationPolicy::ReuseOnly,
+                }),
+                windows,
             );
+        };
+
+        let cached = windows[index];
+        if cached.handles.window_id <= 0 {
+            reuse_failures.missing_window = reuse_failures.missing_window.saturating_add(1);
+            let _ = windows.swap_remove(index);
+            continue;
         }
-        super::ReuseAttempt::Reused(_) | super::ReuseAttempt::NotCandidate => {
-            panic!("expected the stale reuse candidate to fail")
+        if cached.handles.buffer_id <= 0 {
+            reuse_failures.missing_buffer = reuse_failures.missing_buffer.saturating_add(1);
+            let _ = windows.swap_remove(index);
+            continue;
+        }
+
+        windows[index].lifecycle = CachedWindowLifecycle::InUse {
+            epoch: FrameEpoch(0),
+        };
+        windows[index].placement = Some(placement);
+        return (Ok((cached.handles.window_id, reuse_failures)), windows);
+    }
+}
+
+proptest! {
+    #![proptest_config(pure_config())]
+
+    #[test]
+    fn prop_available_window_index_for_placement_matches_reverse_scan(
+        specs in vec((reuse_lifecycle_spec(), 0_u8..=3), 0..=16),
+        target_key in 0_u8..=3,
+    ) {
+        let tab_windows = reuse_tab_windows_from_specs(&specs, ADAPTIVE_POOL_MIN_BUDGET);
+        let target = reuse_placement(target_key);
+
+        prop_assert_eq!(
+            available_window_index_for_placement(&tab_windows, target),
+            reuse_available_window_index_baseline(&tab_windows.windows, target),
+        );
+    }
+
+    #[test]
+    fn prop_rollover_in_use_windows_matches_reference_lifecycles_and_tracking(
+        specs in vec((reuse_lifecycle_spec(), 0_u8..=3), 0..=16),
+        previous_epoch in any::<u8>(),
+    ) {
+        let previous_epoch = FrameEpoch(u64::from(previous_epoch));
+        let mut tab_windows = reuse_tab_windows_from_specs(&specs, ADAPTIVE_POOL_MIN_BUDGET);
+
+        rollover_in_use_windows(&mut tab_windows, previous_epoch);
+
+        let expected_lifecycles = specs
+            .iter()
+            .copied()
+            .map(|(lifecycle, _)| lifecycle.rollover(previous_epoch).as_cached_window_lifecycle())
+            .collect::<Vec<_>>();
+        let actual_lifecycles = tab_windows
+            .windows
+            .iter()
+            .map(|cached| cached.lifecycle)
+            .collect::<Vec<_>>();
+
+        prop_assert_eq!(actual_lifecycles, expected_lifecycles);
+        tab_windows.assert_tracking_consistent();
+    }
+
+    #[test]
+    fn prop_lru_prune_indices_matches_sort_baseline(
+        specs in vec((reuse_lifecycle_spec(), 0_u8..=3), 0..=16),
+        keep_count in 0_usize..=16,
+    ) {
+        let windows = specs
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, (lifecycle, placement_key))| {
+                reuse_cached_window(index, lifecycle, placement_key)
+            })
+            .collect::<Vec<_>>();
+
+        prop_assert_eq!(
+            lru_prune_indices(&windows, keep_count),
+            reuse_lru_prune_indices_baseline(&windows, keep_count),
+        );
+    }
+
+    #[test]
+    fn prop_cached_window_needs_reconfigure_matches_visibility_and_placement_rule(
+        lifecycle in reuse_lifecycle_spec(),
+        placement_key in 0_u8..=3,
+        target_key in 0_u8..=3,
+    ) {
+        let cached = reuse_cached_window(0, lifecycle, placement_key);
+        let target = reuse_placement(target_key);
+        let expected = !matches!(
+            lifecycle,
+            ReuseLifecycleSpec::AvailableVisible { .. } | ReuseLifecycleSpec::InUse { .. }
+        ) || cached.placement != Some(target);
+
+        prop_assert_eq!(cached.needs_reconfigure(target), expected);
+    }
+
+    #[test]
+    fn prop_payload_cache_matches_hash_map_reference_model(
+        ops in vec(reuse_payload_op(), 0..=64),
+    ) {
+        let mut tab_windows = TabWindows::default();
+        let mut expected = HashMap::<i32, u64>::new();
+
+        for op in ops {
+            match op {
+                ReusePayloadOp::Store {
+                    window_id,
+                    payload_hash,
+                } => {
+                    let window_id = 100_i32.saturating_add(i32::from(window_id));
+                    let payload_hash = u64::from(payload_hash);
+                    tab_windows.cache_payload(window_id, payload_hash);
+                    expected.insert(window_id, payload_hash);
+                }
+                ReusePayloadOp::Clear { window_id } => {
+                    let window_id = 100_i32.saturating_add(i32::from(window_id));
+                    tab_windows.clear_payload(window_id);
+                    expected.remove(&window_id);
+                }
+                ReusePayloadOp::Query {
+                    window_id,
+                    payload_hash,
+                } => {
+                    let window_id = 100_i32.saturating_add(i32::from(window_id));
+                    let payload_hash = u64::from(payload_hash);
+                    prop_assert_eq!(
+                        tab_windows.cached_payload_matches(window_id, payload_hash),
+                        expected.get(&window_id).is_some_and(|cached| *cached == payload_hash),
+                    );
+                }
+            }
         }
     }
 
-    assert_eq!(
-        reuse_failures,
-        ReuseFailureCounters {
-            missing_window: 1,
-            ..ReuseFailureCounters::default()
+    #[test]
+    fn prop_swap_remove_window_matches_vector_swap_remove_and_preserves_tracking(
+        (specs, remove_index) in reuse_remove_fixture(),
+    ) {
+        let mut tab_windows = reuse_tab_windows_from_specs(&specs, ADAPTIVE_POOL_MIN_BUDGET);
+        let payloads = tab_windows
+            .windows
+            .iter()
+            .copied()
+            .map(|cached| {
+                (
+                    cached.handles.window_id,
+                    u64::try_from(cached.handles.window_id).unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (window_id, payload_hash) in payloads {
+            tab_windows.cache_payload(
+                window_id,
+                payload_hash,
+            );
         }
-    );
-    assert_eq!(
-        tab_windows.windows.len(),
-        2,
-        "acquire should remove only the failed candidate from the hot path"
-    );
-    assert!(tab_windows.has_invalid_windows());
-    tab_windows.assert_tracking_consistent();
-}
 
-#[test]
-fn frame_capacity_target_keeps_one_reuse_only_spare() {
-    assert_eq!(
-        frame_capacity_target(0, 3, 16, AllocationPolicy::ReuseOnly),
-        FrameCapacityTarget {
-            requested_capacity: 4,
-            target_capacity: 4,
-        }
-    );
-    assert_eq!(
-        frame_capacity_target(2, 3, 16, AllocationPolicy::ReuseOnly),
-        FrameCapacityTarget {
-            requested_capacity: 6,
-            target_capacity: 6,
-        }
-    );
-}
+        let mut expected_windows = tab_windows.windows.clone();
+        let expected_removed = expected_windows.swap_remove(remove_index);
+        let removed = tab_windows
+            .swap_remove_window(remove_index)
+            .expect("fixture index should be removable");
 
-#[test]
-fn frame_capacity_target_stays_exact_for_bootstrap_and_empty_frames() {
-    assert_eq!(
-        frame_capacity_target(0, 3, 16, AllocationPolicy::BootstrapIfPoolEmpty),
-        FrameCapacityTarget {
-            requested_capacity: 3,
-            target_capacity: 3,
+        prop_assert_eq!(
+            reuse_window_signature(removed),
+            reuse_window_signature(expected_removed),
+        );
+        prop_assert_eq!(
+            reuse_window_signatures(&tab_windows.windows),
+            reuse_window_signatures(&expected_windows),
+        );
+        prop_assert!(
+            !tab_windows.cached_payload_matches(
+                expected_removed.handles.window_id,
+                u64::try_from(expected_removed.handles.window_id).unwrap_or_default(),
+            )
+        );
+        for cached in expected_windows {
+            prop_assert!(tab_windows.cached_payload_matches(
+                cached.handles.window_id,
+                u64::try_from(cached.handles.window_id).unwrap_or_default(),
+            ));
         }
-    );
-    assert_eq!(
-        frame_capacity_target(0, 0, 16, AllocationPolicy::ReuseOnly),
-        FrameCapacityTarget {
-            requested_capacity: 0,
-            target_capacity: 0,
-        }
-    );
-}
+        tab_windows.assert_tracking_consistent();
+    }
 
-#[test]
-fn frame_capacity_target_respects_max_kept_windows() {
-    assert_eq!(
-        frame_capacity_target(3, 3, 6, AllocationPolicy::ReuseOnly),
-        FrameCapacityTarget {
-            requested_capacity: 7,
-            target_capacity: 6,
-        }
-    );
-    assert_eq!(
-        frame_capacity_target(3, 3, 5, AllocationPolicy::BootstrapIfPoolEmpty),
-        FrameCapacityTarget {
-            requested_capacity: 6,
-            target_capacity: 5,
-        }
-    );
-}
+    #[test]
+    fn prop_take_visible_available_indices_followed_by_hide_matches_lifecycle_truth(
+        specs in vec((reuse_lifecycle_spec(), 0_u8..=3), 0..=16),
+    ) {
+        let mut tab_windows = reuse_tab_windows_from_specs(&specs, ADAPTIVE_POOL_MIN_BUDGET);
+        let expected_hide_indices = specs
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(index, (lifecycle, _))| lifecycle.is_visible_available().then_some(index))
+            .collect::<Vec<_>>();
 
-#[test]
-fn frame_capacity_target_can_exceed_adaptive_retention_hard_max_for_peak_draws() {
-    let max_kept_windows = ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(32);
-    let target = frame_capacity_target(
-        ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_sub(16),
-        24,
-        max_kept_windows,
-        AllocationPolicy::ReuseOnly,
-    );
+        let hide_indices = tab_windows.take_visible_available_indices_for_hide();
+        prop_assert_eq!(hide_indices.as_slice(), expected_hide_indices.as_slice());
 
-    assert_eq!(
-        target,
-        FrameCapacityTarget {
-            requested_capacity: ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(9),
-            target_capacity: ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(9),
+        for index in hide_indices {
+            let previous_lifecycle = tab_windows.windows[index].lifecycle;
+            let previous_placement = tab_windows.windows[index].placement;
+            tab_windows.windows[index].mark_hidden();
+            let next_lifecycle = tab_windows.windows[index].lifecycle;
+            let next_placement = tab_windows.windows[index].placement;
+            tab_windows.track_window_transition(
+                index,
+                previous_lifecycle,
+                previous_placement,
+                next_lifecycle,
+                next_placement,
+            );
         }
-    );
-    assert!(target.target_capacity > ADAPTIVE_POOL_HARD_MAX_BUDGET);
-}
 
-#[test]
-fn warm_spare_does_not_change_matching_reuse_order_for_same_span_plan() {
-    let placement = WindowPlacement {
-        row: 10,
-        col: 20,
-        width: 1,
-        zindex: 300,
-    };
-    let mut tab_windows = TabWindows {
-        windows: vec![
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 11,
-                    buffer_id: 111,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 12,
-                    buffer_id: 112,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 13,
-                    buffer_id: 113,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: Some(placement),
-            },
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 14,
-                    buffer_id: 114,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableHidden {
-                    last_used_epoch: FrameEpoch(1),
-                },
-                placement: None,
-            },
+        let expected_lifecycles = specs
+            .iter()
+            .copied()
+            .map(|(lifecycle, _)| match lifecycle {
+                ReuseLifecycleSpec::AvailableVisible { last_used_epoch } => {
+                    CachedWindowLifecycle::AvailableHidden {
+                        last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
+                    }
+                }
+                _ => lifecycle.as_cached_window_lifecycle(),
+            })
+            .collect::<Vec<_>>();
+        let actual_lifecycles = tab_windows
+            .windows
+            .iter()
+            .map(|cached| cached.lifecycle)
+            .collect::<Vec<_>>();
+
+        prop_assert_eq!(actual_lifecycles, expected_lifecycles);
+        tab_windows.assert_tracking_consistent();
+    }
+
+    #[test]
+    fn prop_changing_reuse_placement_only_tracks_the_new_key_after_next_frame(
+        old_key in 0_u8..=3,
+        new_key in 0_u8..=3,
+    ) {
+        let new_key = if new_key == old_key {
+            new_key.saturating_add(1) % 4
+        } else {
+            new_key
+        };
+        let old_placement = reuse_placement(old_key);
+        let new_placement = reuse_placement(new_key);
+        let mut tab_windows = reuse_tab_windows_from_specs(
+            &[(ReuseLifecycleSpec::AvailableVisible { last_used_epoch: 1 }, old_key)],
+            ADAPTIVE_POOL_MIN_BUDGET,
+        );
+
+        let previous_lifecycle = tab_windows.windows[0].lifecycle;
+        let previous_placement = tab_windows.windows[0].placement;
+        prop_assert!(tab_windows.windows[0].mark_in_use(tab_windows.current_epoch));
+        tab_windows.windows[0].set_placement(new_placement);
+        let next_lifecycle = tab_windows.windows[0].lifecycle;
+        let next_placement = tab_windows.windows[0].placement;
+        tab_windows.track_window_transition(
+            0,
+            previous_lifecycle,
+            previous_placement,
+            next_lifecycle,
+            next_placement,
+        );
+
+        prop_assert_eq!(
+            available_window_index_for_placement(&tab_windows, old_placement),
+            None,
+        );
+
+        begin_tab_frame(&mut tab_windows, 0);
+
+        prop_assert_eq!(
+            available_window_index_for_placement(&tab_windows, new_placement),
+            Some(0),
+        );
+        prop_assert_eq!(
+            available_window_index_for_placement(&tab_windows, old_placement),
+            None,
+        );
+        tab_windows.assert_tracking_consistent();
+    }
+
+    #[test]
+    fn prop_matching_visible_pool_supports_exact_reuse_capacity_then_exhausts(
+        matching_visible_count in 0_usize..=8,
+    ) {
+        let placement = reuse_placement(0);
+        let mut tab_windows = TabWindows {
+            windows: (0..matching_visible_count)
+                .map(|index| reuse_matching_visible_window(index, placement))
+                .collect(),
+            ..TabWindows::default()
+        };
+        tab_windows.seed_tracking_from_windows_for_test();
+        let mut tabs = tabs_with(tab_windows);
+
+        let acquired_window_ids = (0..matching_visible_count)
+            .map(|_| {
+                let acquired = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly)
+                    .expect("prepared matching pool should satisfy expected reuse demand");
+                prop_assert_eq!(acquired.reuse_failures, ReuseFailureCounters::default());
+                Ok::<i32, TestCaseError>(acquired.window_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let expected_window_ids = (0..matching_visible_count)
+            .rev()
+            .map(|index| {
+                let offset = i32::try_from(index).unwrap_or(i32::MAX);
+                10_000_i32.saturating_add(offset)
+            })
+            .collect::<Vec<_>>();
+        prop_assert_eq!(acquired_window_ids, expected_window_ids);
+        let exhausted = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly);
+        prop_assert_eq!(
+            exhausted.err(),
+            Some(AcquireError::Exhausted {
+                allocation_policy: AllocationPolicy::ReuseOnly,
+            }),
+        );
+    }
+
+    #[test]
+    fn prop_hidden_warm_spares_do_not_change_matching_reuse_order(
+        matching_visible_count in 0_usize..=8,
+        warm_spare_count in 0_usize..=4,
+    ) {
+        let placement = reuse_placement(1);
+        let mut windows = (0..matching_visible_count)
+            .map(|index| reuse_matching_visible_window(index, placement))
+            .collect::<Vec<_>>();
+        windows.extend(
+            (0..warm_spare_count)
+                .map(|index| reuse_hidden_warm_spare(index.saturating_add(matching_visible_count))),
+        );
+        let mut tab_windows = TabWindows {
+            windows,
+            ..TabWindows::default()
+        };
+        tab_windows.seed_tracking_from_windows_for_test();
+        let mut tabs = tabs_with(tab_windows);
+
+        let acquired_window_ids = (0..matching_visible_count)
+            .map(|_| {
+                let acquired = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly)
+                    .expect("matching visible windows should be reused before any hidden spare");
+                prop_assert_eq!(acquired.reuse_failures, ReuseFailureCounters::default());
+                Ok::<i32, TestCaseError>(acquired.window_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let expected_window_ids = (0..matching_visible_count)
+            .rev()
+            .map(|index| {
+                let offset = i32::try_from(index).unwrap_or(i32::MAX);
+                10_000_i32.saturating_add(offset)
+            })
+            .collect::<Vec<_>>();
+        prop_assert_eq!(acquired_window_ids, expected_window_ids);
+    }
+
+    #[test]
+    fn prop_single_reuse_acquire_matches_failure_cleanup_reference_model(
+        specs in vec(reuse_acquire_candidate_spec(), 0..=12),
+    ) {
+        let placement = reuse_placement(2);
+        let windows = specs
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, spec)| reuse_acquire_candidate_window(index, spec, placement))
+            .collect::<Vec<_>>();
+        let mut tab_windows = TabWindows {
+            windows: windows.clone(),
+            ..TabWindows::default()
+        };
+        tab_windows.seed_tracking_from_windows_for_test();
+
+        let (expected_result, expected_windows) = reuse_single_acquire_reference(windows, placement);
+        let actual_result = super::acquire_in_tab(
+            &mut tab_windows,
+            1,
+            placement,
+            AllocationPolicy::ReuseOnly,
+        );
+
+        match (actual_result, expected_result) {
+            (Ok(actual), Ok((expected_window_id, expected_failures))) => {
+                prop_assert_eq!(actual.window_id, expected_window_id);
+                prop_assert_eq!(actual.reuse_failures, expected_failures);
+            }
+            (Err(actual), Err(expected)) => {
+                prop_assert_eq!(actual, expected);
+            }
+            (actual, expected) => {
+                prop_assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            }
+        }
+
+        prop_assert_eq!(
+            reuse_window_signatures(&tab_windows.windows),
+            reuse_window_signatures(&expected_windows),
+        );
+        tab_windows.assert_tracking_consistent();
+    }
+
+    #[test]
+    fn prop_frame_capacity_target_matches_reference_formula(
+        in_use_windows in 0_usize..=64,
+        planned_windows in 0_usize..=64,
+        max_kept_windows in 0_usize..=64,
+        allocation_policy in prop_oneof![
+            Just(AllocationPolicy::ReuseOnly),
+            Just(AllocationPolicy::BootstrapIfPoolEmpty),
         ],
-        ..TabWindows::default()
-    };
-    tab_windows.seed_tracking_from_windows_for_test();
-    let mut tabs = tabs_with(tab_windows);
+    ) {
+        let required_capacity = in_use_windows.saturating_add(planned_windows);
+        let warm_spare = match allocation_policy {
+            AllocationPolicy::ReuseOnly => 1,
+            AllocationPolicy::BootstrapIfPoolEmpty => 0,
+        };
+        let expected = if required_capacity == 0 {
+            FrameCapacityTarget {
+                requested_capacity: 0,
+                target_capacity: 0,
+            }
+        } else {
+            let requested_capacity = required_capacity.saturating_add(warm_spare);
+            FrameCapacityTarget {
+                requested_capacity,
+                target_capacity: requested_capacity.min(max_kept_windows),
+            }
+        };
 
-    let acquired_window_ids: Vec<i32> = (0..3)
-        .map(|_| {
-            acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly)
-                .expect("prepared pool must satisfy expected reuse demand")
-                .window_id
-        })
-        .collect();
-
-    assert_eq!(acquired_window_ids, vec![13, 12, 11]);
+        prop_assert_eq!(
+            frame_capacity_target(
+                in_use_windows,
+                planned_windows,
+                max_kept_windows,
+                allocation_policy,
+            ),
+            expected,
+        );
+    }
 }

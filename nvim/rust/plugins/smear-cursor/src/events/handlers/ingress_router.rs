@@ -24,7 +24,6 @@ use crate::core::state::BufferPerfClass;
 use crate::core::state::ExternalDemandKind;
 use crate::core::types::Millis;
 use crate::draw::clear_highlight_cache;
-use crate::types::ScreenCell;
 use nvim_oxi::Result;
 use nvim_oxi::api;
 
@@ -93,7 +92,8 @@ fn collect_ingress_cursor_presentation_request(
     Ok(IngressCursorPresentationRequest::new(
         mode_allowed,
         smear_outside_cmd_row(&current_corners)?,
-        ScreenCell::from_rounded_point(current_corners[0]),
+        snapshot.current_visual_cursor_cell(),
+        snapshot.current_visual_cursor_shape(),
     ))
 }
 
@@ -229,6 +229,7 @@ mod tests {
     use super::CursorAutocmdPreflight;
     use super::build_cursor_autocmd_events;
     use super::cursor_autocmd_preflight;
+    use super::demand_kind_for_autocmd;
     use super::should_coalesce_window_follow_up_autocmd;
     use crate::config::BufferPerfMode;
     use crate::core::effect::IngressCursorPresentationRequest;
@@ -236,222 +237,160 @@ mod tests {
     use crate::core::event::ExternalDemandQueuedEvent;
     use crate::core::event::InitializeEvent;
     use crate::core::state::BufferPerfClass;
-    use crate::core::state::ExternalDemandKind;
     use crate::core::types::Millis;
     use crate::events::ingress::AutocmdIngress;
     use crate::events::runtime::IngressReadSnapshot;
+    use crate::events::runtime::IngressReadSnapshotTestInput;
     use crate::state::CursorLocation;
+    use crate::test_support::proptest::pure_config;
+    use crate::types::CursorCellShape;
     use crate::types::Point;
+    use proptest::prelude::*;
 
     fn presentation() -> IngressCursorPresentationRequest {
-        IngressCursorPresentationRequest::new(true, true, None)
+        IngressCursorPresentationRequest::new(true, true, None, CursorCellShape::Block)
     }
 
-    fn snapshot_with_perf_class(buffer_perf_class: Option<BufferPerfClass>) -> IngressReadSnapshot {
-        IngressReadSnapshot::new_for_test(
-            true,
-            false,
-            [Point::ZERO; 4],
-            Some(CursorLocation::new(11, 22, 3, 4)),
-            (true, true, true, true),
-            BufferPerfMode::Auto,
-            0.0,
-            buffer_perf_class,
-            Vec::new(),
-        )
+    fn autocmd_ingress_strategy() -> BoxedStrategy<AutocmdIngress> {
+        prop_oneof![
+            Just(AutocmdIngress::CmdlineChanged),
+            Just(AutocmdIngress::CursorMoved),
+            Just(AutocmdIngress::CursorMovedInsert),
+            Just(AutocmdIngress::ModeChanged),
+            Just(AutocmdIngress::WinEnter),
+            Just(AutocmdIngress::WinScrolled),
+            Just(AutocmdIngress::BufEnter),
+        ]
+        .boxed()
     }
 
-    #[test]
-    fn cursor_autocmd_builder_batches_initialize_and_cursor_observation() {
-        let observed_at = Millis::new(21);
+    fn perf_class_strategy() -> BoxedStrategy<Option<BufferPerfClass>> {
+        prop_oneof![
+            Just(None),
+            Just(Some(BufferPerfClass::Full)),
+            Just(Some(BufferPerfClass::FastMotion)),
+            Just(Some(BufferPerfClass::Skip)),
+        ]
+        .boxed()
+    }
 
-        let events = build_cursor_autocmd_events(
-            AutocmdIngress::CursorMoved,
-            observed_at,
-            true,
-            BufferPerfClass::Full,
-            Some(presentation()),
-        );
+    fn snapshot_with_state(
+        enabled: bool,
+        buffer_perf_class: Option<BufferPerfClass>,
+        tracked_location: Option<CursorLocation>,
+    ) -> IngressReadSnapshot {
+        IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
+            enabled,
+            needs_initialize: false,
+            current_corners: [Point::ZERO; 4],
+            target_corners: [Point::ZERO; 4],
+            target_position: Point::ZERO,
+            tracked_location,
+            mode_flags: [true, true, true, true],
+            buffer_perf_mode: BufferPerfMode::Auto,
+            callback_duration_estimate_ms: 0.0,
+            current_buffer_perf_class: buffer_perf_class,
+            filetypes_disabled: Vec::new(),
+        })
+    }
 
-        assert_eq!(
-            events,
-            vec![
-                CoreEvent::Initialize(InitializeEvent { observed_at }),
-                CoreEvent::ExternalDemandQueued(ExternalDemandQueuedEvent {
-                    kind: ExternalDemandKind::ExternalCursor,
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_cursor_autocmd_builder_matches_routing_and_presentation_rules(
+            ingress in autocmd_ingress_strategy(),
+            observed_at in any::<u64>(),
+            needs_initialize in any::<bool>(),
+            buffer_perf_class in prop_oneof![
+                Just(BufferPerfClass::Full),
+                Just(BufferPerfClass::FastMotion),
+                Just(BufferPerfClass::Skip),
+            ],
+            include_presentation in any::<bool>(),
+        ) {
+            let observed_at = Millis::new(observed_at);
+            let ingress_cursor_presentation = include_presentation.then(presentation);
+            let kind = demand_kind_for_autocmd(ingress);
+            let mut expected = Vec::new();
+
+            if needs_initialize {
+                expected.push(CoreEvent::Initialize(InitializeEvent { observed_at }));
+            }
+            expected.push(CoreEvent::ExternalDemandQueued(ExternalDemandQueuedEvent {
+                kind,
+                observed_at,
+                requested_target: None,
+                buffer_perf_class,
+                ingress_cursor_presentation: if kind.is_cursor() {
+                    ingress_cursor_presentation
+                } else {
+                    None
+                },
+            }));
+
+            prop_assert_eq!(
+                build_cursor_autocmd_events(
+                    ingress,
                     observed_at,
-                    requested_target: None,
-                    buffer_perf_class: BufferPerfClass::Full,
-                    ingress_cursor_presentation: Some(presentation()),
-                }),
-            ]
-        );
-    }
+                    needs_initialize,
+                    buffer_perf_class,
+                    ingress_cursor_presentation,
+                ),
+                expected
+            );
+        }
 
-    #[test]
-    fn cursor_autocmd_builder_uses_observation_only_routing_for_mode_change() {
-        let observed_at = Millis::new(21);
+        #[test]
+        fn prop_cursor_autocmd_preflight_matches_enable_validity_and_perf_class_gates(
+            enabled in any::<bool>(),
+            window_valid in any::<bool>(),
+            buffer_valid in any::<bool>(),
+            buffer_perf_class in perf_class_strategy(),
+        ) {
+            let snapshot = snapshot_with_state(enabled, buffer_perf_class, None);
+            let expected = if !enabled || !window_valid || !buffer_valid {
+                CursorAutocmdPreflight::Dropped
+            } else {
+                match buffer_perf_class {
+                    Some(BufferPerfClass::Skip) => CursorAutocmdPreflight::Dropped,
+                    Some(buffer_perf_class) => CursorAutocmdPreflight::Continue { buffer_perf_class },
+                    None => CursorAutocmdPreflight::MissingPerfClass,
+                }
+            };
 
-        let events = build_cursor_autocmd_events(
-            AutocmdIngress::ModeChanged,
-            observed_at,
-            false,
-            BufferPerfClass::FastMotion,
-            Some(presentation()),
-        );
+            prop_assert_eq!(
+                cursor_autocmd_preflight(&snapshot, window_valid, buffer_valid),
+                expected
+            );
+        }
 
-        assert_eq!(
-            events,
-            vec![CoreEvent::ExternalDemandQueued(ExternalDemandQueuedEvent {
-                kind: ExternalDemandKind::ModeChanged,
-                observed_at,
-                requested_target: None,
-                buffer_perf_class: BufferPerfClass::FastMotion,
-                ingress_cursor_presentation: None,
-            })]
-        );
-    }
+        #[test]
+        fn prop_window_follow_up_coalescing_depends_only_on_buf_enter_and_window_change(
+            ingress in autocmd_ingress_strategy(),
+            tracked_window_handle in 1_i64..=64_i64,
+            current_window_handle in 1_i64..=64_i64,
+            tracked_location_present in any::<bool>(),
+        ) {
+            let tracked_location = tracked_location_present
+                .then(|| CursorLocation::new(tracked_window_handle, 22, 3, 4));
+            let snapshot = snapshot_with_state(
+                true,
+                Some(BufferPerfClass::Full),
+                tracked_location,
+            );
+            let expected = ingress == AutocmdIngress::BufEnter
+                && tracked_location_present
+                && tracked_window_handle != current_window_handle;
 
-    #[test]
-    fn cursor_autocmd_builder_uses_observation_only_routing_for_buffer_enter() {
-        let observed_at = Millis::new(21);
-
-        let events = build_cursor_autocmd_events(
-            AutocmdIngress::BufEnter,
-            observed_at,
-            false,
-            BufferPerfClass::FastMotion,
-            Some(presentation()),
-        );
-
-        assert_eq!(
-            events,
-            vec![CoreEvent::ExternalDemandQueued(ExternalDemandQueuedEvent {
-                kind: ExternalDemandKind::BufferEntered,
-                observed_at,
-                requested_target: None,
-                buffer_perf_class: BufferPerfClass::FastMotion,
-                ingress_cursor_presentation: None,
-            })]
-        );
-    }
-
-    #[test]
-    fn cursor_autocmd_builder_keeps_observation_when_presentation_probe_fails() {
-        let observed_at = Millis::new(21);
-
-        let events = build_cursor_autocmd_events(
-            AutocmdIngress::CursorMoved,
-            observed_at,
-            false,
-            BufferPerfClass::Full,
-            None,
-        );
-
-        assert_eq!(
-            events,
-            vec![CoreEvent::ExternalDemandQueued(ExternalDemandQueuedEvent {
-                kind: ExternalDemandKind::ExternalCursor,
-                observed_at,
-                requested_target: None,
-                buffer_perf_class: BufferPerfClass::Full,
-                ingress_cursor_presentation: None,
-            })]
-        );
-    }
-
-    #[test]
-    fn cursor_autocmd_preflight_drops_skip_perf_class() {
-        let snapshot = snapshot_with_perf_class(Some(BufferPerfClass::Skip));
-
-        assert_eq!(
-            cursor_autocmd_preflight(&snapshot, true, true),
-            CursorAutocmdPreflight::Dropped,
-        );
-    }
-
-    #[test]
-    fn cursor_autocmd_preflight_allows_fast_motion_buffers_to_dispatch() {
-        let snapshot = snapshot_with_perf_class(Some(BufferPerfClass::FastMotion));
-
-        assert_eq!(
-            cursor_autocmd_preflight(&snapshot, true, true),
-            CursorAutocmdPreflight::Continue {
-                buffer_perf_class: BufferPerfClass::FastMotion,
-            },
-        );
-    }
-
-    #[test]
-    fn cursor_autocmd_preflight_reports_missing_perf_class_after_preconditions_pass() {
-        let snapshot = snapshot_with_perf_class(None);
-
-        assert_eq!(
-            cursor_autocmd_preflight(&snapshot, true, true),
-            CursorAutocmdPreflight::MissingPerfClass,
-        );
-    }
-
-    #[test]
-    fn buf_enter_is_coalesced_when_a_window_switch_is_still_pending() {
-        let snapshot = IngressReadSnapshot::new_for_test(
-            true,
-            false,
-            [Point::ZERO; 4],
-            Some(CursorLocation::new(11, 22, 3, 4)),
-            (true, true, true, true),
-            BufferPerfMode::Auto,
-            0.0,
-            Some(BufferPerfClass::Full),
-            Vec::new(),
-        );
-
-        assert!(should_coalesce_window_follow_up_autocmd(
-            AutocmdIngress::BufEnter,
-            &snapshot,
-            33,
-        ));
-    }
-
-    #[test]
-    fn buf_enter_is_not_coalesced_for_same_window_buffer_switches() {
-        let snapshot = IngressReadSnapshot::new_for_test(
-            true,
-            false,
-            [Point::ZERO; 4],
-            Some(CursorLocation::new(11, 22, 3, 4)),
-            (true, true, true, true),
-            BufferPerfMode::Auto,
-            0.0,
-            Some(BufferPerfClass::Full),
-            Vec::new(),
-        );
-
-        assert!(!should_coalesce_window_follow_up_autocmd(
-            AutocmdIngress::BufEnter,
-            &snapshot,
-            11,
-        ));
-    }
-
-    #[test]
-    fn non_buf_enter_autocmds_keep_their_observation_path() {
-        let snapshot = IngressReadSnapshot::new_for_test(
-            true,
-            false,
-            [Point::ZERO; 4],
-            Some(CursorLocation::new(11, 22, 3, 4)),
-            (true, true, true, true),
-            BufferPerfMode::Auto,
-            0.0,
-            Some(BufferPerfClass::Full),
-            Vec::new(),
-        );
-
-        assert!(!should_coalesce_window_follow_up_autocmd(
-            AutocmdIngress::WinEnter,
-            &snapshot,
-            33,
-        ));
+            prop_assert_eq!(
+                should_coalesce_window_follow_up_autocmd(
+                    ingress,
+                    &snapshot,
+                    current_window_handle,
+                ),
+                expected
+            );
+        }
     }
 }

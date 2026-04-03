@@ -11,7 +11,7 @@ pub(crate) type LuaParseError = OxiError;
 pub(crate) type LuaParseResult<T> = std::result::Result<T, LuaParseError>;
 
 pub(crate) fn to_nvim_error(err: &LuaParseError) -> nvim_oxi::Error {
-    nvim_oxi::api::Error::Other(err.to_string()).into()
+    crate::other_error(err.to_string())
 }
 
 fn into_nvim_error(err: LuaParseError) -> nvim_oxi::Error {
@@ -45,6 +45,14 @@ where
     parse(key, require_object_typed(value, key)?)
 }
 
+fn parse_typed_object<T>(
+    key: &str,
+    value: Object,
+    parse: impl FnOnce(&str, Object) -> LuaParseResult<T>,
+) -> Result<T> {
+    parse(key, value).map_err(into_nvim_error)
+}
+
 pub(crate) fn f64_from_object_typed(key: &str, value: Object) -> LuaParseResult<f64> {
     match value.kind() {
         ObjectKind::Float => f64::from_object(value).map_err(|_| invalid_key_error(key, "number")),
@@ -58,7 +66,7 @@ pub(crate) fn f64_from_object_typed(key: &str, value: Object) -> LuaParseResult<
 }
 
 pub(crate) fn f64_from_object(key: &str, value: Object) -> Result<f64> {
-    f64_from_object_typed(key, value).map_err(into_nvim_error)
+    parse_typed_object(key, value, f64_from_object_typed)
 }
 
 #[expect(
@@ -70,7 +78,7 @@ pub(crate) fn i64_from_object_typed(key: &str, value: Object) -> LuaParseResult<
 }
 
 pub(crate) fn i64_from_object(key: &str, value: Object) -> Result<i64> {
-    i64_from_object_typed(key, value).map_err(into_nvim_error)
+    parse_typed_object(key, value, i64_from_object_typed)
 }
 
 pub(crate) fn i64_from_object_ref_with_typed<K>(value: &Object, key: K) -> LuaParseResult<i64>
@@ -105,7 +113,7 @@ pub(crate) fn bool_from_object_typed(key: &str, value: Object) -> LuaParseResult
 }
 
 pub(crate) fn bool_from_object(key: &str, value: Object) -> Result<bool> {
-    bool_from_object_typed(key, value).map_err(into_nvim_error)
+    parse_typed_object(key, value, bool_from_object_typed)
 }
 
 pub(crate) fn u8_from_object_typed(key: &str, value: Object) -> LuaParseResult<u8> {
@@ -122,7 +130,7 @@ pub(crate) fn string_from_object_typed(key: &str, value: Object) -> LuaParseResu
 }
 
 pub(crate) fn string_from_object(key: &str, value: Object) -> Result<String> {
-    string_from_object_typed(key, value).map_err(into_nvim_error)
+    parse_typed_object(key, value, string_from_object_typed)
 }
 
 pub(crate) fn parse_optional_with<T, F>(

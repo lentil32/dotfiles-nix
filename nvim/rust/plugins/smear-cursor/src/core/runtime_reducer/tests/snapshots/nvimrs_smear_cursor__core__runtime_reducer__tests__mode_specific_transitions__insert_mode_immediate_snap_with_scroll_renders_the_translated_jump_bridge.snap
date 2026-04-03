@@ -1,0 +1,10 @@
+---
+source: plugins/smear-cursor/src/core/runtime_reducer/tests/mode_specific_transitions.rs
+expression: "render_jump_bridge_snapshot(&transition, &state)"
+---
+motion=jump
+origin=3.000,3.743
+frame_target=3.000,20.000
+state_center=3.500,20.063
+state_target=3.000,20.000
+samples=[3.500,3.806@28.000;3.500,9.225@28.000;3.500,14.644@28.000;3.500,20.063@28.000]

@@ -5,6 +5,15 @@ use std::collections::BTreeMap;
 type CompiledEntry<'a> = ((i64, i64), &'a CompiledCell);
 type PreviousEntry<'a> = ((i64, i64), &'a DecodedCellState);
 
+struct PatchCandidateInput<'a> {
+    patch: MicroTile,
+    age: AgeMoment,
+    previous: Option<DecodedCellState>,
+    shade_profiles: &'a [ShadeProfile],
+    temporal_stability_weight: f64,
+    top_k: usize,
+}
+
 fn recycle_candidate_lists(
     cell_candidates: &mut BTreeMap<(i64, i64), Vec<CellCandidate>>,
     reusable_candidate_lists: &mut Vec<Vec<CellCandidate>>,
@@ -24,22 +33,17 @@ fn insert_cell_candidates_for_patch(
     cell_candidates: &mut BTreeMap<(i64, i64), Vec<CellCandidate>>,
     reusable_candidate_lists: &mut Vec<Vec<CellCandidate>>,
     coord: (i64, i64),
-    patch: MicroTile,
-    age: AgeMoment,
-    previous: Option<DecodedCellState>,
-    shade_profiles: &[ShadeProfile],
-    temporal_stability_weight: f64,
-    top_k: usize,
+    input: PatchCandidateInput<'_>,
 ) {
     let mut per_cell = reusable_candidate_lists.pop().unwrap_or_default();
     cell_candidates_for_patch_into(
         &mut per_cell,
-        patch,
-        age,
-        previous,
-        shade_profiles,
-        temporal_stability_weight,
-        top_k,
+        input.patch,
+        input.age,
+        input.previous,
+        input.shade_profiles,
+        input.temporal_stability_weight,
+        input.top_k,
     );
     cell_candidates.insert(coord, per_cell);
 }
@@ -65,12 +69,14 @@ fn populate_cell_candidates_from_iters<'a, CompiledIter, PreviousIter>(
                             cell_candidates,
                             reusable_candidate_lists,
                             compiled_coord,
-                            compiled_cell.tile,
-                            compiled_cell.age,
-                            None,
-                            shade_profiles,
-                            temporal_stability_weight,
-                            top_k,
+                            PatchCandidateInput {
+                                patch: compiled_cell.tile,
+                                age: compiled_cell.age,
+                                previous: None,
+                                shade_profiles,
+                                temporal_stability_weight,
+                                top_k,
+                            },
                         );
                         compiled_iter.next();
                     }
@@ -79,12 +85,14 @@ fn populate_cell_candidates_from_iters<'a, CompiledIter, PreviousIter>(
                             cell_candidates,
                             reusable_candidate_lists,
                             compiled_coord,
-                            compiled_cell.tile,
-                            compiled_cell.age,
-                            Some(*previous_state),
-                            shade_profiles,
-                            temporal_stability_weight,
-                            top_k,
+                            PatchCandidateInput {
+                                patch: compiled_cell.tile,
+                                age: compiled_cell.age,
+                                previous: Some(*previous_state),
+                                shade_profiles,
+                                temporal_stability_weight,
+                                top_k,
+                            },
                         );
                         compiled_iter.next();
                         previous_iter.next();
@@ -94,12 +102,14 @@ fn populate_cell_candidates_from_iters<'a, CompiledIter, PreviousIter>(
                             cell_candidates,
                             reusable_candidate_lists,
                             previous_coord,
-                            MicroTile::default(),
-                            AgeMoment::default(),
-                            Some(*previous_state),
-                            shade_profiles,
-                            temporal_stability_weight,
-                            top_k,
+                            PatchCandidateInput {
+                                patch: MicroTile::default(),
+                                age: AgeMoment::default(),
+                                previous: Some(*previous_state),
+                                shade_profiles,
+                                temporal_stability_weight,
+                                top_k,
+                            },
                         );
                         previous_iter.next();
                     }
@@ -110,12 +120,14 @@ fn populate_cell_candidates_from_iters<'a, CompiledIter, PreviousIter>(
                     cell_candidates,
                     reusable_candidate_lists,
                     compiled_coord,
-                    compiled_cell.tile,
-                    compiled_cell.age,
-                    None,
-                    shade_profiles,
-                    temporal_stability_weight,
-                    top_k,
+                    PatchCandidateInput {
+                        patch: compiled_cell.tile,
+                        age: compiled_cell.age,
+                        previous: None,
+                        shade_profiles,
+                        temporal_stability_weight,
+                        top_k,
+                    },
                 );
                 compiled_iter.next();
             }
@@ -124,12 +136,14 @@ fn populate_cell_candidates_from_iters<'a, CompiledIter, PreviousIter>(
                     cell_candidates,
                     reusable_candidate_lists,
                     previous_coord,
-                    MicroTile::default(),
-                    AgeMoment::default(),
-                    Some(*previous_state),
-                    shade_profiles,
-                    temporal_stability_weight,
-                    top_k,
+                    PatchCandidateInput {
+                        patch: MicroTile::default(),
+                        age: AgeMoment::default(),
+                        previous: Some(*previous_state),
+                        shade_profiles,
+                        temporal_stability_weight,
+                        top_k,
+                    },
                 );
                 previous_iter.next();
             }

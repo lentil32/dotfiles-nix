@@ -1,0 +1,9 @@
+---
+source: plugins/smear-cursor/src/core/runtime_reducer/tests/trajectory_goldens.rs
+assertion_line: 73
+expression: transcript.render()
+---
+00 ext t=100.000 pos=5.000,6.000 surf=10/20 motion=cont action=draw samples=[5.500,6.500@4.167] center=5.500,6.500 target=5.000,6.000 next=- cleanup=schedule alloc=bootstrap vis=show real_cursor=off sched=0 state=a0s0d0 stroke=1 epoch=1
+01 ext t=108.000 pos=8.000,12.000 surf=11/20 motion=surface action=draw samples=[5.531,6.562@4.167] center=5.531,6.562 target=8.000,12.000 next=114 cleanup=invalidate alloc=reuse vis=hide target_cell=overlay real_cursor=off sched=1 state=a1s0d0 stroke=2 epoch=3
+02 tick t=116.000 pos=8.000,12.000 surf=11/20 motion=cont action=draw samples=[5.613,6.726@4.167;5.730,6.960@4.167] center=5.730,6.960 target=8.000,12.000 next=121 cleanup=invalidate alloc=reuse vis=hide target_cell=overlay real_cursor=off sched=1 state=a1s0d0 stroke=2 epoch=3
+final center=5.730,6.960 target=8.000,12.000 state=a1s0d0 stroke=2 epoch=3 surf=11/20

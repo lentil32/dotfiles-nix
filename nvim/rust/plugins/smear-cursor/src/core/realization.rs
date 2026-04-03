@@ -310,7 +310,7 @@ fn overlay_cell(overlay: TargetCellOverlay) -> CellOp {
         row: overlay.row,
         col: overlay.col,
         zindex: overlay.zindex,
-        glyph: Glyph::BLOCK,
+        glyph: Glyph::Static(overlay.shape.glyph()),
         highlight: HighlightRef::Normal(overlay.level),
     }
 }
@@ -394,37 +394,18 @@ mod tests {
     use crate::draw::render_plan::ParticleOp;
     use crate::draw::render_plan::PlannerState;
     use crate::draw::render_plan::render_frame_to_plan;
+    use crate::test_support::proptest::pure_config;
     use crate::types::BASE_TIME_INTERVAL;
+    use crate::types::CursorCellShape;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
     use crate::types::StaticRenderConfig;
+    use pretty_assertions::assert_eq;
+    use proptest::collection::vec;
+    use proptest::option;
+    use proptest::prelude::*;
     use std::sync::Arc;
-
-    fn cell(row: i64, col: i64, zindex: u32) -> CellOp {
-        CellOp {
-            row,
-            col,
-            zindex,
-            glyph: Glyph::BLOCK,
-            highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(2)),
-        }
-    }
-
-    fn projection_snapshot(max_kept_windows: usize) -> ProjectionSnapshot {
-        ProjectionSnapshot::new(
-            ProjectionWitness::new(
-                SceneRevision::INITIAL,
-                ObservationId::from_ingress_seq(IngressSeq::new(1)),
-                ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
-                ProjectorRevision::CURRENT,
-            ),
-            LogicalRaster::new(
-                Some(ClearOp { max_kept_windows }),
-                Arc::from(Vec::<CellOp>::new()),
-            ),
-        )
-    }
 
     fn sample_for_corners(corners: [Point; 4]) -> RenderStepSample {
         RenderStepSample::new(corners, BASE_TIME_INTERVAL)
@@ -533,122 +514,321 @@ mod tests {
         cells
     }
 
-    #[test]
-    fn project_render_plan_batches_visible_cells_and_overlay() {
-        let plan = RenderPlan {
-            cell_ops: vec![cell(4, 5, 20), cell(4, 6, 20)],
-            particle_ops: vec![ParticleOp {
-                cell: cell(4, 4, 19),
-                requires_background_probe: false,
-            }],
-            target_cell_overlay: Some(TargetCellOverlay {
-                row: 4,
-                col: 7,
-                zindex: 20,
-                level: HighlightLevel::from_raw_clamped(2),
-            }),
-            clear: Some(ClearOp {
-                max_kept_windows: 16,
-            }),
-        };
+    fn glyph_strategy() -> BoxedStrategy<Glyph> {
+        prop_oneof![Just(Glyph::BLOCK), (1_u8..=4_u8).prop_map(Glyph::Braille),].boxed()
+    }
 
-        let raster = project_render_plan(
-            &plan,
-            Viewport {
-                max_row: 20,
-                max_col: 20,
-            },
-            None,
-        );
-        let projection = realize_logical_raster(&raster);
+    fn highlight_ref_strategy() -> BoxedStrategy<HighlightRef> {
+        (1_u32..=6_u32)
+            .prop_map(|level| HighlightRef::Normal(HighlightLevel::from_raw_clamped(level)))
+            .boxed()
+    }
 
-        assert_eq!(
-            raster.clear(),
-            Some(ClearOp {
-                max_kept_windows: 16,
+    fn cursor_cell_shape() -> BoxedStrategy<CursorCellShape> {
+        prop_oneof![
+            Just(CursorCellShape::Block),
+            Just(CursorCellShape::VerticalBar),
+            Just(CursorCellShape::HorizontalBar),
+        ]
+        .boxed()
+    }
+
+    fn cell_op_strategy(max_row: u32, max_col: u32) -> BoxedStrategy<CellOp> {
+        let row_limit = i64::from(max_row).saturating_add(2);
+        let col_limit = i64::from(max_col).saturating_add(2);
+
+        (
+            -1_i64..=row_limit,
+            -1_i64..=col_limit,
+            1_u32..=4_u32,
+            glyph_strategy(),
+            highlight_ref_strategy(),
+        )
+            .prop_map(|(row, col, zindex, glyph, highlight)| CellOp {
+                row,
+                col,
+                zindex,
+                glyph,
+                highlight,
             })
-        );
-        assert_eq!(
-            raster.cells(),
-            &[
-                cell(4, 4, 19),
-                cell(4, 5, 20),
-                cell(4, 6, 20),
-                cell(4, 7, 20)
-            ]
-        );
-        assert_eq!(projection.spans().len(), 2);
-        assert_eq!(projection.spans()[0].row(), 4);
-        assert_eq!(projection.spans()[0].col(), 4);
-        assert_eq!(projection.spans()[0].width(), 1);
-        assert_eq!(projection.spans()[1].col(), 5);
-        assert_eq!(projection.spans()[1].width(), 3);
+            .boxed()
     }
 
-    #[test]
-    fn project_render_plan_skips_probe_required_particles_without_background_allowance() {
-        let plan = RenderPlan {
-            particle_ops: vec![
-                ParticleOp {
-                    cell: cell(5, 8, 11),
-                    requires_background_probe: true,
-                },
-                ParticleOp {
-                    cell: cell(0, 8, 11),
-                    requires_background_probe: true,
-                },
-            ],
-            ..RenderPlan::default()
-        };
-
-        let raster = project_render_plan(
-            &plan,
-            Viewport {
-                max_row: 10,
-                max_col: 10,
-            },
-            None,
-        );
-
-        assert!(raster.cells().is_empty());
+    fn particle_op_strategy(max_row: u32, max_col: u32) -> BoxedStrategy<ParticleOp> {
+        (cell_op_strategy(max_row, max_col), any::<bool>())
+            .prop_map(|(cell, requires_background_probe)| ParticleOp {
+                cell,
+                requires_background_probe,
+            })
+            .boxed()
     }
 
-    #[test]
-    fn project_render_plan_materializes_only_background_allowed_probe_particles() {
-        let plan = RenderPlan {
-            particle_ops: vec![
-                ParticleOp {
-                    cell: cell(5, 8, 11),
-                    requires_background_probe: true,
-                },
-                ParticleOp {
-                    cell: cell(5, 9, 11),
-                    requires_background_probe: true,
-                },
-            ],
-            ..RenderPlan::default()
-        };
-        let mut allowed_mask = vec![false; 100];
-        allowed_mask[47] = true;
-        let background = BackgroundProbeBatch::from_allowed_mask(
-            ViewportSnapshot::new(CursorRow(10), CursorCol(10)),
-            allowed_mask,
-        );
-        let raster = project_render_plan(
-            &plan,
-            Viewport {
-                max_row: 10,
-                max_col: 10,
-            },
-            Some(&background),
-        );
-        let realized = realize_logical_raster(&raster);
+    fn target_cell_overlay_strategy(
+        max_row: u32,
+        max_col: u32,
+    ) -> BoxedStrategy<TargetCellOverlay> {
+        let row_limit = i64::from(max_row).saturating_add(2);
+        let col_limit = i64::from(max_col).saturating_add(2);
 
-        assert_eq!(raster.cells(), &[cell(5, 8, 11)]);
-        assert_eq!(realized.spans().len(), 1);
-        assert_eq!(realized.spans()[0].row(), 5);
-        assert_eq!(realized.spans()[0].col(), 8);
-        assert_eq!(realized.spans()[0].width(), 1);
+        (
+            -1_i64..=row_limit,
+            -1_i64..=col_limit,
+            1_u32..=4_u32,
+            cursor_cell_shape(),
+            1_u32..=6_u32,
+        )
+            .prop_map(|(row, col, zindex, shape, level)| TargetCellOverlay {
+                row,
+                col,
+                zindex,
+                shape,
+                level: HighlightLevel::from_raw_clamped(level),
+            })
+            .boxed()
+    }
+
+    #[derive(Clone, Debug)]
+    struct RenderPlanFixture {
+        viewport: Viewport,
+        viewport_snapshot: ViewportSnapshot,
+        plan: RenderPlan,
+        background_probe: Option<BackgroundProbeBatch>,
+    }
+
+    fn render_plan_fixture() -> BoxedStrategy<RenderPlanFixture> {
+        (1_u32..=6_u32, 1_u32..=6_u32)
+            .prop_flat_map(|(max_row, max_col)| {
+                let viewport = Viewport {
+                    max_row: i64::from(max_row),
+                    max_col: i64::from(max_col),
+                };
+                let viewport_snapshot =
+                    ViewportSnapshot::new(CursorRow(max_row), CursorCol(max_col));
+                let mask_len = usize::try_from(max_row.saturating_mul(max_col)).unwrap_or(0);
+
+                (
+                    option::of(
+                        (0_usize..=32_usize)
+                            .prop_map(|max_kept_windows| ClearOp { max_kept_windows }),
+                    ),
+                    vec(cell_op_strategy(max_row, max_col), 0..=6),
+                    vec(particle_op_strategy(max_row, max_col), 0..=6),
+                    option::of(target_cell_overlay_strategy(max_row, max_col)),
+                    option::of(vec(any::<bool>(), mask_len)),
+                )
+                    .prop_map(
+                        move |(
+                            clear,
+                            cell_ops,
+                            particle_ops,
+                            target_cell_overlay,
+                            allowed_mask,
+                        )| {
+                            let background_probe = allowed_mask.map(|allowed_mask| {
+                                BackgroundProbeBatch::from_allowed_mask(
+                                    viewport_snapshot,
+                                    allowed_mask,
+                                )
+                            });
+                            RenderPlanFixture {
+                                viewport,
+                                viewport_snapshot,
+                                plan: RenderPlan {
+                                    clear,
+                                    cell_ops,
+                                    particle_ops,
+                                    target_cell_overlay,
+                                },
+                                background_probe,
+                            }
+                        },
+                    )
+            })
+            .boxed()
+    }
+
+    fn expected_visible_cells(
+        plan: &RenderPlan,
+        viewport: Viewport,
+        background_probe: Option<&BackgroundProbeBatch>,
+    ) -> Vec<CellOp> {
+        let mut cells = Vec::new();
+
+        for op in &plan.particle_ops {
+            if !in_bounds(viewport, op.cell.row, op.cell.col) {
+                continue;
+            }
+            if op.requires_background_probe {
+                let Some(screen_cell) = ScreenCell::new(op.cell.row, op.cell.col) else {
+                    continue;
+                };
+                if background_probe.is_some_and(|probe| probe.allows_particle(screen_cell)) {
+                    cells.push(op.cell);
+                }
+            } else {
+                cells.push(op.cell);
+            }
+        }
+
+        cells.extend(
+            plan.cell_ops
+                .iter()
+                .filter(|op| in_bounds(viewport, op.row, op.col))
+                .copied(),
+        );
+
+        if let Some(overlay) = plan.target_cell_overlay
+            && in_bounds(viewport, overlay.row, overlay.col)
+        {
+            cells.push(overlay_cell(overlay));
+        }
+
+        cells
+    }
+
+    #[derive(Clone, Debug)]
+    struct ScenePatchFixture {
+        acknowledged: Option<ProjectionSnapshot>,
+        target: Option<ProjectionSnapshot>,
+        expected_kind: ScenePatchKind,
+    }
+
+    fn witness(observation_seq: u64, max_row: u32, max_col: u32) -> ProjectionWitness {
+        ProjectionWitness::new(
+            SceneRevision::INITIAL,
+            ObservationId::from_ingress_seq(IngressSeq::new(observation_seq)),
+            ViewportSnapshot::new(CursorRow(max_row), CursorCol(max_col)),
+            ProjectorRevision::CURRENT,
+        )
+    }
+
+    fn snapshot_with(
+        observation_seq: u64,
+        max_row: u32,
+        max_col: u32,
+        max_kept_windows: usize,
+    ) -> ProjectionSnapshot {
+        ProjectionSnapshot::new(
+            witness(observation_seq, max_row, max_col),
+            LogicalRaster::new(
+                Some(ClearOp { max_kept_windows }),
+                Arc::from(Vec::<CellOp>::new()),
+            ),
+        )
+    }
+
+    fn scene_patch_fixture() -> BoxedStrategy<ScenePatchFixture> {
+        prop_oneof![
+            Just(ScenePatchFixture {
+                acknowledged: None,
+                target: None,
+                expected_kind: ScenePatchKind::Noop,
+            }),
+            (1_u32..=20_u32).prop_map(|max_kept_windows| {
+                let acknowledged =
+                    snapshot_with(1, 20, 40, usize::try_from(max_kept_windows).unwrap_or(0));
+                ScenePatchFixture {
+                    acknowledged: Some(acknowledged),
+                    target: None,
+                    expected_kind: ScenePatchKind::Clear,
+                }
+            }),
+            (1_u32..=20_u32).prop_map(|max_kept_windows| {
+                let target =
+                    snapshot_with(1, 20, 40, usize::try_from(max_kept_windows).unwrap_or(0));
+                ScenePatchFixture {
+                    acknowledged: None,
+                    target: Some(target),
+                    expected_kind: ScenePatchKind::Replace,
+                }
+            }),
+            (1_u32..=20_u32).prop_map(|max_kept_windows| {
+                let snapshot =
+                    snapshot_with(1, 20, 40, usize::try_from(max_kept_windows).unwrap_or(0));
+                ScenePatchFixture {
+                    acknowledged: Some(snapshot.clone()),
+                    target: Some(snapshot),
+                    expected_kind: ScenePatchKind::Noop,
+                }
+            }),
+            (1_u32..=20_u32).prop_map(|max_kept_windows| {
+                let max_kept_windows = usize::try_from(max_kept_windows).unwrap_or(0);
+                let acknowledged = snapshot_with(1, 20, 40, max_kept_windows);
+                let target = acknowledged.clone().with_witness(witness(2, 20, 40));
+                ScenePatchFixture {
+                    acknowledged: Some(acknowledged),
+                    target: Some(target),
+                    expected_kind: ScenePatchKind::Replace,
+                }
+            }),
+            (1_u32..=20_u32, any::<bool>()).prop_map(|(left, increase)| {
+                let right = if increase {
+                    left.saturating_add(1)
+                } else if left == 1 {
+                    2
+                } else {
+                    left.saturating_sub(1)
+                };
+                let acknowledged = snapshot_with(1, 20, 40, usize::try_from(left).unwrap_or(0));
+                let target = snapshot_with(1, 20, 40, usize::try_from(right).unwrap_or(0));
+                ScenePatchFixture {
+                    acknowledged: Some(acknowledged),
+                    target: Some(target),
+                    expected_kind: ScenePatchKind::Replace,
+                }
+            }),
+        ]
+        .boxed()
+    }
+
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_project_render_plan_keeps_exactly_the_visible_and_background_allowed_cells(
+            fixture in render_plan_fixture(),
+        ) {
+            let background_probe = fixture.background_probe.as_ref();
+            let raster = project_render_plan(&fixture.plan, fixture.viewport, background_probe);
+            let realized = realize_logical_raster(&raster);
+
+            let expected =
+                expected_visible_cells(&fixture.plan, fixture.viewport, background_probe);
+
+            assert_eq!(raster.clear(), fixture.plan.clear);
+            assert_eq!(raster.cells(), expected.as_slice());
+            assert_eq!(flatten_projection_cells(&realized), expected);
+            if let Some(background_probe) = fixture.background_probe.as_ref() {
+                prop_assert_eq!(background_probe.viewport(), fixture.viewport_snapshot);
+            }
+        }
+
+        #[test]
+        fn prop_scene_patch_kind_and_realization_follow_only_the_basis_pair(
+            fixture in scene_patch_fixture(),
+        ) {
+            let patch =
+                ScenePatch::derive(PatchBasis::new(fixture.acknowledged.clone(), fixture.target.clone()));
+
+            assert_eq!(patch.kind(), fixture.expected_kind);
+            match (fixture.expected_kind, fixture.target.as_ref()) {
+                (ScenePatchKind::Noop, _) => {
+                    assert_eq!(project_scene_patch(&patch), Ok(ScenePatchRealization::Noop));
+                }
+                (ScenePatchKind::Clear, _) => {
+                    assert_eq!(project_scene_patch(&patch), Ok(ScenePatchRealization::Clear));
+                }
+                (ScenePatchKind::Replace, Some(target)) => {
+                    assert_eq!(project_scene_patch(&patch), Ok(ScenePatchRealization::Draw(target)));
+                }
+                (ScenePatchKind::Replace, None) => {
+                    prop_assert_eq!(
+                        project_scene_patch(&patch),
+                        Err(ScenePatchRealizationError::MissingTargetProjection),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -665,50 +845,6 @@ mod tests {
         assert_eq!(
             flatten_projection_cells(&realized),
             legacy_visible_cells_without_probe(&planner_output.plan, viewport)
-        );
-    }
-
-    #[test]
-    fn project_scene_patch_maps_replace_patch_to_target_snapshot() {
-        let target = projection_snapshot(12);
-        let patch = ScenePatch::derive(PatchBasis::new(None, Some(target.clone())));
-
-        let projected = project_scene_patch(&patch).expect("replace patch should project");
-
-        assert_eq!(projected, ScenePatchRealization::Draw(&target));
-    }
-
-    #[test]
-    fn project_scene_patch_maps_clear_and_noop_patch_kinds() {
-        let snapshot = projection_snapshot(8);
-        let clear_patch = ScenePatch::derive(PatchBasis::new(Some(snapshot.clone()), None));
-        let noop_patch =
-            ScenePatch::derive(PatchBasis::new(Some(snapshot.clone()), Some(snapshot)));
-
-        assert_eq!(
-            project_scene_patch(&clear_patch),
-            Ok(ScenePatchRealization::Clear)
-        );
-        assert_eq!(
-            project_scene_patch(&noop_patch),
-            Ok(ScenePatchRealization::Noop)
-        );
-    }
-
-    #[test]
-    fn scene_patch_replaces_when_projection_witness_drifts_even_if_raster_is_unchanged() {
-        let acknowledged = projection_snapshot(8);
-        let target = acknowledged.clone().with_witness(ProjectionWitness::new(
-            SceneRevision::INITIAL,
-            ObservationId::from_ingress_seq(IngressSeq::new(2)),
-            ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
-            ProjectorRevision::CURRENT,
-        ));
-
-        assert_ne!(acknowledged, target);
-        assert_eq!(
-            ScenePatch::derive(PatchBasis::new(Some(acknowledged), Some(target))).kind(),
-            ScenePatchKind::Replace
         );
     }
 }

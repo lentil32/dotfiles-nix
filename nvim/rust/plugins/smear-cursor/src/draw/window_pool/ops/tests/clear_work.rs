@@ -1,124 +1,133 @@
-#[test]
-fn clear_work_detection_ignores_hidden_windows_within_keep_budget() {
-    let tabs = tabs_with(TabWindows {
-        windows: vec![cached(1, 11, 1), cached(2, 12, 2)],
-        cached_budget: 8,
-        ..TabWindows::default()
-    });
-    assert!(!has_visible_windows(&tabs));
-    assert!(!has_pending_clear_work(&tabs, 32));
+#[derive(Clone, Copy, Debug)]
+enum WindowLifecycleSpec {
+    AvailableVisible { last_used_epoch: u8 },
+    AvailableHidden { last_used_epoch: u8 },
+    InUse { epoch: u8 },
+    Invalid,
 }
 
-#[test]
-fn clear_work_detection_requires_clear_when_visible_window_exists() {
-    let tabs = tabs_with(TabWindows {
-        windows: vec![CachedRenderWindow {
-            handles: WindowBufferHandle {
-                window_id: 1,
-                buffer_id: 11,
-            },
-            lifecycle: CachedWindowLifecycle::AvailableVisible {
-                last_used_epoch: FrameEpoch(3),
-            },
-            placement: Some(WindowPlacement {
-                row: 1,
-                col: 1,
-                width: 1,
-                zindex: 80,
-            }),
-        }],
-        ..TabWindows::default()
-    });
+impl WindowLifecycleSpec {
+    fn is_shell_visible(self) -> bool {
+        matches!(
+            self,
+            Self::AvailableVisible { .. } | Self::InUse { .. }
+        )
+    }
 
-    assert!(has_visible_windows(&tabs));
-    assert!(has_pending_clear_work(&tabs, 32));
+    fn is_invalid(self) -> bool {
+        matches!(self, Self::Invalid)
+    }
 }
 
-#[test]
-fn cleanup_close_indices_target_only_shell_visible_cached_windows() {
-    let tab_windows = TabWindows {
-        visible_available_indices: vec![0],
-        windows: vec![
-            CachedRenderWindow {
-                handles: WindowBufferHandle {
-                    window_id: 1,
-                    buffer_id: 11,
-                },
-                lifecycle: CachedWindowLifecycle::AvailableVisible {
-                    last_used_epoch: FrameEpoch(3),
-                },
-                placement: Some(WindowPlacement {
-                    row: 1,
-                    col: 1,
-                    width: 1,
-                    zindex: 80,
-                }),
-            },
-            cached(2, 12, 2),
-        ],
-        ..TabWindows::default()
+fn window_lifecycle_spec() -> BoxedStrategy<WindowLifecycleSpec> {
+    prop_oneof![
+        any::<u8>().prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableVisible {
+            last_used_epoch,
+        }),
+        any::<u8>().prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableHidden {
+            last_used_epoch,
+        }),
+        any::<u8>().prop_map(|epoch| WindowLifecycleSpec::InUse { epoch }),
+        Just(WindowLifecycleSpec::Invalid),
+    ]
+    .boxed()
+}
+
+fn test_placement(index: usize) -> WindowPlacement {
+    let index = i64::try_from(index).unwrap_or(i64::MAX);
+    WindowPlacement {
+        row: index,
+        col: index.saturating_mul(2),
+        width: 1,
+        zindex: 80,
+    }
+}
+
+fn cached_window(index: usize, lifecycle: WindowLifecycleSpec) -> CachedRenderWindow {
+    let offset = i32::try_from(index).unwrap_or(i32::MAX);
+    let handles = WindowBufferHandle {
+        window_id: 1_i32.saturating_add(offset),
+        buffer_id: 101_i32.saturating_add(offset),
     };
 
-    assert_eq!(shell_visible_close_indices(&tab_windows), vec![0]);
-}
-
-#[test]
-fn cleanup_close_indices_include_untracked_in_use_windows() {
-    let tab_windows = TabWindows {
-        windows: vec![CachedRenderWindow {
-            handles: WindowBufferHandle {
-                window_id: 3,
-                buffer_id: 13,
+    match lifecycle {
+        WindowLifecycleSpec::AvailableVisible { last_used_epoch } => CachedRenderWindow {
+            handles,
+            lifecycle: CachedWindowLifecycle::AvailableVisible {
+                last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
             },
+            placement: Some(test_placement(index)),
+        },
+        WindowLifecycleSpec::AvailableHidden { last_used_epoch } => CachedRenderWindow {
+            handles,
+            lifecycle: CachedWindowLifecycle::AvailableHidden {
+                last_used_epoch: FrameEpoch(u64::from(last_used_epoch)),
+            },
+            placement: Some(test_placement(index)),
+        },
+        WindowLifecycleSpec::InUse { epoch } => CachedRenderWindow {
+            handles,
             lifecycle: CachedWindowLifecycle::InUse {
-                epoch: FrameEpoch(7),
+                epoch: FrameEpoch(u64::from(epoch)),
             },
-            placement: Some(WindowPlacement {
-                row: 2,
-                col: 4,
-                width: 1,
-                zindex: 90,
-            }),
-        }],
-        ..TabWindows::default()
-    };
-
-    assert_eq!(shell_visible_close_indices(&tab_windows), vec![0]);
+            placement: Some(test_placement(index)),
+        },
+        WindowLifecycleSpec::Invalid => CachedRenderWindow {
+            handles,
+            lifecycle: CachedWindowLifecycle::Invalid,
+            placement: None,
+        },
+    }
 }
 
-#[test]
-fn clear_work_detection_reads_maintained_tracking_state() {
-    let tabs = tabs_with(TabWindows {
-        windows: vec![CachedRenderWindow {
-            handles: WindowBufferHandle {
-                window_id: 1,
-                buffer_id: 11,
-            },
-            lifecycle: CachedWindowLifecycle::AvailableVisible {
-                last_used_epoch: FrameEpoch(3),
-            },
-            placement: Some(WindowPlacement {
-                row: 1,
-                col: 1,
-                width: 1,
-                zindex: 80,
-            }),
-        }],
+fn tab_windows_from_specs(specs: &[WindowLifecycleSpec], cached_budget: usize) -> TabWindows {
+    let windows = specs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, lifecycle)| cached_window(index, lifecycle))
+        .collect();
+    TabWindows {
+        windows,
+        cached_budget,
         ..TabWindows::default()
-    });
-
-    assert!(has_visible_windows(&tabs));
-    assert!(has_pending_clear_work(&tabs, 32));
+    }
 }
 
-#[test]
-fn clear_work_detection_requires_clear_when_cache_exceeds_budget() {
-    let tabs = tabs_with(TabWindows {
-        windows: vec![cached(1, 11, 1), cached(2, 12, 2), cached(3, 13, 3)],
-        cached_budget: 1,
-        ..TabWindows::default()
-    });
+proptest! {
+    #![proptest_config(pure_config())]
 
-    assert!(!has_visible_windows(&tabs));
-    assert!(has_pending_clear_work(&tabs, 32));
+    #[test]
+    fn prop_clear_work_detection_matches_visibility_budget_and_invalidity(
+        lifecycles in vec(window_lifecycle_spec(), 0..16),
+        cached_budget in 0_usize..=64,
+        max_kept_windows in 0_usize..=64,
+    ) {
+        let tabs = tabs_with(tab_windows_from_specs(&lifecycles, cached_budget));
+        let expected_has_visible = lifecycles
+            .iter()
+            .copied()
+            .any(WindowLifecycleSpec::is_shell_visible);
+        let expected_pending = expected_has_visible
+            || lifecycles.len() > cached_budget.min(max_kept_windows)
+            || lifecycles.iter().copied().any(WindowLifecycleSpec::is_invalid);
+
+        prop_assert_eq!(has_visible_windows(&tabs), expected_has_visible);
+        prop_assert_eq!(has_pending_clear_work(&tabs, max_kept_windows), expected_pending);
+    }
+
+    #[test]
+    fn prop_shell_visible_close_indices_follow_authoritative_lifecycles(
+        lifecycles in vec(window_lifecycle_spec(), 0..16),
+    ) {
+        let tab_windows = tab_windows_from_specs(&lifecycles, ADAPTIVE_POOL_MIN_BUDGET);
+        let expected_indices = lifecycles
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(index, lifecycle)| lifecycle.is_shell_visible().then_some(index))
+            .collect::<Vec<_>>();
+
+        prop_assert_eq!(shell_visible_close_indices(&tab_windows), expected_indices);
+    }
 }

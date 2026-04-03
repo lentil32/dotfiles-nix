@@ -7,6 +7,7 @@ use super::EventSource;
 use super::MotionClass;
 use super::RenderAllocationPolicy;
 use super::RenderCleanupAction;
+use super::ScrollShift;
 use super::decision::CursorTransitions;
 use super::frame::apply_scroll_shift_to_state;
 use super::frame::build_render_frame;
@@ -46,6 +47,7 @@ const FILAMENT_MIN_SUPPORT_STEPS: u32 = 7;
 const JUMP_BRIDGE_MIN_SEGMENTS: usize = 2;
 const JUMP_BRIDGE_MAX_SEGMENTS: usize = 8;
 const JUMP_BRIDGE_SEGMENT_LENGTH_CELLS: f64 = 6.0;
+const DISCONTINUOUS_JUMP_BRIDGE_DURATION_MS: f64 = 84.0;
 
 fn tail_duration_support_scale(tail_duration_ms: f64) -> f64 {
     if tail_duration_ms.is_finite() {
@@ -115,7 +117,7 @@ fn jump_bridge_step_samples(
         JUMP_BRIDGE_MIN_SEGMENTS
     };
     let segment_count = raw_segments.clamp(JUMP_BRIDGE_MIN_SEGMENTS, JUMP_BRIDGE_MAX_SEGMENTS);
-    let dt_ms = (state.config.jump_cue_duration_ms / segment_count as f64)
+    let dt_ms = (DISCONTINUOUS_JUMP_BRIDGE_DURATION_MS / segment_count as f64)
         .max(state.config.simulation_step_interval_ms().max(1.0))
         .max(1.0);
     let mut samples = Vec::with_capacity(segment_count + 1);
@@ -172,6 +174,15 @@ fn draw_discontinuous_jump_frame(
     .with_motion_class(spec.motion_class)
     .with_next_animation_at_ms(next_animation_at_ms)
     .with_render_cleanup_action(RenderCleanupAction::Invalidate)
+}
+
+fn apply_event_scroll_shift(
+    state: &mut RuntimeState,
+    target_position: &mut Point,
+    scroll_shift: ScrollShift,
+) {
+    apply_scroll_shift_to_state(state, scroll_shift);
+    target_position.row = clamp_row_to_window(target_position.row, scroll_shift);
 }
 
 fn promote_settled_target(state: &mut RuntimeState, now_ms: f64) {
@@ -293,7 +304,6 @@ pub(crate) fn reduce_cursor_event(
         return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
-    state.refresh_jump_cues(event.now_ms);
 
     let vertical_bar = state.config.cursor_is_vertical_bar(mode);
     let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
@@ -315,17 +325,15 @@ pub(crate) fn reduce_cursor_event(
         EventSource::AnimationTick => state.target_position(),
         EventSource::External => event_target,
     };
-    let (window_changed, buffer_changed) =
-        state
-            .tracked_location_ref()
-            .map_or((false, false), |tracked| {
-                (
-                    tracked.window_handle != event.cursor_location.window_handle,
-                    tracked.buffer_handle != event.cursor_location.buffer_handle,
-                )
-            });
-    let previous_target = state.target_position();
-    let previous_location = state.tracked_location_ref().cloned();
+    let (window_changed, buffer_changed, window_dimensions_changed) = state
+        .tracked_location_ref()
+        .map_or((false, false, false), |tracked| {
+            (
+                tracked.window_handle != event.cursor_location.window_handle,
+                tracked.buffer_handle != event.cursor_location.buffer_handle,
+                tracked.window_dimensions_changed(&event.cursor_location),
+            )
+        });
     let mut motion_class = MotionClass::Continuous;
 
     match source {
@@ -344,22 +352,29 @@ pub(crate) fn reduce_cursor_event(
                 return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
+            if window_dimensions_changed && !window_changed && !buffer_changed {
+                motion_class = MotionClass::SurfaceRetarget;
+                state.jump_and_stop_animation(
+                    target_position,
+                    cursor_shape,
+                    &event.cursor_location,
+                );
+                return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+                    .with_motion_class(motion_class)
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+            }
             if external_mode_requires_immediate_movement(
                 &state.config,
                 mode,
                 transitioned_to_or_from_cmdline,
             ) {
-                motion_class = MotionClass::DiscontinuousJump;
-                let jump_origin = previous_target;
-                if let Some(from_location) = previous_location.as_ref() {
-                    state.record_jump_cue(
-                        jump_origin,
-                        from_location,
-                        target_position,
-                        &event.cursor_location,
-                        event.now_ms,
-                    );
+                if state.is_initialized()
+                    && let Some(scroll_shift) = event.scroll_shift
+                {
+                    apply_event_scroll_shift(state, &mut target_position, scroll_shift);
                 }
+                motion_class = MotionClass::DiscontinuousJump;
+                let jump_origin = state.current_visual_cursor_anchor();
                 state.jump_and_stop_animation(
                     target_position,
                     cursor_shape,
@@ -379,18 +394,14 @@ pub(crate) fn reduce_cursor_event(
                 );
             }
             if external_mode_requires_jump(&state.config, mode) {
+                if state.is_initialized()
+                    && let Some(scroll_shift) = event.scroll_shift
+                {
+                    apply_event_scroll_shift(state, &mut target_position, scroll_shift);
+                }
                 // Mode-forced jumps update position/target but preserve in-flight motion.
                 motion_class = MotionClass::DiscontinuousJump;
-                let jump_origin = previous_target;
-                if let Some(from_location) = previous_location.as_ref() {
-                    state.record_jump_cue(
-                        jump_origin,
-                        from_location,
-                        target_position,
-                        &event.cursor_location,
-                        event.now_ms,
-                    );
-                }
+                let jump_origin = state.current_visual_cursor_anchor();
                 state.jump_preserving_motion(target_position, cursor_shape, &event.cursor_location);
                 return draw_discontinuous_jump_frame(
                     state,
@@ -442,9 +453,7 @@ pub(crate) fn reduce_cursor_event(
     let should_update_target = matches!(source, EventSource::External) || tick_retarget;
     if should_update_target {
         if let Some(scroll_shift) = event.scroll_shift {
-            apply_scroll_shift_to_state(state, vertical_bar, horizontal_bar, scroll_shift);
-            target_position.row =
-                clamp_row_to_window(target_position.row - scroll_shift.shift, scroll_shift);
+            apply_event_scroll_shift(state, &mut target_position, scroll_shift);
         }
 
         let path_segmentation = classify_target_transition(
@@ -455,19 +464,8 @@ pub(crate) fn reduce_cursor_event(
             target_position.col,
         );
         motion_class = path_segmentation.motion_class;
-        if matches!(motion_class, MotionClass::DiscontinuousJump)
-            && let Some(from_location) = previous_location.as_ref()
-        {
-            state.record_jump_cue(
-                previous_target,
-                from_location,
-                target_position,
-                &event.cursor_location,
-                event.now_ms,
-            );
-            // large discontinuous moves still reset trail semantics, but they should
-            // stay on the regular spring/comet pipeline unless policy requires an actual snap.
-        }
+        // large discontinuous moves still reset trail semantics, but they should
+        // stay on the regular spring/comet pipeline unless policy requires an actual snap.
 
         if path_segmentation.should_jump {
             state.jump_and_stop_animation(target_position, cursor_shape, &event.cursor_location);

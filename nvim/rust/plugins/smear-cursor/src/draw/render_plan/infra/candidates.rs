@@ -3,11 +3,11 @@ use super::super::latent_field::MICRO_H;
 use super::super::latent_field::MICRO_TILE_SAMPLES;
 use super::super::latent_field::MICRO_W;
 use super::super::latent_field::MicroTile;
-use super::CellCandidate;
-use super::DecodedCellState;
-use super::DecodedGlyph;
-use super::HighlightLevel;
-use super::ShadeProfile;
+use super::shared::CellCandidate;
+use super::shared::DecodedCellState;
+use super::shared::DecodedGlyph;
+use super::shared::HighlightLevel;
+use super::shared::ShadeProfile;
 use std::cmp::Ordering;
 use std::sync::LazyLock;
 

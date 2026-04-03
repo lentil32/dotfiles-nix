@@ -126,3 +126,18 @@ planner_heavy            1675.812               1528.334              +9.65%    
 extmark_heavy            1615.358               1646.625              -1.90%              1.014                     1.009                    1.007                       1.003                      1.002                        0.997
 conceal_heavy            1581.389               1591.208              -0.62%              0.994                     1.020                    1.005                       1.028                      1.000                        1.026
 ```
+
+## Decision
+
+Keep `DEFAULT_MAX_KEPT_WINDOWS=64`.
+
+The refreshed comparison still shows zero cap hits in every scenario, and the
+largest measured requested capacity is only `18` windows. That leaves more than
+3x headroom under the `64` cap while keeping the shipped default much closer to
+the observed demand than `384`.
+
+The `planner_heavy` baseline is the only clearly worse local result in this
+capture. The rest of the baseline deltas are neutral to favorable, and none of
+the stress or recovery sections show evidence that `64` is starving the pool.
+Revisit this default only if a future report starts hitting the cap or shows a
+repeatable multi-scenario regression from the smaller ceiling.

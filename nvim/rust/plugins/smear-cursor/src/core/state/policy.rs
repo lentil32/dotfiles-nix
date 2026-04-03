@@ -22,14 +22,6 @@ pub(crate) enum BufferPerfClass {
 }
 
 impl BufferPerfClass {
-    pub(crate) const fn fingerprint(self) -> u64 {
-        match self {
-            Self::Full => 1_u64,
-            Self::FastMotion => 2_u64,
-            Self::Skip => 4_u64,
-        }
-    }
-
     pub(crate) const fn diagnostic_name(self) -> &'static str {
         match self {
             Self::Full => "full",
@@ -65,6 +57,7 @@ pub(crate) struct IngressPolicyState {
 }
 
 impl IngressPolicyState {
+    #[cfg(test)]
     pub(crate) const fn last_cursor_autocmd_at(self) -> Option<Millis> {
         self.last_cursor_autocmd_at
     }
@@ -293,10 +286,6 @@ impl TimerState {
         }
     }
 
-    pub(crate) fn generation(self, timer_id: TimerId) -> TimerGeneration {
-        self.generation_for(timer_id)
-    }
-
     fn with_generation(self, timer_id: TimerId, generation: TimerGeneration) -> Self {
         match timer_id {
             TimerId::Animation => Self {
@@ -394,141 +383,192 @@ impl TimerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proptest::stateful_config;
+    use crate::test_support::proptest::timer_id;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
 
-    #[test]
-    fn timer_state_arm_stores_the_active_token_in_its_matching_slot() {
-        let (state, token) = TimerState::default().arm(TimerId::Recovery);
+    const TIMER_IDS: [TimerId; 4] = [
+        TimerId::Animation,
+        TimerId::Ingress,
+        TimerId::Recovery,
+        TimerId::Cleanup,
+    ];
 
-        assert_eq!(state.active_recovery, Some(token));
-        assert_eq!(state.active_animation, None);
-        assert_eq!(state.active_ingress, None);
-        assert_eq!(state.active_cleanup, None);
-        assert_eq!(state.active_token(TimerId::Recovery), Some(token));
-    }
-
-    #[test]
-    fn timer_state_clear_matching_ignores_tokens_from_other_slots() {
-        let (state, recovery_token) = TimerState::default().arm(TimerId::Recovery);
-        let animation_token = TimerToken::new(TimerId::Animation, recovery_token.generation());
-
-        assert_eq!(state.clear_matching(animation_token), state);
-        assert_eq!(state.clear_matching(recovery_token).active_recovery, None);
-    }
-
-    #[test]
-    fn timer_state_only_treats_the_latest_token_in_each_slot_as_active_across_many_generations() {
-        for timer_id in [
-            TimerId::Animation,
-            TimerId::Ingress,
-            TimerId::Recovery,
-            TimerId::Cleanup,
-        ] {
-            let mut state = TimerState::default();
-            let mut stale_tokens = Vec::new();
-
-            for expected_generation in 1..=32 {
-                let (next_state, token) = state.arm(timer_id);
-                state = next_state;
-
-                assert_eq!(
-                    token.generation(),
-                    TimerGeneration::new(expected_generation)
-                );
-                assert_eq!(state.active_token(timer_id), Some(token));
-                assert!(
-                    state.is_active(token),
-                    "newly armed token should be the reducer truth for {timer_id:?}"
-                );
-
-                for stale_token in stale_tokens.iter().copied() {
-                    assert!(
-                        !state.is_active(stale_token),
-                        "older token generations must go stale for {timer_id:?}"
-                    );
-                    assert_eq!(
-                        state.clear_matching(stale_token),
-                        state,
-                        "stale tokens must not clear the live slot for {timer_id:?}"
-                    );
-                }
-
-                stale_tokens.push(token);
-            }
+    const fn timer_slot_index(timer_id: TimerId) -> usize {
+        match timer_id {
+            TimerId::Animation => 0,
+            TimerId::Ingress => 1,
+            TimerId::Recovery => 2,
+            TimerId::Cleanup => 3,
         }
     }
 
-    #[test]
-    fn ingress_policy_pending_delay_deadline_only_moves_forward() {
-        let policy = IngressPolicyState::default()
-            .note_pending_delay_until(Millis::new(40))
-            .note_pending_delay_until(Millis::new(35))
-            .note_pending_delay_until(Millis::new(55));
+    proptest! {
+        #![proptest_config(stateful_config())]
 
-        assert_eq!(policy.pending_delay_until(), Some(Millis::new(55)));
-    }
+        #[test]
+        fn prop_timer_state_latest_token_per_slot_wins_across_rearm_sequences(
+            sequence in vec(timer_id(), 1..=64),
+        ) {
+            let mut state = TimerState::default();
+            let mut history: [Vec<TimerToken>; 4] = std::array::from_fn(|_| Vec::new());
 
-    #[test]
-    fn render_cleanup_schedule_enters_hot_with_reducer_owned_cooling_fields() {
-        let cleanup = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 12);
+            for timer_id in sequence {
+                let (next_state, token) = state.arm(timer_id);
+                state = next_state;
+                let slot = timer_slot_index(timer_id);
 
-        assert_eq!(cleanup.thermal(), RenderThermalState::Hot);
-        assert_eq!(cleanup.max_kept_windows(), 12);
-        assert_eq!(cleanup.idle_target_budget(), 2);
-        assert_eq!(cleanup.max_prune_per_tick(), 12);
-        assert_eq!(cleanup.next_compaction_due_at(), Some(Millis::new(65)));
-        assert_eq!(cleanup.entered_cooling_at(), None);
-        assert_eq!(cleanup.hard_purge_due_at(), Some(Millis::new(130)));
-        assert_eq!(cleanup.next_deadline(), Some(Millis::new(65)));
-    }
+                prop_assert_eq!(state.active_token(timer_id), Some(token));
+                prop_assert!(state.is_active(token));
 
-    #[test]
-    fn render_cleanup_soft_clear_transition_moves_hot_state_into_cooling() {
-        let cleanup = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 12)
-            .enter_cooling(Millis::new(65));
+                for stale_token in history[slot].iter().copied() {
+                    prop_assert!(!state.is_active(stale_token));
+                    prop_assert_eq!(state.clear_matching(stale_token), state);
+                }
 
-        assert_eq!(cleanup.thermal(), RenderThermalState::Cooling);
-        assert_eq!(cleanup.max_kept_windows(), 12);
-        assert_eq!(cleanup.idle_target_budget(), 2);
-        assert_eq!(cleanup.max_prune_per_tick(), 12);
-        assert_eq!(cleanup.next_compaction_due_at(), Some(Millis::new(65)));
-        assert_eq!(cleanup.entered_cooling_at(), Some(Millis::new(65)));
-        assert_eq!(cleanup.hard_purge_due_at(), Some(Millis::new(130)));
-        assert_eq!(cleanup.next_deadline(), Some(Millis::new(65)));
-    }
+                for other_id in TIMER_IDS {
+                    if other_id == timer_id {
+                        continue;
+                    }
 
-    #[test]
-    fn render_cleanup_schedule_clamps_idle_target_to_small_retention_budget() {
-        let cleanup = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 1);
+                    prop_assert_eq!(
+                        state.clear_matching(TimerToken::new(other_id, TimerGeneration::INITIAL)),
+                        state,
+                    );
+                }
 
-        assert_eq!(cleanup.max_kept_windows(), 1);
-        assert_eq!(cleanup.idle_target_budget(), 1);
-    }
+                history[slot].push(token);
+            }
 
-    #[test]
-    fn render_cleanup_continue_cooling_rearms_immediate_compaction_without_resetting_entry_time() {
-        let cleanup = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 12)
-            .enter_cooling(Millis::new(65))
-            .continue_cooling(Millis::new(81));
+            for timer_id in TIMER_IDS {
+                let slot = timer_slot_index(timer_id);
+                let expected = history[slot].last().copied();
 
-        assert_eq!(cleanup.thermal(), RenderThermalState::Cooling);
-        assert_eq!(cleanup.next_compaction_due_at(), Some(Millis::new(81)));
-        assert_eq!(cleanup.entered_cooling_at(), Some(Millis::new(65)));
-        assert_eq!(cleanup.next_deadline(), Some(Millis::new(81)));
-    }
+                prop_assert_eq!(state.active_token(timer_id), expected);
 
-    #[test]
-    fn render_cleanup_converged_cold_preserves_idle_budget_for_diagnostics() {
-        let cleanup = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 12)
-            .enter_cooling(Millis::new(65))
-            .converge_to_cold();
+                if let Some(active_token) = expected {
+                    prop_assert_eq!(state.clear_matching(active_token).active_token(timer_id), None);
+                }
+            }
+        }
 
-        assert_eq!(cleanup.thermal(), RenderThermalState::Cold);
-        assert_eq!(cleanup.max_kept_windows(), 12);
-        assert_eq!(cleanup.idle_target_budget(), 2);
-        assert_eq!(cleanup.max_prune_per_tick(), 12);
-        assert_eq!(cleanup.next_compaction_due_at(), None);
-        assert_eq!(cleanup.entered_cooling_at(), None);
-        assert_eq!(cleanup.hard_purge_due_at(), None);
-        assert_eq!(cleanup.next_deadline(), None);
+        #[test]
+        fn prop_ingress_policy_pending_delay_deadline_only_moves_forward(
+            pending_deadlines in vec(any::<u64>(), 1..=64),
+        ) {
+            let mut policy = IngressPolicyState::default();
+            let mut expected_deadline: Option<Millis> = None;
+
+            for pending_deadline in pending_deadlines {
+                let millis = Millis::new(pending_deadline);
+                policy = policy.note_pending_delay_until(millis);
+                expected_deadline = Some(match expected_deadline {
+                    Some(previous) if previous.value() > millis.value() => previous,
+                    _ => millis,
+                });
+                prop_assert_eq!(policy.pending_delay_until(), expected_deadline);
+            }
+
+            prop_assert_eq!(policy.clear_pending_delay().pending_delay_until(), None);
+        }
+
+        #[test]
+        fn prop_render_cleanup_schedule_clamps_budgets_and_deadlines(
+            observed_at in any::<u64>(),
+            soft_delay_ms in any::<u64>(),
+            hard_delay_ms in any::<u64>(),
+            max_kept_windows in 0_usize..=64_usize,
+        ) {
+            let cleanup = RenderCleanupState::scheduled(
+                Millis::new(observed_at),
+                soft_delay_ms,
+                hard_delay_ms,
+                max_kept_windows,
+            );
+            let clamped_soft_delay_ms = soft_delay_ms.max(1);
+            let clamped_hard_delay_ms = hard_delay_ms.max(clamped_soft_delay_ms);
+            let expected_next_compaction_due_at =
+                Millis::new(observed_at.saturating_add(clamped_soft_delay_ms));
+            let expected_hard_purge_due_at =
+                Millis::new(observed_at.saturating_add(clamped_hard_delay_ms));
+
+            prop_assert_eq!(cleanup.thermal(), RenderThermalState::Hot);
+            prop_assert_eq!(cleanup.max_kept_windows(), max_kept_windows);
+            prop_assert_eq!(
+                cleanup.idle_target_budget(),
+                max_kept_windows.min(DEFAULT_IDLE_RETENTION_BUDGET)
+            );
+            prop_assert_eq!(cleanup.max_prune_per_tick(), max_kept_windows.max(1));
+            prop_assert_eq!(
+                cleanup.next_compaction_due_at(),
+                Some(expected_next_compaction_due_at)
+            );
+            prop_assert_eq!(cleanup.entered_cooling_at(), None);
+            prop_assert_eq!(cleanup.hard_purge_due_at(), Some(expected_hard_purge_due_at));
+            prop_assert_eq!(cleanup.next_deadline(), Some(expected_next_compaction_due_at));
+        }
+
+        #[test]
+        fn prop_render_cleanup_rearming_preserves_cooling_entry_time_and_budget(
+            observed_at in any::<u64>(),
+            soft_delay_ms in any::<u64>(),
+            hard_delay_ms in any::<u64>(),
+            max_kept_windows in 0_usize..=64_usize,
+            entered_cooling_at in any::<u64>(),
+            rearm_sequence in vec((any::<bool>(), any::<u64>()), 0..=32),
+        ) {
+            let scheduled = RenderCleanupState::scheduled(
+                Millis::new(observed_at),
+                soft_delay_ms,
+                hard_delay_ms,
+                max_kept_windows,
+            );
+            let entered_cooling_at = Millis::new(entered_cooling_at);
+            let mut cleanup = scheduled.enter_cooling(entered_cooling_at);
+            let mut expected_next_compaction_due_at = entered_cooling_at;
+
+            for (use_enter_cooling, observed_at) in rearm_sequence {
+                let observed_at = Millis::new(observed_at);
+                cleanup = if use_enter_cooling {
+                    cleanup.enter_cooling(observed_at)
+                } else {
+                    cleanup.continue_cooling(observed_at)
+                };
+                expected_next_compaction_due_at = observed_at;
+            }
+
+            let expected_hard_purge_due_at = scheduled
+                .hard_purge_due_at()
+                .expect("scheduled cleanup should always arm a hard purge deadline");
+            let expected_next_deadline =
+                if expected_next_compaction_due_at.value() <= expected_hard_purge_due_at.value() {
+                    expected_next_compaction_due_at
+                } else {
+                    expected_hard_purge_due_at
+                };
+
+            prop_assert_eq!(cleanup.thermal(), RenderThermalState::Cooling);
+            prop_assert_eq!(cleanup.max_kept_windows(), scheduled.max_kept_windows());
+            prop_assert_eq!(cleanup.idle_target_budget(), scheduled.idle_target_budget());
+            prop_assert_eq!(cleanup.max_prune_per_tick(), scheduled.max_prune_per_tick());
+            prop_assert_eq!(
+                cleanup.next_compaction_due_at(),
+                Some(expected_next_compaction_due_at)
+            );
+            prop_assert_eq!(cleanup.entered_cooling_at(), Some(entered_cooling_at));
+            prop_assert_eq!(cleanup.hard_purge_due_at(), Some(expected_hard_purge_due_at));
+            prop_assert_eq!(cleanup.next_deadline(), Some(expected_next_deadline));
+
+            let cold = cleanup.converge_to_cold();
+            prop_assert_eq!(cold.thermal(), RenderThermalState::Cold);
+            prop_assert_eq!(cold.max_kept_windows(), scheduled.max_kept_windows());
+            prop_assert_eq!(cold.idle_target_budget(), scheduled.idle_target_budget());
+            prop_assert_eq!(cold.max_prune_per_tick(), scheduled.max_prune_per_tick());
+            prop_assert_eq!(cold.next_compaction_due_at(), None);
+            prop_assert_eq!(cold.entered_cooling_at(), None);
+            prop_assert_eq!(cold.hard_purge_due_at(), None);
+            prop_assert_eq!(cold.next_deadline(), None);
+        }
     }
 }

@@ -89,10 +89,7 @@ pub(crate) fn advance_second_order_response(
 }
 
 pub(crate) fn center(corners: &[Point; 4]) -> Point {
-    Point {
-        row: (corners[0].row + corners[1].row + corners[2].row + corners[3].row) / 4.0,
-        col: (corners[0].col + corners[1].col + corners[2].col + corners[3].col) / 4.0,
-    }
+    crate::types::corners_center(corners)
 }
 
 pub(crate) fn corners_for_cursor(

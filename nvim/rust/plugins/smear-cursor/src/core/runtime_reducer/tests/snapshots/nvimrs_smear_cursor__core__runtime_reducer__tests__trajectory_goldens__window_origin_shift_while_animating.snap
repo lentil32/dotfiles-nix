@@ -1,0 +1,10 @@
+---
+source: plugins/smear-cursor/src/core/runtime_reducer/tests/trajectory_goldens.rs
+expression: transcript.render()
+---
+00 ext t=100.000 pos=15.000,18.000 surf=10/20 motion=cont action=draw samples=[15.500,18.500@4.167] center=15.500,18.500 target=15.000,18.000 next=- cleanup=schedule alloc=bootstrap vis=show sched=0 state=a0s0d0 stroke=1 epoch=1
+01 ext t=108.000 pos=15.000,24.000 surf=10/20 motion=cont action=draw samples=[15.500,18.562@4.167] center=15.500,18.562 target=15.000,24.000 next=114 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=2
+02 tick t=116.000 pos=15.000,24.000 surf=10/20 motion=cont action=draw samples=[15.500,18.726@4.167;15.500,18.960@4.167] center=15.500,18.960 target=15.000,24.000 next=121 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=2
+03 ext t=124.000 pos=17.000,27.000 surf=10/20 scroll=-2.000,-3.000[5.000..64.000] semantic=ViewportOrWindowMoved motion=cont action=draw samples=[17.500,22.243@4.167;17.500,22.556@4.167] center=17.500,22.556 target=17.000,27.000 next=128 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=3
+04 tick t=132.000 pos=17.000,27.000 surf=10/20 motion=cont action=draw samples=[17.500,22.885@4.167;17.500,23.219@4.167] center=17.500,23.219 target=17.000,27.000 next=135 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=3
+final center=17.500,23.219 target=17.000,27.000 state=a1s0d0 stroke=1 epoch=3 surf=10/20

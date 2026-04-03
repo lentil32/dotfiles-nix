@@ -14,6 +14,11 @@ pub(crate) fn display_metric_row_scale(block_aspect_ratio: f64) -> f64 {
     }
 }
 
+pub(crate) fn smoothstep01(value: f64) -> f64 {
+    let clamped = value.clamp(0.0, 1.0);
+    clamped * clamped * (3.0 - 2.0 * clamped)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Point {
     pub(crate) row: f64,
@@ -38,6 +43,32 @@ impl Point {
     pub(crate) fn display_distance(self, other: Self, block_aspect_ratio: f64) -> f64 {
         self.display_distance_squared(other, block_aspect_ratio)
             .sqrt()
+    }
+}
+
+pub(crate) fn corners_center(corners: &[Point; 4]) -> Point {
+    let mut row = 0.0_f64;
+    let mut col = 0.0_f64;
+    for point in corners {
+        row += point.row;
+        col += point.col;
+    }
+    Point {
+        row: row / 4.0,
+        col: col / 4.0,
+    }
+}
+
+pub(crate) fn current_visual_cursor_anchor(
+    current_corners: &[Point; 4],
+    target_corners: &[Point; 4],
+    target_position: Point,
+) -> Point {
+    let current_center = corners_center(current_corners);
+    let target_center = corners_center(target_corners);
+    Point {
+        row: target_position.row + (current_center.row - target_center.row),
+        col: target_position.col + (current_center.col - target_center.col),
     }
 }
 
@@ -73,12 +104,64 @@ impl ScreenCell {
         Self::new(rounded_row as i64, rounded_col as i64)
     }
 
+    pub(crate) fn from_visual_cursor_anchor(
+        current_corners: &[Point; 4],
+        target_corners: &[Point; 4],
+        target_position: Point,
+    ) -> Option<Self> {
+        Self::from_rounded_point(current_visual_cursor_anchor(
+            current_corners,
+            target_corners,
+            target_position,
+        ))
+    }
+
     pub(crate) const fn row(self) -> i64 {
         self.row
     }
 
     pub(crate) const fn col(self) -> i64 {
         self.col
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum CursorCellShape {
+    Block,
+    VerticalBar,
+    HorizontalBar,
+}
+
+impl CursorCellShape {
+    pub(crate) fn from_corners(corners: &[Point; 4]) -> Self {
+        let mut min_row = f64::INFINITY;
+        let mut max_row = f64::NEG_INFINITY;
+        let mut min_col = f64::INFINITY;
+        let mut max_col = f64::NEG_INFINITY;
+        for corner in corners {
+            min_row = min_row.min(corner.row);
+            max_row = max_row.max(corner.row);
+            min_col = min_col.min(corner.col);
+            max_col = max_col.max(corner.col);
+        }
+
+        let height = (max_row - min_row).abs();
+        let width = (max_col - min_col).abs();
+        if width <= (1.0 / 8.0) + EPSILON && height >= 1.0 - EPSILON {
+            Self::VerticalBar
+        } else if height <= (1.0 / 8.0) + EPSILON && width >= 1.0 - EPSILON {
+            Self::HorizontalBar
+        } else {
+            Self::Block
+        }
+    }
+
+    pub(crate) const fn glyph(self) -> &'static str {
+        match self {
+            Self::Block => "█",
+            Self::VerticalBar => "▏",
+            Self::HorizontalBar => "▁",
+        }
     }
 }
 
@@ -248,36 +331,105 @@ impl Rng32 {
 mod tests {
     use super::Point;
     use super::ScreenCell;
+    use super::current_visual_cursor_anchor;
+    use crate::animation::scaled_corners_for_trail;
+    use crate::test_support::proptest::DEFAULT_FLOAT_EPSILON;
+    use crate::test_support::proptest::approx_eq_point;
+    use crate::test_support::proptest::cursor_rectangle;
+    use crate::test_support::proptest::positive_scale;
+    use crate::test_support::proptest::pure_config;
+    use proptest::prelude::*;
 
-    #[test]
-    fn screen_cell_validates_one_indexed_cells() {
-        assert_eq!(ScreenCell::new(1, 1), Some(ScreenCell { row: 1, col: 1 }));
-        assert_eq!(ScreenCell::new(0, 1), None);
-        assert_eq!(ScreenCell::new(1, 0), None);
+    fn expected_screen_cell_from_point(point: Point) -> Option<ScreenCell> {
+        if !point.row.is_finite() || !point.col.is_finite() {
+            return None;
+        }
+
+        let rounded_row = point.row.round();
+        let rounded_col = point.col.round();
+        if rounded_row < 1.0
+            || rounded_col < 1.0
+            || rounded_row > i64::MAX as f64
+            || rounded_col > i64::MAX as f64
+        {
+            return None;
+        }
+
+        Some(ScreenCell {
+            row: rounded_row as i64,
+            col: rounded_col as i64,
+        })
     }
 
-    #[test]
-    fn screen_cell_from_point_rounds_and_rejects_non_finite_values() {
-        assert_eq!(
-            ScreenCell::from_rounded_point(Point {
-                row: 12.6,
-                col: 9.4
-            }),
-            Some(ScreenCell { row: 13, col: 9 })
-        );
-        assert_eq!(
-            ScreenCell::from_rounded_point(Point {
-                row: f64::NAN,
-                col: 3.0
-            }),
-            None
-        );
-        assert_eq!(
-            ScreenCell::from_rounded_point(Point {
-                row: 3.0,
-                col: -1.0
-            }),
-            None
-        );
+    proptest! {
+        #![proptest_config(pure_config())]
+
+        #[test]
+        fn prop_screen_cell_validates_one_indexed_cells(
+            row in -8_i64..8_i64,
+            col in -8_i64..8_i64,
+        ) {
+            let expected = if row >= 1 && col >= 1 {
+                Some(ScreenCell { row, col })
+            } else {
+                None
+            };
+
+            prop_assert_eq!(ScreenCell::new(row, col), expected);
+        }
+
+        #[test]
+        fn prop_screen_cell_from_rounded_point_matches_rounding_and_validity_rules(
+            row in prop_oneof![
+                -4096.0_f64..4096.0_f64,
+                Just(f64::NAN),
+                Just(f64::INFINITY),
+                Just(f64::NEG_INFINITY),
+            ],
+            col in prop_oneof![
+                -4096.0_f64..4096.0_f64,
+                Just(f64::NAN),
+                Just(f64::INFINITY),
+                Just(f64::NEG_INFINITY),
+            ],
+        ) {
+            let point = Point { row, col };
+            prop_assert_eq!(
+                ScreenCell::from_rounded_point(point),
+                expected_screen_cell_from_point(point)
+            );
+        }
+
+        #[test]
+        fn prop_visual_cursor_anchor_stays_on_target_under_scaled_head_geometry(
+            fixture in cursor_rectangle(),
+            row_scale in positive_scale(),
+            col_scale in positive_scale(),
+        ) {
+            let scaled_corners =
+                scaled_corners_for_trail(&fixture.corners, row_scale, col_scale);
+            let anchor = current_visual_cursor_anchor(
+                &scaled_corners,
+                &fixture.corners,
+                fixture.position,
+            );
+
+            prop_assert!(
+                approx_eq_point(anchor, fixture.position, DEFAULT_FLOAT_EPSILON),
+                "anchor={anchor:?} target={:?} row_scale={row_scale} col_scale={col_scale}",
+                fixture.position
+            );
+            prop_assert_eq!(
+                ScreenCell::from_visual_cursor_anchor(
+                    &scaled_corners,
+                    &fixture.corners,
+                    fixture.position,
+                ),
+                ScreenCell::new(
+                    fixture.position.row.round() as i64,
+                    fixture.position.col.round() as i64,
+                )
+            );
+        }
     }
 }

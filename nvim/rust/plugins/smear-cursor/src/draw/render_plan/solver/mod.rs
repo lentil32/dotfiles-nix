@@ -11,7 +11,9 @@ pub(super) use self::fallback::active_support_is_disconnected;
 pub(super) use self::fallback::decode_compiled_field;
 #[cfg(test)]
 pub(super) use self::fallback::decode_compiled_field_trace;
+#[cfg(test)]
 pub(super) use self::fallback::decode_compiled_field_trace_with_compiled_and_scratch;
+pub(super) use self::fallback::decode_compiled_field_with_compiled_and_scratch;
 #[cfg(test)]
 pub(super) use self::fallback::decode_compiled_field_with_solver;
 #[cfg(test)]
@@ -28,8 +30,6 @@ pub(super) use self::ribbon_dp::merge_ribbon_assignments;
 pub(super) use self::ribbon_dp::overlap_penalty;
 #[cfg(test)]
 pub(super) use self::ribbon_dp::solve_ribbon_dp;
-#[cfg(test)]
-pub(super) use self::ribbon_dp::transition_cost;
 #[cfg(test)]
 pub(super) use self::ribbon_state_space::RunEnumerationCursor;
 #[cfg(test)]

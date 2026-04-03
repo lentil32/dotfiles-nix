@@ -35,47 +35,6 @@ impl MotionClock {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct GlobalDisplayPose {
-    pub(crate) row_display: f64,
-    pub(crate) col_display: f64,
-    pub(crate) window_handle: i64,
-    pub(crate) buffer_handle: i64,
-}
-
-impl GlobalDisplayPose {
-    pub(super) fn new(position: Point, location: &CursorLocation) -> Self {
-        // cue bookkeeping stores display-metric coordinates only for now. Window-origin
-        // projection into a global screen plane lands in the follow-up render-plan work.
-        Self {
-            row_display: position.row,
-            col_display: position.col,
-            window_handle: location.window_handle,
-            buffer_handle: location.buffer_handle,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum JumpCuePhase {
-    Launch,
-    Transfer,
-    Catch,
-    Fade,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct JumpCue {
-    pub(crate) cue_id: u64,
-    pub(crate) epoch: u64,
-    pub(crate) from_pose: GlobalDisplayPose,
-    pub(crate) to_pose: GlobalDisplayPose,
-    pub(crate) started_at_ms: f64,
-    pub(crate) duration_ms: f64,
-    pub(crate) strength: f64,
-    pub(crate) phase: JumpCuePhase,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PendingTarget {
     pub(crate) position: Point,
@@ -166,8 +125,6 @@ pub(super) struct TransientRuntimeState {
     pub(super) target_position: Point,
     pub(super) retarget_epoch: u64,
     pub(super) trail_stroke_id: StrokeId,
-    pub(super) next_jump_cue_id: u64,
-    pub(super) active_jump_cues: Vec<JumpCue>,
     pub(super) last_mode_was_cmdline: Option<bool>,
     pub(super) last_tick_ms: Option<f64>,
     pub(super) tracked_location: Option<CursorLocation>,
@@ -180,8 +137,6 @@ impl Default for TransientRuntimeState {
             target_position: Point::ZERO,
             retarget_epoch: 0,
             trail_stroke_id: StrokeId::INITIAL,
-            next_jump_cue_id: 1,
-            active_jump_cues: Vec::new(),
             last_mode_was_cmdline: None,
             last_tick_ms: None,
             tracked_location: None,

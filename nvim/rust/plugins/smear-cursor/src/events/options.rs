@@ -371,34 +371,6 @@ fn parse_optional_positive_f64(raw: Option<Object>, key: &'static str) -> Result
     parse_optional_with(raw, key, validated_positive_f64)
 }
 
-fn parse_optional_non_negative_i64_value(
-    raw: Option<Object>,
-    key: &'static str,
-) -> Result<Option<i64>> {
-    parse_optional_non_negative_i64(raw, key)
-}
-
-fn parse_optional_non_negative_u32_value(
-    raw: Option<Object>,
-    key: &'static str,
-) -> Result<Option<u32>> {
-    parse_optional_non_negative_u32(raw, key)
-}
-
-fn parse_optional_non_negative_usize_value(
-    raw: Option<Object>,
-    key: &'static str,
-) -> Result<Option<usize>> {
-    parse_optional_non_negative_usize(raw, key)
-}
-
-fn parse_optional_positive_u32_value(
-    raw: Option<Object>,
-    key: &'static str,
-) -> Result<Option<u32>> {
-    parse_optional_positive_u32(raw, key)
-}
-
 fn parse_optional_top_k_per_cell_value(
     raw: Option<Object>,
     key: &'static str,
@@ -411,13 +383,6 @@ fn parse_optional_top_k_per_cell_value(
             u8::try_from(parsed).map_err(|_| invalid_key(key, "integer between 2 and 255"))
         })
         .transpose()
-}
-
-fn parse_optional_filetypes_disabled_value(
-    raw: Option<Object>,
-    key: &'static str,
-) -> Result<Option<Vec<String>>> {
-    parse_optional_filetypes_disabled(raw, key)
 }
 
 fn parse_optional_string(raw: Option<Object>, key: &'static str) -> Result<Option<String>> {
@@ -453,23 +418,12 @@ fn parse_optional_change_u16(
     parse_optional_change_with(raw, key, validated_cterm_color_index)
 }
 
-fn parse_optional_cterm_cursor_colors_value(
-    raw: Option<Object>,
-    key: &'static str,
-) -> Result<Option<OptionalChange<CtermCursorColorsPatch>>> {
-    parse_optional_cterm_cursor_colors(raw, key)
-}
-
 fn parse_optional_time_interval(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
     Ok(parse_optional_with(raw, key, validated_f64)?.map(|parsed| parsed.max(1.0)))
 }
 
-fn parse_optional_fps(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
-    parse_optional_with(raw, key, validated_positive_f64)
-}
-
 macro_rules! define_option_spec {
-    ($fn_name:ident, $const_name:ident, $variant:ident, $parser:ident, $section:ident.$field:ident) => {
+    ($fn_name:ident, $const_name:ident, $variant:ident, $parser:path, $section:ident.$field:ident) => {
         fn $fn_name(
             opts: &Dictionary,
             patch: &mut RuntimeOptionsPatch,
@@ -501,7 +455,7 @@ define_option_spec!(
     spec_fps_apply,
     SPEC_FPS,
     Fps,
-    parse_optional_fps,
+    parse_optional_positive_f64,
     runtime.fps
 );
 define_option_spec!(
@@ -515,7 +469,7 @@ define_option_spec!(
     spec_max_simulation_steps_per_frame_apply,
     SPEC_MAX_SIMULATION_STEPS_PER_FRAME,
     MaxSimulationStepsPerFrame,
-    parse_optional_positive_u32_value,
+    parse_optional_positive_u32,
     runtime.max_simulation_steps_per_frame
 );
 define_option_spec!(
@@ -599,14 +553,14 @@ define_option_spec!(
     spec_max_kept_windows_apply,
     SPEC_MAX_KEPT_WINDOWS,
     MaxKeptWindows,
-    parse_optional_non_negative_usize_value,
+    parse_optional_non_negative_usize,
     runtime.max_kept_windows
 );
 define_option_spec!(
     spec_windows_zindex_apply,
     SPEC_WINDOWS_ZINDEX,
     WindowsZindex,
-    parse_optional_non_negative_u32_value,
+    parse_optional_non_negative_u32,
     runtime.windows_zindex
 );
 define_option_spec!(
@@ -620,14 +574,14 @@ define_option_spec!(
     spec_filetypes_disabled_apply,
     SPEC_FILETYPES_DISABLED,
     FiletypesDisabled,
-    parse_optional_filetypes_disabled_value,
+    parse_optional_filetypes_disabled,
     runtime.filetypes_disabled
 );
 define_option_spec!(
     spec_logging_level_apply,
     SPEC_LOGGING_LEVEL,
     LoggingLevel,
-    parse_optional_non_negative_i64_value,
+    parse_optional_non_negative_i64,
     runtime.logging_level
 );
 define_option_spec!(
@@ -669,7 +623,7 @@ define_option_spec!(
     spec_cterm_cursor_colors_apply,
     SPEC_CTERM_CURSOR_COLORS,
     CtermCursorColors,
-    parse_optional_cterm_cursor_colors_value,
+    parse_optional_cterm_cursor_colors,
     color.cterm_cursor_colors
 );
 define_option_spec!(
@@ -788,7 +742,7 @@ define_option_spec!(
     spec_stop_hold_frames_apply,
     SPEC_STOP_HOLD_FRAMES,
     StopHoldFrames,
-    parse_optional_positive_u32_value,
+    parse_optional_positive_u32,
     motion.stop_hold_frames
 );
 define_option_spec!(
@@ -844,7 +798,7 @@ define_option_spec!(
     spec_particle_max_num_apply,
     SPEC_PARTICLE_MAX_NUM,
     ParticleMaxNum,
-    parse_optional_non_negative_usize_value,
+    parse_optional_non_negative_usize,
     particles.particle_max_num
 );
 define_option_spec!(
@@ -949,7 +903,7 @@ define_option_spec!(
     spec_color_levels_apply,
     SPEC_COLOR_LEVELS,
     ColorLevels,
-    parse_optional_positive_u32_value,
+    parse_optional_positive_u32,
     rendering.color_levels
 );
 define_option_spec!(

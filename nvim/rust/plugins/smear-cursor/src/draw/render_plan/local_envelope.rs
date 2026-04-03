@@ -29,11 +29,6 @@ pub(super) fn to_q16(value: f64) -> i32 {
     scaled.clamp(i32::MIN as f64, i32::MAX as f64) as i32
 }
 
-pub(super) fn smoothstep01(value: f64) -> f64 {
-    let x = value.clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
-}
-
 pub(super) fn centerline_tail_u(sample_index: usize, sample_count: usize) -> f64 {
     if sample_count <= 1 {
         return 0.0;

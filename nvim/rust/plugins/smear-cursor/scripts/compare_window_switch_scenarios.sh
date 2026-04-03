@@ -88,8 +88,9 @@ if [[ -n "${base_overrides_raw}" ]]; then
   read -r -a base_overrides <<< "${base_overrides_raw}"
 fi
 
-worktree_dir="$(mktemp -d /tmp/smear_window_switch_compare.XXXXXX)"
-artifact_dir="$(mktemp -d /tmp/smear_window_switch_compare_artifacts.XXXXXX)"
+IFS=$'\t' read -r worktree_dir artifact_dir <<EOF
+$(smear_compare_prepare_worktree "${repo_root}" "${base_ref}" "smear_window_switch_compare" "smear_window_switch_compare_artifacts")
+EOF
 results_tsv="${artifact_dir}/window_switch_compare_results.tsv"
 raw_results_table="${artifact_dir}/window_switch_compare_raw.txt"
 summary_table="${artifact_dir}/window_switch_compare_summary.txt"
@@ -101,26 +102,9 @@ particle_isolation_table="${artifact_dir}/window_switch_compare_particle_isolati
 delta_table="${artifact_dir}/window_switch_compare_delta.txt"
 
 cleanup() {
-  git -C "${repo_root}" worktree remove "${worktree_dir}" >/dev/null 2>&1 || true
+  smear_compare_remove_worktree "${repo_root}" "${worktree_dir}"
 }
 trap cleanup EXIT
-
-git -C "${repo_root}" worktree add --detach "${worktree_dir}" "${base_ref}" >/dev/null
-
-build_release() {
-  local plugin_dir="$1"
-  (
-    cd "${plugin_dir}"
-    cargo build --release >/dev/null
-  )
-}
-
-extract_field() {
-  local line="$1"
-  local field="$2"
-
-  printf '%s\n' "${line}" | sed -nE "s/.*${field}=([^ ]+).*/\\1/p"
-}
 
 normalize_optional_field() {
   local value="$1"
@@ -136,9 +120,8 @@ run_once() {
   local side_root="$2"
   local scenario_name="$3"
   local repeat_index="$4"
-  local plugin_dir="${side_root}/nvim/rust/plugins/smear-cursor"
+  local plugin_dir
   local log_file="${artifact_dir}/run_${side_label}_${scenario_name}_${repeat_index}.log"
-  local target_directory
   local smear_cursor_cpath
   local run_env
   local summary_line
@@ -168,12 +151,12 @@ run_once() {
   local pool_capacity_cap_hits
   local side_overrides=()
 
-  target_directory="$(smear_resolve_target_directory "${plugin_dir}")"
-  if [[ -z "${target_directory}" ]]; then
-    echo "failed to resolve target_directory for ${side_label}" >&2
+  plugin_dir="$(smear_compare_plugin_dir "${side_root}")"
+  smear_cursor_cpath="$(smear_compare_release_cpath "${plugin_dir}")"
+  if [[ -z "${smear_cursor_cpath}" ]]; then
+    echo "failed to resolve release cpath for ${side_label}" >&2
     exit 1
   fi
-  smear_cursor_cpath="$(smear_default_cpath "${target_directory}")"
 
   run_env=(
     "SMEAR_CURSOR_RTP=${plugin_dir}"
@@ -213,28 +196,28 @@ run_once() {
   stress_line="$(grep 'PERF_STRESS_SUMMARY' "${log_file}" | tail -n 1)"
   diagnostics_line="$(grep 'PERF_DIAGNOSTICS phase=post_recovery ' "${log_file}" | tail -n 1)"
 
-  baseline_us="$(extract_field "${summary_line}" "baseline_avg_us")"
-  recovery_ratio="$(extract_field "${summary_line}" "recovery_ratio")"
-  stress_max_avg_us="$(extract_field "${stress_line}" "max_avg_us")"
-  stress_max_ratio="$(extract_field "${stress_line}" "max_ratio")"
-  stress_tail_ratio="$(extract_field "${stress_line}" "tail_ratio")"
-  perf_class="$(extract_field "${diagnostics_line}" "perf_class")"
-  line_count="$(extract_field "${diagnostics_line}" "buffer_line_count")"
-  extmark_fallback_calls="$(extract_field "${diagnostics_line}" "cursor_color_extmark_fallback_calls")"
-  conceal_full_scan_calls="$(extract_field "${diagnostics_line}" "conceal_full_scan_calls")"
-  planner_bucket_maps_scanned="$(extract_field "${diagnostics_line}" "planner_bms")"
-  planner_bucket_cells_scanned="$(extract_field "${diagnostics_line}" "planner_bcs")"
-  planner_local_query_envelope_area_cells="$(extract_field "${diagnostics_line}" "planner_lqea")"
-  planner_local_query_cells="$(extract_field "${diagnostics_line}" "planner_local_query_cells")"
-  planner_compiled_query_cells="$(extract_field "${diagnostics_line}" "planner_compq")"
-  planner_candidate_query_cells="$(extract_field "${diagnostics_line}" "planner_candq")"
-  planner_compiled_cells_emitted="$(extract_field "${diagnostics_line}" "planner_compiled_cells_emitted")"
-  planner_candidate_cells_built="$(extract_field "${diagnostics_line}" "planner_candidate_cells_built")"
-  pool_total_windows="$(extract_field "${diagnostics_line}" "pool_total_windows")"
-  pool_cached_budget="$(normalize_optional_field "$(extract_field "${diagnostics_line}" "pool_cached_budget")")"
-  max_kept_windows="$(normalize_optional_field "$(extract_field "${diagnostics_line}" "max_kept_windows")")"
-  pool_peak_requested_capacity="$(normalize_optional_field "$(extract_field "${diagnostics_line}" "pool_peak_requested")")"
-  pool_capacity_cap_hits="$(normalize_optional_field "$(extract_field "${diagnostics_line}" "pool_cap_hits")")"
+  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
+  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
+  stress_max_avg_us="$(smear_extract_field "${stress_line}" "max_avg_us")"
+  stress_max_ratio="$(smear_extract_field "${stress_line}" "max_ratio")"
+  stress_tail_ratio="$(smear_extract_field "${stress_line}" "tail_ratio")"
+  perf_class="$(smear_extract_field "${diagnostics_line}" "perf_class")"
+  line_count="$(smear_extract_field "${diagnostics_line}" "buffer_line_count")"
+  extmark_fallback_calls="$(smear_extract_field "${diagnostics_line}" "cursor_color_extmark_fallback_calls")"
+  conceal_full_scan_calls="$(smear_extract_field "${diagnostics_line}" "conceal_full_scan_calls")"
+  planner_bucket_maps_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bms")"
+  planner_bucket_cells_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bcs")"
+  planner_local_query_envelope_area_cells="$(smear_extract_field "${diagnostics_line}" "planner_lqea")"
+  planner_local_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_local_query_cells")"
+  planner_compiled_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_compq")"
+  planner_candidate_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_candq")"
+  planner_compiled_cells_emitted="$(smear_extract_field "${diagnostics_line}" "planner_compiled_cells_emitted")"
+  planner_candidate_cells_built="$(smear_extract_field "${diagnostics_line}" "planner_candidate_cells_built")"
+  pool_total_windows="$(smear_extract_field "${diagnostics_line}" "pool_total_windows")"
+  pool_cached_budget="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_cached_budget")")"
+  max_kept_windows="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "max_kept_windows")")"
+  pool_peak_requested_capacity="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_peak_requested")")"
+  pool_capacity_cap_hits="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_cap_hits")")"
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${side_label}" \
@@ -293,11 +276,12 @@ run_once() {
 run_side() {
   local side_label="$1"
   local side_root="$2"
-  local plugin_dir="${side_root}/nvim/rust/plugins/smear-cursor"
+  local plugin_dir
   local scenario_name
   local repeat_index
 
-  build_release "${plugin_dir}"
+  plugin_dir="$(smear_compare_plugin_dir "${side_root}")"
+  smear_build_release "${plugin_dir}"
   for scenario_name in "${scenarios[@]}"; do
     for repeat_index in $(seq 1 "${repeats}"); do
       run_once "${side_label}" "${side_root}" "${scenario_name}" "${repeat_index}"
@@ -688,14 +672,10 @@ write_report() {
   local capture_time
   local command_line
 
-  git_commit="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || printf 'unknown\n')"
-  if [[ -n "$(git -C "${repo_root}" status --short 2>/dev/null)" ]]; then
-    git_state="dirty"
-  else
-    git_state="clean"
-  fi
-  nvim_version="$("${NVIM_BIN:-nvim}" --version | sed -n '1p')"
-  capture_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  git_commit="$(smear_report_git_commit "${repo_root}")"
+  git_state="$(smear_report_git_state "${repo_root}")"
+  nvim_version="$(smear_report_nvim_version)"
+  capture_time="$(smear_report_capture_time_utc)"
   command_line="${report_command:-SMEAR_COMPARE_REPORT_FILE=${output_file} ${rust_repo_dir}/plugins/smear-cursor/scripts/compare_window_switch_scenarios.sh ${base_ref}}"
 
   mkdir -p "$(dirname -- "${output_file}")"

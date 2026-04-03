@@ -93,20 +93,6 @@ worst_case_table="${artifact_dir}/planner_compile_modes_worst_case.txt"
 planner_telemetry_table="${artifact_dir}/planner_compile_modes_telemetry.txt"
 compile_deltas_table="${artifact_dir}/planner_compile_modes_deltas.txt"
 
-extract_field() {
-  local line="$1"
-  local field="$2"
-
-  printf '%s\n' "${line}" | sed -nE "s/.*${field}=([^ ]+).*/\\1/p"
-}
-
-build_release() {
-  (
-    cd "${repo_dir}"
-    cargo build --release >/dev/null
-  )
-}
-
 run_mode() {
   local mode="$1"
   local scenario_name
@@ -127,7 +113,7 @@ echo "modes=${mode_csv}"
 echo "scenarios=${scenario_csv}"
 echo
 
-build_release
+smear_build_release "${repo_dir}"
 if ! smear_export_runtime_paths "${repo_dir}" >/dev/null; then
   echo "failed to resolve runtime paths for ${repo_dir}" >&2
   exit 1
@@ -198,23 +184,23 @@ run_once() {
     exit 1
   fi
 
-  baseline_us="$(extract_field "${summary_line}" "baseline_avg_us")"
-  recovery_ratio="$(extract_field "${summary_line}" "recovery_ratio")"
-  stress_max_avg_us="$(extract_field "${stress_line}" "max_avg_us")"
-  stress_max_ratio="$(extract_field "${stress_line}" "max_ratio")"
-  stress_tail_ratio="$(extract_field "${stress_line}" "tail_ratio")"
-  perf_class="$(extract_field "${diagnostics_line}" "perf_class")"
-  line_count="$(extract_field "${diagnostics_line}" "buffer_line_count")"
-  planner_bucket_maps_scanned="$(extract_field "${diagnostics_line}" "planner_bms")"
-  planner_bucket_cells_scanned="$(extract_field "${diagnostics_line}" "planner_bcs")"
-  planner_local_query_envelope_area_cells="$(extract_field "${diagnostics_line}" "planner_lqea")"
-  planner_local_query_cells="$(extract_field "${diagnostics_line}" "planner_local_query_cells")"
-  planner_compiled_query_cells="$(extract_field "${diagnostics_line}" "planner_compq")"
-  planner_candidate_query_cells="$(extract_field "${diagnostics_line}" "planner_candq")"
-  planner_compiled_cells_emitted="$(extract_field "${diagnostics_line}" "planner_compiled_cells_emitted")"
-  planner_candidate_cells_built="$(extract_field "${diagnostics_line}" "planner_candidate_cells_built")"
-  planner_reference_compiles="$(extract_field "${diagnostics_line}" "planner_rc")"
-  planner_local_query_compiles="$(extract_field "${diagnostics_line}" "planner_lqc")"
+  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
+  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
+  stress_max_avg_us="$(smear_extract_field "${stress_line}" "max_avg_us")"
+  stress_max_ratio="$(smear_extract_field "${stress_line}" "max_ratio")"
+  stress_tail_ratio="$(smear_extract_field "${stress_line}" "tail_ratio")"
+  perf_class="$(smear_extract_field "${diagnostics_line}" "perf_class")"
+  line_count="$(smear_extract_field "${diagnostics_line}" "buffer_line_count")"
+  planner_bucket_maps_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bms")"
+  planner_bucket_cells_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bcs")"
+  planner_local_query_envelope_area_cells="$(smear_extract_field "${diagnostics_line}" "planner_lqea")"
+  planner_local_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_local_query_cells")"
+  planner_compiled_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_compq")"
+  planner_candidate_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_candq")"
+  planner_compiled_cells_emitted="$(smear_extract_field "${diagnostics_line}" "planner_compiled_cells_emitted")"
+  planner_candidate_cells_built="$(smear_extract_field "${diagnostics_line}" "planner_candidate_cells_built")"
+  planner_reference_compiles="$(smear_extract_field "${diagnostics_line}" "planner_rc")"
+  planner_local_query_compiles="$(smear_extract_field "${diagnostics_line}" "planner_lqc")"
   if [[ "${planner_reference_compiles}" != "0" && "${planner_local_query_compiles}" == "0" ]]; then
     realized_path="reference"
   elif [[ "${planner_reference_compiles}" == "0" && "${planner_local_query_compiles}" != "0" ]]; then
@@ -517,14 +503,10 @@ write_report() {
   local capture_time
   local command_line
 
-  git_commit="$(git -C "${repo_dir}" rev-parse HEAD 2>/dev/null || printf 'unknown\n')"
-  if [[ -n "$(git -C "${repo_dir}" status --short 2>/dev/null)" ]]; then
-    git_state="dirty"
-  else
-    git_state="clean"
-  fi
-  nvim_version="$("${NVIM_BIN:-nvim}" --version | sed -n '1p')"
-  capture_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  git_commit="$(smear_report_git_commit "${repo_dir}")"
+  git_state="$(smear_report_git_state "${repo_dir}")"
+  nvim_version="$(smear_report_nvim_version)"
+  capture_time="$(smear_report_capture_time_utc)"
   command_line="SMEAR_COMPARE_REPORT_FILE=${output_file} ${repo_dir}/scripts/compare_planner_perf.sh"
 
   mkdir -p "$(dirname -- "${output_file}")"

@@ -1,0 +1,323 @@
+use super::EffectExecutor;
+use super::ScheduledWorkItem;
+use super::ScheduledWorkUnit;
+use super::dispatch_core_event;
+use super::drain_scheduled_work_with_executor;
+use super::reset_scheduled_effect_queue;
+use super::reset_scheduled_queue_after_failure;
+use super::scheduled_drain_budget;
+use super::scheduled_drain_budget_for_depth;
+use super::scheduled_drain_budget_for_hot_effect_only_snapshot;
+use super::scheduled_drain_budget_for_thermal;
+use super::with_scheduled_effect_queue;
+use crate::core::effect::Effect;
+use crate::core::event::Event as CoreEvent;
+use crate::core::event::ExternalDemandQueuedEvent;
+use crate::core::event::ObservationBaseCollectedEvent;
+use crate::core::event::ProbeReportedEvent;
+use crate::core::reducer::reduce as reduce_core_event;
+use crate::core::state::BackgroundProbeBatch;
+use crate::core::state::BackgroundProbeChunk;
+use crate::core::state::BackgroundProbeChunkMask;
+use crate::core::state::BackgroundProbePlan;
+use crate::core::state::BufferPerfClass;
+use crate::core::state::CoreState;
+use crate::core::state::CursorColorSample;
+use crate::core::state::ExternalDemandKind;
+use crate::core::state::ObservationBasis;
+use crate::core::state::ObservationMotion;
+use crate::core::state::ObservationRequest;
+use crate::core::state::ObservationSnapshot;
+use crate::core::state::ProbeKind;
+use crate::core::state::ProbeReuse;
+use crate::core::types::CursorCol;
+use crate::core::types::CursorPosition;
+use crate::core::types::CursorRow;
+use crate::core::types::Lifecycle;
+use crate::core::types::Millis;
+use crate::core::types::ViewportSnapshot;
+use crate::events::runtime::core_state;
+use crate::events::runtime::set_core_state;
+use crate::mutex::lock_with_poison_recovery;
+use crate::state::CursorLocation;
+use crate::test_support::cursor;
+use crate::test_support::sparse_probe_cells;
+use nvim_oxi::Result;
+use std::collections::VecDeque;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+
+mod deferred_multi_probe_observation;
+mod dispatch_core_event;
+mod refresh_required_probe_retry;
+mod scheduled_effect_drain;
+mod scheduled_effect_drain_support;
+mod single_cursor_probe_observation;
+
+static CORE_DISPATCH_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn core_dispatch_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    lock_with_poison_recovery(&CORE_DISPATCH_TEST_MUTEX, |_| (), |_| {})
+}
+
+#[derive(Default)]
+struct RecordingExecutor {
+    executed_effects: Vec<Effect>,
+    planned_follow_ups: VecDeque<Vec<CoreEvent>>,
+}
+
+impl EffectExecutor for RecordingExecutor {
+    fn execute_effect(&mut self, effect: Effect) -> Result<Vec<CoreEvent>> {
+        self.executed_effects.push(effect);
+        Ok(self.planned_follow_ups.pop_front().unwrap_or_default())
+    }
+}
+
+fn ready_state() -> CoreState {
+    let mut runtime = crate::state::RuntimeState::default();
+    runtime.config.delay_event_to_smear = 0.0;
+    CoreState::default().with_runtime(runtime).into_primed()
+}
+
+fn observation_basis(
+    request: &ObservationRequest,
+    position: Option<CursorPosition>,
+    observed_at: u64,
+) -> ObservationBasis {
+    ObservationBasis::new(
+        request.observation_id(),
+        Millis::new(observed_at),
+        "n".to_string(),
+        position,
+        CursorLocation::new(11, 22, 3, 4),
+        ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+    )
+}
+
+fn refresh_required_probe_report(request: &ObservationRequest) -> CoreEvent {
+    CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorReady {
+        observation_id: request.observation_id(),
+        probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
+        reuse: ProbeReuse::RefreshRequired,
+        sample: Some(CursorColorSample::new(0x00AB_CDEF)),
+    })
+}
+
+fn compatible_probe_report(request: &ObservationRequest) -> CoreEvent {
+    CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorReady {
+        observation_id: request.observation_id(),
+        probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
+        reuse: ProbeReuse::Compatible,
+        sample: Some(CursorColorSample::new(0x00AB_CDEF)),
+    })
+}
+
+fn background_probe_report(request: &ObservationRequest, viewport: ViewportSnapshot) -> CoreEvent {
+    CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundReady {
+        observation_id: request.observation_id(),
+        probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
+        reuse: ProbeReuse::Exact,
+        batch: BackgroundProbeBatch::empty(viewport),
+    })
+}
+
+fn background_chunk_probe_report(
+    request: &ObservationRequest,
+    chunk: &BackgroundProbeChunk,
+    _viewport: ViewportSnapshot,
+) -> CoreEvent {
+    let allowed_mask = vec![false; chunk.len()];
+    CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
+        observation_id: request.observation_id(),
+        probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
+        chunk: chunk.clone(),
+        allowed_mask: BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
+    })
+}
+
+struct CoreDispatchTestContext {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl CoreDispatchTestContext {
+    fn new() -> Self {
+        let guard = core_dispatch_test_guard();
+        replace_core_state(CoreState::default());
+        reset_scheduled_effect_queue();
+        Self { _guard: guard }
+    }
+
+    fn set_core_state(&self, state: CoreState) {
+        replace_core_state(state);
+    }
+
+    fn dispatch_external_cursor_ingress_to_queue(&self, observed_at: u64) -> ObservationRequest {
+        dispatch_core_event(external_cursor_demand(observed_at), &mut |effects| {
+            // CONTEXT: `stage_batch` reports whether this enqueue operation also needs to arm
+            // the drain edge; it does not signal whether the batch was accepted.
+            let should_schedule =
+                with_scheduled_effect_queue(|queue| queue.stage_batch(effects).should_schedule);
+            assert!(
+                should_schedule,
+                "ingress dispatch should arm exactly one scheduled work item"
+            );
+        })
+        .expect("ingress dispatch should commit reducer state");
+
+        current_core_state()
+            .active_observation_request()
+            .cloned()
+            .expect("ingress dispatch should leave an active observation request")
+    }
+
+    fn observing_state_after_base_collection(&self) -> (ObservationRequest, CoreState) {
+        self.set_core_state(ready_state_with_cursor_color_probe());
+        let observing = reduce_core_event(&current_core_state(), external_cursor_demand(25)).next;
+        let request = observing
+            .active_observation_request()
+            .cloned()
+            .expect("active observation request");
+        let based = reduce_core_event(
+            &observing,
+            observation_base_collected(
+                &request,
+                observation_basis(&request, Some(cursor(7, 8)), 26),
+            ),
+        );
+        self.set_core_state(based.next.clone());
+        (request, based.next)
+    }
+}
+
+impl Drop for CoreDispatchTestContext {
+    fn drop(&mut self) {
+        replace_core_state(CoreState::default());
+        reset_scheduled_effect_queue();
+    }
+}
+
+fn current_core_state() -> CoreState {
+    core_state().expect("test core state access should not re-enter")
+}
+
+fn replace_core_state(state: CoreState) {
+    set_core_state(state).expect("test core state write should not re-enter")
+}
+
+fn external_cursor_demand(observed_at: u64) -> CoreEvent {
+    CoreEvent::ExternalDemandQueued(ExternalDemandQueuedEvent {
+        kind: ExternalDemandKind::ExternalCursor,
+        observed_at: Millis::new(observed_at),
+        requested_target: None,
+        buffer_perf_class: BufferPerfClass::Full,
+        ingress_cursor_presentation: None,
+    })
+}
+
+fn observation_base_collected(request: &ObservationRequest, basis: ObservationBasis) -> CoreEvent {
+    CoreEvent::ObservationBaseCollected(ObservationBaseCollectedEvent {
+        request: request.clone(),
+        basis,
+        motion: ObservationMotion::default(),
+    })
+}
+
+fn ready_state_with_cursor_color_probe() -> CoreState {
+    let mut runtime = ready_state().runtime().clone();
+    runtime.config.cursor_color = Some("none".to_string());
+    ready_state().with_runtime(runtime)
+}
+
+fn ready_state_with_cursor_and_background_probes() -> CoreState {
+    let mut runtime = ready_state().runtime().clone();
+    runtime.config.cursor_color = Some("none".to_string());
+    runtime.config.particles_enabled = true;
+    runtime.config.particles_over_text = false;
+    ready_state().with_runtime(runtime)
+}
+
+fn install_background_probe_plan(request: &ObservationRequest, basis: &ObservationBasis) {
+    let observation =
+        ObservationSnapshot::new(request.clone(), basis.clone(), ObservationMotion::default())
+            .with_background_probe_plan(BackgroundProbePlan::from_cells(sparse_probe_cells(
+                basis.viewport(),
+                2050,
+            )));
+    let next = current_core_state()
+        .with_last_cursor(Some(cursor(7, 8)))
+        .with_active_observation(Some(observation))
+        .expect("active observation state");
+    replace_core_state(next);
+}
+
+fn queue_stage_batch(effects: Vec<Effect>) -> bool {
+    with_scheduled_effect_queue(|queue| queue.stage_batch(effects).should_schedule)
+}
+
+fn queued_work_count() -> usize {
+    with_scheduled_effect_queue(|queue| queue.pending_work_units)
+}
+
+fn queued_front_work_item() -> Option<ScheduledWorkUnit> {
+    with_scheduled_effect_queue(|queue| match queue.items.front()? {
+        ScheduledWorkItem::EffectBatch(effects) => {
+            Some(ScheduledWorkUnit::EffectBatch(effects.clone()))
+        }
+        ScheduledWorkItem::CoreEvent(event) => Some(ScheduledWorkUnit::CoreEvent(event.clone())),
+        ScheduledWorkItem::EffectOnlyAgenda(agenda) => agenda
+            .steps
+            .front()
+            .cloned()
+            .map(ScheduledWorkUnit::EffectOnlyStep),
+    })
+}
+
+fn queue_is_marked_scheduled() -> bool {
+    with_scheduled_effect_queue(|queue| queue.drain_scheduled)
+}
+
+fn drain_next_edge(executor: &mut RecordingExecutor) -> bool {
+    drain_scheduled_work_with_executor(executor)
+        .expect("scheduled drain should execute one queued edge")
+}
+
+fn contains_observation_base_request(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::RequestObservationBase(_)))
+}
+
+fn contains_probe_request(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::RequestProbe(_)))
+}
+
+fn contains_render_plan_request(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::RequestRenderPlan(_)))
+}
+
+fn is_apply_proposal(effect: &Effect) -> bool {
+    matches!(effect, Effect::ApplyProposal(_))
+}
+
+fn only_cursor_color_probe_request(effects: &[Effect]) -> bool {
+    matches!(
+        effects,
+        [Effect::RequestProbe(payload)] if payload.kind == ProbeKind::CursorColor
+    )
+}
+
+fn only_background_probe_request_for_chunk(
+    effects: &[Effect],
+    expected_chunk: &BackgroundProbeChunk,
+) -> bool {
+    matches!(
+        effects,
+        [Effect::RequestProbe(payload)]
+            if payload.kind == ProbeKind::Background
+                && payload.background_chunk.as_ref() == Some(expected_chunk)
+    )
+}
