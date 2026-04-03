@@ -1,5 +1,5 @@
----@module "rs_plugin_util"
-local plugin_util = require("rs_plugin_util")
+---@module "nvimrs_plugin_util"
+local plugin_util = require("nvimrs_plugin_util")
 local M = {}
 
 local function get_cat_enabled(cat, default)

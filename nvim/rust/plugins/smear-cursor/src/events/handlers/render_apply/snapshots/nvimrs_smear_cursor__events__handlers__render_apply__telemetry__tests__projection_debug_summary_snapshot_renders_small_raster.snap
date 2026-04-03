@@ -1,0 +1,5 @@
+---
+source: plugins/smear-cursor/src/events/handlers/render_apply/telemetry.rs
+expression: "&draw_projection_debug_summary(&snapshot)"
+---
+logical_cells=2 logical_sample=[3:7@11,3:8@11] realized_spans=1 span_sample=[3:7x2@11]

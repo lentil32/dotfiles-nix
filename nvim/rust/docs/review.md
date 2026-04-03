@@ -7,11 +7,11 @@ A couple of fast no-code wins first: background sampling only turns on when `par
 Here’s what I’d change in the code, in priority order:
 
 - **Stop probing the whole viewport for background masking.**
-  Right now background progress is row-chunked over the viewport (`src/core/state/observation.rs:546`, `631-647`), Lua does `vim.fn.screenchar(row, col)` for every cell (`lua/rs_smear_cursor/probes.lua:76-95`), and Rust decodes every returned bool object one by one (`src/events/handlers/observation.rs:330-356`). That is expensive on both the Neovim side and the bridge side.
+  Right now background progress is row-chunked over the viewport (`src/core/state/observation.rs:546`, `631-647`), Lua does `vim.fn.screenchar(row, col)` for every cell (`lua/nvimrs_smear_cursor/probes.lua:76-95`), and Rust decodes every returned bool object one by one (`src/events/handlers/observation.rs:330-356`). That is expensive on both the Neovim side and the bridge side.
   The render path already deduplicates particle output per screen cell in `src/draw/render/particles.rs:65-80`, so I’d change the background probe to a **sparse probe over the active smear/particle cells** instead of a full-width viewport mask. Even if you keep chunking, return **packed bytes / row bitmasks** rather than `Vec<bool>`. Also, background probes currently disable projection-cache reuse entirely in `src/core/reducer/machine/planning.rs:254-259`; making the probe local or witness-bound would let more projections reuse.
 
 - **Make cursor-color probes cheaper at the wire format and bridge layers.**
-  Cursor-color probing currently goes Rust → Vimscript → `luaeval` → Lua (`src/events/host_bridge.rs:84-92`, `autoload/rs_smear_cursor/host_bridge.vim:23-29`), and Lua formats colors as `"#RRGGBB"` strings (`lua/rs_smear_cursor/probes.lua:3-8`, `11-73`), which Rust parses back as strings in `src/events/cursor.rs:555-567`.
+  Cursor-color probing currently goes Rust → Vimscript → `luaeval` → Lua (`src/events/host_bridge.rs:84-92`, `autoload/nvimrs_smear_cursor/host_bridge.vim:23-29`), and Lua formats colors as `"#RRGGBB"` strings (`lua/nvimrs_smear_cursor/probes.lua:3-8`, `11-73`), which Rust parses back as strings in `src/events/cursor.rs:555-567`.
   I’d return a **numeric `u32` color** instead of a hex string, and collapse the hot probe path to **one bridge hop**. Also cache `nvim_get_hl()` results by highlight group in Lua for the current colorscheme generation; the Rust side already has colorscheme invalidation hooks in `src/events/probe_cache.rs:156-159`.
 
 - **Fix the cache sizes and cache shape.**

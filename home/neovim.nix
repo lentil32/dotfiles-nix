@@ -48,6 +48,7 @@ in
           outputHashes = rustLockHashes.byCrate;
         };
         toKebab = lib.strings.replaceStrings [ "_" ] [ "-" ];
+        toSnake = lib.strings.replaceStrings [ "-" ] [ "_" ];
         mkPname = crate: "${toKebab crate}-nvim";
         runtimeDirs = [
           "autoload"
@@ -104,7 +105,7 @@ in
           {
             crate,
             pname ? mkPname crate,
-            libBase ? crate,
+            libBase ? toSnake crate,
             outBase ? libBase,
             runtimeRoot ? null,
             cargoBuildFlags ? [
@@ -123,17 +124,17 @@ in
             installPhase = mkInstallPhase libBase outBase runtimeRoot;
           };
         rustPluginSpecs = [
-          { crate = "rs_project_root"; }
-          { crate = "rs_plugin_util"; }
-          { crate = "rs_readline"; }
-          { crate = "rs_text"; }
-          { crate = "rs_snacks_preview"; }
-          { crate = "rs_autocmds"; }
+          { crate = "nvimrs-project-root"; }
+          { crate = "nvimrs-plugin-util"; }
+          { crate = "nvimrs-readline"; }
+          { crate = "nvimrs-text"; }
+          { crate = "nvimrs-snacks-preview"; }
+          { crate = "nvimrs-autocmds"; }
           {
-            crate = "rs_smear_cursor";
-            runtimeRoot = rustWorkspace + "/plugins/smear_cursor";
+            crate = "nvimrs-smear-cursor";
+            runtimeRoot = rustWorkspace + "/plugins/smear-cursor";
           }
-          { crate = "rs_theme_switcher"; }
+          { crate = "nvimrs-theme-switcher"; }
         ];
         rustPluginList = map mkRustPlugin rustPluginSpecs;
         categoriesConfig = {

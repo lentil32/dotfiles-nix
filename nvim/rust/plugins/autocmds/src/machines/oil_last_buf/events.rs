@@ -1,5 +1,7 @@
-use nvim_oxi_utils::handles::{BufHandle, WinHandle};
-use nvim_oxi_utils::state_machine::{NoCommand, Transition};
+use nvimrs_nvim_oxi_utils::handles::BufHandle;
+use nvimrs_nvim_oxi_utils::handles::WinHandle;
+use nvimrs_nvim_oxi_utils::state_machine::NoCommand;
+use nvimrs_nvim_oxi_utils::state_machine::Transition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OilLastBufEvent {

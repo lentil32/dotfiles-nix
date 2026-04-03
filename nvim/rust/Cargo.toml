@@ -2,16 +2,16 @@
 resolver = "2"
 members = [
   "plugins/autocmds",
-  "libs/nvim-oxi-utils",
-  "plugins/project_root",
+  "plugins/project-root",
   "plugins/readline",
-  "plugins/smear_cursor",
-  "plugins/snacks_preview",
-  "plugins/theme_switcher",
-  "libs/support",
+  "plugins/smear-cursor",
+  "plugins/snacks-preview",
   "plugins/text",
-  "plugins/plugin_util",
-  "libs/nvim-utils",
+  "plugins/theme-switcher",
+  "support/plugin-util",
+  "utils/nvim-oxi-utils",
+  "utils/support",
+  "utils/nvim-utils",
 ]
 
 [workspace.package]
@@ -25,14 +25,16 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Internal
-nvim-oxi-utils = { path = "libs/nvim-oxi-utils" }
-nvim-utils = { path = "libs/nvim-utils" }
-support = { path = "libs/support" }
+nvimrs-nvim-oxi-utils = { path = "utils/nvim-oxi-utils" }
+nvimrs-nvim-utils = { path = "utils/nvim-utils" }
+nvimrs-support = { path = "utils/support" }
 
 # External
 derive_more = { version = "2.1.1", features = ["display"] }
+insta = "1.43.2"
 nonempty = "0.12.0"
 nvim-oxi = { version = "0.6", features = ["neovim-0-11"] }
+pretty_assertions = "1.4"
 proptest = "1.6"
 serde = "1.0"
 

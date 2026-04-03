@@ -1,9 +1,13 @@
 mod core;
 
-use crate::core::{InsertAction, transpose_chars};
+use crate::core::InsertAction;
+use crate::core::transpose_chars;
+use nvim_oxi::Dictionary;
+use nvim_oxi::Function;
+use nvim_oxi::Result;
+use nvim_oxi::String as NvimString;
 use nvim_oxi::api;
-use nvim_oxi::{Dictionary, Function, Result, String as NvimString};
-use nvim_utils::mode::is_insert_like_mode;
+use nvimrs_nvim_utils::mode::is_insert_like_mode;
 
 fn is_insert_mode() -> bool {
     let mode = api::get_mode();
@@ -61,7 +65,7 @@ fn transpose_chars_action() -> Result<()> {
 }
 
 #[nvim_oxi::plugin]
-fn rs_readline() -> Dictionary {
+fn nvimrs_readline() -> Dictionary {
     let mut api = Dictionary::new();
     api.insert(
         "beginning_of_line",

@@ -1,13 +1,13 @@
 ---@module "which-key"
 local colorscheme = require("myLuaConf.colorscheme")
 local oil = require("myLuaConf.oil")
----@module "rs_plugin_util"
-local plugin_util = require("rs_plugin_util")
+---@module "nvimrs_plugin_util"
+local plugin_util = require("nvimrs_plugin_util")
 local project = require("myLuaConf.project")
----@module "rs_readline"
-local readline = require("rs_readline")
----@module "rs_text"
-local text = require("rs_text")
+---@module "nvimrs_readline"
+local readline = require("nvimrs_readline")
+---@module "nvimrs_text"
+local text = require("nvimrs_text")
 
 local M = {}
 

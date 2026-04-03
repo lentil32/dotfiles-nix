@@ -1,0 +1,17 @@
+[package]
+name = "nvimrs-project-root"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+nvim-oxi = { workspace = true }
+nvimrs-nvim-utils = { workspace = true }
+nvimrs-nvim-oxi-utils = { workspace = true }
+nonempty = { workspace = true }

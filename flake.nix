@@ -143,6 +143,10 @@
       treefmtEval = system: treefmt-nix.lib.evalModule nixpkgs.legacyPackages.${system} ./treefmt.nix;
 
       pkgs = nixpkgs.legacyPackages.${defaultMachine.system};
+      devShellPkgs = import nixpkgs {
+        inherit (defaultMachine) system;
+        inherit (nixpkgsConfig) overlays;
+      };
       pkgs-unstable = nixpkgs-unstable.legacyPackages.${defaultMachine.system};
       craneLib = crane.mkLib pkgs;
       rustSrc = craneLib.cleanCargoSource ./nvim/rust;
@@ -157,6 +161,32 @@
         version = "0.0.0";
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      rustToolchain = devShellPkgs.rust-bin.stable.latest.default.override {
+        targets = [ "wasm32-unknown-unknown" ];
+        extensions = [
+          "clippy"
+          "rust-analyzer"
+          "rust-src"
+        ];
+      };
+      rustDevShell = devShellPkgs.mkShell {
+        packages = [
+          rustToolchain
+          devShellPkgs.cargo-insta
+          devShellPkgs.cargo-nextest
+          devShellPkgs.clang
+          devShellPkgs.just
+        ];
+        nativeBuildInputs = [
+          devShellPkgs.cmake
+          devShellPkgs.gnumake
+          devShellPkgs.ninja
+          devShellPkgs.pkg-config
+        ];
+        buildInputs = [
+          devShellPkgs.libiconv
+        ];
+      };
 
       baseSpecialArgs = inputs // {
         inherit
@@ -245,6 +275,8 @@
       ) machines;
 
       formatter.${defaultMachine.system} = (treefmtEval defaultMachine.system).config.build.wrapper;
+
+      devShells.${defaultMachine.system}.nvim-rust = rustDevShell;
 
       checks.${defaultMachine.system} = {
         formatting = (treefmtEval defaultMachine.system).config.build.check self;

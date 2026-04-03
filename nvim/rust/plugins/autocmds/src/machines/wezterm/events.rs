@@ -1,5 +1,6 @@
-use nvim_oxi_utils::state_machine::{NoEffect, Transition};
-use support::TabTitle;
+use nvimrs_nvim_oxi_utils::state_machine::NoEffect;
+use nvimrs_nvim_oxi_utils::state_machine::Transition;
+use nvimrs_support::TabTitle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeztermCompletion {

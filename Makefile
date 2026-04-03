@@ -65,8 +65,7 @@ check-lua:
 	emmylua_check -c $(emmylua_config) $(emmylua_workspace)
 
 check-smear-cursor:
-	cd nvim/rust && cargo test -p rs_smear_cursor
-	cd nvim/rust && plugins/smear_cursor/scripts/test_timer_bridge.sh
+	cd nvim/rust && nix shell nixpkgs#just --command just check-smear-cursor
 
 clean:
 	rm -rf result

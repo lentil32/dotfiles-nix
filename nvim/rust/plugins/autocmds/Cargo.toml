@@ -1,5 +1,5 @@
 [package]
-name = "rs_autocmds"
+name = "nvimrs-autocmds"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,9 +12,13 @@ workspace = true
 
 [dependencies]
 nvim-oxi = { workspace = true, features = ["mlua", "libuv"] }
-nvim-utils = { workspace = true }
-nvim-oxi-utils = { workspace = true }
+nvimrs-nvim-utils = { workspace = true }
+nvimrs-nvim-oxi-utils = { workspace = true }
 hostname = "0.4"
 percent-encoding = "2.3"
 serde = { workspace = true, features = ["derive"] }
-support = { workspace = true }
+nvimrs-support = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+pretty_assertions = { workspace = true }

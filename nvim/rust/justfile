@@ -1,0 +1,28 @@
+set positional-arguments
+
+# Display help
+help:
+    just -l
+
+# `NvimRs`
+alias n := nvimrs
+nvimrs *args:
+    cargo run --bin nvimrs -- "$@"
+
+# format code
+fmt:
+    cargo fmt -- --config imports_granularity=Item 2>/dev/null
+
+fix *args:
+    cargo clippy --fix --tests --allow-dirty "$@"
+
+clippy *args:
+    cargo clippy --tests "$@"
+
+# Run `cargo nextest` since it's faster than `cargo test`, though including
+# --no-fail-fast is important to ensure all tests are run.
+#
+# Prefer this for routine local runs; use explicit `cargo test --all-features`
+# only when you specifically need full feature coverage.
+test:
+    cargo nextest run --no-fail-fast

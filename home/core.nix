@@ -77,6 +77,7 @@ in
     glow # markdown previewer in terminal
     keycastr # keystroke visualizer
     killport
+    just
     lefthook
     nurl
     ntfy-sh

@@ -1,0 +1,14 @@
+---
+source: plugins/smear-cursor/src/core/runtime_reducer/tests.rs
+assertion_line: 2051
+expression: transcript.render()
+---
+00 ext t=100.000 pos=5.000,6.000 surf=10/20 motion=cont action=draw samples=[5.500,6.500@4.167] center=5.500,6.500 target=5.000,6.000 next=- cleanup=schedule alloc=bootstrap vis=show sched=0 state=a0s0d0 stroke=1 epoch=1
+01 ext t=108.000 pos=5.000,16.000 surf=10/20 motion=cont action=draw samples=[5.500,6.604@4.167] center=5.500,6.604 target=5.000,16.000 next=114 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=2
+02 tick t=116.000 pos=5.000,16.000 surf=10/20 motion=cont action=draw samples=[5.500,6.876@4.167;5.500,7.267@4.167] center=5.500,7.267 target=5.000,16.000 next=121 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=2
+03 ext t=120.000 pos=5.000,24.000 surf=10/20 motion=cont action=draw samples=[5.500,7.822@4.167] center=5.500,7.822 target=5.000,24.000 next=121 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=3
+04 tick t=128.000 pos=5.000,24.000 surf=10/20 motion=cont action=draw samples=[5.500,8.561@4.167;5.500,9.422@4.167] center=5.500,9.422 target=5.000,24.000 next=129 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=3
+05 ext t=132.000 pos=5.000,36.000 surf=10/20 motion=cont action=draw samples=[5.500,10.481@4.167] center=5.500,10.481 target=5.000,36.000 next=135 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=4
+06 tick t=140.000 pos=5.000,36.000 surf=10/20 motion=cont action=draw samples=[5.500,11.777@4.167;5.500,13.223@4.167] center=5.500,13.223 target=5.000,36.000 next=142 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=4
+07 tick t=148.000 pos=5.000,36.000 surf=10/20 motion=cont action=draw samples=[5.500,14.751@4.167;5.500,16.310@4.167] center=5.500,16.310 target=5.000,36.000 next=149 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=1 epoch=4
+final center=5.500,16.310 target=5.000,36.000 state=a1s0d0 stroke=1 epoch=4 surf=10/20

@@ -1,4 +1,6 @@
-use super::events::{OilLastBufEffect, OilLastBufEvent, OilLastBufTransition};
+use super::events::OilLastBufEffect;
+use super::events::OilLastBufEvent;
+use super::events::OilLastBufTransition;
 use super::state::OilLastBufState;
 
 impl OilLastBufState {

@@ -1,27 +1,54 @@
 use std::collections::VecDeque;
-use std::io::{Error, ErrorKind, Write};
+use std::io::Error;
+use std::io::ErrorKind;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, TrySendError};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::TrySendError;
+use std::sync::mpsc::{self};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use crate::machines::wezterm::{
-    WeztermCommand, WeztermCompletion, WeztermEvent, WeztermState, derive_tab_title,
-    format_cli_failure, format_set_working_dir_failure,
-};
+use crate::machines::wezterm::WeztermCommand;
+use crate::machines::wezterm::WeztermCompletion;
+use crate::machines::wezterm::WeztermEvent;
+use crate::machines::wezterm::WeztermState;
+use crate::machines::wezterm::derive_tab_title;
+use crate::machines::wezterm::format_cli_failure;
+use crate::machines::wezterm::format_set_working_dir_failure;
+use nvim_oxi::Array;
+use nvim_oxi::Result;
+use nvim_oxi::String as NvimString;
 use nvim_oxi::api;
-use nvim_oxi::api::opts::{CreateAugroupOpts, CreateAutocmdOpts, CreateCommandOpts, OptionOpts};
-use nvim_oxi::api::types::{AutocmdCallbackArgs, CommandArgs};
+use nvim_oxi::api::opts::CreateAugroupOpts;
+use nvim_oxi::api::opts::CreateAutocmdOpts;
+use nvim_oxi::api::opts::CreateCommandOpts;
+use nvim_oxi::api::opts::OptionOpts;
+use nvim_oxi::api::types::AutocmdCallbackArgs;
+use nvim_oxi::api::types::CommandArgs;
 use nvim_oxi::libuv::AsyncHandle;
-use nvim_oxi::{Array, Result, String as NvimString};
-use nvim_oxi_utils::{notify, state::StateCell};
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
-use support::{ProjectRoot, TabTitle};
+use nvimrs_nvim_oxi_utils::notify;
+use nvimrs_nvim_oxi_utils::state::StateCell;
+use nvimrs_support::ProjectRoot;
+use nvimrs_support::TabTitle;
+use percent_encoding::AsciiSet;
+use percent_encoding::NON_ALPHANUMERIC;
+use percent_encoding::percent_encode;
 
 use crate::types::AutocmdAction;
+
+mod sync;
+
+use self::sync::WeztermRuntimeMode;
+use self::sync::WeztermSyncGate;
+use self::sync::WeztermSyncPolicy;
+use self::sync::WeztermSyncSnapshot;
+use self::sync::WeztermSyncStats;
 
 const WEZTERM_LOG_CONTEXT: &str = "wezterm_tab";
 const PROJECT_ROOT_VAR: &str = "project_root";
@@ -143,126 +170,6 @@ impl WeztermWorkItem {
             Self::Single(command) => f(command),
             Self::Batch(batch) => batch.for_each(f),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WeztermRuntimeMode {
-    HealthyAsync,
-    DegradedPolling,
-}
-
-impl WeztermRuntimeMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::HealthyAsync => "healthy_async",
-            Self::DegradedPolling => "degraded_polling",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct WeztermSyncStats {
-    requested: u64,
-    enqueued: u64,
-    coalesced: u64,
-    executed: u64,
-    wakeup_failures: u64,
-    enqueue_failures: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WeztermSyncSnapshot {
-    mode: WeztermRuntimeMode,
-    stats: WeztermSyncStats,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CompletionDrainBatchSize(usize);
-
-impl CompletionDrainBatchSize {
-    const MIN: Self = Self(1);
-
-    const fn get(self) -> usize {
-        self.0
-    }
-
-    const fn try_new(value: usize) -> Option<Self> {
-        if value == 0 { None } else { Some(Self(value)) }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WeztermSyncPolicy {
-    completion_drain_batch_size: CompletionDrainBatchSize,
-    autocmd_debounce_window: Duration,
-}
-
-impl WeztermSyncPolicy {
-    const fn try_new(
-        completion_drain_batch_size: usize,
-        autocmd_debounce_window: Duration,
-    ) -> Option<Self> {
-        let Some(completion_drain_batch_size) =
-            CompletionDrainBatchSize::try_new(completion_drain_batch_size)
-        else {
-            return None;
-        };
-        Some(Self {
-            completion_drain_batch_size,
-            autocmd_debounce_window,
-        })
-    }
-
-    fn default_policy() -> Self {
-        let debounce = Duration::from_millis(WEZTERM_DEFAULT_SYNC_DEBOUNCE_WINDOW_MS);
-        match Self::try_new(WEZTERM_DEFAULT_COMPLETION_DRAIN_BATCH_SIZE, debounce) {
-            Some(policy) => policy,
-            None => Self {
-                completion_drain_batch_size: CompletionDrainBatchSize::MIN,
-                autocmd_debounce_window: debounce,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WeztermSyncGate {
-    last_sync_started_at: Option<Instant>,
-}
-
-impl WeztermSyncGate {
-    const fn new() -> Self {
-        Self {
-            last_sync_started_at: None,
-        }
-    }
-
-    fn should_coalesce(&mut self, now: Instant, debounce_window: Duration) -> bool {
-        let Some(last_sync_started_at) = self.last_sync_started_at else {
-            self.last_sync_started_at = Some(now);
-            return false;
-        };
-        if now.saturating_duration_since(last_sync_started_at) < debounce_window {
-            return true;
-        }
-        self.last_sync_started_at = Some(now);
-        false
-    }
-}
-
-impl WeztermSyncSnapshot {
-    fn render(self) -> String {
-        format!(
-            "mode={} requested={} enqueued={} coalesced={} executed={} wakeup_failures={} enqueue_failures={}",
-            self.mode.as_str(),
-            self.stats.requested,
-            self.stats.enqueued,
-            self.stats.coalesced,
-            self.stats.executed,
-            self.stats.wakeup_failures,
-            self.stats.enqueue_failures
-        )
     }
 }
 
@@ -679,7 +586,7 @@ impl WeztermContext {
     }
 }
 
-fn wezterm_state_lock() -> nvim_oxi_utils::state::StateGuard<'static, WeztermState> {
+fn wezterm_state_lock() -> nvimrs_nvim_oxi_utils::state::StateGuard<'static, WeztermState> {
     WEZTERM_STATE.lock_recover(|state| {
         notify::warn(
             WEZTERM_LOG_CONTEXT,
@@ -1292,24 +1199,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_gate_coalesces_requests_within_window() {
-        let start = Instant::now();
-        let mut gate = WeztermSyncGate::new();
-        let debounce_window = WEZTERM_SYNC_POLICY.autocmd_debounce_window;
-        assert!(!gate.should_coalesce(start, debounce_window));
-        assert!(gate.should_coalesce(start + Duration::from_millis(10), debounce_window));
-        assert!(!gate.should_coalesce(start + debounce_window, debounce_window));
-    }
-
-    #[test]
-    fn sync_policy_rejects_zero_drain_batch_size() {
-        assert!(WeztermSyncPolicy::try_new(0, Duration::from_millis(1)).is_none());
-    }
-
-    #[test]
     fn command_batch_preserves_input_order() -> TestResult {
         let tab = title("batched")?;
-        let first = WeztermCommand::SetTabTitle(tab.clone());
+        let first = WeztermCommand::SetTabTitle(tab);
         let second = WeztermCommand::SetWorkingDir("/tmp".to_string());
         let Some(batch) =
             WeztermCommandBatch::from_optional(Some(first.clone()), Some(second.clone()))

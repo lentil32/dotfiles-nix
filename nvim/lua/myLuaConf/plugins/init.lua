@@ -1,7 +1,7 @@
 local colorscheme = require("myLuaConf.colorscheme")
 local keymaps = require("myLuaConf.keymaps")
----@module "rs_plugin_util"
-local plugin_util = require("rs_plugin_util")
+---@module "nvimrs_plugin_util"
+local plugin_util = require("nvimrs_plugin_util")
 local project = require("myLuaConf.project")
 local snacks = require("myLuaConf.snacks")
 ---@module "lze"
@@ -10,9 +10,9 @@ colorscheme.apply()
 snacks.setup()
 project.setup()
 require("myLuaConf.oil").setup()
----@module "rs_autocmds"
-local rs_autocmds = require("rs_autocmds")
-rs_autocmds.setup()
+---@module "nvimrs_autocmds"
+local nvimrs_autocmds = require("nvimrs_autocmds")
+nvimrs_autocmds.setup()
 keymaps.setup()
 
 local function should_enable_smear_cursor()
@@ -174,7 +174,7 @@ lze.load({
     end,
   },
   {
-    "rs-smear-cursor",
+    "nvimrs-smear-cursor",
     for_cat = "general",
     event = "DeferredUIEnter",
     -- Already available via startupPlugins; no packadd needed.
@@ -183,7 +183,7 @@ lze.load({
       if not should_enable_smear_cursor() then
         return
       end
-      require("rs_smear_cursor").setup({
+      require("nvimrs_smear_cursor").setup({
         logging_level = 0,
         smear_terminal_mode = true,
       })

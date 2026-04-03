@@ -1,5 +1,10 @@
-use super::events::{WeztermCommand, WeztermCompletion, WeztermEvent, WeztermTransition};
-use super::state::{FailureChannel, UpdateSlot, WeztermState};
+use super::events::WeztermCommand;
+use super::events::WeztermCompletion;
+use super::events::WeztermEvent;
+use super::events::WeztermTransition;
+use super::state::FailureChannel;
+use super::state::UpdateSlot;
+use super::state::WeztermState;
 
 impl WeztermState {
     fn transition_from_next<T>(
@@ -90,7 +95,7 @@ impl WeztermState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use support::TabTitle;
+    use nvimrs_support::TabTitle;
 
     fn title(value: &str) -> Result<TabTitle, &'static str> {
         TabTitle::try_new(value.to_string()).map_err(|_| "expected non-empty tab title")

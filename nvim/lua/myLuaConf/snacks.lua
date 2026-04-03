@@ -9,8 +9,8 @@ local function snacks()
 end
 
 local function reset_preview_state()
-  ---@module "rs_snacks_preview"
-  local preview = require("rs_snacks_preview")
+  ---@module "nvimrs_snacks_preview"
+  local preview = require("nvimrs_snacks_preview")
   preview.reset_state()
 end
 

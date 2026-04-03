@@ -9,8 +9,8 @@ Rust using nvim-oxi and Nix. It is tuned for macOS + nix-darwin + home-manager.
 - You need native integrations not exposed in Lua
 
 ## High level steps
-1) Create a Rust crate under `nvim/rust/plugins/<plugin>` for Lua-facing plugins
-   and name the package `rs_<plugin>`
+1) Create a Rust crate under `nvim/rust/plugins/<plugin-dir>` for Lua-facing plugins
+   and name the package `nvimrs-<plugin>`
 2) Implement a `#[nvim_oxi::plugin]` entry point returning a Dictionary of
    functions
 3) Compile as a `cdylib` and install the compiled library under `lua/` with
@@ -19,7 +19,7 @@ Rust using nvim-oxi and Nix. It is tuned for macOS + nix-darwin + home-manager.
 5) Provide a small Lua wrapper for ergonomic API + lazy loading
 
 ## 1) Crate layout
-Example (mirrors `nvim/rust/plugins/project_root`):
+Example (mirrors `nvim/rust/plugins/project-root`):
 
 ```
 nvim/rust/
@@ -27,7 +27,7 @@ nvim/rust/
   Cargo.lock
   .cargo/config.toml
   plugins/
-    <plugin>/
+    <plugin-dir>/
       Cargo.toml
       src/lib.rs
 ```
@@ -36,7 +36,7 @@ nvim/rust/
 
 ```
 [package]
-name = "rs_<plugin>"
+name = "nvimrs-<plugin>"
 version = "0.1.0"
 edition = "2024"
 
@@ -71,7 +71,7 @@ The plugin should expose a small API to Lua. Example pattern:
 use nvim_oxi::{Dictionary, Function};
 
 #[nvim_oxi::plugin]
-fn rs_plugin() -> Dictionary {
+fn nvimrs_plugin() -> Dictionary {
     let mut api = Dictionary::new();
     api.insert("setup", Function::<(), ()>::from_fn(|()| ()));
     api.insert("do_thing", Function::<(), String>::from_fn(|()| "ok".to_string()));
@@ -79,7 +79,7 @@ fn rs_plugin() -> Dictionary {
 }
 ```
 
-Each entry becomes a Lua-callable function on `require("rs_<plugin>")`.
+Each entry becomes a Lua-callable function on `require("nvimrs_<plugin>")`.
 
 ## 3) Package it for Neovim (Nix)
 This repo uses `buildRustPackage` to compile and install the compiled library
@@ -145,5 +145,6 @@ Patterns used in this repo:
 - [ ] `nvim/rust/.cargo/config.toml` has macOS dynamic lookup flags
 - [ ] Nix installPhase copies `lib<plugin>.dylib` or `.so` to `lua/<plugin>.so`
 - [ ] Plugin is in runtimepath (`startupPlugins` or `optionalPlugins`)
-- [ ] Lua-facing plugin crate/module uses `rs_` prefix consistently
+- [ ] Lua-facing plugin crate uses the `nvimrs-` prefix consistently
+- [ ] Lua-facing runtime module uses the `nvimrs_` prefix consistently
 - [ ] Lua wrapper handles load errors gracefully

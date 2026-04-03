@@ -1,8 +1,10 @@
+use nvim_oxi::Dictionary;
+use nvim_oxi::Object;
 use nvim_oxi::serde::Deserializer;
-use nvim_oxi::{Dictionary, Object};
-use nvim_oxi_utils::{Error as DecodeError, decode};
+use nvimrs_nvim_oxi_utils::Error as DecodeError;
+use nvimrs_nvim_oxi_utils::decode;
+use nvimrs_support::NonEmptyString;
 use serde::Deserialize;
-use support::NonEmptyString;
 
 #[derive(Debug)]
 pub struct OilMoveAction {

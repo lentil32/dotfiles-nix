@@ -2,23 +2,41 @@ mod integrations;
 mod machines;
 mod types;
 
-use machines::oil_last_buf::{OilLastBufEvent, OilLastBufState};
+use machines::oil_last_buf::OilLastBufEvent;
+use machines::oil_last_buf::OilLastBufState;
+use nvim_oxi::Array;
+use nvim_oxi::Dictionary;
+use nvim_oxi::Function;
+use nvim_oxi::Result;
+use nvim_oxi::String as NvimString;
 use nvim_oxi::api;
-use nvim_oxi::api::opts::{CmdOpts, CreateAugroupOpts, CreateAutocmdOpts, OptionOpts};
-use nvim_oxi::api::types::{AutocmdCallbackArgs, CmdInfos};
-use nvim_oxi::api::{Buffer, Window};
-use nvim_oxi::{Array, Dictionary, Function, Result, String as NvimString, mlua, schedule};
-use nvim_oxi_utils::{
-    guard,
-    handles::{self, BufHandle, WinHandle},
-    lua, notify,
-    state::StateCell,
-};
+use nvim_oxi::api::Buffer;
+use nvim_oxi::api::Window;
+use nvim_oxi::api::opts::CmdOpts;
+use nvim_oxi::api::opts::CreateAugroupOpts;
+use nvim_oxi::api::opts::CreateAutocmdOpts;
+use nvim_oxi::api::opts::OptionOpts;
+use nvim_oxi::api::types::AutocmdCallbackArgs;
+use nvim_oxi::api::types::CmdInfos;
+use nvim_oxi::mlua;
+use nvim_oxi::schedule;
+use nvimrs_nvim_oxi_utils::guard;
+use nvimrs_nvim_oxi_utils::handles::BufHandle;
+use nvimrs_nvim_oxi_utils::handles::WinHandle;
+use nvimrs_nvim_oxi_utils::handles::{self};
+use nvimrs_nvim_oxi_utils::lua;
+use nvimrs_nvim_oxi_utils::notify;
+use nvimrs_nvim_oxi_utils::state::StateCell;
 use std::path::Path;
 use std::sync::LazyLock;
-use types::{AutocmdAction, OilAction, OilActionsPostArgs};
+use types::AutocmdAction;
+use types::OilAction;
+use types::OilActionsPostArgs;
 
-use nvim_utils::path::{has_uri_scheme, normalize_path, path_is_dir, strip_known_prefixes};
+use nvimrs_nvim_utils::path::has_uri_scheme;
+use nvimrs_nvim_utils::path::normalize_path;
+use nvimrs_nvim_utils::path::path_is_dir;
+use nvimrs_nvim_utils::path::strip_known_prefixes;
 
 const LOG_CONTEXT: &str = "autocmds";
 
@@ -30,7 +48,7 @@ struct AutocmdState {
 static STATE: LazyLock<StateCell<AutocmdState>> =
     LazyLock::new(|| StateCell::new(AutocmdState::default()));
 
-fn state_lock() -> nvim_oxi_utils::state::StateGuard<'static, AutocmdState> {
+fn state_lock() -> nvimrs_nvim_oxi_utils::state::StateGuard<'static, AutocmdState> {
     STATE.lock_recover(|state| {
         notify::warn(LOG_CONTEXT, "state mutex poisoned; resetting autocmd state");
         *state = AutocmdState::default();
@@ -437,7 +455,7 @@ fn setup() -> Result<()> {
 }
 
 #[nvim_oxi::plugin]
-fn rs_autocmds() -> Dictionary {
+fn nvimrs_autocmds() -> Dictionary {
     let mut api = Dictionary::new();
     api.insert("setup", Function::<(), ()>::from_fn(|()| setup()));
     api.insert(

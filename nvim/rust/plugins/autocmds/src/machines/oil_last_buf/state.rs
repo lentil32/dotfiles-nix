@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
-use nvim_oxi_utils::handles::{BufHandle, WinHandle};
+use nvimrs_nvim_oxi_utils::handles::BufHandle;
+use nvimrs_nvim_oxi_utils::handles::WinHandle;
 
 #[cfg(test)]
-use super::events::{OilLastBufEffect, OilLastBufEvent};
+use super::events::OilLastBufEffect;
+#[cfg(test)]
+use super::events::OilLastBufEvent;
 
 pub(super) type OilMap = HashMap<WinHandle, BufHandle>;
 

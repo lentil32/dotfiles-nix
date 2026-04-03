@@ -3,9 +3,9 @@ local M = {}
 ---@module "monokai-pro"
 ---@type MonokaiPro
 local monokai = require("monokai-pro")
----@module "rs_theme_switcher"
----@type rs_theme_switcher
-local rust_switcher = require("rs_theme_switcher")
+---@module "nvimrs_theme_switcher"
+---@type nvimrs_theme_switcher
+local rust_switcher = require("nvimrs_theme_switcher")
 
 local DEFAULT_COLORSCHEME = "kanagawa-wave"
 
@@ -17,7 +17,7 @@ local monokai_opts = {
 
 monokai.setup(monokai_opts)
 
----@type rs_theme_switcher.ThemeSpec[]
+---@type nvimrs_theme_switcher.ThemeSpec[]
 local CONFIGURED_THEMES = {
   { name = "Monokai Pro", colorscheme = "monokai-pro" },
   { name = "Kanagawa Wave", colorscheme = "kanagawa-wave" },
@@ -35,7 +35,7 @@ local CONFIGURED_THEMES = {
 
 ---@return string
 local function state_path()
-  return vim.fn.stdpath("state") .. "/rs-theme-switcher/colorscheme.txt"
+  return vim.fn.stdpath("state") .. "/nvimrs-theme-switcher/colorscheme.txt"
 end
 
 ---@return table<string, true>
@@ -52,10 +52,10 @@ local function available_colorscheme_set()
   return available
 end
 
----@return rs_theme_switcher.ThemeSpec[]
+---@return nvimrs_theme_switcher.ThemeSpec[]
 local function discover_themes()
   local available = available_colorscheme_set()
-  ---@type rs_theme_switcher.ThemeSpec[]
+  ---@type nvimrs_theme_switcher.ThemeSpec[]
   local themes = {}
   for _, theme in ipairs(CONFIGURED_THEMES) do
     if available[theme.colorscheme] then
@@ -105,8 +105,8 @@ function M.apply()
   vim.notify(("Failed to load colorscheme '%s'"):format(candidate), vim.log.levels.ERROR)
 end
 
----@param themes rs_theme_switcher.ThemeSpec[]
----@return rs_theme_switcher.OpenArgs
+---@param themes nvimrs_theme_switcher.ThemeSpec[]
+---@return nvimrs_theme_switcher.OpenArgs
 local function switcher_args(themes)
   return {
     title = "Theme Switcher",
@@ -116,7 +116,7 @@ local function switcher_args(themes)
   }
 end
 
----@return rs_theme_switcher.ThemeSpec[]|nil
+---@return nvimrs_theme_switcher.ThemeSpec[]|nil
 local function configured_themes_or_warn()
   local themes = discover_themes()
   if #themes == 0 then

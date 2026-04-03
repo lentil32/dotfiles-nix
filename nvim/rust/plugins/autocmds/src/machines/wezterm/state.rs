@@ -1,4 +1,4 @@
-use support::TabTitle;
+use nvimrs_support::TabTitle;
 
 #[derive(Debug)]
 pub(super) struct UpdateSlot<T> {

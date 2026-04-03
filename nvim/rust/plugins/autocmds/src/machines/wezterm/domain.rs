@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::process::ExitStatus;
 
-use support::{NonEmptyString, ProjectRoot, TabTitle};
+use nvimrs_support::NonEmptyString;
+use nvimrs_support::ProjectRoot;
+use nvimrs_support::TabTitle;
 
 fn path_basename(path: &Path) -> Option<NonEmptyString> {
     let name = path.file_name()?.to_string_lossy().into_owned();

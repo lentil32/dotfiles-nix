@@ -1,12 +1,18 @@
 mod core;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
-use crate::core::{Column, LineRange, SortDirection, TextRangeError};
+use crate::core::Column;
+use crate::core::LineRange;
+use crate::core::SortDirection;
+use crate::core::TextRangeError;
+use nvim_oxi::Dictionary;
+use nvim_oxi::Function;
+use nvim_oxi::Result;
 use nvim_oxi::api;
 use nvim_oxi::api::Buffer;
-use nvim_oxi::{Dictionary, Function, Result};
-use nvim_utils::mode::is_visual_like_mode;
+use nvimrs_nvim_utils::mode::is_visual_like_mode;
 
 fn text_error_to_nvim(err: TextRangeError) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(err.to_string()).into()
@@ -156,7 +162,7 @@ fn kill_back_to_indentation() -> Result<()> {
 }
 
 #[nvim_oxi::plugin]
-fn rs_text() -> Dictionary {
+fn nvimrs_text() -> Dictionary {
     let mut api = Dictionary::new();
     api.insert("sort_lines", Function::<(), ()>::from_fn(|()| sort_lines()));
     api.insert(

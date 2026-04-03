@@ -1,0 +1,5 @@
+---
+source: plugins/autocmds/src/integrations/wezterm/sync.rs
+expression: snapshot.render()
+---
+mode=healthy_async requested=2 enqueued=1 coalesced=0 executed=3 wakeup_failures=0 enqueue_failures=0

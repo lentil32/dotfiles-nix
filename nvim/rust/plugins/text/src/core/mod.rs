@@ -3,7 +3,8 @@ use std::collections::HashSet;
 
 mod types;
 
-pub(crate) use types::{LineRange, TextRangeError};
+pub(crate) use types::LineRange;
+pub(crate) use types::TextRangeError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Column(pub(crate) usize);

@@ -1,6 +1,8 @@
 /result
 .aider*
 .claude/
+.direnv/
+.envrc
 
 target/
 .tmp/
