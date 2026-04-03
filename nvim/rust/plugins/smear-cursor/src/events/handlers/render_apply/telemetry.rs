@@ -22,6 +22,10 @@ pub(crate) struct RenderExecutionMetrics {
     pub(crate) pool_in_use_windows: usize,
     pub(crate) pool_cached_budget: usize,
     pub(crate) pool_last_frame_demand: usize,
+    pub(crate) pool_peak_total_windows: usize,
+    pub(crate) pool_peak_frame_demand: usize,
+    pub(crate) pool_peak_requested_capacity: usize,
+    pub(crate) pool_capacity_cap_hits: usize,
     pub(crate) had_visual_change: bool,
 }
 
@@ -77,6 +81,10 @@ impl RenderExecutionMetrics {
             self.pool_in_use_windows = snapshot.in_use_windows;
             self.pool_cached_budget = snapshot.cached_budget;
             self.pool_last_frame_demand = snapshot.last_frame_demand;
+            self.pool_peak_total_windows = snapshot.peak_total_windows;
+            self.pool_peak_frame_demand = snapshot.peak_frame_demand;
+            self.pool_peak_requested_capacity = snapshot.peak_requested_capacity;
+            self.pool_capacity_cap_hits = snapshot.capacity_cap_hits;
         }
     }
 
@@ -105,7 +113,7 @@ impl RenderExecutionMetrics {
 
     pub(crate) fn perf_details(&self) -> String {
         format!(
-            "ops_planned={} ops_applied={} ops_skipped_capacity={} windows_created={} windows_reused={} reuse_failed_missing_window={} reuse_failed_reconfigure={} reuse_failed_missing_buffer={} windows_pruned={} windows_hidden={} windows_invalid_removed={} windows_recovered={} pool_total_windows={} pool_available_windows={} pool_in_use_windows={} pool_cached_budget={} pool_last_frame_demand={}",
+            "ops_planned={} ops_applied={} ops_skipped_capacity={} windows_created={} windows_reused={} reuse_failed_missing_window={} reuse_failed_reconfigure={} reuse_failed_missing_buffer={} windows_pruned={} windows_hidden={} windows_invalid_removed={} windows_recovered={} pool_total_windows={} pool_available_windows={} pool_in_use_windows={} pool_cached_budget={} pool_last_frame_demand={} pool_peak_total={} pool_peak_demand={} pool_peak_requested={} pool_cap_hits={}",
             self.ops_planned,
             self.ops_applied,
             self.ops_skipped_capacity,
@@ -122,7 +130,11 @@ impl RenderExecutionMetrics {
             self.pool_available_windows,
             self.pool_in_use_windows,
             self.pool_cached_budget,
-            self.pool_last_frame_demand
+            self.pool_last_frame_demand,
+            self.pool_peak_total_windows,
+            self.pool_peak_frame_demand,
+            self.pool_peak_requested_capacity,
+            self.pool_capacity_cap_hits
         )
     }
 
@@ -190,6 +202,7 @@ mod tests {
     use crate::core::types::SceneRevision;
     use crate::core::types::ViewportSnapshot;
     use crate::draw::ApplyMetrics;
+    use crate::draw::TabPoolSnapshot;
     use crate::draw::render_plan::CellOp;
     use crate::draw::render_plan::Glyph;
     use crate::draw::render_plan::HighlightLevel;
@@ -257,10 +270,49 @@ mod tests {
             pool_in_use_windows: 0,
             pool_cached_budget: 0,
             pool_last_frame_demand: 0,
+            pool_peak_total_windows: 0,
+            pool_peak_frame_demand: 0,
+            pool_peak_requested_capacity: 0,
+            pool_capacity_cap_hits: 0,
             had_visual_change: true,
         };
 
         assert_eq!(metrics, expected);
+    }
+
+    #[test]
+    fn merge_apply_metrics_reads_pool_peak_telemetry_from_snapshot() {
+        let mut metrics = RenderExecutionMetrics::default();
+        metrics.merge_apply_metrics(ApplyMetrics {
+            pool_snapshot: Some(TabPoolSnapshot {
+                total_windows: 4,
+                available_windows: 3,
+                in_use_windows: 1,
+                cached_budget: 32,
+                last_frame_demand: 8,
+                peak_total_windows: 14,
+                peak_frame_demand: 11,
+                peak_requested_capacity: 17,
+                capacity_cap_hits: 2,
+            }),
+            ..ApplyMetrics::default()
+        });
+
+        assert_eq!(
+            metrics,
+            RenderExecutionMetrics {
+                pool_total_windows: 4,
+                pool_available_windows: 3,
+                pool_in_use_windows: 1,
+                pool_cached_budget: 32,
+                pool_last_frame_demand: 8,
+                pool_peak_total_windows: 14,
+                pool_peak_frame_demand: 11,
+                pool_peak_requested_capacity: 17,
+                pool_capacity_cap_hits: 2,
+                ..RenderExecutionMetrics::default()
+            }
+        );
     }
 
     #[test]

@@ -1,38 +1,55 @@
-use crate::core::types::{ArcLenQ16, StepIndex, StrokeId};
-use crate::types::{BASE_TIME_INTERVAL, Point};
+use crate::types::Point;
+use std::collections::BTreeMap;
+
+#[path = "latent_field/materialize.rs"]
+mod materialize;
+#[path = "latent_field/reference_compile.rs"]
+mod reference_compile;
+#[path = "latent_field/spatial_index.rs"]
+mod spatial_index;
+#[path = "latent_field/store.rs"]
+mod store;
+#[path = "latent_field/weights.rs"]
+mod weights;
+
+pub(super) use materialize::SweepMaterializeScratch;
 #[cfg(test)]
-use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashMap};
+pub(super) use materialize::deposit_swept_occupancy;
+pub(super) use materialize::materialize_swept_occupancy_with_scratch;
+pub(super) use materialize::prepare_swept_occupancy_geometry;
+pub(super) use reference_compile::CompileScratch;
+#[cfg(test)]
+pub(super) use reference_compile::compile_field;
+#[cfg(test)]
+pub(super) use reference_compile::compile_field_in_bounds;
+pub(super) use reference_compile::compile_field_in_bounds_rows_with_scratch;
+pub(super) use reference_compile::compile_field_in_bounds_with_scratch;
+pub(super) use reference_compile::compile_field_reference;
+pub(super) use reference_compile::compile_field_reference_with_scratch;
+pub(super) use spatial_index::BorrowedCellRows;
+pub(super) use spatial_index::BorrowedCellRowsScratch;
+pub(super) use spatial_index::CellRowQueryStats;
+pub(super) use spatial_index::CellRows;
+pub(super) use store::DepositedSlice;
+pub(super) use store::LatentFieldCache;
+pub(super) use weights::comet_tail_profiles;
+pub(super) use weights::intensity_q16;
+pub(super) use weights::max_comet_support_steps;
+pub(super) use weights::q16_from_non_negative;
+pub(super) use weights::simulation_step_ms;
+#[cfg(test)]
+pub(super) use weights::slice_recent_weight_q16;
+#[cfg(test)]
+pub(super) use weights::slice_weight_q16;
+pub(super) use weights::tail_support_steps;
 
 pub(super) const MICRO_W: usize = 8;
 pub(super) const MICRO_H: usize = 8;
 pub(super) const MICRO_TILE_SAMPLES: usize = MICRO_W * MICRO_H;
 
 const SAMPLE_Q12_SCALE: u32 = 4095;
-const WEIGHT_Q16_SCALE: u64 = 65_536;
 const MIN_COMPILED_SAMPLE_Q12: u16 = 4;
 const EPSILON: f64 = 1.0e-9;
-const DEFAULT_TAIL_DURATION_MS: f64 = 198.0;
-const DURATION_SCALE_MIN: f64 = 0.40;
-const DURATION_SCALE_MAX: f64 = 2.50;
-const DURATION_SCALE_EXPONENT: f64 = 0.85;
-const SHEATH_BASE_LIFETIME_MS: f64 = 40.0;
-const CORE_BASE_LIFETIME_MS: f64 = 112.0;
-const FILAMENT_BASE_LIFETIME_MS: f64 = 252.0;
-const SHEATH_MIN_SUPPORT_STEPS: usize = 2;
-const CORE_MIN_SUPPORT_STEPS: usize = 4;
-const FILAMENT_MIN_SUPPORT_STEPS: usize = 7;
-const SHEATH_WIDTH_SCALE: f64 = 1.18;
-const CORE_WIDTH_SCALE: f64 = 0.58;
-const FILAMENT_WIDTH_SCALE: f64 = 0.28;
-const SHEATH_INTENSITY: f64 = 0.90;
-const CORE_INTENSITY: f64 = 0.80;
-const FILAMENT_INTENSITY: f64 = 0.78;
-const TAIL_WEIGHT_EXPONENT: f64 = 0.90;
-const COMBINED_HEAD_MIX: f64 = 0.20;
-const COMBINED_TAIL_MIX: f64 = 0.80;
-const RECENT_HEAD_MIX: f64 = 0.82;
-const RECENT_TAIL_MIX: f64 = 0.18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MicroTile {
@@ -132,19 +149,6 @@ impl TailBandProfile {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct DepositedSlice {
-    pub(super) stroke_id: StrokeId,
-    pub(super) step_index: StepIndex,
-    pub(super) dt_ms_q16: u32,
-    pub(super) arc_len_q16: ArcLenQ16,
-    pub(super) bbox: CellRect,
-    pub(super) band: TailBand,
-    pub(super) support_steps: usize,
-    pub(super) intensity_q16: u32,
-    pub(super) microtiles: BTreeMap<(i64, i64), MicroTile>,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct AgeMoment {
     pub(super) total_mass_q12: u32,
@@ -157,1112 +161,34 @@ pub(super) struct CompiledCell {
     pub(super) age: AgeMoment,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct WeightCurveKey {
-    support_steps: usize,
-    intensity_q16: u32,
-    dt_ms_q16: u32,
-}
-
-impl WeightCurveKey {
-    fn from_slice(slice: &DepositedSlice) -> Self {
-        Self {
-            support_steps: slice.support_steps.max(1),
-            intensity_q16: slice.intensity_q16,
-            dt_ms_q16: slice.dt_ms_q16,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AccumulatorCell {
-    weighted_samples: [u64; MICRO_TILE_SAMPLES],
-    weighted_total_mass: u64,
-    weighted_recent_mass: u64,
-}
-
-impl Default for AccumulatorCell {
-    fn default() -> Self {
-        Self {
-            weighted_samples: [0_u64; MICRO_TILE_SAMPLES],
-            weighted_total_mass: 0,
-            weighted_recent_mass: 0,
-        }
-    }
-}
-
-impl AccumulatorCell {
-    fn survives(self) -> bool {
-        self.weighted_total_mass
-            >= u64::from(MIN_COMPILED_SAMPLE_Q12).saturating_mul(WEIGHT_Q16_SCALE)
-    }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct CompileScratch {
-    accum: HashMap<(i64, i64), AccumulatorCell>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum AxisSampleProjection {
-    Invalid,
-    Stationary { distance: f64 },
-    Moving { center_t: f64, inv_abs_delta: f64 },
-}
-
-impl AxisSampleProjection {
-    fn for_sample(sample: f64, start: f64, end: f64) -> Self {
-        if !sample.is_finite() || !start.is_finite() || !end.is_finite() {
-            return Self::Invalid;
-        }
-
-        let delta = end - start;
-        if delta.abs() <= EPSILON {
-            return Self::Stationary {
-                distance: (sample - start).abs(),
-            };
-        }
-
-        Self::Moving {
-            center_t: (sample - start) / delta,
-            inv_abs_delta: delta.abs().recip(),
-        }
-    }
-
-    fn interval(self, half_extent: f64) -> Option<(f64, f64)> {
-        if !half_extent.is_finite() || half_extent <= 0.0 {
-            return None;
-        }
-
-        match self {
-            Self::Invalid => None,
-            Self::Stationary { distance } => (distance <= half_extent).then_some((0.0, 1.0)),
-            Self::Moving {
-                center_t,
-                inv_abs_delta,
-            } => {
-                let radius = half_extent * inv_abs_delta;
-                let lo = (center_t - radius).clamp(0.0, 1.0);
-                let hi = (center_t + radius).clamp(0.0, 1.0);
-                (hi > lo).then_some((lo, hi))
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct SweptOccupancyGeometry {
-    row_projections: Vec<(i64, SampleProjectionRow)>,
-    col_projections: Vec<(i64, SampleProjectionCol)>,
-    safe_aspect_ratio: f64,
-    base_half_height: f64,
-    base_half_width: f64,
-    max_half_height: f64,
-    max_half_width: f64,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct SweepMaterializeScratch {
-    row_intervals: Vec<(i64, SampleIntervals<MICRO_H>)>,
-    col_intervals: Vec<(i64, SampleIntervals<MICRO_W>)>,
-}
-
-type SampleProjectionRow = [AxisSampleProjection; MICRO_H];
-type SampleProjectionCol = [AxisSampleProjection; MICRO_W];
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct BucketCell {
-    // Each curve/age bucket currently receives at most one slice per render step, so `u32`
-    // leaves ample headroom while cutting the retained latent-cache footprint roughly in half.
-    samples_q12_sum: [u32; MICRO_TILE_SAMPLES],
-    total_mass_q12: u32,
-}
-
-impl BucketCell {
-    fn add_tile(&mut self, tile: &MicroTile) {
-        let mut total_mass_q12 = 0_u32;
-        for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
-            let sample_u32 = u32::from(sample);
-            self.samples_q12_sum[index] = self.samples_q12_sum[index].saturating_add(sample_u32);
-            total_mass_q12 = total_mass_q12.saturating_add(sample_u32);
-        }
-        self.total_mass_q12 = self.total_mass_q12.saturating_add(total_mass_q12);
-    }
-
-    #[cfg(test)]
-    fn remove_tile(&mut self, tile: &MicroTile) {
-        let mut total_mass_q12 = 0_u32;
-        for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
-            let sample_u32 = u32::from(sample);
-            // removal should mirror prior insertion exactly; saturating arithmetic keeps the
-            // derived cache non-panicking if that invariant is ever violated.
-            debug_assert!(self.samples_q12_sum[index] >= sample_u32);
-            self.samples_q12_sum[index] = self.samples_q12_sum[index].saturating_sub(sample_u32);
-            total_mass_q12 = total_mass_q12.saturating_add(sample_u32);
-        }
-        debug_assert!(self.total_mass_q12 >= total_mass_q12);
-        self.total_mass_q12 = self.total_mass_q12.saturating_sub(total_mass_q12);
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.total_mass_q12 == 0
-    }
-}
-
-impl Default for BucketCell {
-    fn default() -> Self {
-        Self {
-            samples_q12_sum: [0_u32; MICRO_TILE_SAMPLES],
-            total_mass_q12: 0,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct WeightCurveBuckets {
-    age_zero_slot: usize,
-    buckets: Vec<BTreeMap<(i64, i64), BucketCell>>,
-}
-
-impl WeightCurveBuckets {
-    fn with_support_steps(support_steps: usize) -> Self {
-        Self {
-            age_zero_slot: 0,
-            buckets: vec![BTreeMap::new(); support_steps.max(1)],
-        }
-    }
-
-    fn bucket_index(&self, age_steps: u64) -> Option<usize> {
-        let age_index = usize::try_from(age_steps).ok()?;
-        if age_index >= self.buckets.len() {
-            return None;
-        }
-        Some((self.age_zero_slot + age_index) % self.buckets.len())
-    }
-
-    fn bucket_for_age(&self, age_steps: u64) -> Option<&BTreeMap<(i64, i64), BucketCell>> {
-        let index = self.bucket_index(age_steps)?;
-        self.buckets.get(index)
-    }
-
-    fn bucket_for_age_mut(
-        &mut self,
-        age_steps: u64,
-    ) -> Option<&mut BTreeMap<(i64, i64), BucketCell>> {
-        let index = self.bucket_index(age_steps)?;
-        self.buckets.get_mut(index)
-    }
-
-    fn advance_steps(&mut self, step_delta: u64) {
-        if self.buckets.is_empty() || step_delta == 0 {
-            return;
-        }
-
-        let len = self.buckets.len();
-        let len_u64 = u64::try_from(len).unwrap_or(u64::MAX);
-        if step_delta >= len_u64 {
-            self.clear_all();
-            return;
-        }
-
-        let rotate = usize::try_from(step_delta).unwrap_or(len);
-        self.age_zero_slot = (self.age_zero_slot + len - (rotate % len)) % len;
-        for age_index in 0..rotate {
-            let slot = (self.age_zero_slot + age_index) % len;
-            self.buckets[slot].clear();
-        }
-    }
-
-    fn clear_all(&mut self) {
-        self.age_zero_slot = 0;
-        for bucket in &mut self.buckets {
-            bucket.clear();
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.buckets.iter().all(BTreeMap::is_empty)
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct LatentFieldCache {
-    latest_step: StepIndex,
-    revision: u64,
-    curves: BTreeMap<WeightCurveKey, WeightCurveBuckets>,
-}
-
-impl LatentFieldCache {
-    pub(super) const fn latest_step(&self) -> StepIndex {
-        self.latest_step
-    }
-
-    pub(super) const fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    #[cfg(test)]
-    pub(super) fn rebuild(
-        history: &VecDeque<DepositedSlice>,
-        latest_step: StepIndex,
-        revision: u64,
-    ) -> Self {
-        let mut cache = Self {
-            latest_step,
-            revision,
-            curves: BTreeMap::new(),
-        };
-        for slice in history {
-            cache.insert_slice(slice);
-        }
-        cache.revision = revision;
-        cache
-    }
-
-    pub(super) fn advance_to(&mut self, latest_step: StepIndex) {
-        let step_delta = latest_step.value().saturating_sub(self.latest_step.value());
-        if step_delta == 0 {
-            return;
-        }
-
-        for buckets in self.curves.values_mut() {
-            buckets.advance_steps(step_delta);
-        }
-        self.curves.retain(|_, buckets| !buckets.is_empty());
-        self.latest_step = latest_step;
-    }
-
-    pub(super) fn insert_slice(&mut self, slice: &DepositedSlice) {
-        let key = WeightCurveKey::from_slice(slice);
-        let age_steps = self
-            .latest_step
-            .value()
-            .saturating_sub(slice.step_index.value());
-        let buckets = self
-            .curves
-            .entry(key)
-            .or_insert_with(|| WeightCurveBuckets::with_support_steps(key.support_steps));
-        let Some(bucket) = buckets.bucket_for_age_mut(age_steps) else {
-            return;
-        };
-
-        for (coord, tile) in &slice.microtiles {
-            bucket.entry(*coord).or_default().add_tile(tile);
-        }
-        self.revision = self.revision.saturating_add(1);
-    }
-
-    #[cfg(test)]
-    pub(super) fn remove_slice(&mut self, slice: &DepositedSlice) {
-        let key = WeightCurveKey::from_slice(slice);
-        let age_steps = self
-            .latest_step
-            .value()
-            .saturating_sub(slice.step_index.value());
-        let mut changed = false;
-        let mut remove_curve = false;
-
-        if let Some(buckets) = self.curves.get_mut(&key) {
-            if let Some(bucket) = buckets.bucket_for_age_mut(age_steps) {
-                for (coord, tile) in &slice.microtiles {
-                    let remove_cell = bucket.get_mut(coord).is_some_and(|cell| {
-                        cell.remove_tile(tile);
-                        cell.is_empty()
-                    });
-                    changed |= remove_cell || bucket.contains_key(coord);
-                    if remove_cell {
-                        let _ = bucket.remove(coord);
-                    }
-                }
-            }
-            remove_curve = buckets.is_empty();
-        }
-
-        if remove_curve {
-            let _ = self.curves.remove(&key);
-        }
-        if changed {
-            self.revision = self.revision.saturating_add(1);
-        }
-    }
-}
-
-fn sample_offset(sample_index: usize, samples_per_axis: usize) -> f64 {
-    (sample_index as f64 + 0.5) / samples_per_axis as f64
-}
-
-fn sample_center_cell_span(
-    start: f64,
-    end: f64,
-    half_extent: f64,
-    samples_per_axis: usize,
-) -> Option<(i64, i64)> {
-    if !start.is_finite() || !end.is_finite() || !half_extent.is_finite() || samples_per_axis == 0 {
-        return None;
-    }
-
-    let first_offset = sample_offset(0, samples_per_axis);
-    let last_offset = sample_offset(samples_per_axis.saturating_sub(1), samples_per_axis);
-    let min_center = start.min(end) - half_extent;
-    let max_center = start.max(end) + half_extent;
-    let min_cell = (min_center - last_offset).ceil() as i64;
-    let max_cell = (max_center - first_offset).floor() as i64;
-    (min_cell <= max_cell).then_some((min_cell, max_cell))
-}
-
-type AxisInterval = (f64, f64);
-type SampleIntervals<const N: usize> = [Option<AxisInterval>; N];
-type SampleProjection<const N: usize> = [AxisSampleProjection; N];
-
-fn axis_projections_for_cells<const N: usize>(
-    min_cell: i64,
-    max_cell: i64,
-    sample_scale: f64,
-    start: f64,
-    end: f64,
-    max_half_extent: f64,
-) -> Vec<(i64, SampleProjection<N>)> {
-    let cell_count =
-        usize::try_from(max_cell.saturating_sub(min_cell).saturating_add(1)).unwrap_or_default();
-    let mut cells = Vec::with_capacity(cell_count);
-
-    for cell in min_cell..=max_cell {
-        let mut projections = [AxisSampleProjection::Invalid; N];
-        let mut any_coverage = false;
-        for (sample_index, projection_slot) in projections.iter_mut().enumerate() {
-            let sample = (cell as f64 + sample_offset(sample_index, N)) * sample_scale;
-            let projection = AxisSampleProjection::for_sample(sample, start, end);
-            any_coverage |= projection.interval(max_half_extent).is_some();
-            *projection_slot = projection;
-        }
-
-        if any_coverage {
-            cells.push((cell, projections));
-        }
-    }
-
-    cells
-}
-
-fn populate_axis_intervals_from_projections<const N: usize>(
-    projections: &[(i64, SampleProjection<N>)],
-    half_extent: f64,
-    target: &mut Vec<(i64, SampleIntervals<N>)>,
-) {
-    target.clear();
-
-    for (cell, samples) in projections {
-        let mut intervals = [None; N];
-        let mut any_coverage = false;
-        for (interval_slot, projection) in intervals.iter_mut().zip(samples.iter().copied()) {
-            let interval = projection.interval(half_extent);
-            any_coverage |= interval.is_some();
-            *interval_slot = interval;
-        }
-
-        if any_coverage {
-            target.push((*cell, intervals));
-        }
-    }
-}
-
-pub(super) fn tail_support_steps(tail_duration_ms: f64, simulation_hz: f64) -> usize {
-    let safe_duration_ms = if tail_duration_ms.is_finite() {
-        tail_duration_ms.max(1.0)
-    } else {
-        180.0
-    };
-    let step_ms = simulation_step_ms(simulation_hz);
-
-    ((safe_duration_ms / step_ms).round() as usize).max(1)
-}
-
-pub(super) fn simulation_step_ms(simulation_hz: f64) -> f64 {
-    let safe_hz = if simulation_hz.is_finite() {
-        simulation_hz.max(1.0)
-    } else {
-        120.0
-    };
-    1000.0 / safe_hz
-}
-
-pub(super) fn q16_from_non_negative(value: f64) -> u32 {
-    if !value.is_finite() {
-        return 0;
-    }
-
-    let scaled = (value.max(0.0) * f64::from(1_u32 << 16)).round();
-    scaled.clamp(0.0, f64::from(u32::MAX)) as u32
-}
-
-fn reference_step_weight_q16(dt_ms_q16: u32) -> u64 {
-    let reference_dt_q16 = u64::from(q16_from_non_negative(BASE_TIME_INTERVAL));
-    if reference_dt_q16 == 0 {
-        return WEIGHT_Q16_SCALE;
-    }
-
-    u64::from(dt_ms_q16)
-        .saturating_mul(WEIGHT_Q16_SCALE)
-        .saturating_div(reference_dt_q16)
-}
-
-fn scale_weight_by_step_dt(weight_q16: u64, dt_ms_q16: u32) -> u64 {
-    let dt_weight_q16 = reference_step_weight_q16(dt_ms_q16);
-    let scaled = u128::from(weight_q16)
-        .saturating_mul(u128::from(dt_weight_q16))
-        .saturating_div(u128::from(WEIGHT_Q16_SCALE));
-    scaled.min(u128::from(u64::MAX)) as u64
-}
-
-pub(super) fn intensity_q16(intensity: f64) -> u32 {
-    if !intensity.is_finite() {
-        return 0;
-    }
-    (intensity.clamp(0.0, 1.0) * WEIGHT_Q16_SCALE as f64).round() as u32
-}
-
-fn smoothstep01(value: f64) -> f64 {
-    let x = value.clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
-}
-
-fn band_intensity_factor(intensity_q16: u32) -> f64 {
-    (f64::from(intensity_q16) / WEIGHT_Q16_SCALE as f64).max(0.0)
-}
-
-fn age_weights(age_steps: u64, support_steps: usize) -> Option<(f64, f64)> {
-    let support_steps_u64 = u64::try_from(support_steps).unwrap_or(u64::MAX).max(1);
-    if age_steps >= support_steps_u64 {
-        return None;
-    }
-
-    let normalized_age = age_steps as f64 / support_steps_u64 as f64;
-    let age = normalized_age.clamp(0.0, 1.0);
-    let head_weight = (1.0 - age).clamp(0.0, 1.0);
-    // Keep intensity decay smoother near support expiry to reduce one-frame aging pops.
-    let age_smooth = smoothstep01(age);
-    let tail_weight = (1.0 - age_smooth).powf(TAIL_WEIGHT_EXPONENT);
-    Some((head_weight, tail_weight))
-}
-
-fn weight_q16_for_curve(key: WeightCurveKey, age_steps: u64) -> u64 {
-    let Some((head_weight, tail_weight)) = age_weights(age_steps, key.support_steps) else {
-        return 0;
-    };
-
-    let combined_weight = ((COMBINED_HEAD_MIX * head_weight + COMBINED_TAIL_MIX * tail_weight)
-        * band_intensity_factor(key.intensity_q16))
-    .clamp(0.0, 1.0);
-    scale_weight_by_step_dt(
-        (combined_weight * WEIGHT_Q16_SCALE as f64).round() as u64,
-        key.dt_ms_q16,
-    )
-}
-
-fn recent_weight_q16_for_curve(key: WeightCurveKey, age_steps: u64) -> u64 {
-    let Some((head_weight, tail_weight)) = age_weights(age_steps, key.support_steps) else {
-        return 0;
-    };
-
-    let recent_weight = ((RECENT_HEAD_MIX * head_weight + RECENT_TAIL_MIX * tail_weight)
-        * band_intensity_factor(key.intensity_q16))
-    .clamp(0.0, 1.0);
-    scale_weight_by_step_dt(
-        (recent_weight * WEIGHT_Q16_SCALE as f64).round() as u64,
-        key.dt_ms_q16,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn slice_weight_q16(slice: &DepositedSlice, age_steps: u64) -> u64 {
-    weight_q16_for_curve(WeightCurveKey::from_slice(slice), age_steps)
-}
-
-#[cfg(test)]
-pub(super) fn slice_recent_weight_q16(slice: &DepositedSlice, age_steps: u64) -> u64 {
-    recent_weight_q16_for_curve(WeightCurveKey::from_slice(slice), age_steps)
-}
-
-pub(super) fn comet_tail_profiles(tail_duration_ms: f64) -> [TailBandProfile; 3] {
-    let duration_ratio = if tail_duration_ms.is_finite() {
-        (tail_duration_ms / DEFAULT_TAIL_DURATION_MS).clamp(DURATION_SCALE_MIN, DURATION_SCALE_MAX)
-    } else {
-        1.0
-    };
-    let support_scale = duration_ratio.powf(DURATION_SCALE_EXPONENT);
-
-    [
-        TailBandProfile {
-            band: TailBand::Sheath,
-            width_scale: SHEATH_WIDTH_SCALE,
-            lifetime_ms: SHEATH_BASE_LIFETIME_MS * support_scale,
-            min_support_steps: SHEATH_MIN_SUPPORT_STEPS,
-            intensity: SHEATH_INTENSITY,
-        },
-        TailBandProfile {
-            band: TailBand::Core,
-            width_scale: CORE_WIDTH_SCALE,
-            lifetime_ms: CORE_BASE_LIFETIME_MS * support_scale,
-            min_support_steps: CORE_MIN_SUPPORT_STEPS,
-            intensity: CORE_INTENSITY,
-        },
-        TailBandProfile {
-            band: TailBand::Filament,
-            width_scale: FILAMENT_WIDTH_SCALE,
-            lifetime_ms: FILAMENT_BASE_LIFETIME_MS * support_scale,
-            min_support_steps: FILAMENT_MIN_SUPPORT_STEPS,
-            intensity: FILAMENT_INTENSITY,
-        },
-    ]
-}
-
-pub(super) fn max_comet_support_steps(tail_duration_ms: f64, simulation_hz: f64) -> usize {
-    comet_tail_profiles(tail_duration_ms)
-        .into_iter()
-        .map(|profile| profile.support_steps(simulation_hz))
-        .max()
-        .unwrap_or(1)
-}
-
-pub(super) fn prepare_swept_occupancy_geometry(
-    start: Pose,
-    end: Pose,
-    block_aspect_ratio: f64,
-    thickness_y: f64,
-    thickness_x: f64,
-) -> SweptOccupancyGeometry {
-    let safe_aspect_ratio = if block_aspect_ratio.is_finite() {
-        block_aspect_ratio.max(EPSILON)
-    } else {
-        1.0
-    };
-    let width_scale = if thickness_x.is_finite() {
-        thickness_x.max(EPSILON)
-    } else {
-        1.0
-    };
-    let height_scale = if thickness_y.is_finite() {
-        thickness_y.max(EPSILON)
-    } else {
-        1.0
-    };
-    let base_half_width = start.half_width.max(end.half_width);
-    let base_half_height = start.half_height.max(end.half_height);
-    let max_half_width = (base_half_width * width_scale).max(EPSILON);
-    let max_half_height = (base_half_height * height_scale).max(EPSILON);
-
-    let mut geometry = SweptOccupancyGeometry {
-        safe_aspect_ratio,
-        base_half_height,
-        base_half_width,
-        max_half_height,
-        max_half_width,
-        ..SweptOccupancyGeometry::default()
-    };
-
-    let Some((min_row, max_row)) =
-        sample_center_cell_span(start.center.row, end.center.row, max_half_height, MICRO_H)
-    else {
-        return geometry;
-    };
-    let Some((min_col, max_col)) =
-        sample_center_cell_span(start.center.col, end.center.col, max_half_width, MICRO_W)
-    else {
-        return geometry;
-    };
-
-    geometry.row_projections = axis_projections_for_cells::<MICRO_H>(
-        min_row,
-        max_row,
-        safe_aspect_ratio,
-        start.center.row * safe_aspect_ratio,
-        end.center.row * safe_aspect_ratio,
-        max_half_height * safe_aspect_ratio,
-    );
-    geometry.col_projections = axis_projections_for_cells::<MICRO_W>(
-        min_col,
-        max_col,
-        1.0,
-        start.center.col,
-        end.center.col,
-        max_half_width,
-    );
-    geometry
-}
-
-pub(super) fn materialize_swept_occupancy_with_scratch(
-    geometry: &SweptOccupancyGeometry,
-    thickness_y: f64,
-    thickness_x: f64,
-    scratch: &mut SweepMaterializeScratch,
-) -> BTreeMap<(i64, i64), MicroTile> {
-    if geometry.row_projections.is_empty() || geometry.col_projections.is_empty() {
-        return BTreeMap::new();
-    }
-
-    let width_scale = if thickness_x.is_finite() {
-        thickness_x.max(EPSILON)
-    } else {
-        1.0
-    };
-    let height_scale = if thickness_y.is_finite() {
-        thickness_y.max(EPSILON)
-    } else {
-        1.0
-    };
-    let half_width = (geometry.base_half_width * width_scale).max(EPSILON);
-    let half_height = (geometry.base_half_height * height_scale).max(EPSILON);
-    debug_assert!(
-        half_width <= geometry.max_half_width + EPSILON
-            && half_height <= geometry.max_half_height + EPSILON,
-        "sweep materialization should stay within the prepared max extents"
-    );
-
-    populate_axis_intervals_from_projections(
-        &geometry.row_projections,
-        half_height * geometry.safe_aspect_ratio,
-        &mut scratch.row_intervals,
-    );
-    populate_axis_intervals_from_projections(
-        &geometry.col_projections,
-        half_width,
-        &mut scratch.col_intervals,
-    );
-    if scratch.row_intervals.is_empty() || scratch.col_intervals.is_empty() {
-        return BTreeMap::new();
-    }
-
-    let mut tiles = BTreeMap::<(i64, i64), MicroTile>::new();
-
-    for (row, row_intervals) in &scratch.row_intervals {
-        for (col, col_intervals) in &scratch.col_intervals {
-            let mut tile = MicroTile::default();
-            let mut any_coverage = false;
-
-            for (sample_row, y_interval) in row_intervals.iter().copied().enumerate() {
-                let Some((y_lo, y_hi)) = y_interval else {
-                    continue;
-                };
-
-                for (sample_col, x_interval) in col_intervals.iter().copied().enumerate() {
-                    let Some((x_lo, x_hi)) = x_interval else {
-                        continue;
-                    };
-
-                    let index = sample_row * MICRO_W + sample_col;
-                    let occupancy = (x_hi.min(y_hi) - x_lo.max(y_lo)).clamp(0.0, 1.0);
-                    let sample_q12 = (occupancy * SAMPLE_Q12_SCALE as f64).round() as u16;
-                    tile.samples_q12[index] = sample_q12;
-                    any_coverage |= sample_q12 > 0;
-                }
-            }
-
-            if any_coverage {
-                tiles.insert((*row, *col), tile);
-            }
-        }
-    }
-
-    tiles
-}
-
-#[cfg(test)]
-pub(super) fn deposit_swept_occupancy(
-    start: Pose,
-    end: Pose,
-    block_aspect_ratio: f64,
-    thickness_y: f64,
-    thickness_x: f64,
-) -> BTreeMap<(i64, i64), MicroTile> {
-    let geometry =
-        prepare_swept_occupancy_geometry(start, end, block_aspect_ratio, thickness_y, thickness_x);
-    let mut scratch = SweepMaterializeScratch::default();
-    materialize_swept_occupancy_with_scratch(&geometry, thickness_y, thickness_x, &mut scratch)
-}
-
-#[cfg(test)]
-pub(super) fn prune_history(
-    history: &mut VecDeque<DepositedSlice>,
-    latest_step: StepIndex,
-    support_steps: usize,
-) {
-    let support_steps_u64 = u64::try_from(support_steps).unwrap_or(u64::MAX);
-    while history.front().is_some_and(|slice| {
-        latest_step.value().saturating_sub(slice.step_index.value()) >= support_steps_u64
-    }) {
-        let _ = history.pop_front();
-    }
-}
-
-fn accumulate_weighted_mass(
-    cell: &mut AccumulatorCell,
-    total_mass_q12: u32,
-    weight_q16: u64,
-    recent_weight_q16: u64,
-) {
-    cell.weighted_total_mass = cell
-        .weighted_total_mass
-        .saturating_add(u64::from(total_mass_q12).saturating_mul(weight_q16));
-    if recent_weight_q16 > 0 {
-        cell.weighted_recent_mass = cell
-            .weighted_recent_mass
-            .saturating_add(u64::from(total_mass_q12).saturating_mul(recent_weight_q16));
-    }
-}
-
-fn accumulate_bucket_weighted_samples(
-    cell: &mut AccumulatorCell,
-    samples_q12_sum: &[u32; MICRO_TILE_SAMPLES],
-    weight_q16: u64,
-) {
-    for (index, sample_sum) in samples_q12_sum.iter().copied().enumerate() {
-        let weighted = u64::from(sample_sum).saturating_mul(weight_q16);
-        cell.weighted_samples[index] = cell.weighted_samples[index].saturating_add(weighted);
-    }
-}
-
-fn accumulate_bucket_weighted_cell(
-    cell: &mut AccumulatorCell,
-    bucket_cell: &BucketCell,
-    weight_q16: u64,
-    recent_weight_q16: u64,
-) {
-    accumulate_weighted_mass(
-        cell,
-        bucket_cell.total_mass_q12,
-        weight_q16,
-        recent_weight_q16,
-    );
-    accumulate_bucket_weighted_samples(cell, &bucket_cell.samples_q12_sum, weight_q16);
-}
-
-#[cfg(test)]
-fn accumulate_microtile_weighted_samples(
-    cell: &mut AccumulatorCell,
-    tile: &MicroTile,
-    weight_q16: u64,
-) {
-    for (index, sample) in tile.samples_q12.iter().copied().enumerate() {
-        let weighted = u64::from(sample).saturating_mul(weight_q16);
-        cell.weighted_samples[index] = cell.weighted_samples[index].saturating_add(weighted);
-    }
-}
-
-fn finalize_compiled_cells(
-    accum: &HashMap<(i64, i64), AccumulatorCell>,
-) -> BTreeMap<(i64, i64), CompiledCell> {
-    let mut compiled = BTreeMap::<(i64, i64), CompiledCell>::new();
-
-    for (coord, cell) in accum {
-        if !cell.survives() {
-            continue;
-        }
-
-        let mut tile = MicroTile::default();
-        for (index, weighted_sample) in cell.weighted_samples.iter().copied().enumerate() {
-            let normalized = (weighted_sample / WEIGHT_Q16_SCALE).min(u64::from(SAMPLE_Q12_SCALE));
-            tile.samples_q12[index] = normalized as u16;
-        }
-
-        if tile.max_sample_q12() < MIN_COMPILED_SAMPLE_Q12 {
-            continue;
-        }
-
-        let total_mass_q12 =
-            (cell.weighted_total_mass / WEIGHT_Q16_SCALE).min(u64::from(u32::MAX)) as u32;
-        let recent_mass_q12 =
-            (cell.weighted_recent_mass / WEIGHT_Q16_SCALE).min(u64::from(u32::MAX)) as u32;
-
-        compiled.insert(
-            *coord,
-            CompiledCell {
-                tile,
-                age: AgeMoment {
-                    total_mass_q12,
-                    recent_mass_q12,
-                },
-            },
-        );
-    }
-
-    compiled
-}
-
-fn for_each_weighted_bucket<F>(cache: &LatentFieldCache, mut visit: F)
-where
-    F: FnMut(u64, u64, &BTreeMap<(i64, i64), BucketCell>),
-{
-    for (key, curve) in &cache.curves {
-        for age_steps in 0..curve.buckets.len() {
-            let age_steps_u64 = u64::try_from(age_steps).unwrap_or(u64::MAX);
-            let weight_q16 = weight_q16_for_curve(*key, age_steps_u64);
-            if weight_q16 == 0 {
-                continue;
-            }
-
-            let Some(bucket) = curve.bucket_for_age(age_steps_u64) else {
-                continue;
-            };
-            visit(
-                weight_q16,
-                recent_weight_q16_for_curve(*key, age_steps_u64),
-                bucket,
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-pub(super) fn compile_field_from_cache(
-    cache: &LatentFieldCache,
-) -> BTreeMap<(i64, i64), CompiledCell> {
-    let mut scratch = CompileScratch::default();
-    compile_field_from_cache_with_scratch(cache, &mut scratch)
-}
-
-pub(super) fn compile_field_from_cache_with_scratch(
-    cache: &LatentFieldCache,
-    scratch: &mut CompileScratch,
-) -> BTreeMap<(i64, i64), CompiledCell> {
-    scratch.accum.clear();
-
-    // CONTEXT: active motion invalidates the compiled revision every frame once fresh slices land.
-    // Reuse the accumulator allocation and fold mass/sample accumulation into one retained-cache
-    // walk so hot frames do not also pay a second bucket scan plus HashMap growth churn.
-    for_each_weighted_bucket(cache, |weight_q16, recent_weight_q16, bucket| {
-        for (coord, cell) in bucket {
-            accumulate_bucket_weighted_cell(
-                scratch.accum.entry(*coord).or_default(),
-                cell,
-                weight_q16,
-                recent_weight_q16,
-            );
-        }
-    });
-
-    if scratch.accum.is_empty() {
-        return BTreeMap::new();
-    }
-
-    finalize_compiled_cells(&scratch.accum)
-}
-
-#[cfg(test)]
-pub(super) fn compile_field(
-    history: &VecDeque<DepositedSlice>,
-    latest_step: StepIndex,
-) -> BTreeMap<(i64, i64), CompiledCell> {
-    let mut accum = HashMap::<(i64, i64), AccumulatorCell>::new();
-
-    for slice in history {
-        let age_steps = latest_step.value().saturating_sub(slice.step_index.value());
-        let weight_q16 = slice_weight_q16(slice, age_steps);
-        if weight_q16 == 0 {
-            continue;
-        }
-        let recent_weight_q16 = slice_recent_weight_q16(slice, age_steps);
-
-        for (coord, tile) in &slice.microtiles {
-            let accum_cell = accum.entry(*coord).or_default();
-            accumulate_weighted_mass(
-                accum_cell,
-                tile.total_mass_q12(),
-                weight_q16,
-                recent_weight_q16,
-            );
-            accumulate_microtile_weighted_samples(accum_cell, tile, weight_q16);
-        }
-    }
-
-    if accum.is_empty() {
-        return BTreeMap::new();
-    }
-    finalize_compiled_cells(&accum)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        CellRect, LatentFieldCache, MICRO_TILE_SAMPLES, Pose, SAMPLE_Q12_SCALE,
-        SweepMaterializeScratch, TailBand, comet_tail_profiles, compile_field,
-        compile_field_from_cache, compile_field_from_cache_with_scratch, deposit_swept_occupancy,
-        intensity_q16, materialize_swept_occupancy_with_scratch, max_comet_support_steps,
-        prepare_swept_occupancy_geometry, prune_history, q16_from_non_negative, simulation_step_ms,
-        tail_support_steps,
-    };
-    use crate::core::types::{ArcLenQ16, StepIndex, StrokeId};
+    use super::CellRect;
+    use super::LatentFieldCache;
+    use super::MICRO_TILE_SAMPLES;
+    use super::Pose;
+    use super::SAMPLE_Q12_SCALE;
+    use super::TailBand;
+    use super::comet_tail_profiles;
+    use super::compile_field;
+    use super::compile_field_in_bounds;
+    use super::compile_field_in_bounds_rows_with_scratch;
+    use super::compile_field_in_bounds_with_scratch;
+    use super::compile_field_reference;
+    use super::compile_field_reference_with_scratch;
+    use super::deposit_swept_occupancy;
+    use super::intensity_q16;
+    use super::max_comet_support_steps;
+    use super::q16_from_non_negative;
+    use super::simulation_step_ms;
+    use super::tail_support_steps;
+    use crate::core::types::ArcLenQ16;
+    use crate::core::types::StepIndex;
+    use crate::core::types::StrokeId;
     use crate::types::Point;
-    use std::collections::{BTreeMap, VecDeque};
-
-    #[test]
-    fn deposit_static_pose_produces_non_empty_tile() {
-        let pose = Pose {
-            center: Point {
-                row: 10.5,
-                col: 20.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let tiles = deposit_swept_occupancy(pose, pose, 2.0, 1.0, 1.0);
-
-        assert!(!tiles.is_empty());
-        let center = tiles.get(&(10, 20)).expect("center cell should be present");
-        assert!(center.samples_q12.iter().any(|value| *value > 0));
-    }
-
-    #[test]
-    fn deposit_static_pose_on_exact_cell_boundary_skips_empty_border_tiles() {
-        let pose = Pose {
-            center: Point {
-                row: 10.5,
-                col: 20.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-
-        let tiles = deposit_swept_occupancy(pose, pose, 2.0, 1.0, 1.0);
-        assert_eq!(tiles.keys().copied().collect::<Vec<_>>(), vec![(10, 20)]);
-    }
-
-    #[test]
-    fn deposit_sweep_spans_multiple_cells() {
-        let start = Pose {
-            center: Point {
-                row: 10.5,
-                col: 10.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let end = Pose {
-            center: Point {
-                row: 10.5,
-                col: 14.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let tiles = deposit_swept_occupancy(start, end, 2.0, 1.0, 1.0);
-        assert!(tiles.contains_key(&(10, 10)));
-        assert!(tiles.contains_key(&(10, 14)));
-    }
-
-    #[test]
-    fn shared_sweep_geometry_matches_direct_deposit_for_tail_band_widths() {
-        let start = Pose {
-            center: Point {
-                row: 10.5,
-                col: 10.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let end = Pose {
-            center: Point {
-                row: 11.25,
-                col: 14.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let profiles = comet_tail_profiles(198.0);
-        let max_width_scale = profiles
-            .iter()
-            .fold(0.0_f64, |max, profile| max.max(profile.width_scale));
-        let geometry = prepare_swept_occupancy_geometry(
-            start,
-            end,
-            2.0,
-            1.25 * max_width_scale,
-            0.8 * max_width_scale,
-        );
-        let mut scratch = SweepMaterializeScratch::default();
-
-        for profile in profiles {
-            let thickness_y = 1.25 * profile.width_scale;
-            let thickness_x = 0.8 * profile.width_scale;
-            assert_eq!(
-                materialize_swept_occupancy_with_scratch(
-                    &geometry,
-                    thickness_y,
-                    thickness_x,
-                    &mut scratch
-                ),
-                deposit_swept_occupancy(start, end, 2.0, thickness_y, thickness_x),
-                "shared sweep geometry should preserve direct deposition for {:?}",
-                profile.band
-            );
-        }
-    }
-
-    #[test]
-    fn shared_sweep_geometry_materialization_is_order_independent() {
-        let start = Pose {
-            center: Point {
-                row: 10.5,
-                col: 10.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let end = Pose {
-            center: Point {
-                row: 11.0,
-                col: 13.5,
-            },
-            half_height: 0.5,
-            half_width: 0.5,
-        };
-        let mut profiles = comet_tail_profiles(198.0);
-        let max_width_scale = profiles
-            .iter()
-            .fold(0.0_f64, |max, profile| max.max(profile.width_scale));
-        let geometry = prepare_swept_occupancy_geometry(
-            start,
-            end,
-            2.0,
-            1.0 * max_width_scale,
-            1.0 * max_width_scale,
-        );
-        let materialize_profile_order = |ordered_profiles: &[super::TailBandProfile]| {
-            let mut scratch = SweepMaterializeScratch::default();
-            ordered_profiles
-                .iter()
-                .map(|profile| {
-                    (
-                        profile.band,
-                        materialize_swept_occupancy_with_scratch(
-                            &geometry,
-                            profile.width_scale,
-                            profile.width_scale,
-                            &mut scratch,
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let forward = materialize_profile_order(&profiles);
-        profiles.reverse();
-        let reverse = materialize_profile_order(&profiles);
-
-        for band in [TailBand::Sheath, TailBand::Core, TailBand::Filament] {
-            let forward_tiles = forward
-                .iter()
-                .find(|(candidate_band, _)| *candidate_band == band)
-                .map(|(_, tiles)| tiles)
-                .expect("forward order should include each tail band");
-            let reverse_tiles = reverse
-                .iter()
-                .find(|(candidate_band, _)| *candidate_band == band)
-                .map(|(_, tiles)| tiles)
-                .expect("reverse order should include each tail band");
-            assert_eq!(forward_tiles, reverse_tiles);
-        }
-    }
+    use pretty_assertions::assert_eq;
+    use std::collections::BTreeMap;
+    use std::collections::VecDeque;
 
     #[test]
     fn compile_field_ages_out_old_slices() {
@@ -1287,31 +213,6 @@ mod tests {
 
         let empty = compile_field(&history, StepIndex::new(12));
         assert!(empty.is_empty());
-    }
-
-    #[test]
-    fn prune_history_keeps_recent_window() {
-        let mut history = VecDeque::new();
-        for step in 0_u64..10_u64 {
-            history.push_back(super::DepositedSlice {
-                stroke_id: StrokeId::new(1),
-                step_index: StepIndex::new(step),
-                dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
-                arc_len_q16: ArcLenQ16::ZERO,
-                bbox: CellRect::new(0, 0, 0, 0),
-                band: TailBand::Core,
-                support_steps: 3,
-                intensity_q16: intensity_q16(1.0),
-                microtiles: Default::default(),
-            });
-        }
-
-        prune_history(&mut history, StepIndex::new(9), 3);
-        assert!(
-            history
-                .front()
-                .is_some_and(|slice| slice.step_index.value() >= 7)
-        );
     }
 
     #[test]
@@ -1516,27 +417,27 @@ mod tests {
     }
 
     #[test]
-    fn compile_field_from_cache_matches_direct_replay() {
+    fn compile_field_reference_matches_direct_replay() {
         let support_duration_ms = 180.0;
         let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
         let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
 
         assert_eq!(
-            compile_field_from_cache(&cache),
+            compile_field_reference(&cache),
             compile_field(&history, latest_step)
         );
     }
 
     #[test]
-    fn compile_field_from_cache_with_scratch_reuses_accumulator_capacity() {
+    fn compile_field_reference_with_scratch_reuses_accumulator_capacity() {
         let support_duration_ms = 180.0;
         let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
         let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
         let mut scratch = super::CompileScratch::default();
 
-        let first = compile_field_from_cache_with_scratch(&cache, &mut scratch);
-        let first_capacity = scratch.accum.capacity();
-        let second = compile_field_from_cache_with_scratch(&cache, &mut scratch);
+        let first = compile_field_reference_with_scratch(&cache, &mut scratch);
+        let first_capacity = scratch.accumulator_capacity();
+        let second = compile_field_reference_with_scratch(&cache, &mut scratch);
 
         assert_eq!(first, second);
         assert!(
@@ -1544,10 +445,71 @@ mod tests {
             "first compile should reserve accumulator storage for retained cells"
         );
         assert_eq!(
-            scratch.accum.capacity(),
+            scratch.accumulator_capacity(),
             first_capacity,
             "scratch-backed recompiles should keep the existing accumulator allocation"
         );
+    }
+
+    #[test]
+    fn compile_field_in_bounds_matches_reference_filtered_to_same_rect() {
+        let support_duration_ms = 180.0;
+        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
+        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
+        let bounds = CellRect::new(4, 5, 5, 6);
+
+        let bounded = compile_field_in_bounds(&cache, bounds);
+        let filtered_reference = compile_field_reference(&cache)
+            .into_iter()
+            .filter(|(coord, _)| bounds.contains(*coord))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(bounded, filtered_reference);
+    }
+
+    #[test]
+    fn compile_field_in_bounds_with_scratch_reuses_accumulator_capacity() {
+        let support_duration_ms = 180.0;
+        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
+        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
+        let bounds = CellRect::new(4, 5, 5, 6);
+        let mut scratch = super::CompileScratch::default();
+
+        let first = compile_field_in_bounds_with_scratch(&cache, bounds, &mut scratch);
+        let first_capacity = scratch.accumulator_capacity();
+        let second = compile_field_in_bounds_with_scratch(&cache, bounds, &mut scratch);
+
+        assert_eq!(first, second);
+        assert!(
+            first_capacity > 0,
+            "bounded compile should reserve accumulator storage for the queried cells"
+        );
+        assert_eq!(
+            scratch.accumulator_capacity(),
+            first_capacity,
+            "bounded scratch-backed recompiles should keep the existing accumulator allocation"
+        );
+    }
+
+    #[test]
+    fn compile_field_in_bounds_rows_matches_reference_filtered_to_same_rect() {
+        let support_duration_ms = 180.0;
+        let (history, latest_step) = stationary_history_for_rate(120.0, support_duration_ms);
+        let cache = LatentFieldCache::rebuild(&history, latest_step, 7);
+        let bounds = CellRect::new(4, 5, 5, 6);
+        let mut scratch = super::CompileScratch::default();
+
+        let rows = compile_field_in_bounds_rows_with_scratch(&cache, bounds, &mut scratch);
+        let filtered_reference = compile_field_reference(&cache)
+            .into_iter()
+            .filter(|(coord, _)| bounds.contains(*coord))
+            .collect::<BTreeMap<_, _>>();
+        let rows_as_map = rows
+            .iter()
+            .map(|(coord, value)| (coord, *value))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(rows_as_map, filtered_reference);
     }
 
     #[test]
@@ -1569,68 +531,6 @@ mod tests {
         let cache = LatentFieldCache::rebuild(&history, StepIndex::new(1), 17);
 
         assert!(compile_field(&history, StepIndex::new(1)).is_empty());
-        assert!(compile_field_from_cache(&cache).is_empty());
-    }
-
-    #[test]
-    fn latent_bucket_cell_stays_compact() {
-        assert!(
-            std::mem::size_of::<super::BucketCell>() <= 260,
-            "bucket cache cell regressed in size: {} bytes",
-            std::mem::size_of::<super::BucketCell>()
-        );
-    }
-
-    #[test]
-    fn latent_cache_incremental_updates_match_direct_replay() {
-        let tile = fully_covered_tile();
-        let bbox = CellRect::new(4, 4, 5, 5);
-        let make_slice = |step: u64| super::DepositedSlice {
-            stroke_id: StrokeId::new(1),
-            step_index: StepIndex::new(step),
-            dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
-            arc_len_q16: ArcLenQ16::ZERO,
-            bbox,
-            band: TailBand::Core,
-            support_steps: 4,
-            intensity_q16: intensity_q16(1.0),
-            microtiles: BTreeMap::from([((4_i64, 5_i64), tile)]),
-        };
-
-        let mut history = VecDeque::from([make_slice(1), make_slice(2)]);
-        let mut cache = LatentFieldCache::rebuild(&history, StepIndex::new(2), 11);
-        assert_eq!(
-            compile_field_from_cache(&cache),
-            compile_field(&history, StepIndex::new(2))
-        );
-
-        cache.advance_to(StepIndex::new(3));
-        assert_eq!(
-            compile_field_from_cache(&cache),
-            compile_field(&history, StepIndex::new(3))
-        );
-
-        let slice = make_slice(3);
-        cache.insert_slice(&slice);
-        history.push_back(slice);
-        assert_eq!(
-            compile_field_from_cache(&cache),
-            compile_field(&history, StepIndex::new(3))
-        );
-
-        cache.advance_to(StepIndex::new(5));
-        assert_eq!(
-            compile_field_from_cache(&cache),
-            compile_field(&history, StepIndex::new(5))
-        );
-
-        let removed = history
-            .pop_front()
-            .expect("history should contain oldest slice");
-        cache.remove_slice(&removed);
-        assert_eq!(
-            compile_field_from_cache(&cache),
-            compile_field(&history, StepIndex::new(5))
-        );
+        assert!(compile_field_reference(&cache).is_empty());
     }
 }

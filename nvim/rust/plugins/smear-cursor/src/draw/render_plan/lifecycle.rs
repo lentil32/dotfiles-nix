@@ -86,53 +86,6 @@ pub(crate) fn render_frame_to_plan_with_signature(
     decode_compiled_frame(frame, compiled, viewport, maybe_signature)
 }
 
-/// Compiles one render frame into the cached planner representation.
-pub(crate) fn compile_render_frame(
-    frame: &RenderFrame,
-    state: PlannerState,
-) -> CompiledPlannerFrame {
-    let mut next_state = state;
-    stage_deposited_samples(&mut next_state, frame);
-    let compiled = compiled_field_for_state(&mut next_state);
-
-    CompiledPlannerFrame {
-        next_state,
-        compiled,
-    }
-}
-
-fn compiled_field_for_state(
-    state: &mut PlannerState,
-) -> std::sync::Arc<std::collections::BTreeMap<(i64, i64), CompiledCell>> {
-    if state.latent_cache.latest_step() != state.step_index {
-        debug_assert!(
-            state.latent_cache.latest_step().value() <= state.step_index.value(),
-            "latent cache should only advance forward with planner state"
-        );
-        state.latent_cache.advance_to(state.step_index);
-    }
-
-    let cache = &state.compiled_cache;
-    let cache_is_current = cache.latest_step == Some(state.step_index)
-        && cache.latent_revision == state.latent_cache.revision();
-    if cache_is_current {
-        return std::sync::Arc::clone(&cache.field);
-    }
-
-    let compiled = std::sync::Arc::new(latent_field::compile_field_from_cache_with_scratch(
-        &state.latent_cache,
-        &mut state.compiled_cache.scratch,
-    ));
-    let scratch = std::mem::take(&mut state.compiled_cache.scratch);
-    state.compiled_cache = CompiledFieldCache {
-        latest_step: Some(state.step_index),
-        latent_revision: state.latent_cache.revision(),
-        field: std::sync::Arc::clone(&compiled),
-        scratch,
-    };
-    compiled
-}
-
 pub(crate) fn decode_compiled_frame(
     frame: &RenderFrame,
     compiled_frame: CompiledPlannerFrame,
@@ -142,22 +95,29 @@ pub(crate) fn decode_compiled_frame(
     let CompiledPlannerFrame {
         mut next_state,
         compiled,
+        query_bounds,
     } = compiled_frame;
     let temporal_weight = sanitize_temporal_weight(frame);
-    populate_cell_candidates_with_scratch(
-        &compiled,
-        &next_state.previous_cells,
-        frame.color_levels,
-        temporal_weight,
-        sanitize_top_k(frame),
-        &mut next_state.decode_scratch,
-    );
-    populate_resampled_centerline_with_scratch(
-        &next_state.center_history,
-        RIBBON_SAMPLE_SPACING_CELLS,
-        frame.block_aspect_ratio,
-        &mut next_state.decode_scratch,
-    );
+    if let Some(bounds) = query_bounds {
+        populate_cell_candidates_in_bounds_with_scratch(
+            &compiled,
+            &next_state.previous_cells,
+            frame.color_levels,
+            temporal_weight,
+            sanitize_top_k(frame),
+            bounds,
+            &mut next_state.decode_scratch,
+        );
+    } else {
+        populate_cell_candidates_with_scratch(
+            &compiled,
+            &next_state.previous_cells,
+            frame.color_levels,
+            temporal_weight,
+            sanitize_top_k(frame),
+            &mut next_state.decode_scratch,
+        );
+    }
     let decoded = {
         let PlannerDecodeScratch {
             cell_candidates,

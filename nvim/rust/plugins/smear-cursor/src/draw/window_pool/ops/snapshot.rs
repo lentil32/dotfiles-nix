@@ -5,6 +5,10 @@ pub(crate) struct TabPoolSnapshot {
     pub(crate) in_use_windows: usize,
     pub(crate) cached_budget: usize,
     pub(crate) last_frame_demand: usize,
+    pub(crate) peak_total_windows: usize,
+    pub(crate) peak_frame_demand: usize,
+    pub(crate) peak_requested_capacity: usize,
+    pub(crate) capacity_cap_hits: usize,
 }
 
 pub(crate) fn tab_pool_snapshot_from_tab(tab_windows: &TabWindows) -> TabPoolSnapshot {
@@ -14,6 +18,10 @@ pub(crate) fn tab_pool_snapshot_from_tab(tab_windows: &TabWindows) -> TabPoolSna
         in_use_windows: tab_windows.in_use_window_count(),
         cached_budget: tab_windows.cached_budget,
         last_frame_demand: tab_windows.last_frame_demand,
+        peak_total_windows: tab_windows.peak_total_windows,
+        peak_frame_demand: tab_windows.peak_frame_demand,
+        peak_requested_capacity: tab_windows.peak_requested_capacity,
+        capacity_cap_hits: tab_windows.capacity_cap_hits,
     }
 }
 
@@ -92,10 +100,11 @@ mod snapshot_tests {
         assert_eq!(snapshot.total_windows, 3);
         assert_eq!(snapshot.available_windows, 2);
         assert_eq!(snapshot.in_use_windows, 1);
+        assert_eq!(snapshot.peak_total_windows, 3);
     }
 
     #[test]
-    fn tab_pool_snapshot_reads_maintained_counters() {
+    fn tab_pool_snapshot_reads_maintained_counters_and_peak_telemetry() {
         let placement = Some(WindowPlacement {
             row: 2,
             col: 4,
@@ -113,6 +122,11 @@ mod snapshot_tests {
                 },
                 placement,
             }],
+            last_frame_demand: 13,
+            peak_frame_demand: 21,
+            peak_requested_capacity: 34,
+            peak_total_windows: 55,
+            capacity_cap_hits: 2,
             ..TabWindows::default()
         };
         tab_windows.seed_tracking_from_windows_for_test();
@@ -123,5 +137,10 @@ mod snapshot_tests {
         assert_eq!(snapshot.total_windows, 1);
         assert_eq!(snapshot.available_windows, 0);
         assert_eq!(snapshot.in_use_windows, 1);
+        assert_eq!(snapshot.last_frame_demand, 13);
+        assert_eq!(snapshot.peak_frame_demand, 21);
+        assert_eq!(snapshot.peak_requested_capacity, 34);
+        assert_eq!(snapshot.peak_total_windows, 55);
+        assert_eq!(snapshot.capacity_cap_hits, 2);
     }
 }

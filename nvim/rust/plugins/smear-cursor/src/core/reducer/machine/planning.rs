@@ -176,6 +176,29 @@ fn frame_requires_background_probe(
     geometry.requires_background_probe(policy)
 }
 
+fn suppress_particles_for_perf_class(
+    runtime: &mut crate::state::RuntimeState,
+    render_decision: &mut RenderDecision,
+    buffer_perf_class: crate::core::state::BufferPerfClass,
+) {
+    if buffer_perf_class.keeps_ornamental_effects() {
+        return;
+    }
+
+    let _ = runtime.take_particles();
+
+    let RenderAction::Draw(frame) = &mut render_decision.render_action else {
+        return;
+    };
+    if frame.particles.is_empty() {
+        return;
+    }
+
+    // Particle visuals are explicitly first on the degradation path so adaptive policies
+    // can preserve core smear geometry before sacrificing ornamental work.
+    frame.particles = Vec::new().into();
+}
+
 struct PreparedProjection<'a> {
     witness: ProjectionWitness,
     viewport: Viewport,
@@ -529,7 +552,12 @@ pub(super) fn plan_runtime_transition(
         scroll_shift: observation.scroll_shift(),
         semantic_event,
     };
-    let transition = reduce_cursor_event(&mut runtime, mode, &event, source);
+    let mut transition = reduce_cursor_event(&mut runtime, mode, &event, source);
+    suppress_particles_for_perf_class(
+        &mut runtime,
+        &mut transition.render_decision,
+        observation.request().demand().buffer_perf_class(),
+    );
     (runtime, transition)
 }
 
@@ -660,6 +688,7 @@ mod tests {
     use crate::core::state::BackgroundProbeChunkMask;
     use crate::core::state::BackgroundProbePlan;
     use crate::core::state::BackgroundProbeUpdate;
+    use crate::core::state::BufferPerfClass;
     use crate::core::state::CoreState;
     use crate::core::state::CursorTrailGeometry;
     use crate::core::state::CursorTrailProjectionPolicy;
@@ -794,6 +823,7 @@ mod tests {
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(seq),
                 None,
+                BufferPerfClass::Full,
             ),
             ProbeRequestSet::default(),
         );
@@ -821,6 +851,7 @@ mod tests {
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(seq),
                 None,
+                BufferPerfClass::Full,
             ),
             ProbeRequestSet::new(false, true),
         );
@@ -1255,6 +1286,54 @@ mod tests {
             ),
             RealizationPlan::Noop
         );
+    }
+
+    #[test]
+    fn suppress_particles_for_perf_class_clears_runtime_and_draw_frame() {
+        let mut runtime = crate::state::RuntimeState::default();
+        runtime.apply_step_output(crate::types::StepOutput {
+            current_corners: [Point::ZERO; 4],
+            velocity_corners: [Point::ZERO; 4],
+            spring_velocity_corners: [Point::ZERO; 4],
+            trail_elapsed_ms: [0.0; 4],
+            previous_center: Point::ZERO,
+            particles: vec![Particle {
+                position: Point { row: 7.5, col: 8.5 },
+                velocity: Point::ZERO,
+                lifetime: 1.0,
+            }],
+            index_head: 0,
+            index_tail: 0,
+            rng_state: 7,
+        });
+        let mut render_decision = RenderDecision {
+            render_action: RenderAction::Draw(Box::new(base_frame())),
+            render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+            render_allocation_policy:
+                crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
+            render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
+        };
+        let RenderAction::Draw(frame) = &mut render_decision.render_action else {
+            unreachable!("test constructs a draw action");
+        };
+        frame.particles = vec![Particle {
+            position: Point { row: 7.5, col: 8.5 },
+            velocity: Point::ZERO,
+            lifetime: 1.0,
+        }]
+        .into();
+
+        super::suppress_particles_for_perf_class(
+            &mut runtime,
+            &mut render_decision,
+            BufferPerfClass::FastMotion,
+        );
+
+        assert!(runtime.particles().is_empty());
+        let RenderAction::Draw(frame) = &render_decision.render_action else {
+            panic!("expected draw frame after suppression");
+        };
+        assert!(frame.particles.is_empty());
     }
 
     #[test]

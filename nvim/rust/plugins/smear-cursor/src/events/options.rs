@@ -1,3 +1,4 @@
+use crate::config::BufferPerfMode;
 use crate::lua::ParsedOptionalChange;
 use crate::lua::bool_from_object;
 use crate::lua::f64_from_object;
@@ -42,6 +43,7 @@ enum OptionKey {
     HideTargetHack,
     MaxKeptWindows,
     WindowsZindex,
+    BufferPerfMode,
     FiletypesDisabled,
     LoggingLevel,
     CursorColor,
@@ -118,6 +120,7 @@ impl OptionKey {
             Self::HideTargetHack => "hide_target_hack",
             Self::MaxKeptWindows => "max_kept_windows",
             Self::WindowsZindex => "windows_zindex",
+            Self::BufferPerfMode => "buffer_perf_mode",
             Self::FiletypesDisabled => "filetypes_disabled",
             Self::LoggingLevel => "logging_level",
             Self::CursorColor => "cursor_color",
@@ -421,6 +424,21 @@ fn parse_optional_string(raw: Option<Object>, key: &'static str) -> Result<Optio
     parse_optional_with(raw, key, string_from_object)
 }
 
+fn parse_optional_buffer_perf_mode(
+    raw: Option<Object>,
+    key: &'static str,
+) -> Result<Option<BufferPerfMode>> {
+    parse_optional_with(raw, key, string_from_object)?
+        .map(|mode| match mode.as_str() {
+            "auto" => Ok(BufferPerfMode::Auto),
+            "full" => Ok(BufferPerfMode::Full),
+            "fast" => Ok(BufferPerfMode::Fast),
+            "off" => Ok(BufferPerfMode::Off),
+            _ => Err(invalid_key(key, "one of: auto, full, fast, off")),
+        })
+        .transpose()
+}
+
 fn parse_optional_change_string(
     raw: Option<Object>,
     key: &'static str,
@@ -590,6 +608,13 @@ define_option_spec!(
     WindowsZindex,
     parse_optional_non_negative_u32_value,
     runtime.windows_zindex
+);
+define_option_spec!(
+    spec_buffer_perf_mode_apply,
+    SPEC_BUFFER_PERF_MODE,
+    BufferPerfMode,
+    parse_optional_buffer_perf_mode,
+    runtime.buffer_perf_mode
 );
 define_option_spec!(
     spec_filetypes_disabled_apply,
@@ -982,6 +1007,7 @@ const OPTION_SPECS: &[OptionSpec] = &[
     SPEC_HIDE_TARGET_HACK,
     SPEC_MAX_KEPT_WINDOWS,
     SPEC_WINDOWS_ZINDEX,
+    SPEC_BUFFER_PERF_MODE,
     SPEC_FILETYPES_DISABLED,
     SPEC_LOGGING_LEVEL,
     SPEC_CURSOR_COLOR,

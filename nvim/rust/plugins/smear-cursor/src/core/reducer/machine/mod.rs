@@ -18,6 +18,8 @@ use crate::core::event::InitializeEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
 #[cfg(test)]
 use crate::core::event::TimerFiredWithTokenEvent;
+#[cfg(test)]
+use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
 #[cfg(test)]
 use crate::core::state::ExternalDemand;
@@ -87,6 +89,7 @@ fn phase0_smoke_fingerprint() -> u64 {
         crate::core::state::ExternalDemandKind::ExternalCursor,
         Millis::new(2),
         None,
+        BufferPerfClass::Full,
     );
     let request = ObservationRequest::new(demand, ProbeRequestSet::default());
 
@@ -98,6 +101,7 @@ fn phase0_smoke_fingerprint() -> u64 {
             kind: crate::core::state::ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(2),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
         Event::ObservationBaseCollected(ObservationBaseCollectedEvent {

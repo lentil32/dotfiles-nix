@@ -1,5 +1,6 @@
 use crate::core::effect::TimerKind;
 use crate::core::state::ProbeKind;
+use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
 use std::cell::RefCell;
@@ -140,6 +141,181 @@ impl ThermalCountTelemetry {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct HitMissTelemetry {
+    pub(super) hits: u64,
+    pub(super) misses: u64,
+}
+
+impl HitMissTelemetry {
+    const fn new() -> Self {
+        Self { hits: 0, misses: 0 }
+    }
+
+    fn record_hit(&mut self) {
+        self.hits = self.hits.saturating_add(1);
+    }
+
+    fn record_miss(&mut self) {
+        self.misses = self.misses.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ProbeReuseTelemetry {
+    pub(super) exact: u64,
+    pub(super) compatible: u64,
+    pub(super) refresh_required: u64,
+}
+
+impl ProbeReuseTelemetry {
+    const fn new() -> Self {
+        Self {
+            exact: 0,
+            compatible: 0,
+            refresh_required: 0,
+        }
+    }
+
+    fn record(&mut self, reuse: ProbeReuse) {
+        match reuse {
+            ProbeReuse::Exact => {
+                self.exact = self.exact.saturating_add(1);
+            }
+            ProbeReuse::Compatible => {
+                self.compatible = self.compatible.saturating_add(1);
+            }
+            ProbeReuse::RefreshRequired => {
+                self.refresh_required = self.refresh_required.saturating_add(1);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ConcealProbeTelemetry {
+    pub(super) region_cache: HitMissTelemetry,
+    pub(super) screen_cell_cache: HitMissTelemetry,
+    pub(super) full_scan_calls: u64,
+    pub(super) raw_screenpos_fallback_calls: u64,
+}
+
+impl ConcealProbeTelemetry {
+    const fn new() -> Self {
+        Self {
+            region_cache: HitMissTelemetry::new(),
+            screen_cell_cache: HitMissTelemetry::new(),
+            full_scan_calls: 0,
+            raw_screenpos_fallback_calls: 0,
+        }
+    }
+
+    fn record_region_cache_hit(&mut self) {
+        self.region_cache.record_hit();
+    }
+
+    fn record_region_cache_miss(&mut self) {
+        self.region_cache.record_miss();
+    }
+
+    fn record_screen_cell_cache_hit(&mut self) {
+        self.screen_cell_cache.record_hit();
+    }
+
+    fn record_screen_cell_cache_miss(&mut self) {
+        self.screen_cell_cache.record_miss();
+    }
+
+    fn record_full_scan(&mut self) {
+        self.full_scan_calls = self.full_scan_calls.saturating_add(1);
+    }
+
+    fn record_raw_screenpos_fallback(&mut self) {
+        self.raw_screenpos_fallback_calls = self.raw_screenpos_fallback_calls.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct PlannerTelemetry {
+    pub(super) bucket_maps_scanned: u64,
+    pub(super) bucket_cells_scanned: u64,
+    pub(super) local_query_envelope_area_cells: u64,
+    pub(super) local_query_cells: u64,
+    pub(super) compiled_query_cells: u64,
+    pub(super) candidate_query_cells: u64,
+    pub(super) compiled_cells_emitted: u64,
+    pub(super) candidate_cells_built: u64,
+    pub(super) reference_compiles: u64,
+    pub(super) local_query_compiles: u64,
+}
+
+impl PlannerTelemetry {
+    const fn new() -> Self {
+        Self {
+            bucket_maps_scanned: 0,
+            bucket_cells_scanned: 0,
+            local_query_envelope_area_cells: 0,
+            local_query_cells: 0,
+            compiled_query_cells: 0,
+            candidate_query_cells: 0,
+            compiled_cells_emitted: 0,
+            candidate_cells_built: 0,
+            reference_compiles: 0,
+            local_query_compiles: 0,
+        }
+    }
+
+    fn record_local_query(
+        &mut self,
+        bucket_maps_scanned: usize,
+        bucket_cells_scanned: usize,
+        local_query_cells: usize,
+    ) {
+        let bucket_maps_scanned = u64::try_from(bucket_maps_scanned).unwrap_or(u64::MAX);
+        let bucket_cells_scanned = u64::try_from(bucket_cells_scanned).unwrap_or(u64::MAX);
+        let local_query_cells = u64::try_from(local_query_cells).unwrap_or(u64::MAX);
+        self.bucket_maps_scanned = self.bucket_maps_scanned.saturating_add(bucket_maps_scanned);
+        self.bucket_cells_scanned = self
+            .bucket_cells_scanned
+            .saturating_add(bucket_cells_scanned);
+        self.local_query_cells = self.local_query_cells.saturating_add(local_query_cells);
+    }
+
+    fn record_local_query_envelope_area_cells(&mut self, area_cells: u64) {
+        self.local_query_envelope_area_cells = self
+            .local_query_envelope_area_cells
+            .saturating_add(area_cells);
+    }
+
+    fn record_compiled_query_cells_count(&mut self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.compiled_query_cells = self.compiled_query_cells.saturating_add(count);
+    }
+
+    fn record_candidate_query_cells_count(&mut self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.candidate_query_cells = self.candidate_query_cells.saturating_add(count);
+    }
+
+    fn record_compiled_cells_emitted_count(&mut self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.compiled_cells_emitted = self.compiled_cells_emitted.saturating_add(count);
+    }
+
+    fn record_candidate_cells_built_count(&mut self, count: usize) {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.candidate_cells_built = self.candidate_cells_built.saturating_add(count);
+    }
+
+    fn record_reference_compile(&mut self) {
+        self.reference_compiles = self.reference_compiles.saturating_add(1);
+    }
+
+    fn record_local_query_compile(&mut self) {
+        self.local_query_compiles = self.local_query_compiles.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct MillisDurationTelemetry {
     pub(super) samples: u64,
     pub(super) total_ms: u64,
@@ -186,8 +362,12 @@ pub(super) struct RuntimeBehaviorMetrics {
     pub(super) scheduled_drain_items_by_thermal: ThermalDepthTelemetry,
     pub(super) scheduled_drain_reschedules_by_thermal: ThermalCountTelemetry,
     pub(super) post_burst_convergence: MillisDurationTelemetry,
+    pub(super) cursor_color_cache: HitMissTelemetry,
+    pub(super) cursor_color_reuse: ProbeReuseTelemetry,
     pub(super) cursor_color_probe: ProbeTelemetry,
     pub(super) background_probe: ProbeTelemetry,
+    pub(super) conceal_probe: ConcealProbeTelemetry,
+    pub(super) planner: PlannerTelemetry,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -195,6 +375,7 @@ pub(super) struct ProbeTelemetry {
     pub(super) duration: DurationTelemetry,
     pub(super) refresh_retries: u64,
     pub(super) refresh_budget_exhausted: u64,
+    pub(super) extmark_fallback_calls: u64,
 }
 
 impl ProbeTelemetry {
@@ -207,6 +388,7 @@ impl ProbeTelemetry {
             },
             refresh_retries: 0,
             refresh_budget_exhausted: 0,
+            extmark_fallback_calls: 0,
         }
     }
 }
@@ -249,8 +431,12 @@ impl RuntimeBehaviorMetrics {
             scheduled_drain_items_by_thermal: ThermalDepthTelemetry::new(),
             scheduled_drain_reschedules_by_thermal: ThermalCountTelemetry::new(),
             post_burst_convergence: MillisDurationTelemetry::new(),
+            cursor_color_cache: HitMissTelemetry::new(),
+            cursor_color_reuse: ProbeReuseTelemetry::new(),
             cursor_color_probe: ProbeTelemetry::new(),
             background_probe: ProbeTelemetry::new(),
+            conceal_probe: ConcealProbeTelemetry::new(),
+            planner: PlannerTelemetry::new(),
         }
     }
 
@@ -389,6 +575,89 @@ impl RuntimeBehaviorMetrics {
         let telemetry = self.probe_telemetry_mut(kind);
         telemetry.refresh_budget_exhausted =
             telemetry.refresh_budget_exhausted.saturating_add(count);
+    }
+
+    fn record_probe_extmark_fallback(&mut self, kind: ProbeKind) {
+        let telemetry = self.probe_telemetry_mut(kind);
+        telemetry.extmark_fallback_calls = telemetry.extmark_fallback_calls.saturating_add(1);
+    }
+
+    fn record_cursor_color_cache_hit(&mut self) {
+        self.cursor_color_cache.record_hit();
+    }
+
+    fn record_cursor_color_cache_miss(&mut self) {
+        self.cursor_color_cache.record_miss();
+    }
+
+    fn record_cursor_color_reuse(&mut self, reuse: ProbeReuse) {
+        self.cursor_color_reuse.record(reuse);
+    }
+
+    fn record_conceal_region_cache_hit(&mut self) {
+        self.conceal_probe.record_region_cache_hit();
+    }
+
+    fn record_conceal_region_cache_miss(&mut self) {
+        self.conceal_probe.record_region_cache_miss();
+    }
+
+    fn record_conceal_screen_cell_cache_hit(&mut self) {
+        self.conceal_probe.record_screen_cell_cache_hit();
+    }
+
+    fn record_conceal_screen_cell_cache_miss(&mut self) {
+        self.conceal_probe.record_screen_cell_cache_miss();
+    }
+
+    fn record_conceal_full_scan(&mut self) {
+        self.conceal_probe.record_full_scan();
+    }
+
+    fn record_conceal_raw_screenpos_fallback(&mut self) {
+        self.conceal_probe.record_raw_screenpos_fallback();
+    }
+
+    fn record_planner_local_query(
+        &mut self,
+        bucket_maps_scanned: usize,
+        bucket_cells_scanned: usize,
+        local_query_cells: usize,
+    ) {
+        self.planner.record_local_query(
+            bucket_maps_scanned,
+            bucket_cells_scanned,
+            local_query_cells,
+        );
+    }
+
+    fn record_planner_local_query_envelope_area_cells(&mut self, area_cells: u64) {
+        self.planner
+            .record_local_query_envelope_area_cells(area_cells);
+    }
+
+    fn record_planner_compiled_query_cells_count(&mut self, count: usize) {
+        self.planner.record_compiled_query_cells_count(count);
+    }
+
+    fn record_planner_candidate_query_cells_count(&mut self, count: usize) {
+        self.planner.record_candidate_query_cells_count(count);
+    }
+
+    fn record_planner_compiled_cells_emitted_count(&mut self, count: usize) {
+        self.planner.record_compiled_cells_emitted_count(count);
+    }
+
+    fn record_planner_candidate_cells_built_count(&mut self, count: usize) {
+        self.planner.record_candidate_cells_built_count(count);
+    }
+
+    fn record_planner_reference_compile(&mut self) {
+        self.planner.record_reference_compile();
+    }
+
+    fn record_planner_local_query_compile(&mut self) {
+        self.planner.record_local_query_compile();
     }
 }
 
@@ -602,6 +871,92 @@ impl EventLoopState {
             .record_probe_refresh_budget_exhausted_count(kind, count);
     }
 
+    pub(super) fn record_probe_extmark_fallback(&mut self, kind: ProbeKind) {
+        self.runtime_metrics.record_probe_extmark_fallback(kind);
+    }
+
+    pub(super) fn record_cursor_color_cache_hit(&mut self) {
+        self.runtime_metrics.record_cursor_color_cache_hit();
+    }
+
+    pub(super) fn record_cursor_color_cache_miss(&mut self) {
+        self.runtime_metrics.record_cursor_color_cache_miss();
+    }
+
+    pub(super) fn record_cursor_color_reuse(&mut self, reuse: ProbeReuse) {
+        self.runtime_metrics.record_cursor_color_reuse(reuse);
+    }
+
+    pub(super) fn record_conceal_region_cache_hit(&mut self) {
+        self.runtime_metrics.record_conceal_region_cache_hit();
+    }
+
+    pub(super) fn record_conceal_region_cache_miss(&mut self) {
+        self.runtime_metrics.record_conceal_region_cache_miss();
+    }
+
+    pub(super) fn record_conceal_screen_cell_cache_hit(&mut self) {
+        self.runtime_metrics.record_conceal_screen_cell_cache_hit();
+    }
+
+    pub(super) fn record_conceal_screen_cell_cache_miss(&mut self) {
+        self.runtime_metrics.record_conceal_screen_cell_cache_miss();
+    }
+
+    pub(super) fn record_conceal_full_scan(&mut self) {
+        self.runtime_metrics.record_conceal_full_scan();
+    }
+
+    pub(super) fn record_conceal_raw_screenpos_fallback(&mut self) {
+        self.runtime_metrics.record_conceal_raw_screenpos_fallback();
+    }
+
+    pub(super) fn record_planner_local_query(
+        &mut self,
+        bucket_maps_scanned: usize,
+        bucket_cells_scanned: usize,
+        local_query_cells: usize,
+    ) {
+        self.runtime_metrics.record_planner_local_query(
+            bucket_maps_scanned,
+            bucket_cells_scanned,
+            local_query_cells,
+        );
+    }
+
+    pub(super) fn record_planner_local_query_envelope_area_cells(&mut self, area_cells: u64) {
+        self.runtime_metrics
+            .record_planner_local_query_envelope_area_cells(area_cells);
+    }
+
+    pub(super) fn record_planner_compiled_query_cells_count(&mut self, count: usize) {
+        self.runtime_metrics
+            .record_planner_compiled_query_cells_count(count);
+    }
+
+    pub(super) fn record_planner_candidate_query_cells_count(&mut self, count: usize) {
+        self.runtime_metrics
+            .record_planner_candidate_query_cells_count(count);
+    }
+
+    pub(super) fn record_planner_compiled_cells_emitted_count(&mut self, count: usize) {
+        self.runtime_metrics
+            .record_planner_compiled_cells_emitted_count(count);
+    }
+
+    pub(super) fn record_planner_candidate_cells_built_count(&mut self, count: usize) {
+        self.runtime_metrics
+            .record_planner_candidate_cells_built_count(count);
+    }
+
+    pub(super) fn record_planner_reference_compile(&mut self) {
+        self.runtime_metrics.record_planner_reference_compile();
+    }
+
+    pub(super) fn record_planner_local_query_compile(&mut self) {
+        self.runtime_metrics.record_planner_local_query_compile();
+    }
+
     pub(super) fn runtime_metrics(&self) -> RuntimeBehaviorMetrics {
         self.runtime_metrics
     }
@@ -806,14 +1161,132 @@ pub(super) fn diagnostics_snapshot() -> EventLoopDiagnostics {
         .unwrap_or_else(|| EventLoopState::new().diagnostics_snapshot())
 }
 
+pub(super) fn record_probe_extmark_fallback(kind: ProbeKind) {
+    with_event_loop_state(|state| state.record_probe_extmark_fallback(kind));
+}
+
+pub(super) fn record_cursor_color_cache_hit() {
+    with_event_loop_state(EventLoopState::record_cursor_color_cache_hit);
+}
+
+pub(super) fn record_cursor_color_cache_miss() {
+    with_event_loop_state(EventLoopState::record_cursor_color_cache_miss);
+}
+
+pub(super) fn record_cursor_color_reuse(reuse: ProbeReuse) {
+    with_event_loop_state(|state| state.record_cursor_color_reuse(reuse));
+}
+
+pub(super) fn record_conceal_region_cache_hit() {
+    with_event_loop_state(EventLoopState::record_conceal_region_cache_hit);
+}
+
+pub(super) fn record_conceal_region_cache_miss() {
+    with_event_loop_state(EventLoopState::record_conceal_region_cache_miss);
+}
+
+pub(super) fn record_conceal_screen_cell_cache_hit() {
+    with_event_loop_state(EventLoopState::record_conceal_screen_cell_cache_hit);
+}
+
+pub(super) fn record_conceal_screen_cell_cache_miss() {
+    with_event_loop_state(EventLoopState::record_conceal_screen_cell_cache_miss);
+}
+
+pub(super) fn record_conceal_full_scan() {
+    with_event_loop_state(EventLoopState::record_conceal_full_scan);
+}
+
+pub(super) fn record_conceal_raw_screenpos_fallback() {
+    with_event_loop_state(EventLoopState::record_conceal_raw_screenpos_fallback);
+}
+
+pub(super) fn record_planner_local_query(
+    bucket_maps_scanned: usize,
+    bucket_cells_scanned: usize,
+    local_query_cells: usize,
+) {
+    if bucket_maps_scanned == 0 && bucket_cells_scanned == 0 && local_query_cells == 0 {
+        return;
+    }
+    with_event_loop_state(|state| {
+        state.record_planner_local_query(
+            bucket_maps_scanned,
+            bucket_cells_scanned,
+            local_query_cells,
+        )
+    });
+}
+
+pub(super) fn record_planner_local_query_envelope_area_cells(area_cells: u64) {
+    if area_cells == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_planner_local_query_envelope_area_cells(area_cells));
+}
+
+pub(super) fn record_planner_compiled_query_cells_count(count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_planner_compiled_query_cells_count(count));
+}
+
+pub(super) fn record_planner_candidate_query_cells_count(count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_planner_candidate_query_cells_count(count));
+}
+
+pub(super) fn record_planner_compiled_cells_emitted_count(count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_planner_compiled_cells_emitted_count(count));
+}
+
+pub(super) fn record_planner_reference_compile() {
+    with_event_loop_state(EventLoopState::record_planner_reference_compile);
+}
+
+pub(super) fn record_planner_local_query_compile() {
+    with_event_loop_state(EventLoopState::record_planner_local_query_compile);
+}
+
+pub(super) fn record_planner_candidate_cells_built_count(count: usize) {
+    if count == 0 {
+        return;
+    }
+    with_event_loop_state(|state| state.record_planner_candidate_cells_built_count(count));
+}
+
 #[cfg(test)]
 mod tests {
     use super::EventLoopState;
     use super::diagnostics_snapshot;
+    use super::record_conceal_full_scan;
+    use super::record_conceal_raw_screenpos_fallback;
+    use super::record_conceal_region_cache_hit;
+    use super::record_conceal_region_cache_miss;
+    use super::record_conceal_screen_cell_cache_hit;
+    use super::record_conceal_screen_cell_cache_miss;
+    use super::record_cursor_color_cache_hit;
+    use super::record_cursor_color_cache_miss;
+    use super::record_cursor_color_reuse;
     use super::record_delayed_ingress_pending_update;
     use super::record_host_timer_rearm;
+    use super::record_planner_candidate_cells_built_count;
+    use super::record_planner_candidate_query_cells_count;
+    use super::record_planner_compiled_cells_emitted_count;
+    use super::record_planner_compiled_query_cells_count;
+    use super::record_planner_local_query;
+    use super::record_planner_local_query_compile;
+    use super::record_planner_local_query_envelope_area_cells;
+    use super::record_planner_reference_compile;
     use super::record_post_burst_convergence;
     use super::record_probe_duration;
+    use super::record_probe_extmark_fallback;
     use super::record_probe_refresh_budget_exhausted;
     use super::record_probe_refresh_retried;
     use super::record_scheduled_drain_items;
@@ -827,6 +1300,7 @@ mod tests {
     use super::with_event_loop_state_for_test;
     use crate::core::effect::TimerKind;
     use crate::core::state::ProbeKind;
+    use crate::core::state::ProbeReuse;
     use crate::core::state::RenderThermalState;
     use crate::core::types::Millis;
 
@@ -841,8 +1315,20 @@ mod tests {
         record_probe_duration(ProbeKind::CursorColor, 2_500);
         record_probe_refresh_retried(ProbeKind::CursorColor);
         record_probe_refresh_budget_exhausted(ProbeKind::CursorColor);
+        record_probe_extmark_fallback(ProbeKind::CursorColor);
+        record_cursor_color_cache_hit();
+        record_cursor_color_cache_miss();
+        record_cursor_color_reuse(ProbeReuse::Exact);
+        record_cursor_color_reuse(ProbeReuse::Compatible);
+        record_cursor_color_reuse(ProbeReuse::RefreshRequired);
         record_probe_duration(ProbeKind::Background, 5_000);
         record_probe_refresh_retried(ProbeKind::Background);
+        record_conceal_region_cache_hit();
+        record_conceal_region_cache_miss();
+        record_conceal_screen_cell_cache_hit();
+        record_conceal_screen_cell_cache_miss();
+        record_conceal_full_scan();
+        record_conceal_raw_screenpos_fallback();
 
         let diagnostics = diagnostics_snapshot();
 
@@ -859,6 +1345,18 @@ mod tests {
                 .refresh_budget_exhausted,
             1
         );
+        assert_eq!(
+            diagnostics
+                .metrics
+                .cursor_color_probe
+                .extmark_fallback_calls,
+            1
+        );
+        assert_eq!(diagnostics.metrics.cursor_color_cache.hits, 1);
+        assert_eq!(diagnostics.metrics.cursor_color_cache.misses, 1);
+        assert_eq!(diagnostics.metrics.cursor_color_reuse.exact, 1);
+        assert_eq!(diagnostics.metrics.cursor_color_reuse.compatible, 1);
+        assert_eq!(diagnostics.metrics.cursor_color_reuse.refresh_required, 1);
         assert_eq!(diagnostics.metrics.background_probe.duration.samples, 1);
         assert_eq!(
             diagnostics.metrics.background_probe.duration.max_micros,
@@ -871,6 +1369,25 @@ mod tests {
                 .background_probe
                 .refresh_budget_exhausted,
             0
+        );
+        assert_eq!(
+            diagnostics.metrics.background_probe.extmark_fallback_calls,
+            0
+        );
+        assert_eq!(diagnostics.metrics.conceal_probe.region_cache.hits, 1);
+        assert_eq!(diagnostics.metrics.conceal_probe.region_cache.misses, 1);
+        assert_eq!(diagnostics.metrics.conceal_probe.screen_cell_cache.hits, 1);
+        assert_eq!(
+            diagnostics.metrics.conceal_probe.screen_cell_cache.misses,
+            1
+        );
+        assert_eq!(diagnostics.metrics.conceal_probe.full_scan_calls, 1);
+        assert_eq!(
+            diagnostics
+                .metrics
+                .conceal_probe
+                .raw_screenpos_fallback_calls,
+            1
         );
     }
 
@@ -989,6 +1506,37 @@ mod tests {
                 .total_depth,
             1
         );
+    }
+
+    #[test]
+    fn planner_telemetry_tracks_local_queries_and_materialized_cells() {
+        reset_event_loop_state();
+
+        record_planner_local_query(3, 19, 7);
+        record_planner_local_query(2, 11, 5);
+        record_planner_local_query_envelope_area_cells(41);
+        record_planner_compiled_query_cells_count(9);
+        record_planner_candidate_query_cells_count(5);
+        record_planner_reference_compile();
+        record_planner_local_query_compile();
+        record_planner_compiled_cells_emitted_count(13);
+        record_planner_candidate_cells_built_count(17);
+
+        let diagnostics = diagnostics_snapshot();
+
+        assert_eq!(diagnostics.metrics.planner.bucket_maps_scanned, 5);
+        assert_eq!(diagnostics.metrics.planner.bucket_cells_scanned, 30);
+        assert_eq!(
+            diagnostics.metrics.planner.local_query_envelope_area_cells,
+            41
+        );
+        assert_eq!(diagnostics.metrics.planner.local_query_cells, 12);
+        assert_eq!(diagnostics.metrics.planner.compiled_query_cells, 9);
+        assert_eq!(diagnostics.metrics.planner.candidate_query_cells, 5);
+        assert_eq!(diagnostics.metrics.planner.compiled_cells_emitted, 13);
+        assert_eq!(diagnostics.metrics.planner.candidate_cells_built, 17);
+        assert_eq!(diagnostics.metrics.planner.reference_compiles, 1);
+        assert_eq!(diagnostics.metrics.planner.local_query_compiles, 1);
     }
 
     #[test]

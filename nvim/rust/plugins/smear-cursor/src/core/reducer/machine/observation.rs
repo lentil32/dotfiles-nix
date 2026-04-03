@@ -25,6 +25,7 @@ use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::BackgroundProbePlan;
 use crate::core::state::BackgroundProbeUpdate;
 use crate::core::state::CoreState;
+use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemand;
 use crate::core::state::ObservationRequest;
 use crate::core::state::ObservationSnapshot;
@@ -46,7 +47,9 @@ pub(super) fn start_next_observation(
 
     let cleared_ingress_policy = next_state.ingress_policy().clear_pending_delay();
     let next_state = next_state.with_ingress_policy(cleared_ingress_policy);
-    let request = ObservationRequest::new(demand, probe_requests_for(&next_state));
+    let buffer_perf_class = demand.buffer_perf_class();
+    let request =
+        ObservationRequest::new(demand, probe_requests_for(&next_state, buffer_perf_class));
     let next_state = next_state.into_observing(request.clone());
     let effect = request_observation_base(&next_state, request);
     (next_state, Some(effect))
@@ -182,6 +185,7 @@ pub(super) fn reduce_external_demand_queued(
         kind,
         observed_at,
         requested_target,
+        buffer_perf_class,
         ingress_cursor_presentation,
     } = payload;
     let state_with_policy = if ingress_marks_cursor_autocmd_freshness(kind) {
@@ -194,7 +198,7 @@ pub(super) fn reduce_external_demand_queued(
     let ingress_effect =
         ingress_cursor_presentation_effect(&state_with_policy, ingress_cursor_presentation);
     let (state_with_seq, seq) = state_with_policy.allocate_ingress_seq();
-    let demand = ExternalDemand::new(seq, kind, observed_at, requested_target);
+    let demand = ExternalDemand::new(seq, kind, observed_at, requested_target, buffer_perf_class);
     let mut transition =
         queue_external_demand(state_with_seq, QueuedDemand::ready(demand), observed_at);
     if let Some(effect) = ingress_effect {
@@ -222,6 +226,10 @@ pub(super) fn reduce_observation_base_collected(
     let next_cursor = basis.cursor_position().or_else(|| state.last_cursor());
     let observed_at = basis.observed_at();
     let previous_observation = state.retained_observation().cloned();
+    let cursor_color_fallback_sample = previous_observation
+        .as_ref()
+        .and_then(ObservationSnapshot::cursor_color)
+        .map(CursorColorSample::new);
     let next_observation = ObservationSnapshot::new(request, basis, motion);
     let next_observation = if let Some(plan) = background_probe_plan_for_observation(
         &state,
@@ -233,8 +241,10 @@ pub(super) fn reduce_observation_base_collected(
     } else {
         next_observation
     };
+    let next_observation = complete_mode_scoped_cursor_color_probe(&state, next_observation);
     let mut base_state = reset_recovery_attempt(state.with_last_cursor(next_cursor));
-    let next_probe = next_pending_probe_effect(&base_state, &next_observation);
+    let next_probe =
+        next_pending_probe_effect(&base_state, &next_observation, cursor_color_fallback_sample);
     let Some(next_probe) = next_probe else {
         return complete_observation(base_state, next_observation);
     };
@@ -243,6 +253,31 @@ pub(super) fn reduce_observation_base_collected(
     }
 
     Transition::new(base_state, vec![next_probe])
+}
+
+fn complete_mode_scoped_cursor_color_probe(
+    state: &CoreState,
+    observation: ObservationSnapshot,
+) -> ObservationSnapshot {
+    if !observation.request().probes().cursor_color()
+        || state
+            .runtime()
+            .config
+            .requires_cursor_color_sampling_for_mode(observation.basis().mode())
+    {
+        return observation;
+    }
+
+    let request_id = ProbeKind::CursorColor.request_id(observation.request().observation_id());
+    observation
+        .clone()
+        .with_cursor_color_probe(ProbeState::ready(
+            request_id,
+            observation.request().observation_id(),
+            ProbeReuse::Exact,
+            None,
+        ))
+        .unwrap_or(observation)
 }
 
 fn background_probe_plan_for_observation(
@@ -471,7 +506,11 @@ pub(super) fn reduce_probe_reported(state: CoreState, payload: ProbeReportedEven
             if !observing.set_active_observation(Some((*observation).clone())) {
                 return Transition::stay_owned(observing);
             }
-            if let Some(next_probe) = next_pending_probe_effect(&observing, &observation) {
+            let cursor_color_fallback_sample =
+                observation.cursor_color().map(CursorColorSample::new);
+            if let Some(next_probe) =
+                next_pending_probe_effect(&observing, &observation, cursor_color_fallback_sample)
+            {
                 return Transition::new(observing, vec![next_probe]);
             }
             complete_observation(observing, *observation)

@@ -9,13 +9,17 @@ use super::host_bridge::installed_host_bridge;
 use super::logging::set_log_level;
 use super::logging::trace_lazy;
 use super::logging::warn;
+use super::policy::BufferEventPolicy;
+use super::policy::current_buffer_event_policy;
+use super::probe_cache::CachedCursorColorProbeSample;
 use super::probe_cache::ConcealCacheKey;
 use super::probe_cache::ConcealCacheLookup;
+use super::probe_cache::ConcealDeltaCacheKey;
+use super::probe_cache::ConcealDeltaCacheLookup;
 use super::probe_cache::ConcealRegion;
 use super::probe_cache::ConcealScreenCell;
 use super::probe_cache::ConcealScreenCellCacheKey;
 use super::probe_cache::ConcealScreenCellCacheLookup;
-use super::probe_cache::CursorColorCacheLookup;
 use super::probe_cache::CursorTextContextCacheKey;
 use super::probe_cache::CursorTextContextCacheLookup;
 use super::timers::NvimTimerId;
@@ -26,6 +30,7 @@ use super::trace::timer_token_summary;
 use crate::config::RuntimeConfig;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
+use crate::core::effect::ProbePolicy;
 use crate::core::effect::RequestProbeEffect;
 use crate::core::effect::TimerKind;
 use crate::core::event::EffectFailedEvent;
@@ -38,7 +43,10 @@ use crate::core::state::CoreState;
 use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
 use crate::core::state::CursorTextContext;
+use crate::core::state::ExternalDemandKind;
+use crate::core::state::ObservationSnapshot;
 use crate::core::state::ProbeKind;
+use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::DelayBudgetMs;
 use crate::core::types::Generation;
@@ -47,6 +55,7 @@ use crate::core::types::TimerToken;
 use crate::draw::recover_all_namespaces;
 use crate::draw::render_pool_diagnostics;
 use nvim_oxi::Result;
+use nvim_oxi::api;
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
@@ -180,8 +189,23 @@ pub(super) fn clear_observation_request_timestamp() {
     event_loop::clear_observation_request_timestamp();
 }
 
+fn current_buffer_handle() -> Option<i64> {
+    let buffer = api::get_current_buf();
+    buffer.is_valid().then(|| i64::from(buffer.handle()))
+}
+
+fn record_current_buffer_perf_telemetry(update: impl FnOnce(&mut super::ShellState, i64)) {
+    let Some(buffer_handle) = current_buffer_handle() else {
+        return;
+    };
+    let _ = mutate_engine_state(|state| update(&mut state.shell, buffer_handle));
+}
+
 pub(super) fn record_cursor_callback_duration(duration_ms: f64) {
     event_loop::record_cursor_callback_duration(duration_ms);
+    record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+        shell.record_buffer_callback_duration(buffer_handle, duration_ms);
+    });
 }
 
 pub(super) fn clear_cursor_callback_duration_estimate() {
@@ -189,7 +213,17 @@ pub(super) fn clear_cursor_callback_duration_estimate() {
 }
 
 pub(super) fn cursor_callback_duration_estimate_ms() -> f64 {
-    event_loop::cursor_callback_duration_estimate_ms()
+    let local_estimate = current_buffer_handle().and_then(|buffer_handle| {
+        read_engine_state(|state| {
+            state
+                .shell
+                .buffer_perf_telemetry(buffer_handle)
+                .map(|telemetry| telemetry.callback_duration_estimate_ms())
+        })
+        .ok()
+        .flatten()
+    });
+    local_estimate.unwrap_or_else(event_loop::cursor_callback_duration_estimate_ms)
 }
 
 pub(super) fn record_ingress_received() {
@@ -299,142 +333,323 @@ pub(super) fn record_probe_refresh_budget_exhausted_count(kind: ProbeKind, count
     event_loop::record_probe_refresh_budget_exhausted_count(kind, count);
 }
 
+pub(super) fn record_probe_extmark_fallback(kind: ProbeKind) {
+    event_loop::record_probe_extmark_fallback(kind);
+    if matches!(kind, ProbeKind::CursorColor) {
+        let observed_at_ms = now_ms();
+        record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+            shell.record_buffer_cursor_color_extmark_fallback(buffer_handle, observed_at_ms);
+        });
+    }
+}
+
+pub(super) fn record_cursor_color_cache_hit() {
+    event_loop::record_cursor_color_cache_hit();
+}
+
+pub(super) fn record_cursor_color_cache_miss() {
+    event_loop::record_cursor_color_cache_miss();
+}
+
+pub(super) fn record_cursor_color_probe_reuse(reuse: ProbeReuse) {
+    event_loop::record_cursor_color_reuse(reuse);
+}
+
+pub(super) fn record_conceal_region_cache_hit() {
+    event_loop::record_conceal_region_cache_hit();
+}
+
+pub(super) fn record_conceal_region_cache_miss() {
+    event_loop::record_conceal_region_cache_miss();
+}
+
+pub(super) fn record_conceal_screen_cell_cache_hit() {
+    event_loop::record_conceal_screen_cell_cache_hit();
+}
+
+pub(super) fn record_conceal_screen_cell_cache_miss() {
+    event_loop::record_conceal_screen_cell_cache_miss();
+}
+
+pub(super) fn record_conceal_full_scan() {
+    event_loop::record_conceal_full_scan();
+    let observed_at_ms = now_ms();
+    record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+        shell.record_buffer_conceal_full_scan(buffer_handle, observed_at_ms);
+    });
+}
+
+pub(super) fn record_conceal_raw_screenpos_fallback() {
+    event_loop::record_conceal_raw_screenpos_fallback();
+    let observed_at_ms = now_ms();
+    record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+        shell.record_buffer_conceal_raw_screenpos_fallback(buffer_handle, observed_at_ms);
+    });
+}
+
+pub(crate) fn record_planner_local_query(
+    bucket_maps_scanned: usize,
+    bucket_cells_scanned: usize,
+    local_query_cells: usize,
+) {
+    event_loop::record_planner_local_query(
+        bucket_maps_scanned,
+        bucket_cells_scanned,
+        local_query_cells,
+    );
+}
+
+pub(crate) fn record_planner_local_query_envelope_area_cells(area_cells: u64) {
+    event_loop::record_planner_local_query_envelope_area_cells(area_cells);
+}
+
+pub(crate) fn record_planner_compiled_query_cells_count(count: usize) {
+    event_loop::record_planner_compiled_query_cells_count(count);
+}
+
+pub(crate) fn record_planner_candidate_query_cells_count(count: usize) {
+    event_loop::record_planner_candidate_query_cells_count(count);
+}
+
+pub(crate) fn record_planner_compiled_cells_emitted_count(count: usize) {
+    event_loop::record_planner_compiled_cells_emitted_count(count);
+}
+
+pub(crate) fn record_planner_reference_compile() {
+    event_loop::record_planner_reference_compile();
+}
+
+pub(crate) fn record_planner_local_query_compile() {
+    event_loop::record_planner_local_query_compile();
+}
+
+pub(crate) fn record_planner_candidate_cells_built_count(count: usize) {
+    event_loop::record_planner_candidate_cells_built_count(count);
+}
+
 pub(super) fn event_loop_diagnostics() -> event_loop::EventLoopDiagnostics {
     event_loop::diagnostics_snapshot()
+}
+
+#[cfg(not(test))]
+fn current_buffer_perf_policy() -> Result<Option<BufferEventPolicy>> {
+    Ok(ingress_read_snapshot()?.current_buffer_event_policy())
+}
+
+#[cfg(test)]
+fn current_buffer_perf_policy() -> Result<Option<BufferEventPolicy>> {
+    Ok(None)
 }
 
 pub(super) fn diagnostics_report() -> String {
     perf_diagnostics_report()
 }
 
+fn compact_float_value(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
 pub(super) fn perf_diagnostics_report() -> String {
     let loop_diag = event_loop_diagnostics();
+    let buffer_perf_policy = current_buffer_perf_policy().ok().flatten();
     match read_engine_state(|state| {
         let core = state.core_state();
+        let runtime = core.runtime();
         let cleanup = core.render_cleanup();
         let ingress_policy = core.ingress_policy();
         let demand_queue = core.demand_queue();
         let pool = render_pool_diagnostics();
-        let delayed_ingress_due_at = ingress_policy.pending_delay_until();
-        let delayed_ingress_pending = delayed_ingress_due_at.is_some();
+        let _delayed_ingress_due_at = ingress_policy.pending_delay_until();
         let queue_cursor_pending = demand_queue.latest_cursor().is_some();
         let queue_ordered_backlog = demand_queue.ordered().len();
         let queue_total_backlog =
             queue_ordered_backlog.saturating_add(usize::from(queue_cursor_pending));
-        let hot_backlog_max = loop_diag
-            .metrics
-            .scheduled_queue_depth_by_thermal
-            .hot
-            .max_depth;
-        let cooling_backlog_max = loop_diag
-            .metrics
-            .scheduled_queue_depth_by_thermal
-            .cooling
-            .max_depth;
         let post_burst_convergence_last_ms = if loop_diag.metrics.post_burst_convergence.samples > 0
         {
             Some(loop_diag.metrics.post_burst_convergence.last_ms)
         } else {
             None
         };
-        let compaction_excess_windows = pool
-            .total_windows
-            .saturating_sub(cleanup.idle_target_budget());
+        let has_retained_cursor_color = core
+            .retained_observation()
+            .and_then(ObservationSnapshot::cursor_color)
+            .is_some();
+        let probe_policy = core
+            .active_observation_request()
+            .map(|request| {
+                ProbePolicy::for_demand(
+                    request.demand().kind(),
+                    request.demand().buffer_perf_class(),
+                    has_retained_cursor_color,
+                )
+            })
+            .or_else(|| {
+                buffer_perf_policy.map(|policy| {
+                    ProbePolicy::for_demand(
+                        ExternalDemandKind::ExternalCursor,
+                        policy.core_perf_class(),
+                        has_retained_cursor_color,
+                    )
+                })
+            });
+        let configured_perf_mode = runtime.config.buffer_perf_mode;
 
         // Surprising: the Lua-visible `diagnostics()` payload truncates around 1 KiB through the
         // plugin bridge, so perf automation uses this compact reducer-owned subset instead.
         [
             "smear_cursor".to_string(),
             format!(
+                "perf_class={}",
+                buffer_perf_policy.map_or("na", BufferEventPolicy::diagnostic_class_name)
+            ),
+            format!("perf_mode={}", configured_perf_mode.option_name()),
+            format!(
+                "perf_effective_mode={}",
+                buffer_perf_policy.map_or("na", |policy| {
+                    policy.diagnostic_effective_mode_name(configured_perf_mode)
+                })
+            ),
+            format!(
+                "buffer_line_count={}",
+                buffer_perf_policy.map_or(0, BufferEventPolicy::line_count)
+            ),
+            format!(
+                "callback_ewma_ms={}",
+                compact_float_value(buffer_perf_policy.map_or(
+                    loop_diag.callback_duration_ewma_ms,
+                    BufferEventPolicy::callback_duration_estimate_ms,
+                ))
+            ),
+            format!(
+                "probe_policy={}",
+                probe_policy.map_or("na", ProbePolicy::diagnostic_name)
+            ),
+            format!(
+                "perf_reason_bits={}",
+                buffer_perf_policy.map_or(0, BufferEventPolicy::observed_reason_bits)
+            ),
+            format!(
+                "planner_bms={}",
+                loop_diag.metrics.planner.bucket_maps_scanned
+            ),
+            format!(
+                "planner_bcs={}",
+                loop_diag.metrics.planner.bucket_cells_scanned
+            ),
+            format!(
+                "planner_lqea={}",
+                loop_diag.metrics.planner.local_query_envelope_area_cells
+            ),
+            format!(
+                "planner_local_query_cells={}",
+                loop_diag.metrics.planner.local_query_cells
+            ),
+            format!(
+                "planner_compq={}",
+                loop_diag.metrics.planner.compiled_query_cells
+            ),
+            format!(
+                "planner_candq={}",
+                loop_diag.metrics.planner.candidate_query_cells
+            ),
+            format!(
+                "planner_compiled_cells_emitted={}",
+                loop_diag.metrics.planner.compiled_cells_emitted
+            ),
+            format!(
+                "planner_candidate_cells_built={}",
+                loop_diag.metrics.planner.candidate_cells_built
+            ),
+            // Keep these keys abbreviated so the reducer payload stays below
+            // the ~1 KiB bridge budget used by the perf harness.
+            format!(
+                "planner_rc={}",
+                loop_diag.metrics.planner.reference_compiles
+            ),
+            format!(
+                "planner_lqc={}",
+                loop_diag.metrics.planner.local_query_compiles
+            ),
+            format!(
+                "cursor_color_extmark_fallback_calls={}",
+                loop_diag.metrics.cursor_color_probe.extmark_fallback_calls
+            ),
+            format!(
+                "cursor_color_cache_hit={}",
+                loop_diag.metrics.cursor_color_cache.hits
+            ),
+            format!(
+                "cursor_color_cache_miss={}",
+                loop_diag.metrics.cursor_color_cache.misses
+            ),
+            format!(
+                "cursor_color_reuse_exact={}",
+                loop_diag.metrics.cursor_color_reuse.exact
+            ),
+            format!(
+                "cursor_color_reuse_compatible={}",
+                loop_diag.metrics.cursor_color_reuse.compatible
+            ),
+            format!(
+                "cursor_color_reuse_refresh_required={}",
+                loop_diag.metrics.cursor_color_reuse.refresh_required
+            ),
+            format!(
+                "conceal_region_cache_hit={}",
+                loop_diag.metrics.conceal_probe.region_cache.hits
+            ),
+            format!(
+                "conceal_region_cache_miss={}",
+                loop_diag.metrics.conceal_probe.region_cache.misses
+            ),
+            format!(
+                "conceal_screen_cell_cache_hit={}",
+                loop_diag.metrics.conceal_probe.screen_cell_cache.hits
+            ),
+            format!(
+                "conceal_screen_cell_cache_miss={}",
+                loop_diag.metrics.conceal_probe.screen_cell_cache.misses
+            ),
+            format!(
+                "conceal_full_scan_calls={}",
+                loop_diag.metrics.conceal_probe.full_scan_calls
+            ),
+            format!(
+                "conceal_raw_screenpos_fallback_calls={}",
+                loop_diag.metrics.conceal_probe.raw_screenpos_fallback_calls
+            ),
+            format!(
+                "perf_reasons={}",
+                buffer_perf_policy.map_or_else(
+                    || "na".to_string(),
+                    BufferEventPolicy::diagnostic_observed_reason_summary,
+                )
+            ),
+            format!(
                 "cleanup_thermal={}",
                 cleanup_thermal_name(cleanup.thermal())
             ),
-            format!(
-                "cleanup_idle_target_budget={}",
-                cleanup.idle_target_budget()
-            ),
-            format!(
-                "cleanup_max_prune_per_tick={}",
-                cleanup.max_prune_per_tick()
-            ),
-            format!(
-                "cleanup_next_compaction_due_at_ms={}",
-                optional_millis_value(cleanup.next_compaction_due_at())
-            ),
-            format!(
-                "cleanup_entered_cooling_at_ms={}",
-                optional_millis_value(cleanup.entered_cooling_at())
-            ),
-            format!(
-                "cleanup_hard_purge_due_at_ms={}",
-                optional_millis_value(cleanup.hard_purge_due_at())
-            ),
             format!("pool_total_windows={}", pool.total_windows),
-            format!("pool_available_windows={}", pool.available_windows),
-            format!("pool_in_use_windows={}", pool.in_use_windows),
-            format!("pool_visible_windows={}", pool.visible_windows),
-            format!("compaction_excess_windows={compaction_excess_windows}"),
-            format!(
-                "compaction_target_reached={}",
-                compaction_excess_windows == 0
-            ),
-            format!("delayed_ingress_pending={delayed_ingress_pending}"),
-            format!(
-                "delayed_ingress_due_at_ms={}",
-                optional_millis_value(delayed_ingress_due_at)
-            ),
+            format!("pool_cached_budget={}", pool.cached_budget),
+            format!("pool_peak_requested={}", pool.peak_requested_capacity),
+            format!("pool_cap_hits={}", pool.capacity_cap_hits),
+            format!("max_kept_windows={}", runtime.config.max_kept_windows),
             format!(
                 "delayed_ingress_pending_updates={}",
                 loop_diag.metrics.delayed_ingress_pending_updates
             ),
-            format!("queue_cursor_pending={queue_cursor_pending}"),
-            format!("queue_ordered_backlog={queue_ordered_backlog}"),
             format!("queue_total_backlog={queue_total_backlog}"),
-            format!("queue_hot_backlog_max={hot_backlog_max}"),
-            format!("queue_cooling_backlog_max={cooling_backlog_max}"),
             format!(
                 "post_burst_convergence_last_ms={}",
                 optional_u64_value(post_burst_convergence_last_ms)
             ),
             format!(
-                "host_timer_rearms_total={}",
-                loop_diag.metrics.host_timer_rearms_total
-            ),
-            format!(
                 "host_timer_rearms_ingress={}",
                 loop_diag.metrics.host_timer_rearms_by_kind.ingress
-            ),
-            format!(
-                "host_timer_rearms_cleanup={}",
-                loop_diag.metrics.host_timer_rearms_by_kind.cleanup
-            ),
-            format!(
-                "scheduled_drain_hot_max_items={}",
-                loop_diag
-                    .metrics
-                    .scheduled_drain_items_by_thermal
-                    .hot
-                    .max_depth
-            ),
-            format!(
-                "scheduled_drain_cooling_max_items={}",
-                loop_diag
-                    .metrics
-                    .scheduled_drain_items_by_thermal
-                    .cooling
-                    .max_depth
-            ),
-            format!(
-                "scheduled_drain_cold_max_items={}",
-                loop_diag
-                    .metrics
-                    .scheduled_drain_items_by_thermal
-                    .cold
-                    .max_depth
-            ),
-            format!(
-                "scheduled_drain_reschedules_hot={}",
-                loop_diag.metrics.scheduled_drain_reschedules_by_thermal.hot
             ),
             format!(
                 "scheduled_drain_reschedules_cooling={}",
@@ -442,13 +657,6 @@ pub(super) fn perf_diagnostics_report() -> String {
                     .metrics
                     .scheduled_drain_reschedules_by_thermal
                     .cooling
-            ),
-            format!(
-                "scheduled_drain_reschedules_cold={}",
-                loop_diag
-                    .metrics
-                    .scheduled_drain_reschedules_by_thermal
-                    .cold
             ),
         ]
         .join(" ")
@@ -466,10 +674,6 @@ fn cleanup_thermal_name(thermal: RenderThermalState) -> &'static str {
     }
 }
 
-fn optional_millis_value(millis: Option<Millis>) -> String {
-    millis.map_or_else(|| "none".to_string(), |millis| millis.value().to_string())
-}
-
 fn optional_u64_value(value: Option<u64>) -> String {
     value.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
@@ -479,6 +683,7 @@ fn reset_transient_event_state_with_policy() {
     super::handlers::reset_scheduled_effect_queue();
     if let Err(err) = mutate_engine_state(|state| {
         state.shell.reset_probe_caches();
+        state.shell.reset_buffer_event_policies();
     }) {
         warn(&format!(
             "engine state re-entered during transient reset; skipping shell cache reset: {err}"
@@ -557,6 +762,31 @@ pub(super) fn ingress_read_snapshot() -> EngineAccessResult<IngressReadSnapshot>
     IngressReadSnapshot::capture()
 }
 
+pub(super) fn resolved_current_buffer_event_policy(
+    snapshot: &IngressReadSnapshot,
+    buffer: &api::Buffer,
+) -> Result<BufferEventPolicy> {
+    let buffer_handle = i64::from(buffer.handle());
+    let observed_at_ms = now_ms();
+    let (previous, telemetry) = read_engine_state(|state| {
+        (
+            state.shell.cached_buffer_event_policy(buffer_handle),
+            state
+                .shell
+                .buffer_perf_telemetry(buffer_handle)
+                .unwrap_or_default(),
+        )
+    })
+    .map_err(nvim_oxi::Error::from)?;
+    let policy =
+        current_buffer_event_policy(snapshot, buffer, previous, telemetry, observed_at_ms)?;
+    mutate_engine_state(|state| {
+        state.shell.store_buffer_event_policy(buffer_handle, policy);
+    })
+    .map_err(nvim_oxi::Error::from)?;
+    Ok(policy)
+}
+
 #[cfg(test)]
 pub(super) fn core_state() -> EngineAccessResult<CoreState> {
     read_engine_state(EngineState::clone_core_state)
@@ -573,10 +803,16 @@ pub(super) fn cursor_color_colorscheme_generation() -> EngineAccessResult<Genera
     read_engine_state(|state| state.shell.cursor_color_colorscheme_generation())
 }
 
-pub(super) fn cached_cursor_color_sample(
+pub(super) fn cached_cursor_color_sample_for_probe(
     witness: &CursorColorProbeWitness,
-) -> EngineAccessResult<CursorColorCacheLookup> {
-    mutate_engine_state(|state| state.shell.cached_cursor_color_sample(witness))
+    probe_policy: ProbePolicy,
+    reuse: ProbeReuse,
+) -> EngineAccessResult<Option<CachedCursorColorProbeSample>> {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .cached_cursor_color_sample_for_probe(witness, probe_policy, reuse)
+    })
 }
 
 pub(super) fn store_cursor_color_sample(
@@ -609,6 +845,12 @@ pub(super) fn cached_conceal_regions(
     mutate_engine_state(|state| state.shell.cached_conceal_regions(key))
 }
 
+pub(super) fn cached_conceal_delta(
+    key: &ConcealDeltaCacheKey,
+) -> EngineAccessResult<ConcealDeltaCacheLookup> {
+    mutate_engine_state(|state| state.shell.cached_conceal_delta(key))
+}
+
 pub(super) fn store_conceal_regions(
     key: ConcealCacheKey,
     scanned_to_col1: i64,
@@ -618,6 +860,16 @@ pub(super) fn store_conceal_regions(
         state
             .shell
             .store_conceal_regions(key, scanned_to_col1, regions);
+    })
+}
+
+pub(super) fn store_conceal_delta(
+    key: ConcealDeltaCacheKey,
+    current_col1: i64,
+    delta: i64,
+) -> EngineAccessResult<()> {
+    mutate_engine_state(|state| {
+        state.shell.store_conceal_delta(key, current_col1, delta);
     })
 }
 
@@ -900,6 +1152,7 @@ mod tests {
     use super::*;
     use crate::core::types::TimerGeneration;
     use crate::core::types::TimerId;
+    use insta::assert_snapshot;
 
     fn shell_timer_id(value: i64) -> NvimTimerId {
         NvimTimerId::try_new(value).expect("test shell timer id must be positive")
@@ -1023,15 +1276,57 @@ mod tests {
         let report = perf_diagnostics_report();
 
         assert!(report.starts_with("smear_cursor "));
+        assert!(
+            report.len() < 1024,
+            "perf diagnostics report exceeded bridge budget: {} bytes",
+            report.len()
+        );
+        assert!(report.contains("perf_class="));
+        assert!(report.contains("perf_mode="));
+        assert!(report.contains("perf_effective_mode="));
+        assert!(report.contains("buffer_line_count="));
+        assert!(report.contains("callback_ewma_ms="));
+        assert!(report.contains("probe_policy="));
+        assert!(report.contains("perf_reason_bits="));
+        assert!(report.contains("planner_bms="));
+        assert!(report.contains("planner_bcs="));
+        assert!(report.contains("planner_lqea="));
+        assert!(report.contains("planner_local_query_cells="));
+        assert!(report.contains("planner_compq="));
+        assert!(report.contains("planner_candq="));
+        assert!(report.contains("planner_compiled_cells_emitted="));
+        assert!(report.contains("planner_candidate_cells_built="));
+        assert!(report.contains("planner_rc="));
+        assert!(report.contains("planner_lqc="));
+        assert!(report.contains("cursor_color_extmark_fallback_calls="));
+        assert!(report.contains("cursor_color_cache_hit="));
+        assert!(report.contains("cursor_color_cache_miss="));
+        assert!(report.contains("cursor_color_reuse_exact="));
+        assert!(report.contains("cursor_color_reuse_compatible="));
+        assert!(report.contains("cursor_color_reuse_refresh_required="));
+        assert!(report.contains("conceal_region_cache_hit="));
+        assert!(report.contains("conceal_region_cache_miss="));
+        assert!(report.contains("conceal_screen_cell_cache_hit="));
+        assert!(report.contains("conceal_screen_cell_cache_miss="));
+        assert!(report.contains("conceal_full_scan_calls="));
+        assert!(report.contains("conceal_raw_screenpos_fallback_calls="));
+        assert!(report.contains("perf_reasons="));
         assert!(report.contains("cleanup_thermal="));
         assert!(report.contains("pool_total_windows="));
+        assert!(report.contains("pool_cached_budget="));
+        assert!(report.contains("pool_peak_requested="));
+        assert!(report.contains("pool_cap_hits="));
+        assert!(report.contains("max_kept_windows="));
         assert!(report.contains("queue_total_backlog="));
-        assert!(report.contains("queue_hot_backlog_max="));
-        assert!(report.contains("queue_cooling_backlog_max="));
         assert!(report.contains("delayed_ingress_pending_updates="));
         assert!(report.contains("post_burst_convergence_last_ms="));
         assert!(report.contains("host_timer_rearms_ingress="));
         assert!(report.contains("scheduled_drain_reschedules_cooling="));
         assert!(report.len() < 1000);
+    }
+
+    #[test]
+    fn perf_diagnostics_report_snapshot_renders_stable_field_order() {
+        assert_snapshot!(perf_diagnostics_report());
     }
 }

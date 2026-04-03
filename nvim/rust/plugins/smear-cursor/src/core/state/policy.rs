@@ -14,6 +14,36 @@ const fn default_idle_target_budget(max_kept_windows: usize) -> usize {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) enum BufferPerfClass {
+    #[default]
+    Full,
+    FastMotion,
+    Skip,
+}
+
+impl BufferPerfClass {
+    pub(crate) const fn fingerprint(self) -> u64 {
+        match self {
+            Self::Full => 1_u64,
+            Self::FastMotion => 2_u64,
+            Self::Skip => 4_u64,
+        }
+    }
+
+    pub(crate) const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::FastMotion => "fast",
+            Self::Skip => "skip",
+        }
+    }
+
+    pub(crate) const fn keeps_ornamental_effects(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) struct RecoveryPolicyState {
     retry_attempt: u8,
 }

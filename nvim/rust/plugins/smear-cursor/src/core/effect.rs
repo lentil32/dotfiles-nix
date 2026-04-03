@@ -11,7 +11,10 @@
 use crate::core::runtime_reducer::RenderDecision;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::BackgroundProbeChunk;
+use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
+use crate::core::state::CursorColorSample;
+use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationRequest;
@@ -94,12 +97,237 @@ impl CursorPositionReadPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ProbeQuality {
+    Exact,
+    FastMotion,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CursorPositionProbeMode {
+    Exact,
+    RawDuringMotion,
+}
+
+impl CursorPositionProbeMode {
+    const fn fingerprint(self) -> u64 {
+        match self {
+            Self::Exact => 1_u64,
+            Self::RawDuringMotion => 2_u64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CursorColorReuseMode {
+    ExactOnly,
+    CompatibleWithinLine,
+}
+
+impl CursorColorReuseMode {
+    const fn fingerprint(self) -> u64 {
+        match self {
+            Self::ExactOnly => 1_u64,
+            Self::CompatibleWithinLine => 2_u64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CursorColorFallbackMode {
+    SyntaxOnly,
+    SyntaxThenExtmarks,
+}
+
+impl CursorColorFallbackMode {
+    const fn fingerprint(self) -> u64 {
+        match self {
+            Self::SyntaxOnly => 1_u64,
+            Self::SyntaxThenExtmarks => 2_u64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct ProbePolicy {
+    cursor_position_mode: CursorPositionProbeMode,
+    cursor_color_reuse_mode: CursorColorReuseMode,
+    cursor_color_fallback_mode: CursorColorFallbackMode,
+}
+
+impl ProbePolicy {
+    pub(crate) const fn new(quality: ProbeQuality) -> Self {
+        match quality {
+            ProbeQuality::Exact => Self::exact(),
+            ProbeQuality::FastMotion => Self::fast_motion(),
+        }
+    }
+
+    pub(crate) const fn exact() -> Self {
+        Self::from_modes(
+            CursorPositionProbeMode::Exact,
+            CursorColorReuseMode::ExactOnly,
+            CursorColorFallbackMode::SyntaxThenExtmarks,
+        )
+    }
+
+    pub(crate) const fn fast_motion() -> Self {
+        Self::from_modes(
+            CursorPositionProbeMode::RawDuringMotion,
+            CursorColorReuseMode::CompatibleWithinLine,
+            CursorColorFallbackMode::SyntaxOnly,
+        )
+    }
+
+    pub(crate) const fn from_modes(
+        cursor_position_mode: CursorPositionProbeMode,
+        cursor_color_reuse_mode: CursorColorReuseMode,
+        cursor_color_fallback_mode: CursorColorFallbackMode,
+    ) -> Self {
+        Self {
+            cursor_position_mode,
+            cursor_color_reuse_mode,
+            cursor_color_fallback_mode,
+        }
+    }
+
+    pub(crate) const fn for_demand(
+        demand_kind: ExternalDemandKind,
+        buffer_perf_class: BufferPerfClass,
+        has_cursor_color_fallback_sample: bool,
+    ) -> Self {
+        let cursor_color_reuse_mode = if has_cursor_color_fallback_sample {
+            CursorColorReuseMode::CompatibleWithinLine
+        } else {
+            CursorColorReuseMode::ExactOnly
+        };
+
+        match demand_kind {
+            ExternalDemandKind::ExternalCursor => match buffer_perf_class {
+                BufferPerfClass::Full | BufferPerfClass::Skip => Self::from_modes(
+                    CursorPositionProbeMode::Exact,
+                    cursor_color_reuse_mode,
+                    CursorColorFallbackMode::SyntaxThenExtmarks,
+                ),
+                BufferPerfClass::FastMotion => Self::from_modes(
+                    CursorPositionProbeMode::RawDuringMotion,
+                    cursor_color_reuse_mode,
+                    CursorColorFallbackMode::SyntaxOnly,
+                ),
+            },
+            ExternalDemandKind::ModeChanged
+            | ExternalDemandKind::BufferEntered
+            | ExternalDemandKind::BoundaryRefresh => Self::exact(),
+        }
+    }
+
+    pub(crate) const fn quality(self) -> ProbeQuality {
+        match self.cursor_position_mode {
+            CursorPositionProbeMode::Exact => ProbeQuality::Exact,
+            CursorPositionProbeMode::RawDuringMotion => ProbeQuality::FastMotion,
+        }
+    }
+
+    pub(crate) const fn cursor_position_mode(self) -> CursorPositionProbeMode {
+        self.cursor_position_mode
+    }
+
+    pub(crate) const fn cursor_color_reuse_mode(self) -> CursorColorReuseMode {
+        self.cursor_color_reuse_mode
+    }
+
+    pub(crate) const fn cursor_color_fallback_mode(self) -> CursorColorFallbackMode {
+        self.cursor_color_fallback_mode
+    }
+
+    pub(crate) const fn diagnostic_name(self) -> &'static str {
+        match (
+            self.cursor_position_mode,
+            self.cursor_color_reuse_mode,
+            self.cursor_color_fallback_mode,
+        ) {
+            (
+                CursorPositionProbeMode::Exact,
+                CursorColorReuseMode::ExactOnly,
+                CursorColorFallbackMode::SyntaxThenExtmarks,
+            ) => "exact",
+            (
+                CursorPositionProbeMode::Exact,
+                CursorColorReuseMode::CompatibleWithinLine,
+                CursorColorFallbackMode::SyntaxThenExtmarks,
+            ) => "exact_compatible",
+            (
+                CursorPositionProbeMode::RawDuringMotion,
+                CursorColorReuseMode::ExactOnly,
+                CursorColorFallbackMode::SyntaxOnly,
+            ) => "raw_syntax",
+            (
+                CursorPositionProbeMode::RawDuringMotion,
+                CursorColorReuseMode::CompatibleWithinLine,
+                CursorColorFallbackMode::SyntaxOnly,
+            ) => "fast_motion",
+            (
+                CursorPositionProbeMode::Exact,
+                CursorColorReuseMode::ExactOnly,
+                CursorColorFallbackMode::SyntaxOnly,
+            ) => "exact_syntax",
+            (
+                CursorPositionProbeMode::Exact,
+                CursorColorReuseMode::CompatibleWithinLine,
+                CursorColorFallbackMode::SyntaxOnly,
+            ) => "exact_compatible_syntax",
+            (
+                CursorPositionProbeMode::RawDuringMotion,
+                CursorColorReuseMode::ExactOnly,
+                CursorColorFallbackMode::SyntaxThenExtmarks,
+            ) => "raw_extmarks",
+            (
+                CursorPositionProbeMode::RawDuringMotion,
+                CursorColorReuseMode::CompatibleWithinLine,
+                CursorColorFallbackMode::SyntaxThenExtmarks,
+            ) => "raw_compatible_extmarks",
+        }
+    }
+
+    pub(crate) const fn allows_compatible_cursor_color_reuse(self) -> bool {
+        matches!(
+            self.cursor_color_reuse_mode,
+            CursorColorReuseMode::CompatibleWithinLine
+        )
+    }
+
+    pub(crate) const fn allows_cursor_color_extmark_fallback(self) -> bool {
+        matches!(
+            self.cursor_color_fallback_mode,
+            CursorColorFallbackMode::SyntaxThenExtmarks
+        )
+    }
+
+    pub(crate) const fn uses_raw_screenpos_fallback(self) -> bool {
+        matches!(
+            self.cursor_position_mode,
+            CursorPositionProbeMode::RawDuringMotion
+        )
+    }
+
+    pub(crate) const fn fingerprint(self) -> u64 {
+        self.cursor_position_mode.fingerprint()
+            ^ self.cursor_color_reuse_mode.fingerprint().rotate_left(7)
+            ^ self
+                .cursor_color_fallback_mode
+                .fingerprint()
+                .rotate_left(13)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObservationRuntimeContext {
     cursor_position_policy: CursorPositionReadPolicy,
     scroll_buffer_space: bool,
     tracked_location: Option<CursorLocation>,
     current_corners: [Point; 4],
+    buffer_perf_class: BufferPerfClass,
+    probe_policy: ProbePolicy,
 }
 
 impl ObservationRuntimeContext {
@@ -108,12 +336,16 @@ impl ObservationRuntimeContext {
         scroll_buffer_space: bool,
         tracked_location: Option<CursorLocation>,
         current_corners: [Point; 4],
+        buffer_perf_class: BufferPerfClass,
+        probe_policy: ProbePolicy,
     ) -> Self {
         Self {
             cursor_position_policy,
             scroll_buffer_space,
             tracked_location,
             current_corners,
+            buffer_perf_class,
+            probe_policy,
         }
     }
 
@@ -132,6 +364,18 @@ impl ObservationRuntimeContext {
     pub(crate) const fn current_corners(&self) -> [Point; 4] {
         self.current_corners
     }
+
+    pub(crate) const fn buffer_perf_class(&self) -> BufferPerfClass {
+        self.buffer_perf_class
+    }
+
+    pub(crate) const fn probe_quality(&self) -> ProbeQuality {
+        self.probe_policy.quality()
+    }
+
+    pub(crate) const fn probe_policy(&self) -> ProbePolicy {
+        self.probe_policy
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,7 +384,16 @@ pub(crate) struct RequestProbeEffect {
     pub(crate) probe_request_id: ProbeRequestId,
     pub(crate) kind: ProbeKind,
     pub(crate) cursor_position_policy: CursorPositionReadPolicy,
+    pub(crate) buffer_perf_class: BufferPerfClass,
+    pub(crate) probe_policy: ProbePolicy,
     pub(crate) background_chunk: Option<BackgroundProbeChunk>,
+    pub(crate) cursor_color_fallback_sample: Option<CursorColorSample>,
+}
+
+impl RequestProbeEffect {
+    pub(crate) const fn probe_policy(&self) -> ProbePolicy {
+        self.probe_policy
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +545,10 @@ fn screen_cell_fingerprint(cell: ScreenCell) -> u64 {
         ^ u64::from_ne_bytes(cell.col().to_ne_bytes()).rotate_left(7)
 }
 
+fn cursor_color_sample_fingerprint(sample: Option<CursorColorSample>) -> u64 {
+    sample.map_or(0_u64, |sample| u64::from(sample.value()))
+}
+
 fn observation_context_fingerprint(context: &ObservationRuntimeContext) -> u64 {
     let cursor_position_seed = if context.cursor_position_policy().smear_to_cmd() {
         1_u64
@@ -316,6 +573,8 @@ fn observation_context_fingerprint(context: &ObservationRuntimeContext) -> u64 {
         ^ scroll_seed.rotate_left(5)
         ^ tracked_seed.rotate_left(11)
         ^ corner_seed.rotate_left(17)
+        ^ context.buffer_perf_class().fingerprint().rotate_left(23)
+        ^ context.probe_policy().fingerprint().rotate_left(29)
 }
 
 fn cursor_color_witness_fingerprint(
@@ -397,6 +656,12 @@ impl Effect {
                     ^ payload.request.observation_id().value()
                     ^ payload.request.demand().seq().value()
                     ^ payload.request.demand().observed_at().value()
+                    ^ payload
+                        .request
+                        .demand()
+                        .buffer_perf_class()
+                        .fingerprint()
+                        .rotate_left(5)
                     ^ probe_seed.rotate_left(11)
                     ^ observation_context_fingerprint(&payload.context).rotate_left(17)
                     ^ payload
@@ -425,23 +690,28 @@ impl Effect {
                     cursor_color_witness_fingerprint(basis.cursor_color_witness());
                 let cursor_text_context_seed =
                     cursor_text_context_fingerprint(basis.cursor_text_context());
+                let cursor_color_fallback_seed =
+                    cursor_color_sample_fingerprint(payload.cursor_color_fallback_sample);
                 109_u64
                     ^ basis.observation_id().value()
                     ^ basis.observed_at().value()
                     ^ payload.probe_request_id.value().rotate_left(7)
                     ^ payload.kind.fingerprint().rotate_left(13)
+                    ^ payload.probe_policy().fingerprint().rotate_left(17)
+                    ^ payload.buffer_perf_class.fingerprint().rotate_left(19)
                     ^ (if payload.cursor_position_policy.smear_to_cmd() {
                         1_u64
                     } else {
                         0_u64
                     })
-                    .rotate_left(17)
-                    ^ cursor_seed.rotate_left(19)
-                    ^ u64::from(viewport.max_row.value()).rotate_left(23)
-                    ^ u64::from(viewport.max_col.value()).rotate_left(29)
-                    ^ background_chunk_seed.rotate_left(31)
-                    ^ cursor_color_witness_seed.rotate_left(37)
-                    ^ cursor_text_context_seed.rotate_left(41)
+                    .rotate_left(23)
+                    ^ cursor_seed.rotate_left(29)
+                    ^ u64::from(viewport.max_row.value()).rotate_left(31)
+                    ^ u64::from(viewport.max_col.value()).rotate_left(37)
+                    ^ background_chunk_seed.rotate_left(41)
+                    ^ cursor_color_witness_seed.rotate_left(43)
+                    ^ cursor_text_context_seed.rotate_left(47)
+                    ^ cursor_color_fallback_seed.rotate_left(53)
             }
             Self::RequestRenderPlan(payload) => {
                 111_u64
@@ -511,6 +781,7 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
             crate::core::state::ExternalDemandKind::ExternalCursor,
             at,
             None,
+            BufferPerfClass::Full,
         ),
         crate::core::state::ProbeRequestSet::default(),
     );
@@ -578,6 +849,8 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
                     Point { row: 2.0, col: 2.0 },
                     Point { row: 2.0, col: 1.0 },
                 ],
+                BufferPerfClass::Full,
+                ProbePolicy::fast_motion(),
             ),
         }),
         Effect::RequestProbe(RequestProbeEffect {
@@ -604,7 +877,10 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
             ),
             kind: ProbeKind::CursorColor,
             cursor_position_policy: CursorPositionReadPolicy::new(true),
+            buffer_perf_class: BufferPerfClass::Full,
+            probe_policy: ProbePolicy::fast_motion(),
             background_chunk: None,
+            cursor_color_fallback_sample: Some(CursorColorSample::new(0x00AB_CDEF)),
         }),
         Effect::RequestRenderPlan(Box::new(RequestRenderPlanEffect {
             proposal_id,
@@ -645,4 +921,124 @@ pub(crate) fn phase4_effect_fingerprint_seed() -> u64 {
         .iter()
         .map(Effect::fingerprint)
         .fold(0_u64, u64::wrapping_add)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CursorColorFallbackMode;
+    use super::CursorColorReuseMode;
+    use super::CursorPositionProbeMode;
+    use super::ProbePolicy;
+    use super::ProbeQuality;
+    use crate::core::state::BufferPerfClass;
+    use crate::core::state::ExternalDemandKind;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn probe_policy_keeps_full_buffers_exact_without_retained_cursor_color() {
+        let policy = ProbePolicy::for_demand(
+            ExternalDemandKind::ExternalCursor,
+            BufferPerfClass::Full,
+            false,
+        );
+
+        assert_eq!(policy.quality(), ProbeQuality::Exact);
+        assert_eq!(policy.diagnostic_name(), "exact");
+        assert_eq!(
+            policy.cursor_position_mode(),
+            CursorPositionProbeMode::Exact
+        );
+        assert_eq!(
+            policy.cursor_color_reuse_mode(),
+            CursorColorReuseMode::ExactOnly
+        );
+        assert_eq!(
+            policy.cursor_color_fallback_mode(),
+            CursorColorFallbackMode::SyntaxThenExtmarks,
+        );
+        assert!(!policy.allows_compatible_cursor_color_reuse());
+        assert!(policy.allows_cursor_color_extmark_fallback());
+        assert!(!policy.uses_raw_screenpos_fallback());
+    }
+
+    #[test]
+    fn probe_policy_reuses_cursor_color_without_downgrading_full_buffers_to_raw_screenpos() {
+        let policy = ProbePolicy::for_demand(
+            ExternalDemandKind::ExternalCursor,
+            BufferPerfClass::Full,
+            true,
+        );
+
+        assert_eq!(policy.quality(), ProbeQuality::Exact);
+        assert_eq!(policy.diagnostic_name(), "exact_compatible");
+        assert_eq!(
+            policy.cursor_position_mode(),
+            CursorPositionProbeMode::Exact
+        );
+        assert_eq!(
+            policy.cursor_color_reuse_mode(),
+            CursorColorReuseMode::CompatibleWithinLine,
+        );
+        assert_eq!(
+            policy.cursor_color_fallback_mode(),
+            CursorColorFallbackMode::SyntaxThenExtmarks,
+        );
+        assert!(policy.allows_compatible_cursor_color_reuse());
+        assert!(policy.allows_cursor_color_extmark_fallback());
+        assert!(!policy.uses_raw_screenpos_fallback());
+    }
+
+    #[test]
+    fn probe_policy_fast_motion_can_disable_extmarks_without_requiring_compatible_reuse() {
+        let policy = ProbePolicy::for_demand(
+            ExternalDemandKind::ExternalCursor,
+            BufferPerfClass::FastMotion,
+            false,
+        );
+
+        assert_eq!(policy.quality(), ProbeQuality::FastMotion);
+        assert_eq!(policy.diagnostic_name(), "raw_syntax");
+        assert_eq!(
+            policy.cursor_position_mode(),
+            CursorPositionProbeMode::RawDuringMotion,
+        );
+        assert_eq!(
+            policy.cursor_color_reuse_mode(),
+            CursorColorReuseMode::ExactOnly
+        );
+        assert_eq!(
+            policy.cursor_color_fallback_mode(),
+            CursorColorFallbackMode::SyntaxOnly,
+        );
+        assert!(!policy.allows_compatible_cursor_color_reuse());
+        assert!(!policy.allows_cursor_color_extmark_fallback());
+        assert!(policy.uses_raw_screenpos_fallback());
+    }
+
+    #[test]
+    fn probe_policy_keeps_boundary_refresh_exact_even_for_fast_motion() {
+        let policy = ProbePolicy::for_demand(
+            ExternalDemandKind::BoundaryRefresh,
+            BufferPerfClass::FastMotion,
+            true,
+        );
+
+        assert_eq!(policy.quality(), ProbeQuality::Exact);
+        assert_eq!(policy.diagnostic_name(), "exact");
+        assert_eq!(
+            policy.cursor_position_mode(),
+            CursorPositionProbeMode::Exact
+        );
+        assert_eq!(
+            policy.cursor_color_reuse_mode(),
+            CursorColorReuseMode::ExactOnly
+        );
+        assert_eq!(
+            policy.cursor_color_fallback_mode(),
+            CursorColorFallbackMode::SyntaxThenExtmarks,
+        );
+        assert!(!policy.allows_compatible_cursor_color_reuse());
+        assert!(policy.allows_cursor_color_extmark_fallback());
+        assert!(!policy.uses_raw_screenpos_fallback());
+    }
 }

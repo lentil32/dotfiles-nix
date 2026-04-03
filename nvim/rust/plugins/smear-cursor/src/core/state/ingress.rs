@@ -1,3 +1,4 @@
+use super::BufferPerfClass;
 use crate::core::types::CursorPosition;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
@@ -9,6 +10,7 @@ pub(crate) enum ExternalDemandKind {
     ExternalCursor,
     ModeChanged,
     BufferEntered,
+    BoundaryRefresh,
 }
 
 impl ExternalDemandKind {
@@ -23,6 +25,7 @@ pub(crate) struct ExternalDemand {
     kind: ExternalDemandKind,
     observed_at: Millis,
     requested_target: Option<CursorPosition>,
+    buffer_perf_class: BufferPerfClass,
 }
 
 impl ExternalDemand {
@@ -31,12 +34,14 @@ impl ExternalDemand {
         kind: ExternalDemandKind,
         observed_at: Millis,
         requested_target: Option<CursorPosition>,
+        buffer_perf_class: BufferPerfClass,
     ) -> Self {
         Self {
             seq,
             kind,
             observed_at,
             requested_target,
+            buffer_perf_class,
         }
     }
 
@@ -54,6 +59,10 @@ impl ExternalDemand {
 
     pub(crate) const fn requested_target(&self) -> Option<CursorPosition> {
         self.requested_target
+    }
+
+    pub(crate) const fn buffer_perf_class(&self) -> BufferPerfClass {
+        self.buffer_perf_class
     }
 
     pub(crate) const fn is_cursor(&self) -> bool {

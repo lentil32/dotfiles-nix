@@ -6,6 +6,7 @@ use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::effect::ObservationRuntimeContext;
+use crate::core::effect::ProbePolicy;
 use crate::core::effect::RenderCleanupExecution;
 use crate::core::effect::RequestObservationBaseEffect;
 use crate::core::effect::RequestProbeEffect;
@@ -18,7 +19,10 @@ use crate::core::runtime_reducer::RenderDecision;
 use crate::core::runtime_reducer::render_cleanup_delay_ms;
 use crate::core::runtime_reducer::render_hard_cleanup_delay_ms;
 use crate::core::state::AnimationSchedule;
+use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
+use crate::core::state::CursorColorSample;
+use crate::core::state::ExternalDemand;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ObservationBasis;
@@ -144,19 +148,89 @@ fn cursor_position_read_policy(state: &CoreState) -> CursorPositionReadPolicy {
     CursorPositionReadPolicy::new(state.runtime().config.smear_to_cmd)
 }
 
-fn observation_runtime_context(state: &CoreState) -> ObservationRuntimeContext {
+fn retained_cursor_color_sample(
+    observation: Option<&ObservationSnapshot>,
+) -> Option<CursorColorSample> {
+    observation
+        .and_then(ObservationSnapshot::cursor_color)
+        .map(CursorColorSample::new)
+}
+
+pub(super) fn exact_boundary_refresh_required(state: &CoreState) -> bool {
+    let Some(observation) = state.retained_observation() else {
+        return false;
+    };
+
+    if !state.runtime().is_initialized() || state.runtime().is_animating() {
+        return false;
+    }
+
+    let cursor_color_refresh = state
+        .runtime()
+        .config
+        .requires_cursor_color_sampling_for_mode(observation.basis().mode())
+        && observation.requires_exact_cursor_color_refresh();
+    let cursor_position_refresh = observation.requires_exact_cursor_position_refresh();
+
+    cursor_color_refresh || cursor_position_refresh
+}
+
+pub(super) fn start_boundary_refresh_observation(
+    state: CoreState,
+    observed_at: Millis,
+) -> Option<(CoreState, Effect)> {
+    if !exact_boundary_refresh_required(&state) {
+        return None;
+    }
+
+    let requested_target = state
+        .retained_observation()
+        .and_then(|observation| observation.basis().cursor_position())
+        .or_else(|| state.last_cursor());
+    let buffer_perf_class = state
+        .retained_observation()
+        .map_or(BufferPerfClass::Full, |observation| {
+            observation.request().demand().buffer_perf_class()
+        });
+    let (state, seq) = state.allocate_ingress_seq();
+    let demand = ExternalDemand::new(
+        seq,
+        ExternalDemandKind::BoundaryRefresh,
+        observed_at,
+        requested_target,
+        buffer_perf_class,
+    );
+    let request = ObservationRequest::new(demand, probe_requests_for(&state, buffer_perf_class));
+    let next_state = state.into_observing(request.clone());
+    let effect = request_observation_base(&next_state, request);
+    Some((next_state, effect))
+}
+
+fn observation_runtime_context(
+    state: &CoreState,
+    request: &ObservationRequest,
+) -> ObservationRuntimeContext {
+    let cursor_color_fallback_sample = retained_cursor_color_sample(state.retained_observation());
+    let buffer_perf_class = request.demand().buffer_perf_class();
+    let probe_policy = ProbePolicy::for_demand(
+        request.demand().kind(),
+        buffer_perf_class,
+        cursor_color_fallback_sample.is_some(),
+    );
     ObservationRuntimeContext::new(
         cursor_position_read_policy(state),
         state.runtime().config.scroll_buffer_space,
         state.runtime().tracked_location(),
         state.runtime().current_corners(),
+        buffer_perf_class,
+        probe_policy,
     )
 }
 
 pub(super) fn request_observation_base(state: &CoreState, request: ObservationRequest) -> Effect {
     Effect::RequestObservationBase(RequestObservationBaseEffect {
+        context: observation_runtime_context(state, &request),
         request,
-        context: observation_runtime_context(state),
     })
 }
 
@@ -172,34 +246,62 @@ pub(super) fn probe_refresh_budget_exhausted_metric(kind: ProbeKind) -> Effect {
     record_event_loop_metric(EventLoopMetricEffect::ProbeRefreshBudgetExhausted(kind))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reducer keeps probe request policy explicit at the callsite while adaptive perf-class plumbing settles"
+)]
 fn request_probe(
     state: &CoreState,
     observation_basis: ObservationBasis,
     probe_request_id: crate::core::types::ProbeRequestId,
     kind: ProbeKind,
     background_chunk: Option<crate::core::state::BackgroundProbeChunk>,
+    demand_kind: ExternalDemandKind,
+    buffer_perf_class: BufferPerfClass,
+    cursor_color_fallback_sample: Option<CursorColorSample>,
 ) -> Effect {
+    let probe_policy = ProbePolicy::for_demand(
+        demand_kind,
+        buffer_perf_class,
+        cursor_color_fallback_sample.is_some(),
+    );
     Effect::RequestProbe(RequestProbeEffect {
         observation_basis,
         probe_request_id,
         kind,
         cursor_position_policy: cursor_position_read_policy(state),
+        buffer_perf_class,
+        probe_policy,
         background_chunk,
+        cursor_color_fallback_sample: if matches!(kind, ProbeKind::CursorColor) {
+            cursor_color_fallback_sample
+        } else {
+            None
+        },
     })
 }
 
-pub(super) fn probe_requests_for(state: &CoreState) -> ProbeRequestSet {
+pub(super) fn probe_requests_for(
+    state: &CoreState,
+    buffer_perf_class: BufferPerfClass,
+) -> ProbeRequestSet {
     ProbeRequestSet::new(
         state.runtime().config.requires_cursor_color_sampling(),
-        state.runtime().config.requires_background_sampling(),
+        state
+            .runtime()
+            .config
+            .requires_background_sampling_for_perf_class(buffer_perf_class),
     )
 }
 
 pub(super) fn next_pending_probe_effect(
     state: &CoreState,
     observation: &ObservationSnapshot,
+    cursor_color_fallback_sample: Option<CursorColorSample>,
 ) -> Option<Effect> {
     let basis = observation.basis();
+    let demand_kind = observation.request().demand().kind();
+    let buffer_perf_class = observation.request().demand().buffer_perf_class();
     if let crate::core::state::ProbeSlot::Requested(ProbeState::Pending { request_id }) =
         observation.probes().cursor_color()
     {
@@ -209,6 +311,9 @@ pub(super) fn next_pending_probe_effect(
             *request_id,
             ProbeKind::CursorColor,
             None,
+            demand_kind,
+            buffer_perf_class,
+            cursor_color_fallback_sample,
         ));
     }
 
@@ -223,6 +328,9 @@ pub(super) fn next_pending_probe_effect(
             observation
                 .background_progress()
                 .and_then(crate::core::state::BackgroundProbeProgress::next_chunk),
+            demand_kind,
+            buffer_perf_class,
+            cursor_color_fallback_sample,
         ));
     }
 

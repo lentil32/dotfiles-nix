@@ -16,7 +16,7 @@ const INSTALL_PROBE_HELPERS_FUNCTION_NAME: &str =
 const LUAEVAL_FUNCTION_NAME: &str = "luaeval";
 const CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR: &str = concat!(
     "(package.loaded['nvimrs_smear_cursor.probes'] or require('nvimrs_smear_cursor.probes'))",
-    ".cursor_color_at_cursor(_A)"
+    ".cursor_color_at_cursor(_A[1], _A[2])"
 );
 #[cfg(test)]
 const CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME: &str =
@@ -100,15 +100,20 @@ impl InstalledHostBridge {
     pub(super) fn cursor_color_at_cursor(
         self,
         colorscheme_generation: Generation,
+        allow_extmark_fallback: bool,
     ) -> HostBridgeResult<Object> {
         let generation = i64::try_from(colorscheme_generation.value()).map_err(|_| {
             HostBridgeError::CursorColorGenerationEncode {
                 value: colorscheme_generation.value(),
             }
         })?;
+        let probe_args = Array::from_iter([
+            Object::from(generation),
+            Object::from(allow_extmark_fallback),
+        ]);
         let args = Array::from_iter([
             Object::from(CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR),
-            Object::from(generation),
+            Object::from(probe_args),
         ]);
         api::call_function(LUAEVAL_FUNCTION_NAME, args)
             .map_err(|error| HostBridgeError::CursorColorProbe(error.into()))
@@ -238,15 +243,17 @@ mod tests {
     #[test]
     fn host_bridge_script_passes_colorscheme_generation_to_cursor_probe() {
         let script = HOST_BRIDGE_SCRIPT;
-        assert!(script.contains("cursor_color_at_cursor(colorscheme_generation) abort"));
-        assert!(script.contains(".cursor_color_at_cursor(_A)"));
+        assert!(script.contains(
+            "cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback) abort"
+        ));
+        assert!(script.contains(".cursor_color_at_cursor(_A[1], _A[2])"));
     }
 
     #[test]
     fn cursor_color_probe_luaeval_expr_loads_probe_helpers_from_runtime_module() {
         let expr = CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR;
         assert!(expr.contains("require('nvimrs_smear_cursor.probes')"));
-        assert!(expr.contains(".cursor_color_at_cursor(_A)"));
+        assert!(expr.contains(".cursor_color_at_cursor(_A[1], _A[2])"));
     }
 
     #[test]
@@ -255,5 +262,20 @@ mod tests {
         assert!(script.contains("hl_color_cache_generation"));
         assert!(script.contains("reset_hl_color_cache(colorscheme_generation)"));
         assert!(script.contains("hl_fg_cache[group]"));
+    }
+
+    #[test]
+    fn probe_helpers_gate_extmark_fallback_to_exact_edges() {
+        let script = PROBE_HELPERS_SCRIPT;
+        assert!(script.contains(
+            "function M.cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback)"
+        ));
+        assert!(script.contains("if not allow_extmark_fallback then"));
+    }
+
+    #[test]
+    fn probe_helpers_report_extmark_fallback_usage_in_cursor_color_results() {
+        let script = PROBE_HELPERS_SCRIPT;
+        assert!(script.contains("used_extmark_fallback"));
     }
 }

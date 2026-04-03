@@ -22,13 +22,19 @@ mod runtime;
 mod timers;
 mod trace;
 
+use policy::BufferEventPolicy;
+use policy::BufferEventPolicyCache;
+use policy::BufferPerfTelemetry;
+use policy::BufferPerfTelemetryCache;
+use probe_cache::CachedCursorColorProbeSample;
 use probe_cache::ConcealCacheKey;
 use probe_cache::ConcealCacheLookup;
+use probe_cache::ConcealDeltaCacheKey;
+use probe_cache::ConcealDeltaCacheLookup;
 use probe_cache::ConcealRegion;
 use probe_cache::ConcealScreenCell;
 use probe_cache::ConcealScreenCellCacheKey;
 use probe_cache::ConcealScreenCellCacheLookup;
-use probe_cache::CursorColorCacheLookup;
 use probe_cache::CursorTextContextCacheKey;
 use probe_cache::CursorTextContextCacheLookup;
 use probe_cache::ProbeCacheState;
@@ -42,6 +48,14 @@ pub(crate) use lifecycle::setup;
 pub(crate) use lifecycle::toggle;
 pub(crate) use logging::warn;
 pub(crate) use runtime::record_effect_failure;
+pub(crate) use runtime::record_planner_candidate_cells_built_count;
+pub(crate) use runtime::record_planner_candidate_query_cells_count;
+pub(crate) use runtime::record_planner_compiled_cells_emitted_count;
+pub(crate) use runtime::record_planner_compiled_query_cells_count;
+pub(crate) use runtime::record_planner_local_query;
+pub(crate) use runtime::record_planner_local_query_compile;
+pub(crate) use runtime::record_planner_local_query_envelope_area_cells;
+pub(crate) use runtime::record_planner_reference_compile;
 pub(crate) use timers::on_core_timer_event;
 pub(crate) use timers::schedule_guarded;
 
@@ -78,6 +92,8 @@ struct ShellState {
     namespace_id: Option<u32>,
     host_bridge_state: HostBridgeState,
     probe_cache: ProbeCacheState,
+    buffer_perf_policy_cache: BufferEventPolicyCache,
+    buffer_perf_telemetry_cache: BufferPerfTelemetryCache,
 }
 
 impl ShellState {
@@ -101,11 +117,14 @@ impl ShellState {
         self.probe_cache.colorscheme_generation()
     }
 
-    fn cached_cursor_color_sample(
+    fn cached_cursor_color_sample_for_probe(
         &mut self,
         witness: &CursorColorProbeWitness,
-    ) -> CursorColorCacheLookup {
-        self.probe_cache.cached_cursor_color_sample(witness)
+        probe_policy: crate::core::effect::ProbePolicy,
+        reuse: crate::core::state::ProbeReuse,
+    ) -> Option<CachedCursorColorProbeSample> {
+        self.probe_cache
+            .cached_cursor_color_sample_for_probe(witness, probe_policy, reuse)
     }
 
     fn store_cursor_color_sample(
@@ -135,6 +154,10 @@ impl ShellState {
         self.probe_cache.cached_conceal_regions(key)
     }
 
+    fn cached_conceal_delta(&mut self, key: &ConcealDeltaCacheKey) -> ConcealDeltaCacheLookup {
+        self.probe_cache.cached_conceal_delta(key)
+    }
+
     fn store_conceal_regions(
         &mut self,
         key: ConcealCacheKey,
@@ -143,6 +166,11 @@ impl ShellState {
     ) {
         self.probe_cache
             .store_conceal_regions(key, scanned_to_col1, regions);
+    }
+
+    fn store_conceal_delta(&mut self, key: ConcealDeltaCacheKey, current_col1: i64, delta: i64) {
+        self.probe_cache
+            .store_conceal_delta(key, current_col1, delta);
     }
 
     fn cached_conceal_screen_cell(
@@ -166,6 +194,60 @@ impl ShellState {
 
     fn reset_probe_caches(&mut self) {
         self.probe_cache.reset();
+    }
+
+    fn cached_buffer_event_policy(&self, buffer_handle: i64) -> Option<BufferEventPolicy> {
+        self.buffer_perf_policy_cache.cached_policy(buffer_handle)
+    }
+
+    fn store_buffer_event_policy(&mut self, buffer_handle: i64, policy: BufferEventPolicy) {
+        self.buffer_perf_policy_cache
+            .store_policy(buffer_handle, policy);
+    }
+
+    fn buffer_perf_telemetry(&self, buffer_handle: i64) -> Option<BufferPerfTelemetry> {
+        self.buffer_perf_telemetry_cache.telemetry(buffer_handle)
+    }
+
+    fn record_buffer_callback_duration(
+        &mut self,
+        buffer_handle: i64,
+        duration_ms: f64,
+    ) -> BufferPerfTelemetry {
+        self.buffer_perf_telemetry_cache
+            .record_callback_duration(buffer_handle, duration_ms)
+    }
+
+    fn record_buffer_cursor_color_extmark_fallback(
+        &mut self,
+        buffer_handle: i64,
+        observed_at_ms: f64,
+    ) -> BufferPerfTelemetry {
+        self.buffer_perf_telemetry_cache
+            .record_cursor_color_extmark_fallback(buffer_handle, observed_at_ms)
+    }
+
+    fn record_buffer_conceal_full_scan(
+        &mut self,
+        buffer_handle: i64,
+        observed_at_ms: f64,
+    ) -> BufferPerfTelemetry {
+        self.buffer_perf_telemetry_cache
+            .record_conceal_full_scan(buffer_handle, observed_at_ms)
+    }
+
+    fn record_buffer_conceal_raw_screenpos_fallback(
+        &mut self,
+        buffer_handle: i64,
+        observed_at_ms: f64,
+    ) -> BufferPerfTelemetry {
+        self.buffer_perf_telemetry_cache
+            .record_conceal_raw_screenpos_fallback(buffer_handle, observed_at_ms)
+    }
+
+    fn reset_buffer_event_policies(&mut self) {
+        self.buffer_perf_policy_cache.clear();
+        self.buffer_perf_telemetry_cache.clear();
     }
 }
 

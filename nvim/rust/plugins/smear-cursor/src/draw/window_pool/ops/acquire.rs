@@ -241,15 +241,30 @@ fn record_reuse_failure(
 
 const REUSE_ONLY_WARM_SPARE_WINDOWS: usize = 1;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FrameCapacityTarget {
+    pub(crate) requested_capacity: usize,
+    pub(crate) target_capacity: usize,
+}
+
+impl FrameCapacityTarget {
+    pub(crate) fn is_clamped_by_cap(self) -> bool {
+        self.target_capacity < self.requested_capacity
+    }
+}
+
 pub(crate) fn frame_capacity_target(
     in_use_windows: usize,
     planned_windows: usize,
     max_kept_windows: usize,
     allocation_policy: AllocationPolicy,
-) -> usize {
+) -> FrameCapacityTarget {
     let required_capacity = in_use_windows.saturating_add(planned_windows);
     if required_capacity == 0 {
-        return 0;
+        return FrameCapacityTarget {
+            requested_capacity: 0,
+            target_capacity: 0,
+        };
     }
 
     let warm_spare = match allocation_policy {
@@ -260,9 +275,18 @@ pub(crate) fn frame_capacity_target(
     // Surprising: this peak-frame cap intentionally stays distinct from the adaptive retained
     // budget hard max. One burst can need more simultaneous windows than we want to keep warm
     // once cleanup converges back to idle.
-    required_capacity
-        .saturating_add(warm_spare)
-        .min(max_kept_windows)
+    let requested_capacity = required_capacity.saturating_add(warm_spare);
+    FrameCapacityTarget {
+        requested_capacity,
+        target_capacity: requested_capacity.min(max_kept_windows),
+    }
+}
+
+pub(crate) fn record_frame_capacity_target(
+    tab_windows: &mut TabWindows,
+    target: FrameCapacityTarget,
+) {
+    tab_windows.note_capacity_target(target);
 }
 
 #[cfg(test)]
@@ -394,6 +418,7 @@ fn begin_tab_frame(tab_windows: &mut TabWindows, expected_demand: usize) {
     let previous_epoch = tab_windows.current_epoch;
     tab_windows.current_epoch = tab_windows.current_epoch.next();
     tab_windows.last_frame_demand = demand_signal;
+    tab_windows.note_frame_demand(demand_signal);
     tab_windows.frame_demand = 0;
     rollover_in_use_windows(tab_windows, previous_epoch);
 

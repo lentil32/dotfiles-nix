@@ -941,6 +941,7 @@ mod tests {
     use crate::core::state::BackgroundProbeChunk;
     use crate::core::state::BackgroundProbeChunkMask;
     use crate::core::state::BackgroundProbePlan;
+    use crate::core::state::BufferPerfClass;
     use crate::core::state::CoreState;
     use crate::core::state::CursorColorSample;
     use crate::core::state::ExternalDemandKind;
@@ -1149,6 +1150,7 @@ mod tests {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(observed_at),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         })
     }

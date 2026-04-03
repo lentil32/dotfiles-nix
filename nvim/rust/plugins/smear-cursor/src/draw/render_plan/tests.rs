@@ -295,6 +295,10 @@ fn compiled_single_cell(
     BTreeMap::from([((10_i64, 10_i64), latent_field::CompiledCell { tile, age })])
 }
 
+fn compiled_field(compiled: &BTreeMap<(i64, i64), latent_field::CompiledCell>) -> CompiledField {
+    CompiledField::Reference(compiled.clone())
+}
+
 fn count_state_toggles(states: &[DecodedCellState]) -> usize {
     states.windows(2).filter(|pair| pair[0] != pair[1]).count()
 }
@@ -336,6 +340,26 @@ fn dense_slice_with_candidate_fanout(cell_count: usize, candidate_count: usize) 
 
 mod field_compilation_and_cache {
     use super::*;
+
+    fn render_frame_to_plan_reference(
+        frame: &RenderFrame,
+        state: PlannerState,
+        viewport: Viewport,
+    ) -> PlannerOutput {
+        let compiled_frame = compile_render_frame(frame, state.clone());
+        let reference_compiled = compile_render_frame_reference(frame, state);
+
+        decode_compiled_frame(
+            frame,
+            CompiledPlannerFrame {
+                next_state: compiled_frame.next_state,
+                compiled: Arc::new(CompiledField::Reference(reference_compiled)),
+                query_bounds: None,
+            },
+            viewport,
+            frame_draw_signature(frame),
+        )
+    }
 
     #[test]
     fn empty_previous_only_cell_keeps_empty_candidate_only() {
@@ -393,6 +417,59 @@ mod field_compilation_and_cache {
     }
 
     #[test]
+    fn candidate_population_keeps_interleaved_compiled_and_previous_union() {
+        let low_sample_q12 = quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(4), 16);
+        let high_sample_q12 =
+            quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(12), 16);
+        let compiled = BTreeMap::from([
+            (
+                (10_i64, 10_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(0, latent_field::MICRO_W / 2, low_sample_q12),
+                    age: AgeMoment::default(),
+                },
+            ),
+            (
+                (10_i64, 12_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(
+                        latent_field::MICRO_W / 2,
+                        latent_field::MICRO_W - 1,
+                        high_sample_q12,
+                    ),
+                    age: AgeMoment::default(),
+                },
+            ),
+        ]);
+        let previous_cells = BTreeMap::from([
+            ((10_i64, 9_i64), highlight_state(3)),
+            ((10_i64, 10_i64), highlight_state(4)),
+            ((10_i64, 11_i64), highlight_state(7)),
+        ]);
+
+        let candidates = build_cell_candidates(&compiled, &previous_cells, 16, 0.12, 5);
+
+        pretty_assertions::assert_eq!(
+            candidates.keys().copied().collect::<Vec<_>>(),
+            vec![
+                (10_i64, 9_i64),
+                (10_i64, 10_i64),
+                (10_i64, 11_i64),
+                (10_i64, 12_i64),
+            ]
+        );
+        assert_eq!(
+            candidates
+                .get(&(10_i64, 11_i64))
+                .and_then(|cell_candidates| cell_candidates.first())
+                .and_then(|candidate| candidate.state),
+            None
+        );
+        assert!(candidates.contains_key(&(10_i64, 10_i64)));
+        assert!(candidates.contains_key(&(10_i64, 12_i64)));
+    }
+
+    #[test]
     fn compile_render_frame_reuses_cached_field_when_history_is_unchanged() {
         let mut frame = base_frame();
         frame.step_samples = Vec::new().into();
@@ -435,12 +512,246 @@ mod field_compilation_and_cache {
     }
 
     #[test]
+    fn compile_render_frame_keeps_local_query_bounds_for_normal_motion() {
+        let compiled = compile_render_frame(&base_frame(), PlannerState::default());
+
+        assert!(
+            compiled.query_bounds.is_some(),
+            "ordinary local motion should stay on the bounded fast path"
+        );
+        assert!(
+            matches!(compiled.compiled.as_ref(), CompiledField::Rows(_)),
+            "bounded planner compiles should stay in row-oriented storage"
+        );
+    }
+
+    #[test]
+    fn compile_render_frame_matches_reference_compiler_on_staged_history() {
+        let first = compile_render_frame(&base_frame(), PlannerState::default());
+        let mut second_frame = base_frame();
+        set_frame_corners(
+            &mut second_frame,
+            [
+                Point {
+                    row: 10.0,
+                    col: 11.0,
+                },
+                Point {
+                    row: 10.0,
+                    col: 12.0,
+                },
+                Point {
+                    row: 11.0,
+                    col: 12.0,
+                },
+                Point {
+                    row: 11.0,
+                    col: 11.0,
+                },
+            ],
+        );
+
+        let compiled = compile_render_frame(&second_frame, first.next_state.clone());
+        let mut reference = compile_render_frame_reference(&second_frame, first.next_state);
+        if let Some(bounds) = compiled.query_bounds {
+            reference.retain(|coord, _| bounds.contains(*coord));
+        }
+
+        pretty_assertions::assert_eq!(compiled.compiled.to_btree_map(), reference);
+    }
+
+    #[test]
+    fn compile_render_frame_falls_back_to_reference_compile_when_query_envelope_is_oversized() {
+        let frame = base_frame();
+        let mut state = PlannerState::default();
+        state.previous_cells = BTreeMap::from([
+            ((8_i64, 8_i64), highlight_state(4)),
+            (
+                (
+                    8_i64,
+                    8_i64 + LOCAL_QUERY_ENVELOPE_FAST_PATH_MAX_AREA_CELLS as i64,
+                ),
+                highlight_state(7),
+            ),
+        ]);
+
+        let compiled = compile_render_frame(&frame, state.clone());
+        let reference = compile_render_frame_reference(&frame, state);
+
+        assert!(
+            compute_local_query_envelope(
+                &compiled.next_state.decode_scratch.centerline,
+                &compiled.next_state.previous_cells,
+                &frame,
+                PREVIOUS_CELL_HALO_CELLS,
+            )
+            .is_some(),
+            "the planner should only drop query bounds because the envelope exceeded the fast-path budget"
+        );
+        assert_eq!(compiled.query_bounds, None);
+        assert!(matches!(
+            compiled.compiled.as_ref(),
+            CompiledField::Reference(_)
+        ));
+        pretty_assertions::assert_eq!(compiled.compiled.to_btree_map(), reference);
+    }
+
+    #[test]
+    fn render_plan_matches_reference_compile_on_deterministic_frame_sequence() {
+        let viewport = Viewport {
+            max_row: 200,
+            max_col: 200,
+        };
+        let mut second_frame = base_frame();
+        set_frame_corners(
+            &mut second_frame,
+            [
+                Point {
+                    row: 10.0,
+                    col: 11.0,
+                },
+                Point {
+                    row: 10.0,
+                    col: 12.0,
+                },
+                Point {
+                    row: 11.0,
+                    col: 12.0,
+                },
+                Point {
+                    row: 11.0,
+                    col: 11.0,
+                },
+            ],
+        );
+        second_frame.target = Point {
+            row: 10.0,
+            col: 11.0,
+        };
+
+        let mut third_frame = second_frame.clone();
+        set_frame_corners(
+            &mut third_frame,
+            [
+                Point {
+                    row: 11.0,
+                    col: 12.0,
+                },
+                Point {
+                    row: 11.0,
+                    col: 13.0,
+                },
+                Point {
+                    row: 12.0,
+                    col: 13.0,
+                },
+                Point {
+                    row: 12.0,
+                    col: 12.0,
+                },
+            ],
+        );
+        third_frame.target = Point {
+            row: 11.0,
+            col: 12.0,
+        };
+
+        let frames = [base_frame(), second_frame, third_frame];
+        let mut optimized_state = PlannerState::default();
+        let mut reference_state = PlannerState::default();
+
+        for frame in &frames {
+            let optimized = render_frame_to_plan(frame, optimized_state, viewport);
+            let reference = render_frame_to_plan_reference(frame, reference_state, viewport);
+
+            pretty_assertions::assert_eq!(optimized.plan, reference.plan);
+            pretty_assertions::assert_eq!(
+                optimized.next_state.previous_cells,
+                reference.next_state.previous_cells
+            );
+
+            optimized_state = optimized.next_state;
+            reference_state = reference.next_state;
+        }
+    }
+
+    #[test]
+    fn bounded_candidate_population_matches_reference_filtered_to_same_rect() {
+        let low_sample_q12 = quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(4), 16);
+        let high_sample_q12 =
+            quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(12), 16);
+        let compiled = BTreeMap::from([
+            (
+                (9_i64, 9_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(0, latent_field::MICRO_W / 2, low_sample_q12),
+                    age: AgeMoment::default(),
+                },
+            ),
+            (
+                (10_i64, 10_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(0, latent_field::MICRO_W / 2, low_sample_q12),
+                    age: AgeMoment::default(),
+                },
+            ),
+            (
+                (10_i64, 12_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(
+                        latent_field::MICRO_W / 2,
+                        latent_field::MICRO_W - 1,
+                        high_sample_q12,
+                    ),
+                    age: AgeMoment::default(),
+                },
+            ),
+            (
+                (11_i64, 11_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(
+                        latent_field::MICRO_W / 2,
+                        latent_field::MICRO_W - 1,
+                        high_sample_q12,
+                    ),
+                    age: AgeMoment::default(),
+                },
+            ),
+        ]);
+        let previous_cells = BTreeMap::from([
+            ((9_i64, 10_i64), highlight_state(3)),
+            ((10_i64, 9_i64), highlight_state(4)),
+            ((10_i64, 11_i64), highlight_state(7)),
+            ((11_i64, 12_i64), highlight_state(9)),
+        ]);
+        let bounds = SliceSearchBounds::new(10, 10, 10, 11);
+
+        let mut expected = build_cell_candidates(&compiled, &previous_cells, 16, 0.12, 5);
+        expected.retain(|coord, _| bounds.contains(*coord));
+
+        let compiled = compiled_field(&compiled);
+        let mut scratch = PlannerDecodeScratch::default();
+        populate_cell_candidates_in_bounds_with_scratch(
+            &compiled,
+            &previous_cells,
+            16,
+            0.12,
+            5,
+            bounds,
+            &mut scratch,
+        );
+
+        pretty_assertions::assert_eq!(scratch.cell_candidates, expected);
+    }
+
+    #[test]
     fn cell_candidate_scratch_reuses_per_cell_vector_capacity() {
         let sample_q12 = quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(12), 16);
         let compiled = compiled_single_cell(
             tile_for_column_span(0, latent_field::MICRO_W - 1, sample_q12),
             AgeMoment::default(),
         );
+        let compiled = compiled_field(&compiled);
         let mut scratch = PlannerDecodeScratch::default();
 
         populate_cell_candidates_with_scratch(
@@ -476,6 +787,87 @@ mod field_compilation_and_cache {
             second_capacity, first_capacity,
             "candidate scratch should retain the existing per-cell vector allocation"
         );
+    }
+
+    #[test]
+    fn repeated_candidate_population_keeps_stable_output_and_capacity() {
+        let low_sample_q12 = quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(4), 16);
+        let mid_sample_q12 = quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(8), 16);
+        let high_sample_q12 =
+            quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(12), 16);
+        let compiled = BTreeMap::from([
+            (
+                (10_i64, 10_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(0, latent_field::MICRO_W / 2, low_sample_q12),
+                    age: AgeMoment::default(),
+                },
+            ),
+            (
+                (10_i64, 11_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(2, latent_field::MICRO_W - 3, mid_sample_q12),
+                    age: AgeMoment {
+                        total_mass_q12: 1800,
+                        recent_mass_q12: 900,
+                    },
+                },
+            ),
+            (
+                (11_i64, 10_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(
+                        latent_field::MICRO_W / 2,
+                        latent_field::MICRO_W - 1,
+                        high_sample_q12,
+                    ),
+                    age: AgeMoment {
+                        total_mass_q12: 2600,
+                        recent_mass_q12: 1700,
+                    },
+                },
+            ),
+        ]);
+        let previous_cells = BTreeMap::from([
+            ((10_i64, 10_i64), highlight_state(4)),
+            ((10_i64, 12_i64), highlight_state(6)),
+            ((11_i64, 10_i64), highlight_state(10)),
+        ]);
+        let compiled = compiled_field(&compiled);
+        let mut scratch = PlannerDecodeScratch::default();
+
+        populate_cell_candidates_with_scratch(
+            &compiled,
+            &previous_cells,
+            16,
+            0.35,
+            5,
+            &mut scratch,
+        );
+        let first_candidates = scratch.cell_candidates.clone();
+        let first_capacities = scratch
+            .cell_candidates
+            .iter()
+            .map(|(coord, candidates)| (*coord, candidates.capacity()))
+            .collect::<BTreeMap<_, _>>();
+
+        populate_cell_candidates_with_scratch(
+            &compiled,
+            &previous_cells,
+            16,
+            0.35,
+            5,
+            &mut scratch,
+        );
+        let second_capacities = scratch
+            .cell_candidates
+            .iter()
+            .map(|(coord, candidates)| (*coord, candidates.capacity()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert!(first_capacities.values().all(|capacity| *capacity > 0));
+        pretty_assertions::assert_eq!(scratch.cell_candidates, first_candidates);
+        pretty_assertions::assert_eq!(second_capacities, first_capacities);
     }
 
     #[test]
@@ -1492,12 +1884,14 @@ mod decode_path_selection_and_salience {
             DecodePathTrace::RibbonDp
         );
 
+        let compiled = CompiledField::default();
+        let mut scratch = SolverScratch::default();
         let decoded = decode_compiled_field_with_solver(
-            &BTreeMap::new(),
+            &compiled,
             &candidates,
             &centerline,
             &frame,
-            &mut SolverScratch::default(),
+            &mut scratch,
             |_, _| None,
         );
 
@@ -1571,6 +1965,105 @@ mod decode_path_selection_and_salience {
         assert_eq!(scratch.fallback_coords.capacity(), coord_capacity);
         assert_eq!(scratch.fallback_coord_index.capacity(), index_capacity);
         assert_eq!(scratch.fallback_assignment.capacity(), assignment_capacity);
+    }
+
+    #[test]
+    fn decode_solver_scratch_reuses_row_index_storage() {
+        let frame = with_block_aspect_ratio(&base_frame(), 1.0);
+        let centerline = vec![
+            CenterSample {
+                pos: Point {
+                    row: 10.5,
+                    col: 10.5,
+                },
+                tangent_row: 0.0,
+                tangent_col: 1.0,
+            },
+            CenterSample {
+                pos: Point {
+                    row: 10.5,
+                    col: 11.5,
+                },
+                tangent_row: 0.0,
+                tangent_col: 1.0,
+            },
+        ];
+        let compiled = BTreeMap::from([
+            (
+                (10_i64, 10_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(0, latent_field::MICRO_W - 1, 0x0FFF),
+                    age: AgeMoment::default(),
+                },
+            ),
+            (
+                (10_i64, 11_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(2, latent_field::MICRO_W - 3, 0x0FFF),
+                    age: AgeMoment {
+                        total_mass_q12: 1800,
+                        recent_mass_q12: 900,
+                    },
+                },
+            ),
+            (
+                (11_i64, 11_i64),
+                latent_field::CompiledCell {
+                    tile: tile_for_column_span(0, latent_field::MICRO_W - 1, 0x0FFF),
+                    age: AgeMoment {
+                        total_mass_q12: 2400,
+                        recent_mass_q12: 1500,
+                    },
+                },
+            ),
+        ]);
+        let candidates =
+            build_cell_candidates(&compiled, &BTreeMap::new(), frame.color_levels, 0.35, 5);
+        let compiled = compiled_field(&compiled);
+        let mut scratch = SolverScratch::default();
+
+        let first = decode_compiled_field_trace_with_compiled_and_scratch(
+            &compiled,
+            &candidates,
+            &centerline,
+            &frame,
+            &mut scratch,
+        );
+        let first_compiled_rows_capacity = scratch.compiled_row_index.row_capacity();
+        let first_compiled_entries_capacity = scratch.compiled_row_index.entry_capacity();
+        let first_candidate_rows_capacity = scratch.candidate_row_index.row_capacity();
+        let first_candidate_entries_capacity = scratch.candidate_row_index.entry_capacity();
+
+        let second = decode_compiled_field_trace_with_compiled_and_scratch(
+            &compiled,
+            &candidates,
+            &centerline,
+            &frame,
+            &mut scratch,
+        );
+
+        assert!(first_compiled_rows_capacity > 0);
+        assert!(first_compiled_entries_capacity > 0);
+        assert!(first_candidate_rows_capacity > 0);
+        assert!(first_candidate_entries_capacity > 0);
+        assert_eq!(
+            scratch.compiled_row_index.row_capacity(),
+            first_compiled_rows_capacity
+        );
+        assert_eq!(
+            scratch.compiled_row_index.entry_capacity(),
+            first_compiled_entries_capacity
+        );
+        assert_eq!(
+            scratch.candidate_row_index.row_capacity(),
+            first_candidate_rows_capacity
+        );
+        assert_eq!(
+            scratch.candidate_row_index.entry_capacity(),
+            first_candidate_entries_capacity
+        );
+        pretty_assertions::assert_eq!(second.cells, first.cells);
+        assert_eq!(second.path, first.path);
     }
 
     #[test]
@@ -2141,7 +2634,8 @@ mod ribbon_width_targets_and_taper {
         let cells = (0_i64..=200_i64)
             .map(|col| ((10_i64, col), col))
             .collect::<BTreeMap<_, _>>();
-        let index = CellRowIndex::build(&cells);
+        let mut scratch = CellRowIndexScratch::default();
+        let index = CellRowIndex::build(&cells, &mut scratch);
         let mut visited = Vec::<(i64, i64)>::new();
 
         index.for_each_in_bounds(
@@ -2620,6 +3114,110 @@ mod staged_deposits_and_metric_projection {
             first_centerline_capacity,
             "resample scratch should keep the output centerline allocation"
         );
+    }
+
+    #[test]
+    fn local_query_envelope_keeps_previous_cell_halo_when_centerline_is_empty() {
+        let previous_cells = BTreeMap::from([
+            ((8_i64, 10_i64), highlight_state(4)),
+            ((9_i64, 12_i64), highlight_state(6)),
+        ]);
+
+        let envelope = compute_local_query_envelope(
+            &[],
+            &previous_cells,
+            &base_frame(),
+            /*previous_cell_halo*/ 2,
+        )
+        .expect("previous decoded cells should still define an envelope");
+
+        assert_eq!(envelope, SliceSearchBounds::new(6, 11, 8, 14));
+    }
+
+    #[test]
+    fn local_query_envelope_matches_union_of_straight_centerline_slice_bounds() {
+        let frame = with_trail_thickness(&with_block_aspect_ratio(&base_frame(), 1.6), 2.25);
+        let centerline = vec![
+            CenterSample {
+                pos: Point {
+                    row: 10.25,
+                    col: 9.75,
+                },
+                tangent_row: 0.0,
+                tangent_col: 1.0,
+            },
+            CenterSample {
+                pos: Point {
+                    row: 10.25,
+                    col: 11.25,
+                },
+                tangent_row: 0.0,
+                tangent_col: 1.0,
+            },
+            CenterSample {
+                pos: Point {
+                    row: 10.25,
+                    col: 12.75,
+                },
+                tangent_row: 0.0,
+                tangent_col: 1.0,
+            },
+        ];
+
+        let envelope = compute_local_query_envelope(&centerline, &BTreeMap::new(), &frame, 0)
+            .expect("centerline slices should produce a local query envelope");
+        let mut expected = super::local_envelope::ribbon_slice_search_bounds(
+            centerline[0],
+            &frame,
+            super::local_envelope::centerline_tail_u(0, centerline.len()),
+            0.0,
+        );
+        for (sample_index, sample) in centerline.iter().copied().enumerate().skip(1) {
+            let bounds = super::local_envelope::ribbon_slice_search_bounds(
+                sample,
+                &frame,
+                super::local_envelope::centerline_tail_u(sample_index, centerline.len()),
+                0.0,
+            );
+            expected.min_row = expected.min_row.min(bounds.min_row);
+            expected.max_row = expected.max_row.max(bounds.max_row);
+            expected.min_col = expected.min_col.min(bounds.min_col);
+            expected.max_col = expected.max_col.max(bounds.max_col);
+        }
+
+        assert_eq!(envelope, expected);
+    }
+
+    #[test]
+    fn local_query_envelope_keeps_previous_cell_halo_alongside_centerline_bounds() {
+        let frame = base_frame();
+        let centerline = vec![CenterSample {
+            pos: Point {
+                row: 10.5,
+                col: 10.5,
+            },
+            tangent_row: 0.0,
+            tangent_col: 1.0,
+        }];
+        let previous_cells = BTreeMap::from([((14_i64, 16_i64), highlight_state(6))]);
+
+        let envelope = compute_local_query_envelope(
+            &centerline,
+            &previous_cells,
+            &frame,
+            PREVIOUS_CELL_HALO_CELLS,
+        )
+        .expect("previous decoded cells and the centerline should share a local envelope");
+        let ribbon_bounds =
+            super::local_envelope::ribbon_slice_search_bounds(centerline[0], &frame, 0.0, 0.0);
+        let expected = SliceSearchBounds::new(
+            ribbon_bounds.min_row.min(14_i64 - PREVIOUS_CELL_HALO_CELLS),
+            ribbon_bounds.max_row.max(14_i64 + PREVIOUS_CELL_HALO_CELLS),
+            ribbon_bounds.min_col.min(16_i64 - PREVIOUS_CELL_HALO_CELLS),
+            ribbon_bounds.max_col.max(16_i64 + PREVIOUS_CELL_HALO_CELLS),
+        );
+
+        assert_eq!(envelope, expected);
     }
 
     #[test]

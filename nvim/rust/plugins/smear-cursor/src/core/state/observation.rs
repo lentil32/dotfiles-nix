@@ -849,6 +849,13 @@ impl<T> ProbeState<T> {
             Self::Ready { value, .. } => Some(value),
         }
     }
+
+    pub(crate) const fn reuse(&self) -> Option<ProbeReuse> {
+        match self {
+            Self::Ready { reuse, .. } => Some(*reuse),
+            Self::Pending { .. } | Self::Failed { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -881,6 +888,13 @@ impl<T> ProbeSlot<T> {
         match self {
             Self::Unrequested => None,
             Self::Requested(state) => state.value(),
+        }
+    }
+
+    pub(crate) const fn reuse(&self) -> Option<ProbeReuse> {
+        match self {
+            Self::Requested(state) => state.reuse(),
+            Self::Unrequested => None,
         }
     }
 
@@ -1105,16 +1119,44 @@ impl ObservationBasis {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ObservationMotion {
     scroll_shift: Option<ScrollShift>,
+    cursor_position_sync: CursorPositionSync,
 }
 
 impl ObservationMotion {
     pub(crate) const fn new(scroll_shift: Option<ScrollShift>) -> Self {
-        Self { scroll_shift }
+        Self {
+            scroll_shift,
+            cursor_position_sync: CursorPositionSync::Exact,
+        }
     }
 
     pub(crate) const fn scroll_shift(&self) -> Option<ScrollShift> {
         self.scroll_shift
     }
+
+    pub(crate) const fn requires_exact_cursor_position_refresh(&self) -> bool {
+        matches!(
+            self.cursor_position_sync,
+            CursorPositionSync::ConcealDeferred
+        )
+    }
+
+    pub(crate) const fn with_cursor_position_sync(
+        self,
+        cursor_position_sync: CursorPositionSync,
+    ) -> Self {
+        Self {
+            cursor_position_sync,
+            ..self
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) enum CursorPositionSync {
+    #[default]
+    Exact,
+    ConcealDeferred,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1223,6 +1265,17 @@ impl ObservationSnapshot {
     pub(crate) const fn scroll_shift(&self) -> Option<ScrollShift> {
         self.motion().scroll_shift()
     }
+
+    pub(crate) const fn requires_exact_cursor_color_refresh(&self) -> bool {
+        matches!(
+            self.probes.cursor_color().reuse(),
+            Some(ProbeReuse::Compatible)
+        )
+    }
+
+    pub(crate) const fn requires_exact_cursor_position_refresh(&self) -> bool {
+        self.motion.requires_exact_cursor_position_refresh()
+    }
 }
 
 fn cursor_motion_detected(previous: &ObservationBasis, current: &ObservationBasis) -> bool {
@@ -1306,6 +1359,7 @@ pub(crate) fn classify_semantic_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::state::BufferPerfClass;
     use crate::core::state::ExternalDemand;
     use crate::core::state::ExternalDemandKind;
     use crate::core::types::CursorCol;
@@ -1318,6 +1372,7 @@ mod tests {
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(10),
                 None,
+                BufferPerfClass::Full,
             ),
             probes,
         )
@@ -1790,6 +1845,7 @@ mod tests {
                 ExternalDemandKind::ModeChanged,
                 Millis::new(10),
                 None,
+                BufferPerfClass::Full,
             ),
             ProbeRequestSet::default(),
         );

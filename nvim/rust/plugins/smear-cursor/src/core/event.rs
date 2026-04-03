@@ -3,6 +3,7 @@ use crate::core::state::ApplyFailureKind;
 use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbeChunk;
 use crate::core::state::BackgroundProbeChunkMask;
+use crate::core::state::BufferPerfClass;
 use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::ObservationBasis;
@@ -29,6 +30,7 @@ pub(crate) struct ExternalDemandQueuedEvent {
     pub(crate) kind: ExternalDemandKind,
     pub(crate) observed_at: Millis,
     pub(crate) requested_target: Option<CursorPosition>,
+    pub(crate) buffer_perf_class: BufferPerfClass,
     pub(crate) ingress_cursor_presentation: Option<IngressCursorPresentationRequest>,
 }
 

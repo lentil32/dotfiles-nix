@@ -1,3 +1,4 @@
+use crate::core::state::BufferPerfClass;
 use crate::types::BASE_TIME_INTERVAL;
 use crate::types::StaticRenderConfig;
 #[cfg(test)]
@@ -11,6 +12,36 @@ use std::sync::Arc;
 
 pub(crate) const DEFAULT_ANIMATION_FPS: f64 = 144.0;
 pub(crate) const DEFAULT_BLOCK_ASPECT_RATIO: f64 = 2.0;
+pub(crate) const DEFAULT_MAX_KEPT_WINDOWS: usize = 64;
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub(crate) enum BufferPerfMode {
+    #[default]
+    Auto,
+    Full,
+    Fast,
+    Off,
+}
+
+impl BufferPerfMode {
+    pub(crate) const fn option_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Full => "full",
+            Self::Fast => "fast",
+            Self::Off => "off",
+        }
+    }
+
+    pub(crate) const fn forced_perf_class(self) -> Option<BufferPerfClass> {
+        match self {
+            Self::Auto => None,
+            Self::Full => Some(BufferPerfClass::Full),
+            Self::Fast => Some(BufferPerfClass::FastMotion),
+            Self::Off => Some(BufferPerfClass::Skip),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuntimeConfig {
@@ -60,6 +91,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) cross_window_bridge_strength_scale: f64,
     pub(crate) max_kept_windows: usize,
     pub(crate) windows_zindex: u32,
+    pub(crate) buffer_perf_mode: BufferPerfMode,
     pub(crate) filetypes_disabled: Arc<HashSet<String>>,
     pub(crate) logging_level: i64,
     pub(crate) cursor_color: Option<String>,
@@ -130,13 +162,28 @@ impl RuntimeConfig {
         is_replace_like_mode(mode) && self.horizontal_bar_cursor_replace_mode
     }
 
-    pub(crate) fn requires_cursor_color_sampling(&self) -> bool {
-        self.cursor_color.as_deref() == Some("none")
-            || self.cursor_color_insert_mode.as_deref() == Some("none")
+    pub(crate) fn requires_cursor_color_sampling_for_mode(&self, mode: &str) -> bool {
+        let setting = if is_insert_like_mode(mode) {
+            self.cursor_color_insert_mode.as_deref()
+        } else {
+            self.cursor_color.as_deref()
+        };
+
+        setting == Some("none")
     }
 
-    pub(crate) fn requires_background_sampling(&self) -> bool {
-        self.particles_enabled && !self.particles_over_text
+    pub(crate) fn requires_cursor_color_sampling(&self) -> bool {
+        self.requires_cursor_color_sampling_for_mode("n")
+            || self.requires_cursor_color_sampling_for_mode("i")
+    }
+
+    pub(crate) fn requires_background_sampling_for_perf_class(
+        &self,
+        buffer_perf_class: BufferPerfClass,
+    ) -> bool {
+        self.particles_enabled
+            && !self.particles_over_text
+            && buffer_perf_class.keeps_ornamental_effects()
     }
 
     pub(crate) fn simulation_step_interval_ms(&self) -> f64 {
@@ -197,8 +244,12 @@ impl Default for RuntimeConfig {
             jump_intent_window_ms: 40.0,
             cross_window_jump_bridges: true,
             cross_window_bridge_strength_scale: 1.0,
-            max_kept_windows: 384,
+            // Keep the peak pool cap distinct from the adaptive retained-budget ceiling.
+            // Cleanup already converges retained windows toward the adaptive budget floor, but
+            // one hot frame can still need more simultaneous windows than we keep warm when idle.
+            max_kept_windows: DEFAULT_MAX_KEPT_WINDOWS,
             windows_zindex: 300,
+            buffer_perf_mode: BufferPerfMode::Auto,
             filetypes_disabled: Arc::default(),
             logging_level: 2,
             cursor_color: None,
@@ -268,6 +319,8 @@ impl From<&RuntimeConfig> for StaticRenderConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::BufferPerfMode;
+    use super::DEFAULT_MAX_KEPT_WINDOWS;
     use super::RuntimeConfig;
 
     fn mode_filter_fixture() -> RuntimeConfig {
@@ -378,9 +431,43 @@ mod tests {
     }
 
     #[test]
+    fn requires_cursor_color_sampling_uses_active_mode_family() {
+        let config = RuntimeConfig {
+            cursor_color: Some("#112233".to_string()),
+            cursor_color_insert_mode: Some("none".to_string()),
+            ..RuntimeConfig::default()
+        };
+
+        assert!(!config.requires_cursor_color_sampling_for_mode("n"));
+        assert!(config.requires_cursor_color_sampling_for_mode("ic"));
+        assert!(!config.requires_cursor_color_sampling_for_mode("Rc"));
+    }
+
+    #[test]
     fn default_delay_event_to_smear_keeps_small_ingress_debounce() {
         let config = RuntimeConfig::default();
 
         assert_eq!(config.delay_event_to_smear, 1.0);
+    }
+
+    #[test]
+    fn default_particles_remain_disabled() {
+        let config = RuntimeConfig::default();
+
+        assert!(!config.particles_enabled);
+    }
+
+    #[test]
+    fn default_max_kept_windows_uses_named_default_cap() {
+        let config = RuntimeConfig::default();
+
+        assert_eq!(config.max_kept_windows, DEFAULT_MAX_KEPT_WINDOWS);
+    }
+
+    #[test]
+    fn default_buffer_perf_mode_stays_automatic() {
+        let config = RuntimeConfig::default();
+
+        assert_eq!(config.buffer_perf_mode, BufferPerfMode::Auto);
     }
 }

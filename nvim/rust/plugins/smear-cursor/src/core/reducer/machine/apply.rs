@@ -7,9 +7,11 @@ use super::support::arm_render_cleanup_timer;
 use super::support::cleanup_state_after_applied;
 use super::support::delay_budget_from_ms;
 use super::support::enter_recovering_with_backoff;
+use super::support::exact_boundary_refresh_required;
 use super::support::record_event_loop_metric;
 use super::support::redraw_effect_for_proposal;
 use super::support::schedule_timer_with_delay;
+use super::support::start_boundary_refresh_observation;
 use crate::core::effect::ApplyRenderCleanupEffect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::RenderCleanupExecution;
@@ -165,8 +167,21 @@ fn reduce_apply_completed(
     }
 
     let (base_state, dispatch) = start_next_observation(ready_state, observed_at);
+    let dispatched_observation = dispatch.is_some();
     let mut next_state = base_state;
     effects.extend(dispatch);
+    if !dispatched_observation
+        && proposal.animation_schedule() == crate::core::state::AnimationSchedule::Idle
+        && exact_boundary_refresh_required(&next_state)
+    {
+        let Some((refresh_state, refresh_effect)) =
+            start_boundary_refresh_observation(next_state, observed_at)
+        else {
+            unreachable!("boundary refresh eligibility changed between check and start");
+        };
+        next_state = refresh_state;
+        effects.push(refresh_effect);
+    }
 
     match proposal.animation_schedule() {
         crate::core::state::AnimationSchedule::Idle => {}

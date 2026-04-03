@@ -8,9 +8,78 @@ local uv = vim.uv or vim.loop
 -- `SMEAR_SETTLE_WAIT_MS`, `SMEAR_RECOVERY_MODE`, `SMEAR_COLD_WAIT_TIMEOUT_MS`,
 -- `SMEAR_REQUIRE_COLD_RECOVERY`,
 -- `SMEAR_RECOVERY_POLL_MS`, `SMEAR_LOGGING_LEVEL`, `SMEAR_SCENARIO_NAME`,
--- `SMEAR_DRAIN_EVERY` and `SMEAR_DELAY_EVENT_TO_SMEAR`.
+-- `SMEAR_SCENARIO_PRESET`, `SMEAR_LINE_WIDTH`, `SMEAR_CURSOR_COLUMN`,
+-- `SMEAR_EXTMARK_SPAN_COUNT`, `SMEAR_CONCEAL_SEGMENTS`,
+-- `SMEAR_CONCEAL_SEGMENT_WIDTH`, `SMEAR_CONCEAL_GAP_WIDTH`,
+-- `SMEAR_DRAIN_EVERY`, `SMEAR_DELAY_EVENT_TO_SMEAR`, `SMEAR_BUFFER_PERF_MODE`,
+-- `SMEAR_PLANNER_COMPILE_MODE`,
+-- `SMEAR_MAX_KEPT_WINDOWS`, `SMEAR_TRAIL_DURATION_MS`,
+-- `SMEAR_TRAIL_THICKNESS`, `SMEAR_TRAIL_THICKNESS_X`, and `SMEAR_TOP_K_PER_CELL`.
 -- Logging note: this plugin uses lower numbers for more logging and `4` for the least verbose
 -- mode, so the perf harness keeps `logging_level = 4` when it wants logging effectively off.
+
+local SCENARIO_PRESETS = {
+  large_line_count = {
+    workload_line_count = 50000,
+    workload_line_width = 96,
+    cursor_column = 23,
+  },
+  long_running_repetition = {
+    workload_line_count = 12000,
+    workload_line_width = 96,
+    cursor_column = 23,
+    baseline_iterations = 1200,
+    stress_iterations = 4000,
+    stress_rounds = 10,
+    recovery_iterations = 1200,
+    drain_every = 1,
+    delay_event_to_smear = 0,
+  },
+  extmark_heavy = {
+    workload_line_count = 4000,
+    workload_line_width = 160,
+    cursor_column = 47,
+    extmark_span_count = 48,
+    cursor_color = "none",
+  },
+  conceal_heavy = {
+    workload_line_count = 4000,
+    workload_line_width = 160,
+    cursor_column = 79,
+    conceal_segment_count = 24,
+    conceal_segment_width = 2,
+    conceal_gap_width = 1,
+  },
+  particles_off = {
+    workload_line_count = 4000,
+    workload_line_width = 96,
+    cursor_column = 23,
+    particles_enabled = false,
+  },
+  particles_on = {
+    workload_line_count = 4000,
+    workload_line_width = 96,
+    cursor_column = 23,
+    particles_enabled = true,
+  },
+  planner_heavy = {
+    workload_line_count = 12000,
+    workload_line_width = 240,
+    cursor_column = 120,
+    baseline_iterations = 1200,
+    stress_iterations = 3600,
+    stress_rounds = 6,
+    recovery_iterations = 1200,
+    drain_every = 1,
+    delay_event_to_smear = 0,
+    particles_enabled = false,
+    cursor_color = "#f59f00",
+    trail_duration_ms = 280,
+    trail_thickness = 4,
+    trail_thickness_x = 10,
+    top_k_per_cell = 8,
+  },
+}
 
 local function getenv_string(name, default_value)
   local value = vim.env[name]
@@ -39,6 +108,25 @@ local function getenv_positive_integer(name, default_value)
   return rounded
 end
 
+local function getenv_optional_positive_integer(name)
+  local raw_value = getenv_string(name, nil)
+  if raw_value == nil then
+    return nil
+  end
+
+  local parsed = tonumber(raw_value)
+  if parsed == nil then
+    error(string.format("%s must be an integer, got %q", name, raw_value))
+  end
+
+  local rounded = math.floor(parsed)
+  if rounded < 1 or parsed ~= rounded then
+    error(string.format("%s must be a positive integer, got %q", name, raw_value))
+  end
+
+  return rounded
+end
+
 local function getenv_non_negative_number(name, default_value)
   local raw_value = getenv_string(name, nil)
   if raw_value == nil then
@@ -48,6 +136,20 @@ local function getenv_non_negative_number(name, default_value)
   local parsed = tonumber(raw_value)
   if parsed == nil or parsed < 0 then
     error(string.format("%s must be a non-negative number, got %q", name, raw_value))
+  end
+
+  return parsed
+end
+
+local function getenv_positive_number(name, default_value)
+  local raw_value = getenv_string(name, nil)
+  if raw_value == nil then
+    return default_value
+  end
+
+  local parsed = tonumber(raw_value)
+  if parsed == nil or parsed <= 0 then
+    error(string.format("%s must be a positive number, got %q", name, raw_value))
   end
 
   return parsed
@@ -86,6 +188,36 @@ local function getenv_bool(name, default_value)
   end
 
   error(string.format("%s must be one of 1, 0, true, false, got %q", name, raw_value))
+end
+
+local function scenario_default(scenario_preset, key, fallback)
+  if scenario_preset == nil then
+    return fallback
+  end
+
+  local value = scenario_preset[key]
+  if value == nil then
+    return fallback
+  end
+  return value
+end
+
+local function resolve_scenario_preset(scenario_name)
+  local preset_name = getenv_string("SMEAR_SCENARIO_PRESET", "")
+  if preset_name == "" and SCENARIO_PRESETS[scenario_name] ~= nil then
+    preset_name = scenario_name
+  end
+
+  if preset_name == "" then
+    return nil, "none"
+  end
+
+  local scenario_preset = SCENARIO_PRESETS[preset_name]
+  if scenario_preset == nil then
+    error(string.format("unknown SMEAR_SCENARIO_PRESET %q", preset_name))
+  end
+
+  return scenario_preset, preset_name
 end
 
 local function prepend_runtimepath(path)
@@ -153,22 +285,35 @@ local function count_smear_floating_windows(visible_only)
   return floating_windows
 end
 
-local function create_workload_buffer(line_count)
-  -- Surprising: a listed non-scratch `[No Name]` buffer can try to create a swapfile in headless
-  -- perf runs. Keep the synthetic workload buffer scratch-only so the harness measures recovery
-  -- behavior instead of swapfile side effects.
-  local buffer = vim.api.nvim_create_buf(false, true)
+local function build_workload_line(index, line_width)
+  local prefix = string.format("line-%05d ", index)
+  if line_width <= #prefix then
+    return prefix:sub(1, line_width)
+  end
+
+  local tail_width = line_width - #prefix
+  local fill_chunk = "abcdefghijklmnopqrstuvwxyz0123456789_"
+  local fill = string.rep(fill_chunk, math.ceil(tail_width / #fill_chunk))
+  return prefix .. fill:sub(1, tail_width)
+end
+
+local function create_workload_buffer(line_count, line_width)
+  -- Keep the harness on a normal listed buffer so adaptive policy and probe logic exercise the
+  -- same buftype path as a real editing session, but disable swapfile side effects explicitly.
+  local buffer = vim.api.nvim_create_buf(true, false)
+  vim.bo[buffer].swapfile = false
+  vim.bo[buffer].bufhidden = "wipe"
   local lines = {}
   for index = 1, line_count do
-    lines[index] = string.format("line-%05d", index)
+    lines[index] = build_workload_line(index, line_width)
   end
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   return buffer
 end
 
-local function create_workload_buffers(line_count, requested_windows, unique_buffers)
+local function create_workload_buffers(line_count, line_width, requested_windows, unique_buffers)
   local buffers = {}
-  local base_buffer = create_workload_buffer(line_count)
+  local base_buffer = create_workload_buffer(line_count, line_width)
   for index = 1, requested_windows do
     buffers[index] = base_buffer
   end
@@ -180,13 +325,24 @@ local function create_workload_buffers(line_count, requested_windows, unique_buf
   -- Surprising: toggling `smear_between_buffers` only changes plugin policy. The harness needs
   -- distinct workload buffers per split when it wants to measure real cross-buffer churn.
   for index = 2, requested_windows do
-    buffers[index] = create_workload_buffer(line_count)
+    buffers[index] = create_workload_buffer(line_count, line_width)
   end
 
   return buffers
 end
 
-local function create_split_windows(buffers)
+local function build_cursor_targets(requested_windows, line_count, cursor_column)
+  local targets = {}
+  for index = 1, requested_windows do
+    targets[index] = {
+      line = (((index - 1) * 11) % line_count) + 1,
+      column = cursor_column,
+    }
+  end
+  return targets
+end
+
+local function create_split_windows(buffers, cursor_targets)
   vim.api.nvim_set_current_buf(buffers[1])
   for _ = 2, #buffers do
     vim.cmd("vsplit")
@@ -204,11 +360,84 @@ local function create_split_windows(buffers)
 
   for index, win in ipairs(windows) do
     vim.api.nvim_win_set_buf(win, buffers[index])
-    local line = math.min(index * 11, 1999)
-    vim.api.nvim_win_set_cursor(win, { line, 0 })
+    local cursor_target = cursor_targets[index]
+    vim.api.nvim_win_set_cursor(win, { cursor_target.line, cursor_target.column })
   end
 
   return windows
+end
+
+local function ensure_extmark_probe_highlight()
+  vim.api.nvim_set_hl(0, "SmearPerfExtmarkHeavy", { fg = "#f59f00" })
+end
+
+local function apply_extmark_heavy_workload(buffers, cursor_targets, line_width, extmark_span_count)
+  if extmark_span_count <= 0 then
+    return
+  end
+
+  -- Force cursor-color sampling past the default `Normal` highlight so this scenario actually
+  -- exercises the extmark fallback path it is meant to benchmark.
+  vim.api.nvim_set_hl(0, "Normal", {})
+  vim.api.nvim_set_hl(0, "NormalNC", {})
+  ensure_extmark_probe_highlight()
+  local namespace = vim.api.nvim_create_namespace("smear-perf-extmark-heavy")
+  for index, buffer in ipairs(buffers) do
+    local cursor_target = cursor_targets[index]
+    for span_index = 1, extmark_span_count do
+      vim.api.nvim_buf_set_extmark(buffer, namespace, cursor_target.line - 1, 0, {
+        end_row = cursor_target.line - 1,
+        end_col = line_width,
+        hl_group = "SmearPerfExtmarkHeavy",
+        priority = 300 + span_index,
+      })
+    end
+  end
+end
+
+local function conceal_positions_for_target(
+  cursor_target,
+  conceal_segment_count,
+  conceal_segment_width,
+  conceal_gap_width
+)
+  local positions = {}
+  local col1 = 2
+  for segment_index = 1, conceal_segment_count do
+    positions[segment_index] = {
+      cursor_target.line,
+      col1,
+      conceal_segment_width,
+    }
+    col1 = col1 + conceal_segment_width + conceal_gap_width
+  end
+  return positions
+end
+
+local function apply_conceal_heavy_workload(
+  windows,
+  cursor_targets,
+  conceal_segment_count,
+  conceal_segment_width,
+  conceal_gap_width
+)
+  if conceal_segment_count <= 0 then
+    return
+  end
+
+  for index, window in ipairs(windows) do
+    local positions = conceal_positions_for_target(
+      cursor_targets[index],
+      conceal_segment_count,
+      conceal_segment_width,
+      conceal_gap_width
+    )
+    vim.api.nvim_win_call(window, function()
+      vim.opt_local.conceallevel = 2
+      vim.opt_local.concealcursor = "n"
+      vim.fn.matchaddpos("Conceal", positions, 10, -1, { conceal = "." })
+    end)
+  end
 end
 
 local function drain_event_loop_once()
@@ -313,6 +542,41 @@ local function validate_recovery_mode(recovery_mode)
   error(string.format("SMEAR_RECOVERY_MODE must be 'cold' or 'fixed', got %q", recovery_mode))
 end
 
+local function validate_buffer_perf_mode(buffer_perf_mode)
+  if
+    buffer_perf_mode == "auto"
+    or buffer_perf_mode == "full"
+    or buffer_perf_mode == "fast"
+    or buffer_perf_mode == "off"
+  then
+    return buffer_perf_mode
+  end
+
+  error(
+    string.format(
+      "SMEAR_BUFFER_PERF_MODE must be one of auto, full, fast, off, got %q",
+      buffer_perf_mode
+    )
+  )
+end
+
+local function validate_planner_compile_mode(planner_compile_mode)
+  if
+    planner_compile_mode == "auto"
+    or planner_compile_mode == "reference"
+    or planner_compile_mode == "local_query"
+  then
+    return planner_compile_mode
+  end
+
+  error(
+    string.format(
+      "SMEAR_PLANNER_COMPILE_MODE must be one of auto, reference, local_query, got %q",
+      planner_compile_mode
+    )
+  )
+end
+
 local function wait_for_recovery(
   smear,
   recovery_mode,
@@ -349,10 +613,14 @@ local function wait_for_recovery(
   local compaction_target_reached = last_diagnostics.fields.compaction_target_reached or "unknown"
   local queue_total_backlog = last_diagnostics.fields.queue_total_backlog or "unknown"
   local pool_total_windows = last_diagnostics.fields.pool_total_windows or "unknown"
+  local pool_cached_budget = last_diagnostics.fields.pool_cached_budget or "unknown"
+  local pool_peak_requested_capacity = last_diagnostics.fields.pool_peak_requested or "unknown"
+  local pool_capacity_cap_hits = last_diagnostics.fields.pool_cap_hits or "unknown"
+  local max_kept_windows = last_diagnostics.fields.max_kept_windows or "unknown"
 
   emit_line(
     string.format(
-      "PERF_RECOVERY_WAIT mode=%s elapsed_ms=%.3f reached_cold=%s timed_out=%s cleanup_thermal=%s compaction_target_reached=%s queue_total_backlog=%s pool_total_windows=%s",
+      "PERF_RECOVERY_WAIT mode=%s elapsed_ms=%.3f reached_cold=%s timed_out=%s cleanup_thermal=%s compaction_target_reached=%s queue_total_backlog=%s pool_total_windows=%s pool_cached_budget=%s pool_peak_requested_capacity=%s pool_capacity_cap_hits=%s max_kept_windows=%s",
       recovery_mode,
       elapsed_ms,
       tostring(reached_cold),
@@ -360,7 +628,11 @@ local function wait_for_recovery(
       cleanup_thermal,
       compaction_target_reached,
       queue_total_backlog,
-      pool_total_windows
+      pool_total_windows,
+      pool_cached_budget,
+      pool_peak_requested_capacity,
+      pool_capacity_cap_hits,
+      max_kept_windows
     )
   )
 
@@ -394,7 +666,7 @@ local function main()
   -- body even after the harness prepends the local release artifact to `package.cpath`.
   -- `package.loadlib` forces the harness to execute the exact dylib it is about to benchmark.
   local module_loader, load_error =
-    package.loadlib(loaded_module_path, "luaopen_rs_smear_cursor")
+    package.loadlib(loaded_module_path, "luaopen_nvimrs_smear_cursor")
   if module_loader == nil then
     error("failed to load nvimrs_smear_cursor: " .. tostring(load_error))
   end
@@ -404,13 +676,26 @@ local function main()
   end
   package.loaded.nvimrs_smear_cursor = smear
   local scenario_name = getenv_string("SMEAR_SCENARIO_NAME", "adhoc")
+  local scenario_preset, scenario_preset_name = resolve_scenario_preset(scenario_name)
 
   local windows_count = getenv_positive_integer("SMEAR_WINDOWS", 8)
   local warmup_iterations = getenv_positive_integer("SMEAR_WARMUP_ITERATIONS", 500)
-  local baseline_iterations = getenv_positive_integer("SMEAR_BASELINE_ITERATIONS", 3000)
-  local stress_iterations = getenv_positive_integer("SMEAR_STRESS_ITERATIONS", 20000)
-  local stress_rounds = getenv_positive_integer("SMEAR_STRESS_ROUNDS", 4)
-  local recovery_iterations = getenv_positive_integer("SMEAR_RECOVERY_ITERATIONS", baseline_iterations)
+  local baseline_iterations = getenv_positive_integer(
+    "SMEAR_BASELINE_ITERATIONS",
+    scenario_default(scenario_preset, "baseline_iterations", 3000)
+  )
+  local stress_iterations = getenv_positive_integer(
+    "SMEAR_STRESS_ITERATIONS",
+    scenario_default(scenario_preset, "stress_iterations", 20000)
+  )
+  local stress_rounds = getenv_positive_integer(
+    "SMEAR_STRESS_ROUNDS",
+    scenario_default(scenario_preset, "stress_rounds", 4)
+  )
+  local recovery_iterations = getenv_positive_integer(
+    "SMEAR_RECOVERY_ITERATIONS",
+    scenario_default(scenario_preset, "recovery_iterations", baseline_iterations)
+  )
   local recovery_mode = validate_recovery_mode(getenv_string("SMEAR_RECOVERY_MODE", "cold"))
   local settle_wait_ms = getenv_non_negative_number("SMEAR_SETTLE_WAIT_MS", 1200)
   local cold_wait_timeout_ms = getenv_positive_integer("SMEAR_COLD_WAIT_TIMEOUT_MS", 2500)
@@ -421,43 +706,149 @@ local function main()
   local max_floating_windows = getenv_positive_integer("SMEAR_MAX_FLOATING_WINDOWS", 256)
   local smear_between_buffers = getenv_bool("SMEAR_BETWEEN_BUFFERS", false)
   local unique_buffers = getenv_bool("SMEAR_UNIQUE_BUFFERS", false)
-  local particles_enabled = getenv_bool("SMEAR_PARTICLES_ENABLED", false)
+  local particles_enabled = getenv_bool(
+    "SMEAR_PARTICLES_ENABLED",
+    scenario_default(scenario_preset, "particles_enabled", false)
+  )
+  local cursor_color = scenario_default(scenario_preset, "cursor_color", nil)
   local particles_over_text = getenv_bool("SMEAR_PARTICLES_OVER_TEXT", false)
+  local max_kept_windows = getenv_optional_positive_integer("SMEAR_MAX_KEPT_WINDOWS")
   local logging_level = getenv_non_negative_integer("SMEAR_LOGGING_LEVEL", 4)
-  local drain_every = getenv_non_negative_integer("SMEAR_DRAIN_EVERY", 16)
-  local delay_event_to_smear = getenv_non_negative_number("SMEAR_DELAY_EVENT_TO_SMEAR", 1)
-  local workload_line_count = getenv_positive_integer("SMEAR_LINE_COUNT", 2000)
+  local buffer_perf_mode = validate_buffer_perf_mode(
+    getenv_string("SMEAR_BUFFER_PERF_MODE", "auto")
+  )
+  local planner_compile_mode = validate_planner_compile_mode(
+    getenv_string("SMEAR_PLANNER_COMPILE_MODE", "auto")
+  )
+  local drain_every = getenv_non_negative_integer(
+    "SMEAR_DRAIN_EVERY",
+    scenario_default(scenario_preset, "drain_every", 16)
+  )
+  local delay_event_to_smear = getenv_non_negative_number(
+    "SMEAR_DELAY_EVENT_TO_SMEAR",
+    scenario_default(scenario_preset, "delay_event_to_smear", 1)
+  )
+  local workload_line_count = getenv_positive_integer(
+    "SMEAR_LINE_COUNT",
+    scenario_default(scenario_preset, "workload_line_count", 2000)
+  )
+  local workload_line_width = getenv_positive_integer(
+    "SMEAR_LINE_WIDTH",
+    scenario_default(scenario_preset, "workload_line_width", 96)
+  )
+  local cursor_column = getenv_non_negative_integer(
+    "SMEAR_CURSOR_COLUMN",
+    scenario_default(scenario_preset, "cursor_column", 0)
+  )
+  local extmark_span_count = getenv_non_negative_integer(
+    "SMEAR_EXTMARK_SPAN_COUNT",
+    scenario_default(scenario_preset, "extmark_span_count", 0)
+  )
+  local conceal_segment_count = getenv_non_negative_integer(
+    "SMEAR_CONCEAL_SEGMENTS",
+    scenario_default(scenario_preset, "conceal_segment_count", 0)
+  )
+  local conceal_segment_width = getenv_positive_integer(
+    "SMEAR_CONCEAL_SEGMENT_WIDTH",
+    scenario_default(scenario_preset, "conceal_segment_width", 2)
+  )
+  local conceal_gap_width = getenv_non_negative_integer(
+    "SMEAR_CONCEAL_GAP_WIDTH",
+    scenario_default(scenario_preset, "conceal_gap_width", 1)
+  )
+  local trail_duration_ms = getenv_positive_number(
+    "SMEAR_TRAIL_DURATION_MS",
+    scenario_default(scenario_preset, "trail_duration_ms", 150)
+  )
+  local trail_thickness = getenv_non_negative_number(
+    "SMEAR_TRAIL_THICKNESS",
+    scenario_default(scenario_preset, "trail_thickness", 1)
+  )
+  local trail_thickness_x = getenv_non_negative_number(
+    "SMEAR_TRAIL_THICKNESS_X",
+    scenario_default(scenario_preset, "trail_thickness_x", trail_thickness)
+  )
+  local top_k_per_cell = getenv_positive_integer(
+    "SMEAR_TOP_K_PER_CELL",
+    scenario_default(scenario_preset, "top_k_per_cell", 5)
+  )
 
-  smear.setup({
+  if cursor_column >= workload_line_width then
+    error(
+      string.format(
+        "SMEAR_CURSOR_COLUMN must be smaller than SMEAR_LINE_WIDTH, got cursor=%d width=%d",
+        cursor_column,
+        workload_line_width
+      )
+    )
+  end
+  if top_k_per_cell < 2 then
+    error(string.format("SMEAR_TOP_K_PER_CELL must be at least 2, got %d", top_k_per_cell))
+  end
+
+  local setup_options = {
     -- `logging_level = 4` is intentionally the quietest setting in this plugin, not the most
     -- verbose one. Keep perf runs on that setting unless the harness is explicitly debugging.
     logging_level = logging_level,
+    cursor_color = cursor_color,
     particles_enabled = particles_enabled,
     particles_over_text = particles_over_text,
+    buffer_perf_mode = buffer_perf_mode,
     smear_between_buffers = smear_between_buffers,
     smear_between_neighbor_lines = true,
     delay_event_to_smear = delay_event_to_smear,
+    trail_duration_ms = trail_duration_ms,
+    trail_thickness = trail_thickness,
+    trail_thickness_x = trail_thickness_x,
+    top_k_per_cell = top_k_per_cell,
     fps = 120,
-  })
+  }
+  if max_kept_windows ~= nil then
+    setup_options.max_kept_windows = max_kept_windows
+  end
 
-  emit_line(string.format("PERF_SCENARIO name=%s", scenario_name))
+  smear.setup(setup_options)
+
+  emit_line(
+    string.format("PERF_SCENARIO name=%s preset=%s", scenario_name, scenario_preset_name)
+  )
   emit_line(string.format("PERF_LIBRARY module_path=%s", loaded_module_path))
 
   local workload_buffers = create_workload_buffers(
     workload_line_count,
+    workload_line_width,
     windows_count,
     unique_buffers
   )
-  local windows = create_split_windows(workload_buffers)
+  local cursor_targets = build_cursor_targets(
+    windows_count,
+    workload_line_count,
+    cursor_column
+  )
+  local windows = create_split_windows(workload_buffers, cursor_targets)
+  apply_extmark_heavy_workload(
+    workload_buffers,
+    cursor_targets,
+    workload_line_width,
+    extmark_span_count
+  )
+  apply_conceal_heavy_workload(
+    windows,
+    cursor_targets,
+    conceal_segment_count,
+    conceal_segment_width,
+    conceal_gap_width
+  )
   if #windows < 2 then
     error("need at least 2 windows for this harness")
   end
 
   emit_line(
     string.format(
-      "PERF_CONFIG windows=%d workload_line_count=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d recovery_mode=%s settle_wait_ms=%.0f cold_wait_timeout_ms=%d require_cold_recovery=%s recovery_poll_ms=%d logging_level=%d smear_between_buffers=%s unique_buffers=%s particles_enabled=%s particles_over_text=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d delay_event_to_smear=%.3f",
+      "PERF_CONFIG windows=%d workload_line_count=%d workload_line_width=%d warmup_iterations=%d baseline_iterations=%d stress_iterations=%d stress_rounds=%d recovery_iterations=%d recovery_mode=%s settle_wait_ms=%.0f cold_wait_timeout_ms=%d require_cold_recovery=%s recovery_poll_ms=%d logging_level=%d buffer_perf_mode=%s planner_compile_mode=%s smear_between_buffers=%s unique_buffers=%s particles_enabled=%s particles_over_text=%s requested_max_kept_windows=%s max_recovery_ratio=%.3f max_stress_ratio=%.3f drain_every=%d delay_event_to_smear=%.3f cursor_col0=%d extmark_span_count=%d conceal_segment_count=%d conceal_segment_width=%d conceal_gap_width=%d trail_duration_ms=%.1f trail_thickness=%.2f trail_thickness_x=%.2f top_k_per_cell=%d",
       #windows,
       workload_line_count,
+      workload_line_width,
       warmup_iterations,
       baseline_iterations,
       stress_iterations,
@@ -469,14 +860,26 @@ local function main()
       tostring(require_cold_recovery),
       recovery_poll_ms,
       logging_level,
+      buffer_perf_mode,
+      planner_compile_mode,
       tostring(smear_between_buffers),
       tostring(unique_buffers),
       tostring(particles_enabled),
       tostring(particles_over_text),
+      max_kept_windows == nil and "default" or tostring(max_kept_windows),
       max_recovery_ratio,
       max_stress_ratio,
       drain_every,
-      delay_event_to_smear
+      delay_event_to_smear,
+      cursor_column,
+      extmark_span_count,
+      conceal_segment_count,
+      conceal_segment_width,
+      conceal_gap_width,
+      trail_duration_ms,
+      trail_thickness,
+      trail_thickness_x,
+      top_k_per_cell
     )
   )
 

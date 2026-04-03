@@ -1,4 +1,5 @@
 use super::RuntimeState;
+use crate::config::BufferPerfMode;
 use crate::config::RuntimeConfig;
 use crate::lua::invalid_key;
 use nvim_oxi::Result;
@@ -42,6 +43,7 @@ pub(crate) struct RuntimeSwitchesPatch {
     pub(crate) hide_target_hack: Option<bool>,
     pub(crate) max_kept_windows: Option<usize>,
     pub(crate) windows_zindex: Option<u32>,
+    pub(crate) buffer_perf_mode: Option<BufferPerfMode>,
     pub(crate) filetypes_disabled: Option<Vec<String>>,
     pub(crate) logging_level: Option<i64>,
 }
@@ -276,6 +278,7 @@ impl RuntimeSwitchesPatch {
                 hide_target_hack,
                 max_kept_windows,
                 windows_zindex,
+                buffer_perf_mode,
             ]
         );
         if let Some(value) = self.filetypes_disabled.take() {

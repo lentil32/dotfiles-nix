@@ -352,19 +352,20 @@ fn prepare_frame_capacity(
         }
 
         let in_use_windows = window_pool::tab_in_use_window_count_from_tab(tab_windows);
-        let required_capacity = window_pool::frame_capacity_target(
+        let capacity_target = window_pool::frame_capacity_target(
             in_use_windows,
             metrics.planned_ops,
             max_kept_windows,
             allocation_policy,
         );
+        window_pool::record_frame_capacity_target(tab_windows, capacity_target);
         metrics.created_windows =
             metrics
                 .created_windows
                 .saturating_add(window_pool::ensure_capacity_in_tab(
                     tab_windows,
                     namespace_id,
-                    required_capacity,
+                    capacity_target.target_capacity,
                     max_kept_windows,
                 )?);
         Ok(())

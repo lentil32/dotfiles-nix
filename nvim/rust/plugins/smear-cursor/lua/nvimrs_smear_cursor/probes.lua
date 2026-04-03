@@ -34,7 +34,14 @@ local function parse_hex_color(value)
   return tonumber(hex, 16)
 end
 
-function M.cursor_color_at_cursor(colorscheme_generation)
+local function cursor_color_result(color, used_extmark_fallback)
+  return {
+    color = color,
+    used_extmark_fallback = used_extmark_fallback,
+  }
+end
+
+function M.cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback)
   reset_hl_color_cache(colorscheme_generation)
 
   local line = vim.fn.line(".")
@@ -45,14 +52,14 @@ function M.cursor_color_at_cursor(colorscheme_generation)
     local trans_id = vim.fn.synIDtrans(syn_id)
     local syn_color = parse_hex_color(vim.fn.synIDattr(trans_id, "fg#"))
     if syn_color then
-      return syn_color
+      return cursor_color_result(syn_color, false)
     end
 
     local syn_group = vim.fn.synIDattr(trans_id, "name")
     if type(syn_group) == "string" and syn_group ~= "" then
       local color = get_hl_fg(syn_group)
       if color then
-        return color
+        return cursor_color_result(color, false)
       end
     end
   end
@@ -70,14 +77,18 @@ function M.cursor_color_at_cursor(colorscheme_generation)
       if ts_hl_group then
         local color = get_hl_fg(ts_hl_group)
         if color then
-          return color
+          return cursor_color_result(color, false)
         end
       end
     end
   end
 
   if vim.bo.buftype ~= "" and vim.bo.buftype ~= "acwrite" then
-    return nil
+    return cursor_color_result(nil, false)
+  end
+
+  if not allow_extmark_fallback then
+    return cursor_color_result(nil, false)
   end
 
   local extmarks = vim.api.nvim_buf_get_extmarks(
@@ -93,12 +104,12 @@ function M.cursor_color_at_cursor(colorscheme_generation)
     if hl_group then
       local color = get_hl_fg(hl_group)
       if color then
-        return color
+        return cursor_color_result(color, true)
       end
     end
   end
 
-  return nil
+  return cursor_color_result(nil, true)
 end
 
 function M.background_allowed_mask(request)

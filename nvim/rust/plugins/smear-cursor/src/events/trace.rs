@@ -98,13 +98,19 @@ fn external_demand_kind_name(kind: ExternalDemandKind) -> &'static str {
         ExternalDemandKind::ExternalCursor => "external_cursor",
         ExternalDemandKind::ModeChanged => "mode_changed",
         ExternalDemandKind::BufferEntered => "buffer_entered",
+        ExternalDemandKind::BoundaryRefresh => "boundary_refresh",
     }
+}
+
+fn buffer_perf_class_name(class: crate::core::state::BufferPerfClass) -> &'static str {
+    class.diagnostic_name()
 }
 
 fn external_demand_summary(demand: &ExternalDemand) -> String {
     format!(
-        "kind={} seq={} observed_at={} target={}",
+        "kind={} perf_class={} seq={} observed_at={} target={}",
         external_demand_kind_name(demand.kind()),
+        buffer_perf_class_name(demand.buffer_perf_class()),
         demand.seq().value(),
         millis_summary(demand.observed_at()),
         cursor_position_summary(demand.requested_target()),

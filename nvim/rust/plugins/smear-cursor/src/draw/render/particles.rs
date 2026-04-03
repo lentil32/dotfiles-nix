@@ -1,6 +1,9 @@
 use super::PlanResources;
-use super::cell_draw::{draw_braille_character, draw_octant_character};
-use super::geometry::{frac01, level_from_shade, round_lua};
+use super::cell_draw::draw_braille_character;
+use super::cell_draw::draw_octant_character;
+use super::geometry::frac01;
+use super::geometry::level_from_shade;
+use super::geometry::round_lua;
 use crate::types::RenderFrame;
 use std::collections::BTreeMap;
 

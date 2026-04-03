@@ -1,5 +1,6 @@
 ---
 source: plugins/smear-cursor/src/events/handlers/render_apply/telemetry.rs
+assertion_line: 363
 expression: "&metrics.perf_details()"
 ---
-ops_planned=2 ops_applied=1 ops_skipped_capacity=3 windows_created=4 windows_reused=5 reuse_failed_missing_window=6 reuse_failed_reconfigure=7 reuse_failed_missing_buffer=8 windows_pruned=9 windows_hidden=10 windows_invalid_removed=11 windows_recovered=12 pool_total_windows=0 pool_available_windows=0 pool_in_use_windows=0 pool_cached_budget=0 pool_last_frame_demand=0
+ops_planned=2 ops_applied=1 ops_skipped_capacity=3 windows_created=4 windows_reused=5 reuse_failed_missing_window=6 reuse_failed_reconfigure=7 reuse_failed_missing_buffer=8 windows_pruned=9 windows_hidden=10 windows_invalid_removed=11 windows_recovered=12 pool_total_windows=0 pool_available_windows=0 pool_in_use_windows=0 pool_cached_budget=0 pool_last_frame_demand=0 pool_peak_total=0 pool_peak_demand=0 pool_peak_requested=0 pool_cap_hits=0

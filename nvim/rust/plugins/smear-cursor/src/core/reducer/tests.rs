@@ -7,6 +7,8 @@ use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::effect::ObservationRuntimeContext;
+use crate::core::effect::ProbePolicy;
+use crate::core::effect::ProbeQuality;
 use crate::core::effect::RenderCleanupExecution;
 use crate::core::effect::RequestObservationBaseEffect;
 use crate::core::effect::RequestProbeEffect;
@@ -32,8 +34,10 @@ use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbeChunk;
 use crate::core::state::BackgroundProbeChunkMask;
 use crate::core::state::BackgroundProbePlan;
+use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
 use crate::core::state::CursorColorSample;
+use crate::core::state::CursorPositionSync;
 use crate::core::state::CursorTextContext;
 use crate::core::state::DegradedApplyMetrics;
 use crate::core::state::DemandQueue;
@@ -76,6 +80,7 @@ use crate::state::CursorShape;
 use crate::state::RuntimeState;
 use crate::types::Point;
 use crate::types::ScreenCell;
+use pretty_assertions::assert_eq as pretty_assert_eq;
 
 fn cursor(row: u32, col: u32) -> CursorPosition {
     CursorPosition {
@@ -124,17 +129,47 @@ fn external_demand_event(
     observed_at: u64,
     requested_target: Option<CursorPosition>,
 ) -> Event {
+    external_demand_event_with_perf_class(
+        kind,
+        observed_at,
+        requested_target,
+        BufferPerfClass::Full,
+    )
+}
+
+fn external_demand_event_with_perf_class(
+    kind: ExternalDemandKind,
+    observed_at: u64,
+    requested_target: Option<CursorPosition>,
+    buffer_perf_class: BufferPerfClass,
+) -> Event {
     Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
         kind,
         observed_at: Millis::new(observed_at),
         requested_target,
+        buffer_perf_class,
         ingress_cursor_presentation: None,
     })
 }
 
 fn observation_request(seq: u64, kind: ExternalDemandKind, observed_at: u64) -> ObservationRequest {
+    observation_request_with_perf_class(seq, kind, observed_at, BufferPerfClass::Full)
+}
+
+fn observation_request_with_perf_class(
+    seq: u64,
+    kind: ExternalDemandKind,
+    observed_at: u64,
+    buffer_perf_class: BufferPerfClass,
+) -> ObservationRequest {
     ObservationRequest::new(
-        ExternalDemand::new(IngressSeq::new(seq), kind, Millis::new(observed_at), None),
+        ExternalDemand::new(
+            IngressSeq::new(seq),
+            kind,
+            Millis::new(observed_at),
+            None,
+            buffer_perf_class,
+        ),
         ProbeRequestSet::default(),
     )
 }
@@ -144,10 +179,19 @@ fn observation_basis(
     position: Option<CursorPosition>,
     observed_at: u64,
 ) -> ObservationBasis {
+    observation_basis_in_mode(request, position, observed_at, "n")
+}
+
+fn observation_basis_in_mode(
+    request: &ObservationRequest,
+    position: Option<CursorPosition>,
+    observed_at: u64,
+    mode: &str,
+) -> ObservationBasis {
     ObservationBasis::new(
         request.observation_id(),
         Millis::new(observed_at),
-        "n".to_string(),
+        mode.to_string(),
         position,
         CursorLocation::new(11, 22, 3, 4),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
@@ -216,6 +260,39 @@ fn observation_snapshot(position: CursorPosition) -> ObservationSnapshot {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let basis = observation_basis(&request, Some(position), 91);
     ObservationSnapshot::new(request, basis, observation_motion())
+}
+
+fn observation_snapshot_with_cursor_color(
+    position: CursorPosition,
+    color: u32,
+) -> ObservationSnapshot {
+    observation_snapshot_with_cursor_color_reuse(position, color, ProbeReuse::Exact)
+}
+
+fn observation_snapshot_with_cursor_color_reuse(
+    position: CursorPosition,
+    color: u32,
+    reuse: ProbeReuse,
+) -> ObservationSnapshot {
+    let request = ObservationRequest::new(
+        ExternalDemand::new(
+            IngressSeq::new(9),
+            ExternalDemandKind::ExternalCursor,
+            Millis::new(90),
+            None,
+            BufferPerfClass::Full,
+        ),
+        ProbeRequestSet::new(true, false),
+    );
+    let basis = observation_basis(&request, Some(position), 91);
+    ObservationSnapshot::new(request.clone(), basis, observation_motion())
+        .with_cursor_color_probe(ProbeState::ready(
+            ProbeKind::CursorColor.request_id(request.observation_id()),
+            request.observation_id(),
+            reuse,
+            Some(CursorColorSample::new(color)),
+        ))
+        .expect("cursor color probe should be requested")
 }
 
 fn observing_state_from_demand(
@@ -323,13 +400,21 @@ impl ObservationScenario {
             .with_last_cursor(Some(cursor(7, 8)))
             .with_active_observation(Some(observation.clone()))
             .expect("observation should stay active");
+        let cursor_color_fallback_sample = retained_cursor_color_sample(&observing);
         let effect = if ready.runtime().config.requires_cursor_color_sampling() {
             Effect::RequestProbe(RequestProbeEffect {
                 observation_basis: basis.clone(),
                 probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
                 kind: ProbeKind::CursorColor,
                 cursor_position_policy: cursor_position_policy(&observing),
+                buffer_perf_class: request.demand().buffer_perf_class(),
+                probe_policy: expected_probe_policy(
+                    request.demand().kind(),
+                    request.demand().buffer_perf_class(),
+                    cursor_color_fallback_sample,
+                ),
                 background_chunk: None,
+                cursor_color_fallback_sample,
             })
         } else {
             Effect::RequestProbe(RequestProbeEffect {
@@ -337,9 +422,16 @@ impl ObservationScenario {
                 probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
                 kind: ProbeKind::Background,
                 cursor_position_policy: cursor_position_policy(&observing),
+                buffer_perf_class: request.demand().buffer_perf_class(),
+                probe_policy: expected_probe_policy(
+                    request.demand().kind(),
+                    request.demand().buffer_perf_class(),
+                    cursor_color_fallback_sample,
+                ),
                 background_chunk: observation
                     .background_progress()
                     .and_then(crate::core::state::BackgroundProbeProgress::next_chunk),
+                cursor_color_fallback_sample: None,
             })
         };
 
@@ -364,12 +456,98 @@ fn cursor_position_policy(state: &CoreState) -> CursorPositionReadPolicy {
     CursorPositionReadPolicy::new(state.runtime().config.smear_to_cmd)
 }
 
-fn observation_runtime_context(state: &CoreState) -> ObservationRuntimeContext {
+fn retained_cursor_color_sample(state: &CoreState) -> Option<CursorColorSample> {
+    state
+        .retained_observation()
+        .and_then(ObservationSnapshot::cursor_color)
+        .map(CursorColorSample::new)
+}
+
+fn expected_probe_policy(
+    demand_kind: ExternalDemandKind,
+    buffer_perf_class: BufferPerfClass,
+    cursor_color_fallback_sample: Option<CursorColorSample>,
+) -> ProbePolicy {
+    ProbePolicy::for_demand(
+        demand_kind,
+        buffer_perf_class,
+        cursor_color_fallback_sample.is_some(),
+    )
+}
+
+fn compatible_cursor_color_ready_state(
+    configure_runtime: impl FnOnce(&mut RuntimeState),
+) -> CoreState {
+    let mut runtime = ready_state().runtime().clone();
+    runtime.config.cursor_color = Some("none".to_string());
+    runtime.initialize_cursor(
+        Point { row: 9.0, col: 9.0 },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(11, 22, 3, 9),
+    );
+    configure_runtime(&mut runtime);
+    ready_state()
+        .with_last_cursor(Some(cursor(9, 9)))
+        .with_runtime(runtime)
+        .into_ready_with_observation(observation_snapshot_with_cursor_color_reuse(
+            cursor(9, 9),
+            0x00AB_CDEF,
+            ProbeReuse::Compatible,
+        ))
+}
+
+fn conceal_deferred_cursor_ready_state(
+    configure_runtime: impl FnOnce(&mut RuntimeState),
+) -> CoreState {
+    let mut runtime = ready_state().runtime().clone();
+    runtime.initialize_cursor(
+        Point { row: 9.0, col: 9.0 },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(11, 22, 3, 9),
+    );
+    configure_runtime(&mut runtime);
+
+    let request = observation_request_with_perf_class(
+        9,
+        ExternalDemandKind::ExternalCursor,
+        90,
+        BufferPerfClass::FastMotion,
+    );
+    let basis = observation_basis(&request, Some(cursor(9, 9)), 91);
+    let observation = ObservationSnapshot::new(
+        request,
+        basis,
+        observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+    );
+
+    ready_state()
+        .with_last_cursor(Some(cursor(9, 9)))
+        .with_runtime(runtime)
+        .into_ready_with_observation(observation)
+}
+
+fn observation_runtime_context(
+    state: &CoreState,
+    demand_kind: ExternalDemandKind,
+) -> ObservationRuntimeContext {
+    observation_runtime_context_with_perf_class(state, demand_kind, BufferPerfClass::Full)
+}
+
+fn observation_runtime_context_with_perf_class(
+    state: &CoreState,
+    demand_kind: ExternalDemandKind,
+    buffer_perf_class: BufferPerfClass,
+) -> ObservationRuntimeContext {
+    let cursor_color_fallback_sample = retained_cursor_color_sample(state);
     ObservationRuntimeContext::new(
         cursor_position_policy(state),
         state.runtime().config.scroll_buffer_space,
         state.runtime().tracked_location(),
         state.runtime().current_corners(),
+        buffer_perf_class,
+        expected_probe_policy(demand_kind, buffer_perf_class, cursor_color_fallback_sample),
     )
 }
 
@@ -606,7 +784,7 @@ fn initialize_from_idle_enters_primed_protocol_without_follow_up_reads() {
         }),
     );
 
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Primed);
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Primed);
     assert!(transition.effects.is_empty());
 }
 
@@ -637,12 +815,12 @@ mod protocol_shared_state_constructors {
         recovery_policy: RecoveryPolicyState,
         ingress_policy: IngressPolicyState,
     ) {
-        assert_eq!(
+        pretty_assert_eq!(
             state.timers().active_token(TimerId::Animation),
             Some(expected_token)
         );
-        assert_eq!(state.recovery_policy(), recovery_policy);
-        assert_eq!(state.ingress_policy(), ingress_policy);
+        pretty_assert_eq!(state.recovery_policy(), recovery_policy);
+        pretty_assert_eq!(state.ingress_policy(), ingress_policy);
     }
 
     #[test]
@@ -744,8 +922,8 @@ mod observing_cursor_demand_queue {
             external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
         );
 
-        assert_eq!(first.next.lifecycle(), Lifecycle::Observing);
-        assert_eq!(
+        pretty_assert_eq!(first.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(
             first.effects,
             with_cleanup_invalidation(
                 &first.next,
@@ -753,7 +931,10 @@ mod observing_cursor_demand_queue {
                 vec![Effect::RequestObservationBase(
                     RequestObservationBaseEffect {
                         request: observation_request(1, ExternalDemandKind::ExternalCursor, 20),
-                        context: observation_runtime_context(&ready),
+                        context: observation_runtime_context(
+                            &ready,
+                            ExternalDemandKind::ExternalCursor,
+                        ),
                     }
                 )]
             )
@@ -771,8 +952,8 @@ mod observing_cursor_demand_queue {
             external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
         );
 
-        assert_eq!(second.next.lifecycle(), Lifecycle::Observing);
-        assert_eq!(
+        pretty_assert_eq!(second.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(
             second.effects,
             vec![Effect::RecordEventLoopMetric(
                 EventLoopMetricEffect::IngressCoalesced,
@@ -800,13 +981,14 @@ mod observing_cursor_demand_queue {
             .demand_queue()
             .latest_cursor()
             .expect("queued cursor demand");
-        assert_eq!(
+        pretty_assert_eq!(
             queued_cursor,
             &crate::core::state::QueuedDemand::ready(ExternalDemand::new(
                 IngressSeq::new(3),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(22),
                 None,
+                BufferPerfClass::Full,
             ))
         );
     }
@@ -835,8 +1017,8 @@ mod delayed_cursor_demand_queue {
             .timers()
             .active_token(TimerId::Ingress)
             .expect("cursor ingress delay should arm the ingress timer");
-        assert_eq!(first.next.lifecycle(), ready.lifecycle());
-        assert_eq!(
+        pretty_assert_eq!(first.next.lifecycle(), ready.lifecycle());
+        pretty_assert_eq!(
             first.effects,
             with_cleanup_invalidation(
                 &first.next,
@@ -849,7 +1031,7 @@ mod delayed_cursor_demand_queue {
             )
         );
         assert!(first.next.demand_queue().latest_cursor().is_some());
-        assert_eq!(
+        pretty_assert_eq!(
             first.next.ingress_policy().pending_delay_until(),
             Some(Millis::new(60))
         );
@@ -876,7 +1058,7 @@ mod delayed_cursor_demand_queue {
             }),
         );
 
-        assert_eq!(fired.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(fired.next.lifecycle(), Lifecycle::Observing);
         assert!(matches!(
             fired.effects.as_slice(),
             [Effect::RequestObservationBase(
@@ -908,8 +1090,8 @@ mod delayed_cursor_demand_queue {
             .timers()
             .active_token(TimerId::Ingress)
             .expect("existing ingress timer token");
-        assert_eq!(second_token, first_token);
-        assert_eq!(
+        pretty_assert_eq!(second_token, first_token);
+        pretty_assert_eq!(
             second.next.demand_queue().latest_cursor(),
             Some(&crate::core::state::QueuedDemand::ready(
                 ExternalDemand::new(
@@ -917,17 +1099,18 @@ mod delayed_cursor_demand_queue {
                     ExternalDemandKind::ExternalCursor,
                     Millis::new(21),
                     None,
+                    BufferPerfClass::Full,
                 )
             ))
         );
-        assert_eq!(
+        pretty_assert_eq!(
             second.effects,
             vec![
                 Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
                 Effect::RecordEventLoopMetric(EventLoopMetricEffect::DelayedIngressPendingUpdated,),
             ]
         );
-        assert_eq!(
+        pretty_assert_eq!(
             second.next.ingress_policy().pending_delay_until(),
             Some(Millis::new(61))
         );
@@ -960,8 +1143,8 @@ mod delayed_cursor_demand_queue {
             .timers()
             .active_token(TimerId::Ingress)
             .expect("existing ingress timer token");
-        assert_eq!(third_token, first_token);
-        assert_eq!(
+        pretty_assert_eq!(third_token, first_token);
+        pretty_assert_eq!(
             third.next.demand_queue().latest_cursor(),
             Some(&crate::core::state::QueuedDemand::ready(
                 ExternalDemand::new(
@@ -969,17 +1152,18 @@ mod delayed_cursor_demand_queue {
                     ExternalDemandKind::ExternalCursor,
                     Millis::new(22),
                     None,
+                    BufferPerfClass::Full,
                 )
             ))
         );
-        assert_eq!(
+        pretty_assert_eq!(
             second.effects,
             vec![
                 Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
                 Effect::RecordEventLoopMetric(EventLoopMetricEffect::DelayedIngressPendingUpdated,),
             ]
         );
-        assert_eq!(
+        pretty_assert_eq!(
             third.effects,
             vec![
                 Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
@@ -998,7 +1182,7 @@ mod delayed_cursor_demand_queue {
                 )),
             "burst updates should reuse the original timer generation instead of churning timer tokens"
         );
-        assert_eq!(
+        pretty_assert_eq!(
             third.next.ingress_policy().pending_delay_until(),
             Some(Millis::new(62))
         );
@@ -1035,7 +1219,7 @@ mod delayed_cursor_demand_queue {
             .active_token(TimerId::Ingress)
             .expect("ingress timer should be rearmed for the remaining delay");
         assert_ne!(rearmed_token, first_token);
-        assert_eq!(
+        pretty_assert_eq!(
             early_fire.effects,
             vec![Effect::ScheduleTimer(ScheduleTimerEffect {
                 token: rearmed_token,
@@ -1043,7 +1227,7 @@ mod delayed_cursor_demand_queue {
                 requested_at: Millis::new(60),
             })]
         );
-        assert_eq!(
+        pretty_assert_eq!(
             early_fire.next.ingress_policy().pending_delay_until(),
             Some(Millis::new(61))
         );
@@ -1070,7 +1254,7 @@ mod delayed_cursor_demand_queue {
             }),
         );
 
-        assert_eq!(fired.next.ingress_policy().pending_delay_until(), None);
+        pretty_assert_eq!(fired.next.ingress_policy().pending_delay_until(), None);
     }
 }
 
@@ -1086,12 +1270,13 @@ fn observation_request_uses_explicit_cursor_color_probe_policy() {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(24),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     );
 
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
         transition.effects,
         with_cleanup_invalidation(
             &transition.next,
@@ -1104,10 +1289,14 @@ fn observation_request_uses_explicit_cursor_color_probe_policy() {
                             ExternalDemandKind::ExternalCursor,
                             Millis::new(24),
                             None,
+                            BufferPerfClass::Full,
                         ),
                         ProbeRequestSet::new(true, false),
                     ),
-                    context: observation_runtime_context(&ready),
+                    context: observation_runtime_context(
+                        &ready,
+                        ExternalDemandKind::ExternalCursor,
+                    ),
                 }
             )]
         )
@@ -1127,12 +1316,13 @@ fn observation_request_uses_explicit_background_probe_policy() {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(24),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     );
 
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
         transition.effects,
         with_cleanup_invalidation(
             &transition.next,
@@ -1145,10 +1335,60 @@ fn observation_request_uses_explicit_background_probe_policy() {
                             ExternalDemandKind::ExternalCursor,
                             Millis::new(24),
                             None,
+                            BufferPerfClass::Full,
                         ),
                         ProbeRequestSet::new(false, true),
                     ),
-                    context: observation_runtime_context(&ready),
+                    context: observation_runtime_context(
+                        &ready,
+                        ExternalDemandKind::ExternalCursor,
+                    ),
+                }
+            )]
+        )
+    );
+}
+
+#[test]
+fn observation_request_skips_background_probe_for_fast_motion_perf_class() {
+    let ready = ready_state_with_runtime_config(|runtime| {
+        runtime.config.particles_enabled = true;
+        runtime.config.particles_over_text = false;
+    });
+
+    let transition = reduce(
+        &ready,
+        external_demand_event_with_perf_class(
+            ExternalDemandKind::ExternalCursor,
+            24,
+            None,
+            BufferPerfClass::FastMotion,
+        ),
+    );
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
+        transition.effects,
+        with_cleanup_invalidation(
+            &transition.next,
+            24,
+            vec![Effect::RequestObservationBase(
+                RequestObservationBaseEffect {
+                    request: ObservationRequest::new(
+                        ExternalDemand::new(
+                            IngressSeq::new(1),
+                            ExternalDemandKind::ExternalCursor,
+                            Millis::new(24),
+                            None,
+                            BufferPerfClass::FastMotion,
+                        ),
+                        ProbeRequestSet::new(false, false),
+                    ),
+                    context: observation_runtime_context_with_perf_class(
+                        &ready,
+                        ExternalDemandKind::ExternalCursor,
+                        BufferPerfClass::FastMotion,
+                    ),
                 }
             )]
         )
@@ -1177,11 +1417,12 @@ fn observation_request_captures_runtime_tracking_context() {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(24),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     );
 
-    assert_eq!(
+    pretty_assert_eq!(
         transition.effects,
         with_cleanup_invalidation(
             &transition.next,
@@ -1189,7 +1430,94 @@ fn observation_request_captures_runtime_tracking_context() {
             vec![Effect::RequestObservationBase(
                 RequestObservationBaseEffect {
                     request: observation_request(1, ExternalDemandKind::ExternalCursor, 24),
-                    context: observation_runtime_context(&ready),
+                    context: observation_runtime_context(
+                        &ready,
+                        ExternalDemandKind::ExternalCursor,
+                    ),
+                }
+            )]
+        )
+    );
+}
+
+#[test]
+fn observation_request_reuses_retained_cursor_color_without_downgrading_position_policy() {
+    let ready = cursor_color_probe_ready_state().into_ready_with_observation(
+        observation_snapshot_with_cursor_color(cursor(3, 4), 0x00AB_CDEF),
+    );
+
+    let transition = reduce(
+        &ready,
+        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+            kind: ExternalDemandKind::ExternalCursor,
+            observed_at: Millis::new(24),
+            requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
+            ingress_cursor_presentation: None,
+        }),
+    );
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
+        transition.effects,
+        with_cleanup_invalidation(
+            &transition.next,
+            24,
+            vec![Effect::RequestObservationBase(
+                RequestObservationBaseEffect {
+                    request: ObservationRequest::new(
+                        ExternalDemand::new(
+                            IngressSeq::new(1),
+                            ExternalDemandKind::ExternalCursor,
+                            Millis::new(24),
+                            None,
+                            BufferPerfClass::Full,
+                        ),
+                        ProbeRequestSet::new(true, false),
+                    ),
+                    context: observation_runtime_context(
+                        &ready,
+                        ExternalDemandKind::ExternalCursor,
+                    ),
+                }
+            )]
+        )
+    );
+}
+
+#[test]
+fn observation_request_uses_fast_motion_probe_quality_for_fast_motion_perf_class() {
+    let ready = ready_state();
+
+    let transition = reduce(
+        &ready,
+        external_demand_event_with_perf_class(
+            ExternalDemandKind::ExternalCursor,
+            24,
+            None,
+            BufferPerfClass::FastMotion,
+        ),
+    );
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
+        transition.effects,
+        with_cleanup_invalidation(
+            &transition.next,
+            24,
+            vec![Effect::RequestObservationBase(
+                RequestObservationBaseEffect {
+                    request: observation_request_with_perf_class(
+                        1,
+                        ExternalDemandKind::ExternalCursor,
+                        24,
+                        BufferPerfClass::FastMotion,
+                    ),
+                    context: observation_runtime_context_with_perf_class(
+                        &ready,
+                        ExternalDemandKind::ExternalCursor,
+                        BufferPerfClass::FastMotion,
+                    ),
                 }
             )]
         )
@@ -1207,6 +1535,7 @@ fn observation_base_collection_emits_cursor_color_probe_request() {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(25),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     )
@@ -1225,15 +1554,22 @@ fn observation_base_collection_emits_cursor_color_probe_request() {
         }),
     );
 
-    assert_eq!(based.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
+    pretty_assert_eq!(based.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
         based.effects,
         vec![Effect::RequestProbe(RequestProbeEffect {
             observation_basis: observation_basis(&request, Some(cursor(7, 8)), 26),
             probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
             kind: ProbeKind::CursorColor,
             cursor_position_policy: cursor_position_policy(&observing),
+            buffer_perf_class: request.demand().buffer_perf_class(),
+            probe_policy: expected_probe_policy(
+                request.demand().kind(),
+                request.demand().buffer_perf_class(),
+                retained_cursor_color_sample(&observing),
+            ),
             background_chunk: None,
+            cursor_color_fallback_sample: retained_cursor_color_sample(&observing),
         })]
     );
     match based
@@ -1262,6 +1598,7 @@ fn observation_base_collection_stages_only_first_pending_probe_when_multiple_pro
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(25),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     )
@@ -1281,15 +1618,22 @@ fn observation_base_collection_stages_only_first_pending_probe_when_multiple_pro
         }),
     );
 
-    assert_eq!(based.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
+    pretty_assert_eq!(based.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
         based.effects,
         vec![Effect::RequestProbe(RequestProbeEffect {
             observation_basis: basis,
             probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
             kind: ProbeKind::CursorColor,
             cursor_position_policy: cursor_position_policy(&observing),
+            buffer_perf_class: request.demand().buffer_perf_class(),
+            probe_policy: expected_probe_policy(
+                request.demand().kind(),
+                request.demand().buffer_perf_class(),
+                retained_cursor_color_sample(&observing),
+            ),
             background_chunk: None,
+            cursor_color_fallback_sample: retained_cursor_color_sample(&observing),
         })]
     );
     let observation = based
@@ -1307,6 +1651,157 @@ fn observation_base_collection_stages_only_first_pending_probe_when_multiple_pro
 }
 
 #[test]
+fn observation_base_collection_keeps_exact_position_policy_when_reusing_retained_cursor_color() {
+    let ready = cursor_color_probe_ready_state().into_ready_with_observation(
+        observation_snapshot_with_cursor_color(cursor(3, 4), 0x00AB_CDEF),
+    );
+    let observing = reduce(
+        &ready,
+        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+            kind: ExternalDemandKind::ExternalCursor,
+            observed_at: Millis::new(25),
+            requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
+            ingress_cursor_presentation: None,
+        }),
+    )
+    .next;
+    let request = observing
+        .active_observation_request()
+        .cloned()
+        .expect("active observation");
+
+    let based = reduce(
+        &observing,
+        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
+            request: request.clone(),
+            basis: observation_basis(&request, Some(cursor(7, 8)), 26),
+            motion: observation_motion(),
+        }),
+    );
+
+    pretty_assert_eq!(based.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
+        based.effects,
+        vec![Effect::RequestProbe(RequestProbeEffect {
+            observation_basis: observation_basis(&request, Some(cursor(7, 8)), 26),
+            probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
+            kind: ProbeKind::CursorColor,
+            cursor_position_policy: cursor_position_policy(&observing),
+            buffer_perf_class: request.demand().buffer_perf_class(),
+            probe_policy: expected_probe_policy(
+                request.demand().kind(),
+                request.demand().buffer_perf_class(),
+                Some(CursorColorSample::new(0x00AB_CDEF)),
+            ),
+            background_chunk: None,
+            cursor_color_fallback_sample: Some(CursorColorSample::new(0x00AB_CDEF)),
+        })]
+    );
+}
+
+#[test]
+fn observation_base_collection_uses_fast_motion_probe_quality_for_fast_motion_perf_class() {
+    let mut runtime = ready_state().runtime().clone();
+    runtime.config.cursor_color = Some("none".to_string());
+    let ready = ready_state().with_runtime(runtime);
+    let observing = reduce(
+        &ready,
+        external_demand_event_with_perf_class(
+            ExternalDemandKind::ExternalCursor,
+            25,
+            None,
+            BufferPerfClass::FastMotion,
+        ),
+    )
+    .next;
+    let request = observing
+        .active_observation_request()
+        .cloned()
+        .expect("active observation");
+
+    let based = reduce(
+        &observing,
+        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
+            request: request.clone(),
+            basis: observation_basis(&request, Some(cursor(7, 8)), 26),
+            motion: observation_motion(),
+        }),
+    );
+
+    pretty_assert_eq!(based.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
+        based.effects,
+        vec![Effect::RequestProbe(RequestProbeEffect {
+            observation_basis: observation_basis(&request, Some(cursor(7, 8)), 26),
+            probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
+            kind: ProbeKind::CursorColor,
+            cursor_position_policy: cursor_position_policy(&observing),
+            buffer_perf_class: BufferPerfClass::FastMotion,
+            probe_policy: expected_probe_policy(
+                request.demand().kind(),
+                request.demand().buffer_perf_class(),
+                None,
+            ),
+            background_chunk: None,
+            cursor_color_fallback_sample: None,
+        })]
+    );
+}
+
+#[test]
+fn observation_base_collection_skips_cursor_color_probe_when_current_mode_has_explicit_color() {
+    let ready = ready_state_with_runtime_config(|runtime| {
+        runtime.config.cursor_color = Some("#112233".to_string());
+        runtime.config.cursor_color_insert_mode = Some("none".to_string());
+    });
+    let observing = reduce(
+        &ready,
+        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+            kind: ExternalDemandKind::ExternalCursor,
+            observed_at: Millis::new(25),
+            requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
+            ingress_cursor_presentation: None,
+        }),
+    )
+    .next;
+    let request = observing
+        .active_observation_request()
+        .cloned()
+        .expect("active observation");
+    let basis = observation_basis_in_mode(&request, Some(cursor(7, 8)), 26, "n");
+
+    let based = reduce(
+        &observing,
+        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
+            request,
+            basis,
+            motion: observation_motion(),
+        }),
+    );
+
+    pretty_assert_eq!(based.next.lifecycle(), Lifecycle::Planning);
+    assert!(matches!(
+        based.effects.as_slice(),
+        [Effect::RequestRenderPlan(_)]
+    ));
+    match based
+        .next
+        .observation()
+        .expect("completed observation snapshot")
+        .probes()
+        .cursor_color()
+    {
+        ProbeSlot::Requested(ProbeState::Ready { reuse, value, .. }) => {
+            pretty_assert_eq!(*reuse, ProbeReuse::Exact);
+            pretty_assert_eq!(*value, None);
+        }
+        other => panic!("expected completed cursor color probe, got {other:?}"),
+    }
+}
+
+#[test]
 fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
     let mut runtime = ready_state().runtime().clone();
     runtime.config.cursor_color = Some("none".to_string());
@@ -1317,6 +1812,7 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(25),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     )
@@ -1343,10 +1839,10 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
         .next
         .observation()
         .expect("stored observation snapshot");
-    assert_eq!(observation.cursor_color(), Some(0x00AB_CDEF));
+    pretty_assert_eq!(observation.cursor_color(), Some(0x00AB_CDEF));
     match observation.probes().cursor_color() {
         ProbeSlot::Requested(ProbeState::Ready { reuse, .. }) => {
-            assert_eq!(*reuse, ProbeReuse::Compatible)
+            pretty_assert_eq!(*reuse, ProbeReuse::Compatible)
         }
         other => panic!("expected ready cursor color probe, got {other:?}"),
     }
@@ -1407,7 +1903,7 @@ mod probe_completion_sequence {
     fn cursor_color_completion_keeps_observation_active_until_background_probe_finishes() {
         let (_scenario, after_cursor) = after_cursor_color_probe_ready();
 
-        assert_eq!(after_cursor.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(after_cursor.next.lifecycle(), Lifecycle::Observing);
         assert!(after_cursor.next.pending_proposal().is_none());
     }
 
@@ -1421,7 +1917,7 @@ mod probe_completion_sequence {
             .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
             .expect("first background probe chunk");
 
-        assert_eq!(
+        pretty_assert_eq!(
             after_cursor.effects,
             vec![Effect::RequestProbe(RequestProbeEffect {
                 observation_basis: scenario.basis.clone(),
@@ -1429,7 +1925,14 @@ mod probe_completion_sequence {
                     .request_id(scenario.request.observation_id()),
                 kind: ProbeKind::Background,
                 cursor_position_policy: cursor_position_policy(&scenario.based.next),
+                buffer_perf_class: scenario.request.demand().buffer_perf_class(),
+                probe_policy: expected_probe_policy(
+                    scenario.request.demand().kind(),
+                    scenario.request.demand().buffer_perf_class(),
+                    Some(CursorColorSample::new(0x00AB_CDEF)),
+                ),
                 background_chunk: Some(first_background_chunk),
+                cursor_color_fallback_sample: None,
             })]
         );
     }
@@ -1442,7 +1945,7 @@ mod probe_completion_sequence {
             .next
             .observation()
             .expect("observation should stay active while background probe is pending");
-        assert_eq!(observation.cursor_color(), Some(0x00AB_CDEF));
+        pretty_assert_eq!(observation.cursor_color(), Some(0x00AB_CDEF));
         assert!(matches!(
             observation.probes().background(),
             ProbeSlot::Requested(ProbeState::Pending { .. })
@@ -1469,7 +1972,7 @@ mod probe_completion_sequence {
             ),
         );
 
-        assert_eq!(after_background.next.lifecycle(), Lifecycle::Planning);
+        pretty_assert_eq!(after_background.next.lifecycle(), Lifecycle::Planning);
         assert!(after_background.next.pending_proposal().is_none());
         assert!(after_background.next.pending_plan_proposal_id().is_some());
         assert!(matches!(
@@ -1488,8 +1991,8 @@ mod probe_completion_sequence {
             .and_then(|observation| observation.background_progress())
             .and_then(crate::core::state::BackgroundProbeProgress::next_chunk);
 
-        assert_eq!(scenario.based.next.lifecycle(), Lifecycle::Observing);
-        assert_eq!(
+        pretty_assert_eq!(scenario.based.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(
             scenario.based.effects,
             vec![Effect::RequestProbe(RequestProbeEffect {
                 observation_basis: scenario.basis.clone(),
@@ -1497,7 +2000,14 @@ mod probe_completion_sequence {
                     .request_id(scenario.request.observation_id()),
                 kind: ProbeKind::Background,
                 cursor_position_policy: cursor_position_policy(&scenario.observing),
+                buffer_perf_class: scenario.request.demand().buffer_perf_class(),
+                probe_policy: expected_probe_policy(
+                    scenario.request.demand().kind(),
+                    scenario.request.demand().buffer_perf_class(),
+                    retained_cursor_color_sample(&scenario.observing),
+                ),
                 background_chunk: first_chunk,
+                cursor_color_fallback_sample: None,
             })]
         );
     }
@@ -1552,7 +2062,7 @@ mod probe_completion_sequence {
             .expect("stored observation snapshot");
         match observation.probes().background() {
             ProbeSlot::Requested(ProbeState::Ready { reuse, .. }) => {
-                assert_eq!(*reuse, ProbeReuse::Exact)
+                pretty_assert_eq!(*reuse, ProbeReuse::Exact)
             }
             other => panic!("expected ready background probe, got {other:?}"),
         }
@@ -1569,7 +2079,7 @@ mod probe_completion_sequence {
         let progressed = progressed_observation
             .background_progress()
             .expect("background progress after first chunk");
-        assert_eq!(
+        pretty_assert_eq!(
             progressed.next_cell_index(),
             first_chunk.start_index().saturating_add(first_chunk.len())
         );
@@ -1586,9 +2096,9 @@ mod probe_completion_sequence {
             .expect("background progress after first chunk");
         let next_chunk = progressed.next_chunk().expect("second chunk");
 
-        assert_eq!(after_first_chunk.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(after_first_chunk.next.lifecycle(), Lifecycle::Observing);
         assert!(after_first_chunk.next.pending_proposal().is_none());
-        assert_eq!(
+        pretty_assert_eq!(
             after_first_chunk.effects,
             vec![Effect::RequestProbe(RequestProbeEffect {
                 observation_basis: scenario.basis,
@@ -1596,7 +2106,14 @@ mod probe_completion_sequence {
                     .request_id(scenario.request.observation_id()),
                 kind: ProbeKind::Background,
                 cursor_position_policy: cursor_position_policy(&scenario.based.next),
+                buffer_perf_class: scenario.request.demand().buffer_perf_class(),
+                probe_policy: expected_probe_policy(
+                    scenario.request.demand().kind(),
+                    scenario.request.demand().buffer_perf_class(),
+                    retained_cursor_color_sample(&scenario.based.next),
+                ),
                 background_chunk: Some(next_chunk),
+                cursor_color_fallback_sample: None,
             })]
         );
     }
@@ -1613,6 +2130,7 @@ fn refresh_required_probe_report_retries_base_observation() {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(25),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     )
@@ -1635,8 +2153,8 @@ fn refresh_required_probe_report_retries_base_observation() {
         cursor_color_probe_report(&request, ProbeReuse::RefreshRequired, None),
     );
 
-    assert_eq!(retried.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
+    pretty_assert_eq!(retried.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
         retried.effects,
         vec![
             Effect::RecordEventLoopMetric(EventLoopMetricEffect::ProbeRefreshRetried(
@@ -1644,12 +2162,15 @@ fn refresh_required_probe_report_retries_base_observation() {
             )),
             Effect::RequestObservationBase(RequestObservationBaseEffect {
                 request,
-                context: observation_runtime_context(&based.next),
+                context: observation_runtime_context(
+                    &based.next,
+                    ExternalDemandKind::ExternalCursor
+                ),
             })
         ]
     );
     assert!(retried.next.observation().is_none());
-    assert_eq!(
+    pretty_assert_eq!(
         retried
             .next
             .probe_refresh_state()
@@ -1707,11 +2228,11 @@ mod probe_refresh_retry_budget {
             .cloned()
             .expect("newer ingress should take over after retry budget exhaustion");
         assert_ne!(replacement_request, request);
-        assert_eq!(
+        pretty_assert_eq!(
             replacement_request.demand().requested_target(),
             Some(cursor(9, 10))
         );
-        assert_eq!(exhausted.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(exhausted.next.lifecycle(), Lifecycle::Observing);
     }
 
     #[test]
@@ -1723,7 +2244,7 @@ mod probe_refresh_retry_budget {
             .cloned()
             .expect("replacement request after retry exhaustion");
 
-        assert_eq!(
+        pretty_assert_eq!(
             exhausted.effects,
             vec![
                 Effect::RecordEventLoopMetric(EventLoopMetricEffect::ProbeRefreshBudgetExhausted(
@@ -1731,7 +2252,10 @@ mod probe_refresh_retry_budget {
                 ),),
                 Effect::RequestObservationBase(RequestObservationBaseEffect {
                     request: replacement_request,
-                    context: observation_runtime_context(&exhausted.next),
+                    context: observation_runtime_context(
+                        &exhausted.next,
+                        ExternalDemandKind::ExternalCursor,
+                    ),
                 }),
             ]
         );
@@ -1756,6 +2280,7 @@ fn failed_probe_report_is_retained_without_collapsing_to_missing() {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(25),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     )
@@ -1779,10 +2304,10 @@ fn failed_probe_report_is_retained_without_collapsing_to_missing() {
         .next
         .observation()
         .expect("stored observation snapshot");
-    assert_eq!(observation.cursor_color(), None);
+    pretty_assert_eq!(observation.cursor_color(), None);
     match observation.probes().cursor_color() {
         ProbeSlot::Requested(ProbeState::Failed { failure, .. }) => {
-            assert_eq!(*failure, ProbeFailure::ShellReadFailed)
+            pretty_assert_eq!(*failure, ProbeFailure::ShellReadFailed)
         }
         other => panic!("expected failed cursor color probe, got {other:?}"),
     }
@@ -1814,12 +2339,12 @@ mod observation_completion_planning {
     fn observation_completion_enters_planning_and_requests_render_plan() {
         let completed = completed_mode_change_observation_with_cursor_queued();
 
-        assert_eq!(completed.next.lifecycle(), Lifecycle::Planning);
-        assert_eq!(completed.effects.len(), 1);
+        pretty_assert_eq!(completed.next.lifecycle(), Lifecycle::Planning);
+        pretty_assert_eq!(completed.effects.len(), 1);
         match &completed.effects[0] {
             Effect::RequestRenderPlan(payload) => {
-                assert_eq!(payload.requested_at, Millis::new(32));
-                assert_eq!(
+                pretty_assert_eq!(payload.requested_at, Millis::new(32));
+                pretty_assert_eq!(
                     Some(payload.proposal_id),
                     completed.next.pending_plan_proposal_id()
                 );
@@ -1844,11 +2369,12 @@ fn cursor_autocmd_demands_refresh_ingress_policy_state() {
             kind: ExternalDemandKind::ModeChanged,
             observed_at: Millis::new(77),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
         }),
     );
 
-    assert_eq!(
+    pretty_assert_eq!(
         transition.next.ingress_policy().last_cursor_autocmd_at(),
         Some(Millis::new(77))
     );
@@ -1865,6 +2391,7 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(78),
             requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: Some(IngressCursorPresentationRequest::new(
                 true,
                 true,
@@ -1873,8 +2400,8 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
         }),
     );
 
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
-    assert_eq!(
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
         transition.effects,
         with_cleanup_invalidation(
             &transition.next,
@@ -1888,7 +2415,10 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
                 ),
                 Effect::RequestObservationBase(RequestObservationBaseEffect {
                     request: observation_request(1, ExternalDemandKind::ExternalCursor, 78),
-                    context: observation_runtime_context(&state),
+                    context: observation_runtime_context(
+                        &state,
+                        ExternalDemandKind::ExternalCursor,
+                    ),
                 }),
             ],
         )
@@ -1902,7 +2432,7 @@ fn animation_timer_from_ready_enters_planning_and_requests_render_plan() {
 
     let transition = reduce(&state, animation_tick_event(token, 50));
 
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
     assert!(transition.next.pending_proposal().is_none());
     assert!(transition.next.pending_plan_proposal_id().is_some());
     assert!(matches!(
@@ -1939,7 +2469,7 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     let [Effect::RequestRenderPlan(payload)] = transition.effects.as_slice() else {
         panic!("expected render plan request after stale-clock animation tick");
     };
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
     let planned_render = crate::core::reducer::build_planned_render(
         &payload.planning_state,
         payload.proposal_id,
@@ -1963,6 +2493,217 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
         "next animation deadline should advance from timer time, got {}",
         next_animation_at.value()
     );
+}
+
+#[test]
+fn animation_timer_keeps_rendering_compatible_cursor_color_observation_while_runtime_is_animating()
+{
+    let base = compatible_cursor_color_ready_state(|runtime| {
+        runtime.start_animation();
+        runtime.set_last_tick_ms(Some(100.0));
+    });
+    let (state, token) = timer_armed_state(base);
+
+    let transition = reduce(&state, animation_tick_event(token, 116));
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
+    assert!(matches!(
+        transition.effects.as_slice(),
+        [Effect::RequestRenderPlan(payload)] if payload.requested_at == Millis::new(116)
+    ));
+}
+
+#[test]
+fn animation_timer_requests_boundary_refresh_for_compatible_cursor_color_when_motion_stops() {
+    let base = compatible_cursor_color_ready_state(|_runtime| {});
+    let (state, token) = timer_armed_state(base);
+
+    let transition = reduce(&state, animation_tick_event(token, 116));
+
+    let [Effect::RequestObservationBase(payload)] = transition.effects.as_slice() else {
+        panic!("expected boundary refresh observation after compatible cursor color reuse");
+    };
+    let request = active_request(&transition.next);
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(payload.request, request);
+    pretty_assert_eq!(payload.context.buffer_perf_class(), BufferPerfClass::Full);
+    pretty_assert_eq!(payload.context.probe_quality(), ProbeQuality::Exact);
+    pretty_assert_eq!(request.demand().kind(), ExternalDemandKind::BoundaryRefresh);
+    pretty_assert_eq!(request.demand().buffer_perf_class(), BufferPerfClass::Full);
+    pretty_assert_eq!(request.demand().requested_target(), Some(cursor(9, 9)));
+}
+
+#[test]
+fn animation_timer_preserves_perf_class_across_boundary_refresh() {
+    let mut runtime = ready_state().runtime().clone();
+    runtime.config.cursor_color = Some("none".to_string());
+    runtime.initialize_cursor(
+        Point { row: 9.0, col: 9.0 },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(11, 22, 3, 9),
+    );
+    let request = ObservationRequest::new(
+        ExternalDemand::new(
+            IngressSeq::new(9),
+            ExternalDemandKind::ExternalCursor,
+            Millis::new(90),
+            None,
+            BufferPerfClass::FastMotion,
+        ),
+        ProbeRequestSet::new(true, false),
+    );
+    let observation = ObservationSnapshot::new(
+        request.clone(),
+        observation_basis(&request, Some(cursor(9, 9)), 91),
+        observation_motion(),
+    )
+    .with_cursor_color_probe(ProbeState::ready(
+        ProbeKind::CursorColor.request_id(request.observation_id()),
+        request.observation_id(),
+        ProbeReuse::Compatible,
+        Some(CursorColorSample::new(0x00AB_CDEF)),
+    ))
+    .expect("cursor color probe should be requested");
+    let base = ready_state()
+        .with_last_cursor(Some(cursor(9, 9)))
+        .with_runtime(runtime)
+        .into_ready_with_observation(observation);
+    let (state, token) = timer_armed_state(base);
+
+    let transition = reduce(&state, animation_tick_event(token, 116));
+
+    let [Effect::RequestObservationBase(payload)] = transition.effects.as_slice() else {
+        panic!("expected boundary refresh observation after compatible cursor color reuse");
+    };
+    let next_request = active_request(&transition.next);
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(payload.request, next_request);
+    pretty_assert_eq!(
+        payload.context.buffer_perf_class(),
+        BufferPerfClass::FastMotion
+    );
+    pretty_assert_eq!(payload.context.probe_quality(), ProbeQuality::Exact);
+    pretty_assert_eq!(
+        next_request.demand().buffer_perf_class(),
+        BufferPerfClass::FastMotion
+    );
+    pretty_assert_eq!(
+        next_request.demand().kind(),
+        ExternalDemandKind::BoundaryRefresh
+    );
+}
+
+#[test]
+fn animation_timer_requests_boundary_refresh_for_conceal_deferred_cursor_position() {
+    let base = conceal_deferred_cursor_ready_state(|_runtime| {});
+    let (state, token) = timer_armed_state(base);
+
+    let transition = reduce(&state, animation_tick_event(token, 116));
+
+    let [Effect::RequestObservationBase(payload)] = transition.effects.as_slice() else {
+        panic!("expected boundary refresh observation after deferred conceal correction");
+    };
+    let request = active_request(&transition.next);
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(payload.request, request);
+    pretty_assert_eq!(
+        payload.context.buffer_perf_class(),
+        BufferPerfClass::FastMotion
+    );
+    pretty_assert_eq!(payload.context.probe_quality(), ProbeQuality::Exact);
+    pretty_assert_eq!(request.demand().kind(), ExternalDemandKind::BoundaryRefresh);
+    pretty_assert_eq!(
+        request.demand().buffer_perf_class(),
+        BufferPerfClass::FastMotion
+    );
+    pretty_assert_eq!(request.demand().requested_target(), Some(cursor(9, 9)));
+}
+
+#[test]
+fn animation_timer_skips_boundary_refresh_when_current_mode_has_explicit_cursor_color() {
+    let base = compatible_cursor_color_ready_state(|runtime| {
+        runtime.config.cursor_color = Some("#112233".to_string());
+        runtime.config.cursor_color_insert_mode = Some("none".to_string());
+    });
+    let (state, token) = timer_armed_state(base);
+
+    let transition = reduce(&state, animation_tick_event(token, 116));
+
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
+    assert!(matches!(
+        transition.effects.as_slice(),
+        [Effect::RequestRenderPlan(payload)] if payload.requested_at == Millis::new(116)
+    ));
+}
+
+#[test]
+fn idle_apply_completion_requests_boundary_refresh_for_compatible_cursor_color() {
+    let (applying, proposal_id) = applying_state_with_realization_plan(
+        compatible_cursor_color_ready_state(|_runtime| {}),
+        noop_realization_plan(),
+        false,
+        None,
+    );
+
+    let transition = reduce(
+        &applying,
+        Event::ApplyReported(ApplyReport::AppliedFully {
+            proposal_id,
+            observed_at: Millis::new(101),
+            visual_change: false,
+        }),
+    );
+
+    let request = active_request(&transition.next);
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(request.demand().kind(), ExternalDemandKind::BoundaryRefresh);
+    assert!(transition.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::RequestObservationBase(payload)
+                if payload.request == request && payload.context.probe_quality() == ProbeQuality::Exact
+        )
+    }));
+}
+
+#[test]
+fn idle_apply_completion_requests_boundary_refresh_for_conceal_deferred_cursor_position() {
+    let (applying, proposal_id) = applying_state_with_realization_plan(
+        conceal_deferred_cursor_ready_state(|_runtime| {}),
+        noop_realization_plan(),
+        false,
+        None,
+    );
+
+    let transition = reduce(
+        &applying,
+        Event::ApplyReported(ApplyReport::AppliedFully {
+            proposal_id,
+            observed_at: Millis::new(101),
+            visual_change: false,
+        }),
+    );
+
+    let request = active_request(&transition.next);
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(request.demand().kind(), ExternalDemandKind::BoundaryRefresh);
+    pretty_assert_eq!(
+        request.demand().buffer_perf_class(),
+        BufferPerfClass::FastMotion
+    );
+    assert!(transition.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::RequestObservationBase(payload)
+                if payload.request == request
+                    && payload.context.buffer_perf_class() == BufferPerfClass::FastMotion
+                    && payload.context.probe_quality() == ProbeQuality::Exact
+        )
+    }));
 }
 
 #[test]
@@ -2162,8 +2903,8 @@ mod animation_timer_draw_state {
         let state = staged_draw_state();
         let scene = state.scene();
 
-        assert_eq!(scene.revision().value(), 1);
-        assert_eq!(
+        pretty_assert_eq!(scene.revision().value(), 1);
+        pretty_assert_eq!(
             scene.dirty().entities(),
             &std::collections::BTreeSet::from([SemanticEntityId::CursorTrail])
         );
@@ -2179,12 +2920,12 @@ mod animation_timer_draw_state {
             .snapshot()
             .clone();
 
-        assert_eq!(projection.witness().observation_id().value(), 9);
-        assert_eq!(
+        pretty_assert_eq!(projection.witness().observation_id().value(), 9);
+        pretty_assert_eq!(
             projection.witness().viewport(),
             ViewportSnapshot::new(CursorRow(40), CursorCol(120))
         );
-        assert_eq!(
+        pretty_assert_eq!(
             projection
                 .logical_raster()
                 .clear()
@@ -2209,7 +2950,7 @@ mod animation_timer_draw_state {
             panic!("expected draw realization plan");
         };
 
-        assert_eq!(
+        pretty_assert_eq!(
             scene
                 .projection_entry()
                 .expect("projection cache entry after draw render")
@@ -2217,15 +2958,15 @@ mod animation_timer_draw_state {
                 .target_cell_presentation(),
             proposal.side_effects().target_cell_presentation
         );
-        assert_eq!(
+        pretty_assert_eq!(
             draw.palette().color_levels(),
             state.runtime().config.color_levels
         );
-        assert_eq!(
+        pretty_assert_eq!(
             draw.max_kept_windows(),
             state.runtime().config.max_kept_windows
         );
-        assert_eq!(proposal.patch().basis().target(), Some(&projection));
+        pretty_assert_eq!(proposal.patch().basis().target(), Some(&projection));
     }
 }
 
@@ -2247,8 +2988,8 @@ fn apply_completed_advances_acknowledged_projection() {
         }),
     );
 
-    assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
-    assert_eq!(
+    pretty_assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
+    pretty_assert_eq!(
         completed.next.realization(),
         &RealizationLedger::Consistent { acknowledged }
     );
@@ -2280,19 +3021,19 @@ fn render_cleanup_applied_clears_trusted_realization_basis() {
         }),
     );
 
-    assert_eq!(cleaned.next.lifecycle(), Lifecycle::Ready);
-    assert_eq!(
+    pretty_assert_eq!(cleaned.next.lifecycle(), Lifecycle::Ready);
+    pretty_assert_eq!(
         cleaned.next.realization(),
         &RealizationLedger::Diverged {
             last_consistent: Some(acknowledged.clone()),
             divergence: RealizationDivergence::ShellStateUnknown,
         }
     );
-    assert_eq!(
+    pretty_assert_eq!(
         cleaned.next.realization().trusted_acknowledged_for_patch(),
         None
     );
-    assert_eq!(
+    pretty_assert_eq!(
         cleaned.next.realization().last_consistent(),
         Some(&acknowledged)
     );
@@ -2332,7 +3073,7 @@ fn untrusted_target_basis_derives_replace_patch() {
         Some(target),
     ));
 
-    assert_eq!(patch.kind(), crate::core::state::ScenePatchKind::Replace);
+    pretty_assert_eq!(patch.kind(), crate::core::state::ScenePatchKind::Replace);
 }
 
 #[test]
@@ -2368,22 +3109,22 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
         }),
     );
 
-    assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
-    assert_eq!(
+    pretty_assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
+    pretty_assert_eq!(
         completed.next.render_cleanup().thermal(),
         RenderThermalState::Hot
     );
-    assert_eq!(
+    pretty_assert_eq!(
         completed.next.render_cleanup().next_compaction_due_at(),
         Some(Millis::new(79 + render_cleanup_delay_ms(&runtime.config)))
     );
-    assert_eq!(completed.next.render_cleanup().entered_cooling_at(), None);
+    pretty_assert_eq!(completed.next.render_cleanup().entered_cooling_at(), None);
     let cleanup_token = completed
         .next
         .timers()
         .active_token(TimerId::Cleanup)
         .expect("cleanup timer should be armed");
-    assert_eq!(
+    pretty_assert_eq!(
         completed.effects,
         vec![
             Effect::ScheduleTimer(ScheduleTimerEffect {
@@ -2426,7 +3167,7 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
             visual_change: true,
         }),
     );
-    assert_eq!(
+    pretty_assert_eq!(
         completed.next.render_cleanup().thermal(),
         RenderThermalState::Hot
     );
@@ -2441,7 +3182,7 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
         cleanup_tick_event(soft_token, 79 + render_cleanup_delay_ms(&runtime.config)),
     );
 
-    assert_eq!(
+    pretty_assert_eq!(
         soft_tick.effects,
         vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
             execution: RenderCleanupExecution::SoftClear {
@@ -2457,19 +3198,19 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
             action: RenderCleanupAppliedAction::SoftCleared,
         }),
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_soft.next.render_cleanup().thermal(),
         RenderThermalState::Cooling
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_soft.next.render_cleanup().entered_cooling_at(),
         Some(Millis::new(79 + render_cleanup_delay_ms(&runtime.config)))
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_soft.next.timers().active_token(TimerId::Cleanup),
         None
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_soft.effects,
         vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
             execution: RenderCleanupExecution::CompactToBudget {
@@ -2489,26 +3230,26 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
         }),
     );
 
-    assert_eq!(
+    pretty_assert_eq!(
         after_compaction
             .next
             .timers()
             .active_token(TimerId::Cleanup),
         None
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_compaction.next.render_cleanup().thermal(),
         RenderThermalState::Cold
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_compaction.next.render_cleanup().idle_target_budget(),
         2
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_compaction.next.render_cleanup().max_kept_windows(),
         21
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_compaction.effects,
         vec![Effect::RecordEventLoopMetric(
             EventLoopMetricEffect::CleanupConvergedToCold {
@@ -2564,7 +3305,7 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
             action: RenderCleanupAppliedAction::SoftCleared,
         }),
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_soft.next.timers().active_token(TimerId::Cleanup),
         None
     );
@@ -2577,7 +3318,7 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
             },
         }),
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_compaction.next.render_cleanup().thermal(),
         RenderThermalState::Cooling
     );
@@ -2596,7 +3337,7 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
         ),
     );
 
-    assert_eq!(
+    pretty_assert_eq!(
         hard_tick.effects,
         vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
             execution: RenderCleanupExecution::HardPurge,
@@ -2611,17 +3352,17 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
         }),
     );
 
-    assert_eq!(
+    pretty_assert_eq!(
         after_hard.next.timers().active_token(TimerId::Cleanup),
         None
     );
-    assert_eq!(
+    pretty_assert_eq!(
         after_hard.next.render_cleanup().thermal(),
         RenderThermalState::Cold
     );
-    assert_eq!(after_hard.next.render_cleanup().idle_target_budget(), 2);
-    assert_eq!(after_hard.next.render_cleanup().max_kept_windows(), 21);
-    assert_eq!(
+    pretty_assert_eq!(after_hard.next.render_cleanup().idle_target_budget(), 2);
+    pretty_assert_eq!(after_hard.next.render_cleanup().max_kept_windows(), 21);
+    pretty_assert_eq!(
         after_hard.effects,
         vec![Effect::RecordEventLoopMetric(
             EventLoopMetricEffect::CleanupConvergedToCold {
@@ -2684,7 +3425,7 @@ fn fresh_ingress_promotes_cooling_cleanup_state_back_to_hot() {
         external_demand_event(ExternalDemandKind::BufferEntered, 150, None),
     );
 
-    assert_eq!(
+    pretty_assert_eq!(
         reheated.next.render_cleanup().thermal(),
         RenderThermalState::Hot
     );
@@ -2728,7 +3469,7 @@ fn diverged_realization_cannot_derive_noop_for_identical_target() {
         Some(target),
     ));
 
-    assert_eq!(patch.kind(), crate::core::state::ScenePatchKind::Replace);
+    pretty_assert_eq!(patch.kind(), crate::core::state::ScenePatchKind::Replace);
 }
 
 mod apply_completion_resume {
@@ -2762,8 +3503,8 @@ mod apply_completion_resume {
     fn apply_completion_clears_the_in_flight_proposal_and_resumes_observing() {
         let (_staged, completed) = completed_apply_with_pending_mode_change();
 
-        assert_eq!(completed.next.lifecycle(), Lifecycle::Observing);
-        assert_eq!(completed.next.realization(), &RealizationLedger::Cleared);
+        pretty_assert_eq!(completed.next.lifecycle(), Lifecycle::Observing);
+        pretty_assert_eq!(completed.next.realization(), &RealizationLedger::Cleared);
         assert!(completed.next.pending_proposal().is_none());
     }
 
@@ -2771,11 +3512,11 @@ mod apply_completion_resume {
     fn apply_completion_requests_the_pending_observation_before_rearming_animation() {
         let (staged, completed) = completed_apply_with_pending_mode_change();
 
-        assert_eq!(
+        pretty_assert_eq!(
             completed.effects[0],
             Effect::RequestObservationBase(RequestObservationBaseEffect {
                 request: observation_request(1, ExternalDemandKind::ModeChanged, 71),
-                context: observation_runtime_context(&staged),
+                context: observation_runtime_context(&staged, ExternalDemandKind::ModeChanged),
             })
         );
     }
@@ -2784,7 +3525,7 @@ mod apply_completion_resume {
     fn apply_completion_rearms_animation_after_requesting_the_pending_observation() {
         let (_staged, completed) = completed_apply_with_pending_mode_change();
 
-        assert_eq!(completed.effects.len(), 2);
+        pretty_assert_eq!(completed.effects.len(), 2);
         assert!(matches!(
             completed.effects[1],
             Effect::ScheduleTimer(ScheduleTimerEffect { .. })
@@ -2821,8 +3562,8 @@ fn failed_apply_preserves_last_acknowledged_basis_in_divergence() {
         }),
     );
 
-    assert_eq!(failed.next.lifecycle(), Lifecycle::Recovering);
-    assert_eq!(
+    pretty_assert_eq!(failed.next.lifecycle(), Lifecycle::Recovering);
+    pretty_assert_eq!(
         failed.next.realization(),
         &RealizationLedger::Diverged {
             last_consistent: Some(acknowledged),
@@ -2850,8 +3591,8 @@ fn viewport_drift_apply_failure_enters_recovering() {
         }),
     );
 
-    assert_eq!(failed.next.lifecycle(), Lifecycle::Recovering);
-    assert_eq!(
+    pretty_assert_eq!(failed.next.lifecycle(), Lifecycle::Recovering);
+    pretty_assert_eq!(
         failed.next.realization(),
         &RealizationLedger::Diverged {
             last_consistent: None,
@@ -2878,8 +3619,8 @@ fn stale_apply_report_is_ignored_by_proposal_id() {
         }),
     );
 
-    assert_eq!(stale.next, staged);
-    assert_eq!(
+    pretty_assert_eq!(stale.next, staged);
+    pretty_assert_eq!(
         stale.effects,
         vec![Effect::RecordEventLoopMetric(
             EventLoopMetricEffect::StaleToken
@@ -2908,8 +3649,8 @@ fn degraded_apply_enters_recovering_and_schedules_recovery_timer() {
         }),
     );
 
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Recovering);
-    assert_eq!(
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Recovering);
+    pretty_assert_eq!(
         transition.next.realization(),
         &RealizationLedger::Diverged {
             last_consistent: None,
@@ -2957,8 +3698,8 @@ fn degraded_apply_keeps_last_acknowledged_projection() {
         }),
     );
 
-    assert_eq!(degraded.next.lifecycle(), Lifecycle::Recovering);
-    assert_eq!(
+    pretty_assert_eq!(degraded.next.lifecycle(), Lifecycle::Recovering);
+    pretty_assert_eq!(
         degraded.next.realization(),
         &RealizationLedger::Diverged {
             last_consistent: Some(acknowledged),
@@ -2979,7 +3720,7 @@ fn effect_failure_is_ignored_before_initialize() {
         }),
     );
 
-    assert_eq!(transition.next, state);
+    pretty_assert_eq!(transition.next, state);
     assert!(transition.effects.is_empty());
 }
 
@@ -3012,8 +3753,8 @@ fn effect_failure_for_pending_proposal_preserves_acknowledged_basis_in_divergenc
         }),
     );
 
-    assert_eq!(failed.next.lifecycle(), Lifecycle::Recovering);
-    assert_eq!(
+    pretty_assert_eq!(failed.next.lifecycle(), Lifecycle::Recovering);
+    pretty_assert_eq!(
         failed.next.realization(),
         &RealizationLedger::Diverged {
             last_consistent: Some(acknowledged),
@@ -3044,8 +3785,8 @@ fn stale_effect_failure_is_ignored_by_proposal_id() {
         }),
     );
 
-    assert_eq!(stale.next, staged);
-    assert_eq!(
+    pretty_assert_eq!(stale.next, staged);
+    pretty_assert_eq!(
         stale.effects,
         vec![Effect::RecordEventLoopMetric(
             EventLoopMetricEffect::StaleToken
@@ -3069,8 +3810,8 @@ fn stale_timer_token_is_ignored_without_mutating_state() {
         }),
     );
 
-    assert_eq!(transition.next, state);
-    assert_eq!(
+    pretty_assert_eq!(transition.next, state);
+    pretty_assert_eq!(
         transition.effects,
         vec![Effect::RecordEventLoopMetric(
             EventLoopMetricEffect::StaleToken

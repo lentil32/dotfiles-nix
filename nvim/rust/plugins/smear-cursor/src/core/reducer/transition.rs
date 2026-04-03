@@ -73,6 +73,7 @@ const fn demand_kind_fingerprint(kind: ExternalDemandKind) -> u64 {
         ExternalDemandKind::ExternalCursor => 1_u64,
         ExternalDemandKind::ModeChanged => 2_u64,
         ExternalDemandKind::BufferEntered => 3_u64,
+        ExternalDemandKind::BoundaryRefresh => 4_u64,
     }
 }
 
@@ -127,6 +128,7 @@ fn demand_fingerprint(demand: &ExternalDemand) -> u64 {
     demand.seq().value()
         ^ demand_kind_fingerprint(demand.kind())
         ^ demand.observed_at().value()
+        ^ demand.buffer_perf_class().fingerprint().rotate_left(7)
         ^ demand
             .requested_target()
             .map_or(0_u64, crate::core::types::CursorPosition::fingerprint)

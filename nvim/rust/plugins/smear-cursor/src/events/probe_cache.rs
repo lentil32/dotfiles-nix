@@ -1,14 +1,24 @@
+use crate::core::effect::ProbePolicy;
 use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
 use crate::core::state::CursorTextContext;
+use crate::core::state::ProbeReuse;
 use crate::core::types::Generation;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-const CURSOR_COLOR_CACHE_CAPACITY: usize = 16;
 const CURSOR_TEXT_CONTEXT_CACHE_CAPACITY: usize = 32;
 const CONCEAL_REGION_CACHE_CAPACITY: usize = 32;
+const CONCEAL_DELTA_CACHE_CAPACITY: usize = 32;
 const CONCEAL_SCREEN_CELL_CACHE_CAPACITY: usize = 128;
+
+mod cursor_color;
+
+#[cfg(test)]
+use cursor_color::CURSOR_COLOR_CACHE_CAPACITY;
+pub(super) use cursor_color::CachedCursorColorProbeSample;
+pub(super) use cursor_color::CursorColorCacheLookup;
+pub(super) use cursor_color::CursorColorProbeCache;
 
 pub(super) type ConcealScreenCell = (i64, i64);
 
@@ -150,6 +160,52 @@ impl ConcealScreenCellCacheKey {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) struct ConcealDeltaCacheKey {
+    window_handle: i64,
+    buffer_handle: i64,
+    changedtick: u64,
+    line: usize,
+    window_row: i64,
+    window_col: i64,
+    window_width: i64,
+    window_height: i64,
+    topline: i64,
+    leftcol: i64,
+    textoff: i64,
+}
+
+impl ConcealDeltaCacheKey {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) const fn new(
+        window_handle: i64,
+        buffer_handle: i64,
+        changedtick: u64,
+        line: usize,
+        window_row: i64,
+        window_col: i64,
+        window_width: i64,
+        window_height: i64,
+        topline: i64,
+        leftcol: i64,
+        textoff: i64,
+    ) -> Self {
+        Self {
+            window_handle,
+            buffer_handle,
+            changedtick,
+            line,
+            window_row,
+            window_col,
+            window_width,
+            window_height,
+            topline,
+            leftcol,
+            textoff,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(super) struct CursorTextContextCacheKey {
     buffer_handle: i64,
     changedtick: u64,
@@ -209,9 +265,32 @@ pub(super) enum ConcealScreenCellCacheLookup {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(super) enum CursorColorCacheLookup {
+pub(super) struct CachedConcealDelta {
+    current_col1: i64,
+    delta: i64,
+}
+
+impl CachedConcealDelta {
+    pub(super) const fn new(current_col1: i64, delta: i64) -> Self {
+        Self {
+            current_col1,
+            delta,
+        }
+    }
+
+    pub(super) const fn current_col1(&self) -> i64 {
+        self.current_col1
+    }
+
+    pub(super) const fn delta(&self) -> i64 {
+        self.delta
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) enum ConcealDeltaCacheLookup {
     Miss,
-    Hit(Option<CursorColorSample>),
+    Hit(CachedConcealDelta),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -223,9 +302,10 @@ pub(super) enum CursorTextContextCacheLookup {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(super) struct ProbeCacheState {
     colorscheme_generation: Generation,
-    cursor_color: LruCache<CursorColorProbeWitness, Option<CursorColorSample>>,
+    cursor_color: CursorColorProbeCache,
     cursor_text_context: LruCache<CursorTextContextCacheKey, Option<CursorTextContext>>,
     conceal_lines: LruCache<ConcealCacheKey, CachedConcealRegions>,
+    conceal_deltas: LruCache<ConcealDeltaCacheKey, CachedConcealDelta>,
     conceal_screen_cells: LruCache<ConcealScreenCellCacheKey, Option<ConcealScreenCell>>,
 }
 
@@ -233,9 +313,10 @@ impl Default for ProbeCacheState {
     fn default() -> Self {
         Self {
             colorscheme_generation: Generation::INITIAL,
-            cursor_color: LruCache::new(CURSOR_COLOR_CACHE_CAPACITY),
+            cursor_color: CursorColorProbeCache::default(),
             cursor_text_context: LruCache::new(CURSOR_TEXT_CONTEXT_CACHE_CAPACITY),
             conceal_lines: LruCache::new(CONCEAL_REGION_CACHE_CAPACITY),
+            conceal_deltas: LruCache::new(CONCEAL_DELTA_CACHE_CAPACITY),
             conceal_screen_cells: LruCache::new(CONCEAL_SCREEN_CELL_CACHE_CAPACITY),
         }
     }
@@ -250,9 +331,17 @@ impl ProbeCacheState {
         &mut self,
         witness: &CursorColorProbeWitness,
     ) -> CursorColorCacheLookup {
+        self.cursor_color.cached_sample(witness)
+    }
+
+    pub(super) fn cached_cursor_color_sample_for_probe(
+        &mut self,
+        witness: &CursorColorProbeWitness,
+        probe_policy: ProbePolicy,
+        reuse: ProbeReuse,
+    ) -> Option<CachedCursorColorProbeSample> {
         self.cursor_color
-            .get_cloned(witness)
-            .map_or(CursorColorCacheLookup::Miss, CursorColorCacheLookup::Hit)
+            .cached_sample_for_probe(witness, probe_policy, reuse)
     }
 
     pub(super) fn store_cursor_color_sample(
@@ -260,7 +349,7 @@ impl ProbeCacheState {
         witness: CursorColorProbeWitness,
         sample: Option<CursorColorSample>,
     ) {
-        self.cursor_color.insert(witness, sample);
+        self.cursor_color.store_sample(witness, sample);
     }
 
     pub(super) fn cached_cursor_text_context(
@@ -315,9 +404,28 @@ impl ProbeCacheState {
         self.conceal_screen_cells.insert(key, cell);
     }
 
+    pub(super) fn cached_conceal_delta(
+        &mut self,
+        key: &ConcealDeltaCacheKey,
+    ) -> ConcealDeltaCacheLookup {
+        self.conceal_deltas
+            .get_cloned(key)
+            .map_or(ConcealDeltaCacheLookup::Miss, ConcealDeltaCacheLookup::Hit)
+    }
+
+    pub(super) fn store_conceal_delta(
+        &mut self,
+        key: ConcealDeltaCacheKey,
+        current_col1: i64,
+        delta: i64,
+    ) {
+        self.conceal_deltas
+            .insert(key, CachedConcealDelta::new(current_col1, delta));
+    }
+
     pub(super) fn note_cursor_color_colorscheme_change(&mut self) {
         self.colorscheme_generation = self.colorscheme_generation.next();
-        self.cursor_color.clear();
+        self.cursor_color.note_colorscheme_change();
     }
 
     pub(super) fn reset(&mut self) {
@@ -331,9 +439,12 @@ mod tests {
     use super::CONCEAL_SCREEN_CELL_CACHE_CAPACITY;
     use super::CURSOR_COLOR_CACHE_CAPACITY;
     use super::CURSOR_TEXT_CONTEXT_CACHE_CAPACITY;
+    use super::CachedConcealDelta;
     use super::CachedConcealRegions;
     use super::ConcealCacheKey;
     use super::ConcealCacheLookup;
+    use super::ConcealDeltaCacheKey;
+    use super::ConcealDeltaCacheLookup;
     use super::ConcealRegion;
     use super::ConcealScreenCellCacheKey;
     use super::ConcealScreenCellCacheLookup;
@@ -349,6 +460,7 @@ mod tests {
     use crate::core::types::CursorPosition;
     use crate::core::types::CursorRow;
     use crate::core::types::Generation;
+    use pretty_assertions::assert_eq;
     use std::sync::Arc;
 
     fn cursor(row: u32, col: u32) -> CursorPosition {
@@ -444,6 +556,35 @@ mod tests {
             changedtick,
             line,
             col1,
+            window_row,
+            window_col,
+            window_width,
+            window_height,
+            topline,
+            leftcol,
+            textoff,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn conceal_delta_key(
+        window_handle: i64,
+        buffer_handle: i64,
+        changedtick: u64,
+        line: usize,
+        window_row: i64,
+        window_col: i64,
+        window_width: i64,
+        window_height: i64,
+        topline: i64,
+        leftcol: i64,
+        textoff: i64,
+    ) -> ConcealDeltaCacheKey {
+        ConcealDeltaCacheKey::new(
+            window_handle,
+            buffer_handle,
+            changedtick,
+            line,
             window_row,
             window_col,
             window_width,
@@ -834,6 +975,39 @@ mod tests {
     }
 
     #[test]
+    fn probe_cache_state_returns_last_conceal_delta_only_for_identical_view_key() {
+        let mut cache = ProbeCacheState::default();
+        let key = conceal_delta_key(8, 22, 14, 7, 2, 3, 120, 40, 11, 0, 4);
+        cache.store_conceal_delta(key.clone(), 6, 4);
+
+        assert_eq!(
+            cache.cached_conceal_delta(&key),
+            ConcealDeltaCacheLookup::Hit(CachedConcealDelta::new(6, 4)),
+        );
+        assert_eq!(
+            cache.cached_conceal_delta(&conceal_delta_key(8, 22, 14, 7, 2, 3, 120, 40, 12, 0, 4)),
+            ConcealDeltaCacheLookup::Miss,
+        );
+        assert_eq!(
+            cache.cached_conceal_delta(&conceal_delta_key(8, 22, 14, 8, 2, 3, 120, 40, 11, 0, 4)),
+            ConcealDeltaCacheLookup::Miss,
+        );
+    }
+
+    #[test]
+    fn probe_cache_state_replaces_last_conceal_delta_for_identical_view_key() {
+        let mut cache = ProbeCacheState::default();
+        let key = conceal_delta_key(8, 22, 14, 7, 2, 3, 120, 40, 11, 0, 4);
+        cache.store_conceal_delta(key.clone(), 6, 4);
+        cache.store_conceal_delta(key.clone(), 9, 7);
+
+        assert_eq!(
+            cache.cached_conceal_delta(&key),
+            ConcealDeltaCacheLookup::Hit(CachedConcealDelta::new(9, 7)),
+        );
+    }
+
+    #[test]
     fn probe_cache_state_reset_clears_generation_and_entries() {
         let mut cache = ProbeCacheState::default();
         cache.store_cursor_color_sample(
@@ -867,6 +1041,10 @@ mod tests {
                 8, 22, 14, 7, 5, 2, 3, 120, 40, 11, 0, 4
             )),
             ConcealScreenCellCacheLookup::Miss,
+        );
+        assert_eq!(
+            cache.cached_conceal_delta(&conceal_delta_key(8, 22, 14, 7, 2, 3, 120, 40, 11, 0, 4)),
+            ConcealDeltaCacheLookup::Miss,
         );
     }
 }

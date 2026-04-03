@@ -3,7 +3,7 @@ mod tests {
     use super::{
         ADAPTIVE_POOL_HARD_MAX_BUDGET, ADAPTIVE_POOL_MIN_BUDGET, AcquireError, AdaptiveBudgetState,
         AllocationPolicy, CachedRenderWindow, CachedWindowLifecycle, CompactRenderWindowsSummary,
-        EpochRollover, FrameEpoch, ReuseFailureCounters, TabWindows, WindowBufferHandle,
+        EpochRollover, FrameCapacityTarget, FrameEpoch, ReuseFailureCounters, TabWindows, WindowBufferHandle,
         WindowPlacement, acquire, available_window_index_for_placement, begin_tab_frame,
         effective_keep_budget, frame_capacity_target, global_compaction_prune_plan,
         has_pending_clear_work, has_visible_windows, lru_prune_indices, next_adaptive_budget,

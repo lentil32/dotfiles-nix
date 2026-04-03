@@ -1,12 +1,15 @@
 use super::Transition;
 use super::observation::observe_or_plan;
+use super::observation::start_next_observation;
 use super::observation::transition_ready_or_observe;
 use super::support::arm_render_cleanup_timer;
 use super::support::cleanup_effect_for_timer_fire;
 use super::support::delay_budget_from_ms;
+use super::support::exact_boundary_refresh_required;
 use super::support::record_event_loop_metric;
 use super::support::reset_recovery_attempt;
 use super::support::schedule_timer_with_delay;
+use super::support::start_boundary_refresh_observation;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::TimerKind;
 use crate::core::event::TimerFiredWithTokenEvent;
@@ -71,7 +74,21 @@ fn reduce_timer_signal_with_token(
             if disarmed_state.needs_initialize() {
                 Transition::stay_owned(disarmed_state)
             } else {
-                observe_or_plan(disarmed_state, observed_at)
+                let (next_state, effect) = start_next_observation(disarmed_state, observed_at);
+                if let Some(effect) = effect {
+                    Transition::new(next_state, vec![effect])
+                } else if exact_boundary_refresh_required(&next_state) {
+                    let Some((refresh_state, refresh_effect)) =
+                        start_boundary_refresh_observation(next_state, observed_at)
+                    else {
+                        unreachable!(
+                            "boundary refresh eligibility changed between check and start"
+                        );
+                    };
+                    Transition::new(refresh_state, vec![refresh_effect])
+                } else {
+                    observe_or_plan(next_state, observed_at)
+                }
             }
         }
         TimerKind::Ingress => reduce_ingress_timer_signal(disarmed_state, observed_at),

@@ -1,4 +1,7 @@
-use super::{Glyph, HighlightLevel, HighlightRef, PlanResources};
+use super::Glyph;
+use super::HighlightLevel;
+use super::HighlightRef;
+use super::PlanResources;
 use crate::octant_chars::OCTANT_CHARACTERS;
 
 pub(super) fn draw_braille_character(

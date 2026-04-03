@@ -26,6 +26,7 @@ mod window_pool;
 pub(crate) use apply::ApplyMetrics;
 pub(crate) use window_pool::AllocationPolicy;
 pub(crate) use window_pool::CompactRenderWindowsSummary;
+pub(crate) use window_pool::TabPoolSnapshot;
 
 pub(crate) const EXTMARK_ID: u32 = 999;
 const PREPAINT_EXTMARK_ID: u32 = 1001;
@@ -384,6 +385,11 @@ pub(crate) struct RenderPoolDiagnostics {
     pub(crate) available_windows: usize,
     pub(crate) in_use_windows: usize,
     pub(crate) visible_windows: usize,
+    pub(crate) cached_budget: usize,
+    pub(crate) peak_total_windows: usize,
+    pub(crate) peak_frame_demand: usize,
+    pub(crate) peak_requested_capacity: usize,
+    pub(crate) capacity_cap_hits: usize,
 }
 
 pub(crate) fn render_pool_diagnostics() -> RenderPoolDiagnostics {
@@ -403,6 +409,21 @@ pub(crate) fn render_pool_diagnostics() -> RenderPoolDiagnostics {
             diagnostics.visible_windows = diagnostics
                 .visible_windows
                 .saturating_add(window_pool::tab_visible_window_count_from_tab(tab_windows));
+            diagnostics.cached_budget = diagnostics
+                .cached_budget
+                .saturating_add(snapshot.cached_budget);
+            diagnostics.peak_total_windows = diagnostics
+                .peak_total_windows
+                .max(snapshot.peak_total_windows);
+            diagnostics.peak_frame_demand = diagnostics
+                .peak_frame_demand
+                .max(snapshot.peak_frame_demand);
+            diagnostics.peak_requested_capacity = diagnostics
+                .peak_requested_capacity
+                .max(snapshot.peak_requested_capacity);
+            diagnostics.capacity_cap_hits = diagnostics
+                .capacity_cap_hits
+                .saturating_add(snapshot.capacity_cap_hits);
         }
         diagnostics
     })
@@ -930,6 +951,11 @@ mod tests {
         assert_eq!(diagnostics.available_windows, 3);
         assert_eq!(diagnostics.in_use_windows, 0);
         assert_eq!(diagnostics.visible_windows, 3);
+        assert_eq!(diagnostics.cached_budget, 64);
+        assert_eq!(diagnostics.peak_total_windows, 2);
+        assert_eq!(diagnostics.peak_frame_demand, 0);
+        assert_eq!(diagnostics.peak_requested_capacity, 0);
+        assert_eq!(diagnostics.capacity_cap_hits, 0);
 
         reset_draw_context_for_test();
     }

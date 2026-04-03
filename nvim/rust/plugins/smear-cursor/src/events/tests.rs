@@ -158,6 +158,7 @@ mod runtime_option_application {
     use super::super::options::apply_runtime_options;
     use super::cterm_colors_object;
     use super::options_dict;
+    use crate::config::BufferPerfMode;
     use crate::config::RuntimeConfig;
     use crate::state::ColorOptionsPatch;
     use crate::state::OptionalChange;
@@ -249,6 +250,21 @@ mod runtime_option_application {
 
         patch.apply(&mut state);
         assert_eq!(state.config.max_kept_windows, 24);
+    }
+
+    #[test]
+    fn runtime_options_patch_apply_sets_buffer_perf_mode() {
+        let mut state = RuntimeState::default();
+        let patch = RuntimeOptionsPatch {
+            runtime: RuntimeSwitchesPatch {
+                buffer_perf_mode: Some(BufferPerfMode::Fast),
+                ..RuntimeSwitchesPatch::default()
+            },
+            ..RuntimeOptionsPatch::default()
+        };
+
+        patch.apply(&mut state);
+        assert_eq!(state.config.buffer_perf_mode, BufferPerfMode::Fast);
     }
 
     #[test]
@@ -528,6 +544,7 @@ mod runtime_option_parsing {
     use super::super::options::validated_non_negative_f64;
     use super::cterm_colors_object;
     use super::options_dict;
+    use crate::config::BufferPerfMode;
     use crate::state::OptionalChange;
     use crate::state::RuntimeOptionsPatch;
     use nvim_oxi::Object;
@@ -589,6 +606,15 @@ mod runtime_option_parsing {
     }
 
     #[test]
+    fn runtime_options_patch_parse_accepts_buffer_perf_mode() {
+        let opts = options_dict([("buffer_perf_mode", Object::from("fast"))]);
+
+        let patch = RuntimeOptionsPatch::parse(&opts).expect("expected parse success");
+
+        assert_eq!(patch.runtime.buffer_perf_mode, Some(BufferPerfMode::Fast));
+    }
+
+    #[test]
     fn runtime_options_patch_parse_rejects_non_positive_simulation_hz() {
         let opts = options_dict([("simulation_hz", Object::from(0.0_f64))]);
 
@@ -614,6 +640,21 @@ mod runtime_option_parsing {
         );
         assert!(
             err.to_string().contains("between 2 and 255"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_options_patch_parse_rejects_unknown_buffer_perf_mode() {
+        let opts = options_dict([("buffer_perf_mode", Object::from("minimal"))]);
+
+        let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
+        assert!(
+            err.to_string().contains("buffer_perf_mode"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("one of: auto, full, fast, off"),
             "unexpected error: {err}"
         );
     }
@@ -646,12 +687,17 @@ mod runtime_option_parsing {
 
 mod buffer_event_policy {
     use super::super::policy::BufferEventPolicy;
+    use super::super::policy::BufferPerfClass;
+    use super::super::policy::BufferPerfSignals;
+    use super::super::policy::BufferPerfTelemetry;
     use super::super::policy::IngressCursorPresentationContext;
     use super::super::policy::IngressCursorPresentationPolicy;
+    use crate::config::BufferPerfMode;
     use crate::types::ScreenCell;
+    use pretty_assertions::assert_eq;
 
     #[test]
-    fn normal_policy_allows_explicit_ingress_prepaint() {
+    fn full_policy_allows_explicit_ingress_prepaint() {
         let policy = BufferEventPolicy::from_buffer_metadata("terminal", true, 1, 0.0);
         let cell = ScreenCell::new(3, 7).expect("valid test cell");
         assert_eq!(
@@ -669,8 +715,8 @@ mod buffer_event_policy {
     }
 
     #[test]
-    fn normal_policy_hides_without_prepaint_when_target_cell_cannot_round() {
-        let policy = BufferEventPolicy::Normal;
+    fn full_policy_hides_without_prepaint_when_target_cell_cannot_round() {
+        let policy = BufferEventPolicy::from_buffer_metadata("", true, 1, 0.0);
         assert_eq!(
             policy.ingress_cursor_presentation_policy(IngressCursorPresentationContext::new(
                 true, false, true, false, true, None, 90,
@@ -680,8 +726,8 @@ mod buffer_event_policy {
     }
 
     #[test]
-    fn normal_policy_skips_ingress_cursor_presentation_when_runtime_is_ineligible() {
-        let policy = BufferEventPolicy::Normal;
+    fn full_policy_skips_ingress_cursor_presentation_when_runtime_is_ineligible() {
+        let policy = BufferEventPolicy::from_buffer_metadata("", true, 1, 0.0);
         let cell = ScreenCell::new(3, 7).expect("valid test cell");
         for context in [
             IngressCursorPresentationContext::new(true, true, true, false, true, Some(cell), 90),
@@ -695,6 +741,343 @@ mod buffer_event_policy {
                 IngressCursorPresentationPolicy::NoAction
             );
         }
+    }
+
+    #[test]
+    fn disabled_filetype_is_a_hard_skip() {
+        let policy = BufferEventPolicy::from_test_input("", true, 1, 0.0, true);
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::Skip);
+        assert!(policy.should_skip());
+    }
+
+    #[test]
+    fn unsupported_special_buftype_is_skipped() {
+        let policy = BufferEventPolicy::from_buffer_metadata("quickfix", false, 1, 0.0);
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::Skip);
+        assert!(policy.should_skip());
+    }
+
+    #[test]
+    fn large_line_count_degrades_to_fast_motion() {
+        let policy = BufferEventPolicy::from_buffer_metadata("", true, 20_000, 0.0);
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert!(!policy.should_skip());
+        assert_eq!(
+            policy.diagnostic_effective_mode_name(BufferPerfMode::Auto),
+            "auto_fast"
+        );
+        assert_eq!(policy.observed_reason_bits(), 1);
+        assert_eq!(policy.reason_bits(), 1);
+        assert_eq!(policy.diagnostic_observed_reason_summary(), "lines");
+        assert_eq!(policy.diagnostic_reason_summary(), "lines");
+        assert_eq!(policy.diagnostic_summary(), "fast:lines");
+    }
+
+    #[test]
+    fn slow_callbacks_degrade_to_fast_motion() {
+        let policy = BufferEventPolicy::from_buffer_metadata("", true, 1, 16.0);
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert!(!policy.should_skip());
+        assert_eq!(policy.reason_bits(), 2);
+        assert_eq!(policy.diagnostic_reason_summary(), "slow_cb");
+        assert_eq!(policy.diagnostic_summary(), "fast:slow_cb");
+    }
+
+    #[test]
+    fn cursor_color_extmark_pressure_degrades_to_fast_motion() {
+        let mut telemetry = BufferPerfTelemetry::default();
+        telemetry.record_cursor_color_extmark_fallback(1_000.0);
+        telemetry.record_cursor_color_extmark_fallback(1_000.0);
+
+        let policy = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Auto,
+            1,
+            0.0,
+            telemetry.signals_at(1_000.0),
+            false,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(policy.reason_bits(), 16);
+        assert_eq!(policy.diagnostic_reason_summary(), "extmark");
+        assert_eq!(policy.diagnostic_summary(), "fast:extmark");
+    }
+
+    #[test]
+    fn conceal_scan_pressure_degrades_to_fast_motion() {
+        let mut telemetry = BufferPerfTelemetry::default();
+        telemetry.record_conceal_full_scan(1_000.0);
+        telemetry.record_conceal_full_scan(1_000.0);
+
+        let policy = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Auto,
+            1,
+            0.0,
+            telemetry.signals_at(1_000.0),
+            false,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(policy.reason_bits(), 32);
+        assert_eq!(policy.diagnostic_reason_summary(), "conceal_scan");
+        assert_eq!(policy.diagnostic_summary(), "fast:conceal_scan");
+    }
+
+    #[test]
+    fn combined_inputs_accumulate_reason_bits_in_diagnostic_order() {
+        let policy = BufferEventPolicy::from_buffer_metadata("", true, 80_000, 16.0);
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(policy.reason_bits(), 3);
+        assert_eq!(policy.diagnostic_reason_summary(), "lines,slow_cb");
+        assert_eq!(policy.diagnostic_summary(), "fast:lines,slow_cb");
+    }
+
+    #[test]
+    fn pressure_reasons_append_after_line_and_callback_in_diagnostic_order() {
+        let mut telemetry = BufferPerfTelemetry::default();
+        telemetry.record_cursor_color_extmark_fallback(1_000.0);
+        telemetry.record_cursor_color_extmark_fallback(1_000.0);
+        telemetry.record_conceal_full_scan(1_000.0);
+        telemetry.record_conceal_full_scan(1_000.0);
+        telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
+        telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
+
+        let policy = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Auto,
+            80_000,
+            16.0,
+            telemetry.signals_at(1_000.0),
+            false,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(policy.reason_bits(), 115);
+        assert_eq!(
+            policy.diagnostic_reason_summary(),
+            "lines,slow_cb,extmark,conceal_scan,conceal_raw"
+        );
+        assert_eq!(
+            policy.diagnostic_summary(),
+            "fast:lines,slow_cb,extmark,conceal_scan,conceal_raw"
+        );
+    }
+
+    #[test]
+    fn skip_policy_exposes_disabled_filetype_reason_in_summary() {
+        let policy = BufferEventPolicy::from_test_input("", true, 80_000, 16.0, true);
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::Skip);
+        assert_eq!(policy.reason_bits(), 11);
+        assert_eq!(policy.diagnostic_reason_summary(), "lines,slow_cb,filetype");
+        assert_eq!(policy.diagnostic_summary(), "skip:lines,slow_cb,filetype");
+    }
+
+    #[test]
+    fn callback_threshold_enters_fast_motion_at_enter_threshold() {
+        let policy = BufferEventPolicy::from_buffer_metadata("", true, 1, 8.0);
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(policy.reason_bits(), 2);
+        assert_eq!(policy.diagnostic_summary(), "fast:slow_cb");
+    }
+
+    #[test]
+    fn line_count_hysteresis_keeps_fast_motion_until_exit_threshold() {
+        let previous = BufferEventPolicy::from_buffer_metadata("", true, 20_000, 0.0);
+
+        let held = BufferEventPolicy::from_test_input_with_previous(
+            Some(previous),
+            "",
+            true,
+            16_000,
+            0.0,
+            false,
+        );
+        let released = BufferEventPolicy::from_test_input_with_previous(
+            Some(previous),
+            "",
+            true,
+            15_999,
+            0.0,
+            false,
+        );
+
+        assert_eq!(held.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(held.reason_bits(), 1);
+        assert_eq!(released.perf_class(), BufferPerfClass::Full);
+        assert_eq!(released.reason_bits(), 0);
+    }
+
+    #[test]
+    fn callback_hysteresis_keeps_fast_motion_until_exit_threshold() {
+        let previous = BufferEventPolicy::from_buffer_metadata("", true, 1, 16.0);
+
+        let held = BufferEventPolicy::from_test_input_with_previous(
+            Some(previous),
+            "",
+            true,
+            1,
+            6.0,
+            false,
+        );
+        let released =
+            BufferEventPolicy::from_test_input_with_previous(Some(held), "", true, 1, 5.9, false);
+
+        assert_eq!(held.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(held.reason_bits(), 2);
+        assert_eq!(released.perf_class(), BufferPerfClass::Full);
+        assert_eq!(released.reason_bits(), 0);
+    }
+
+    #[test]
+    fn conceal_raw_pressure_can_hold_fast_motion_after_scan_pressure_decays() {
+        let mut telemetry = BufferPerfTelemetry::default();
+        telemetry.record_conceal_full_scan(1_000.0);
+        telemetry.record_conceal_full_scan(1_000.0);
+        let previous = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Auto,
+            1,
+            0.0,
+            telemetry.signals_at(1_000.0),
+            false,
+        );
+        telemetry.record_conceal_raw_screenpos_fallback(6_100.0);
+        telemetry.record_conceal_raw_screenpos_fallback(6_100.0);
+
+        let held = BufferEventPolicy::from_test_input_with_perf_mode(
+            Some(previous),
+            "",
+            true,
+            BufferPerfMode::Auto,
+            1,
+            0.0,
+            telemetry.signals_at(6_100.0),
+            false,
+        );
+
+        assert_eq!(held.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(held.reason_bits(), 64);
+        assert_eq!(held.diagnostic_summary(), "fast:conceal_raw");
+    }
+
+    #[test]
+    fn hysteresis_tracks_line_count_and_callback_reasons_independently() {
+        let previous = BufferEventPolicy::from_buffer_metadata("", true, 1, 16.0);
+        let policy = BufferEventPolicy::from_test_input_with_previous(
+            Some(previous),
+            "",
+            true,
+            70_000,
+            11.0,
+            false,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(policy.reason_bits(), 3);
+        assert_eq!(policy.diagnostic_summary(), "fast:lines,slow_cb");
+    }
+
+    #[test]
+    fn manual_full_mode_preserves_full_behavior_without_auto_reason_bits() {
+        let policy = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Full,
+            80_000,
+            16.0,
+            BufferPerfSignals::default(),
+            false,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::Full);
+        assert_eq!(
+            policy.diagnostic_effective_mode_name(BufferPerfMode::Full),
+            "full_full"
+        );
+        assert_eq!(policy.observed_reason_bits(), 3);
+        assert_eq!(policy.reason_bits(), 3);
+        assert_eq!(policy.diagnostic_observed_reason_summary(), "lines,slow_cb");
+        assert_eq!(policy.diagnostic_summary(), "full:lines,slow_cb");
+    }
+
+    #[test]
+    fn manual_fast_mode_forces_fast_motion_on_supported_buffers() {
+        let policy = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Fast,
+            1,
+            0.0,
+            BufferPerfSignals::default(),
+            false,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::FastMotion);
+        assert_eq!(policy.reason_bits(), 0);
+        assert_eq!(policy.diagnostic_summary(), "fast");
+    }
+
+    #[test]
+    fn manual_off_mode_skips_supported_buffers_without_auto_reasons() {
+        let policy = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Off,
+            1,
+            0.0,
+            BufferPerfSignals::default(),
+            false,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::Skip);
+        assert_eq!(
+            policy.diagnostic_effective_mode_name(BufferPerfMode::Off),
+            "off_skip"
+        );
+        assert_eq!(policy.reason_bits(), 0);
+        assert_eq!(policy.diagnostic_summary(), "skip");
+    }
+
+    #[test]
+    fn manual_full_mode_still_respects_disabled_filetypes() {
+        let policy = BufferEventPolicy::from_test_input_with_perf_mode(
+            None,
+            "",
+            true,
+            BufferPerfMode::Full,
+            1,
+            0.0,
+            BufferPerfSignals::default(),
+            true,
+        );
+
+        assert_eq!(policy.perf_class(), BufferPerfClass::Skip);
+        assert_eq!(
+            policy.diagnostic_effective_mode_name(BufferPerfMode::Full),
+            "full_skip"
+        );
+        assert_eq!(policy.reason_bits(), 8);
+        assert_eq!(policy.diagnostic_summary(), "skip:filetype");
     }
 }
 

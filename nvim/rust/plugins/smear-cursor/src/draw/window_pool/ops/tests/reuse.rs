@@ -586,11 +586,17 @@ fn acquire_failure_removes_only_failed_candidate_and_defers_other_invalid_cleanu
 fn frame_capacity_target_keeps_one_reuse_only_spare() {
     assert_eq!(
         frame_capacity_target(0, 3, 16, AllocationPolicy::ReuseOnly),
-        4
+        FrameCapacityTarget {
+            requested_capacity: 4,
+            target_capacity: 4,
+        }
     );
     assert_eq!(
         frame_capacity_target(2, 3, 16, AllocationPolicy::ReuseOnly),
-        6
+        FrameCapacityTarget {
+            requested_capacity: 6,
+            target_capacity: 6,
+        }
     );
 }
 
@@ -598,11 +604,17 @@ fn frame_capacity_target_keeps_one_reuse_only_spare() {
 fn frame_capacity_target_stays_exact_for_bootstrap_and_empty_frames() {
     assert_eq!(
         frame_capacity_target(0, 3, 16, AllocationPolicy::BootstrapIfPoolEmpty),
-        3
+        FrameCapacityTarget {
+            requested_capacity: 3,
+            target_capacity: 3,
+        }
     );
     assert_eq!(
         frame_capacity_target(0, 0, 16, AllocationPolicy::ReuseOnly),
-        0
+        FrameCapacityTarget {
+            requested_capacity: 0,
+            target_capacity: 0,
+        }
     );
 }
 
@@ -610,25 +622,38 @@ fn frame_capacity_target_stays_exact_for_bootstrap_and_empty_frames() {
 fn frame_capacity_target_respects_max_kept_windows() {
     assert_eq!(
         frame_capacity_target(3, 3, 6, AllocationPolicy::ReuseOnly),
-        6
+        FrameCapacityTarget {
+            requested_capacity: 7,
+            target_capacity: 6,
+        }
     );
     assert_eq!(
         frame_capacity_target(3, 3, 5, AllocationPolicy::BootstrapIfPoolEmpty),
-        5
+        FrameCapacityTarget {
+            requested_capacity: 6,
+            target_capacity: 5,
+        }
     );
 }
 
 #[test]
 fn frame_capacity_target_can_exceed_adaptive_retention_hard_max_for_peak_draws() {
+    let max_kept_windows = ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(32);
     let target = frame_capacity_target(
         ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_sub(16),
         24,
-        ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(64),
+        max_kept_windows,
         AllocationPolicy::ReuseOnly,
     );
 
-    assert_eq!(target, ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(9));
-    assert!(target > ADAPTIVE_POOL_HARD_MAX_BUDGET);
+    assert_eq!(
+        target,
+        FrameCapacityTarget {
+            requested_capacity: ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(9),
+            target_capacity: ADAPTIVE_POOL_HARD_MAX_BUDGET.saturating_add(9),
+        }
+    );
+    assert!(target.target_capacity > ADAPTIVE_POOL_HARD_MAX_BUDGET);
 }
 
 #[test]

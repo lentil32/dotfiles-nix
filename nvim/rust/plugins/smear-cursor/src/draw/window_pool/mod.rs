@@ -341,6 +341,10 @@ pub(crate) struct TabWindows {
     current_epoch: FrameEpoch,
     frame_demand: usize,
     last_frame_demand: usize,
+    peak_frame_demand: usize,
+    peak_requested_capacity: usize,
+    peak_total_windows: usize,
+    capacity_cap_hits: usize,
     in_use_indices: Vec<usize>,
     in_use_slots: Vec<Option<usize>>,
     visible_available_indices: Vec<usize>,
@@ -362,6 +366,10 @@ impl Default for TabWindows {
             current_epoch: FrameEpoch::ZERO,
             frame_demand: 0,
             last_frame_demand: 0,
+            peak_frame_demand: 0,
+            peak_requested_capacity: 0,
+            peak_total_windows: 0,
+            capacity_cap_hits: 0,
             in_use_indices: Vec::new(),
             in_use_slots: Vec::new(),
             visible_available_indices: Vec::new(),
@@ -420,6 +428,7 @@ impl TabWindows {
     fn push_cached_window(&mut self, cached: CachedRenderWindow) {
         let index = self.windows.len();
         self.windows.push(cached);
+        self.note_peak_total_windows();
         self.in_use_slots.push(None);
         self.visible_available_slots.push(None);
         self.reusable_window_slots.push(None);
@@ -697,6 +706,7 @@ impl TabWindows {
             let cached = self.windows[index];
             self.track_window_insert(index, cached.lifecycle, cached.placement);
         }
+        self.note_peak_total_windows();
         self.debug_assert_tracking_consistent();
     }
 
@@ -807,6 +817,21 @@ impl TabWindows {
 
     fn has_invalid_windows(&self) -> bool {
         self.lifecycle_counters.invalid > 0
+    }
+
+    fn note_frame_demand(&mut self, demand_signal: usize) {
+        self.peak_frame_demand = self.peak_frame_demand.max(demand_signal);
+    }
+
+    fn note_capacity_target(&mut self, target: FrameCapacityTarget) {
+        self.peak_requested_capacity = self.peak_requested_capacity.max(target.requested_capacity);
+        if target.is_clamped_by_cap() {
+            self.capacity_cap_hits = self.capacity_cap_hits.saturating_add(1);
+        }
+    }
+
+    fn note_peak_total_windows(&mut self) {
+        self.peak_total_windows = self.peak_total_windows.max(self.windows.len());
     }
 }
 

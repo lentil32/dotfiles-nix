@@ -71,6 +71,19 @@ Non-goals:
 - cells are anisotropic; `block_aspect_ratio` is part of the rendering metric
 - global coherence must be solved before Unicode quantization, not after
 
+### 3.3 Operational perf modes
+
+Adaptive performance remains automatic by default, but production operation may expose one small
+top-level override for debugging or forced recovery behavior:
+
+- `auto`: derive the perf class from buffer size, callback slowness, and skip predicates
+- `full`: keep the full-quality path for otherwise supported buffers
+- `fast`: force the fast-motion policy for otherwise supported buffers
+- `off`: skip smear-cursor work entirely
+
+Hard skip predicates such as unsupported special buffers or explicitly disabled filetypes still win
+over the non-off override modes.
+
 ---
 
 ## 4. Coordinate systems and notation
