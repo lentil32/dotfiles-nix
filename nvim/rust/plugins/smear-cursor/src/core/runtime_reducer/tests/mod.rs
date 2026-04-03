@@ -405,7 +405,7 @@ impl RenderFrameSummary {
                 .iter()
                 .map(StepSampleSummary::from_step_sample)
                 .collect(),
-            particles: frame.particles.len(),
+            particles: frame.particle_count,
             color_at_cursor: frame.color_at_cursor,
         }
     }

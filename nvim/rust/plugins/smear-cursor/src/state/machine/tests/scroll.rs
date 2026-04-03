@@ -80,14 +80,16 @@ proptest! {
         state.current_corners = current_corners;
         state.previous_center = center(&current_corners);
         state.trail_origin_corners = trail_origin;
-        state.particles = particles
+        state.particles = std::sync::Arc::new(
+            particles
             .into_iter()
             .map(|(position, velocity, lifetime)| Particle {
                 position,
                 velocity,
                 lifetime,
             })
-            .collect();
+            .collect(),
+        );
 
         state.apply_scroll_shift(row_shift, col_shift, min_row, max_row);
 

@@ -11,11 +11,44 @@ use super::RecoveryPolicyState;
 use super::RenderCleanupState;
 use super::SceneState;
 use super::TimerState;
+use crate::core::runtime_reducer::CursorTransition;
 use crate::core::types::CursorPosition;
 use crate::core::types::Generation;
 use crate::core::types::IngressSeq;
 use crate::core::types::Lifecycle;
 use crate::core::types::ProposalId;
+use std::rc::Rc;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreparedObservationPlan {
+    prepared_motion: crate::state::PreparedRuntimeMotion,
+    transition: CursorTransition,
+}
+
+impl PreparedObservationPlan {
+    pub(crate) fn new(
+        prepared_motion: crate::state::PreparedRuntimeMotion,
+        transition: CursorTransition,
+    ) -> Self {
+        Self {
+            prepared_motion,
+            transition,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_to_runtime(&self, runtime: &mut crate::state::RuntimeState) {
+        runtime.apply_prepared_motion(self.prepared_motion.clone());
+    }
+
+    pub(crate) fn transition(&self) -> &CursorTransition {
+        &self.transition
+    }
+
+    pub(crate) fn into_parts(self) -> (crate::state::PreparedRuntimeMotion, CursorTransition) {
+        (self.prepared_motion, self.transition)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ProtocolSharedState {
@@ -69,6 +102,7 @@ pub(crate) enum ProtocolState {
         request: ObservationRequest,
         observation: ObservationSnapshot,
         probe_refresh: ProbeRefreshState,
+        prepared_plan: Option<Box<PreparedObservationPlan>>,
     },
     Ready {
         shared: ProtocolSharedState,
@@ -217,6 +251,17 @@ impl ProtocolState {
         }
     }
 
+    pub(crate) fn observation_mut(&mut self) -> Option<&mut ObservationSnapshot> {
+        match self {
+            Self::Idle { .. } | Self::Primed { .. } => None,
+            Self::ObservingRequest { .. } | Self::Recovering { .. } => None,
+            Self::ObservingActive { observation, .. }
+            | Self::Ready { observation, .. }
+            | Self::Planning { observation, .. }
+            | Self::Applying { observation, .. } => Some(observation),
+        }
+    }
+
     pub(crate) fn retained_observation(&self) -> Option<&ObservationSnapshot> {
         match self {
             Self::Idle { .. } | Self::Primed { .. } => None,
@@ -237,7 +282,7 @@ impl ProtocolState {
 pub(crate) struct CoreStatePayload {
     pub(crate) entropy: EntropyState,
     pub(crate) last_cursor: Option<CursorPosition>,
-    pub(crate) scene: SceneState,
+    pub(crate) scene: Rc<SceneState>,
     pub(crate) realization: RealizationLedger,
 }
 
@@ -349,28 +394,91 @@ impl CoreState {
         self.protocol.observation()
     }
 
+    pub(crate) fn observation_mut(&mut self) -> Option<&mut ObservationSnapshot> {
+        self.protocol.observation_mut()
+    }
+
     pub(crate) fn retained_observation(&self) -> Option<&ObservationSnapshot> {
         self.protocol.retained_observation()
     }
 
-    pub(crate) const fn scene(&self) -> &SceneState {
-        &self.payload.scene
+    pub(crate) fn take_retained_observation(&mut self) -> Option<ObservationSnapshot> {
+        match &mut self.protocol {
+            ProtocolState::ObservingRequest {
+                retained_observation,
+                ..
+            }
+            | ProtocolState::Recovering {
+                observation: retained_observation,
+                ..
+            } => retained_observation.take(),
+            ProtocolState::Idle { .. }
+            | ProtocolState::Primed { .. }
+            | ProtocolState::ObservingActive { .. }
+            | ProtocolState::Ready { .. }
+            | ProtocolState::Planning { .. }
+            | ProtocolState::Applying { .. } => None,
+        }
+    }
+
+    pub(crate) fn set_retained_observation(
+        &mut self,
+        observation: Option<ObservationSnapshot>,
+    ) -> bool {
+        match &mut self.protocol {
+            ProtocolState::ObservingRequest {
+                retained_observation,
+                ..
+            }
+            | ProtocolState::Recovering {
+                observation: retained_observation,
+                ..
+            } => {
+                *retained_observation = observation;
+                true
+            }
+            ProtocolState::Idle { .. }
+            | ProtocolState::Primed { .. }
+            | ProtocolState::ObservingActive { .. }
+            | ProtocolState::Ready { .. }
+            | ProtocolState::Planning { .. }
+            | ProtocolState::Applying { .. } => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scene(&self) -> &SceneState {
+        self.payload.scene.as_ref()
+    }
+
+    pub(crate) fn shared_scene(&self) -> Rc<SceneState> {
+        Rc::clone(&self.payload.scene)
     }
 
     pub(crate) const fn realization(&self) -> &RealizationLedger {
         &self.payload.realization
     }
 
-    pub(crate) const fn runtime(&self) -> &crate::state::RuntimeState {
+    pub(crate) fn runtime(&self) -> &crate::state::RuntimeState {
         self.payload.scene.motion()
     }
 
     pub(crate) fn runtime_mut(&mut self) -> &mut crate::state::RuntimeState {
-        self.payload.scene.motion_mut()
+        Rc::make_mut(&mut self.payload.scene).motion_mut()
+    }
+
+    pub(crate) fn runtime_mut_with_observation(
+        &mut self,
+    ) -> Option<(&mut crate::state::RuntimeState, &ObservationSnapshot)> {
+        let Self {
+            protocol, payload, ..
+        } = self;
+        let observation = protocol.observation()?;
+        Some((Rc::make_mut(&mut payload.scene).motion_mut(), observation))
     }
 
     pub(crate) fn take_runtime(&mut self) -> crate::state::RuntimeState {
-        self.payload.scene.take_motion()
+        Rc::make_mut(&mut self.payload.scene).take_motion()
     }
 
     pub(crate) fn pending_proposal(&self) -> Option<&InFlightProposal> {
@@ -417,20 +525,13 @@ impl CoreState {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_scene(mut self, scene: SceneState) -> Self {
-        self.payload.scene = scene;
-        self
-    }
-
     pub(crate) fn with_realization(mut self, realization: RealizationLedger) -> Self {
         self.payload.realization = realization;
         self
     }
 
     pub(crate) fn with_runtime(mut self, runtime: crate::state::RuntimeState) -> Self {
-        let scene = std::mem::take(&mut self.payload.scene);
-        self.payload.scene = scene.with_motion(runtime);
+        *Rc::make_mut(&mut self.payload.scene).motion_mut() = runtime;
         self
     }
 
@@ -499,6 +600,7 @@ impl CoreState {
                         request,
                         observation,
                         probe_refresh,
+                        prepared_plan: None,
                     },
                     None => ProtocolState::ObservingRequest {
                         shared,
@@ -513,6 +615,7 @@ impl CoreState {
                 shared,
                 request,
                 probe_refresh,
+                prepared_plan,
                 ..
             } => {
                 self.protocol = match observation {
@@ -521,6 +624,7 @@ impl CoreState {
                         request,
                         observation,
                         probe_refresh,
+                        prepared_plan,
                     },
                     None => ProtocolState::ObservingRequest {
                         shared,
@@ -534,6 +638,31 @@ impl CoreState {
             protocol => {
                 self.protocol = protocol;
                 false
+            }
+        }
+    }
+
+    pub(crate) fn take_active_observation(&mut self) -> Option<ObservationSnapshot> {
+        let protocol = std::mem::take(&mut self.protocol);
+        match protocol {
+            ProtocolState::ObservingActive {
+                shared,
+                request,
+                observation,
+                probe_refresh,
+                ..
+            } => {
+                self.protocol = ProtocolState::ObservingRequest {
+                    shared,
+                    request,
+                    retained_observation: None,
+                    probe_refresh,
+                };
+                Some(observation)
+            }
+            protocol => {
+                self.protocol = protocol;
+                None
             }
         }
     }
@@ -552,6 +681,39 @@ impl CoreState {
                 true
             }
             _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepared_observation_plan(&self) -> Option<&PreparedObservationPlan> {
+        match &self.protocol {
+            ProtocolState::ObservingActive { prepared_plan, .. } => prepared_plan.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_prepared_observation_plan(
+        &mut self,
+        prepared_plan: Option<PreparedObservationPlan>,
+    ) -> bool {
+        match &mut self.protocol {
+            ProtocolState::ObservingActive {
+                prepared_plan: current,
+                ..
+            } => {
+                *current = prepared_plan.map(Box::new);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn take_prepared_observation_plan(&mut self) -> Option<PreparedObservationPlan> {
+        match &mut self.protocol {
+            ProtocolState::ObservingActive { prepared_plan, .. } => {
+                prepared_plan.take().map(|plan| *plan)
+            }
+            _ => None,
         }
     }
 
@@ -679,7 +841,7 @@ impl CoreState {
         planned_render: crate::core::state::PlannedRender,
     ) -> bool {
         let proposal_id = planned_render.proposal_id();
-        let (next_scene, proposal) = planned_render.into_parts();
+        let (scene_update, proposal) = planned_render.into_parts();
         let protocol = std::mem::take(&mut self.protocol);
         match protocol {
             ProtocolState::Planning {
@@ -692,7 +854,7 @@ impl CoreState {
                     observation,
                     proposal: Box::new(proposal),
                 };
-                self.payload.scene = next_scene;
+                Rc::make_mut(&mut self.payload.scene).apply_planned_update(scene_update);
                 true
             }
             protocol => {

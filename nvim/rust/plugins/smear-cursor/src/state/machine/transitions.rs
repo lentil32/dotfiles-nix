@@ -41,7 +41,7 @@ impl RuntimeState {
                 self.start_new_trail_stroke();
                 self.velocity_corners = zero_velocity_corners();
                 self.spring_velocity_corners = zero_velocity_corners();
-                self.particles.clear();
+                self.set_shared_particles(std::sync::Arc::default());
                 self.rng_state = seed;
                 self.mark_initialized();
                 self.clear_pending_target();
@@ -69,7 +69,7 @@ impl RuntimeState {
                 self.start_new_trail_stroke();
                 self.velocity_corners = zero_velocity_corners();
                 self.spring_velocity_corners = zero_velocity_corners();
-                self.particles.clear();
+                self.set_shared_particles(std::sync::Arc::default());
                 self.clear_pending_target();
                 self.stop_animation();
                 self.mark_initialized();

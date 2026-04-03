@@ -14,12 +14,12 @@ use super::window_pool::{self};
 use super::with_render_tab;
 use crate::core::realization::RealizationProjection;
 use crate::core::realization::RealizationSpan;
+use crate::events::editor_viewport_for_bounds;
 use nvim_oxi::Array;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
 use nvim_oxi::Result;
 use nvim_oxi::api;
-use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::opts::SetExtmarkOpts;
 use nvim_oxi::api::types::ExtmarkVirtTextPosition;
 use std::cell::Cell;
@@ -42,13 +42,11 @@ pub(crate) struct ApplyMetrics {
 }
 
 pub(crate) fn editor_bounds() -> Result<Viewport> {
-    let opts = OptionOpts::builder().build();
-    let lines: i64 = api::get_option_value("lines", &opts)?;
-    let cmdheight: i64 = api::get_option_value("cmdheight", &opts)?;
-    let columns: i64 = api::get_option_value("columns", &opts)?;
-    let max_row = (lines - cmdheight).max(1);
-    let max_col = columns.max(1);
-    Ok(Viewport { max_row, max_col })
+    let viewport = editor_viewport_for_bounds()?;
+    Ok(Viewport {
+        max_row: viewport.max_row(),
+        max_col: viewport.max_col(),
+    })
 }
 
 pub(crate) fn current_tab_handle() -> i32 {

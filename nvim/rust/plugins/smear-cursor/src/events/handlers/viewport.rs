@@ -55,6 +55,39 @@ fn current_window_surface_metrics(window: &api::Window) -> Option<WindowSurfaceM
     })
 }
 
+fn cursor_location_from_live_window_state(
+    window: &api::Window,
+    buffer: &api::Buffer,
+    top_row: i64,
+    line: i64,
+    metrics: WindowSurfaceMetrics,
+) -> CursorLocation {
+    CursorLocation::new(
+        i64::from(window.handle()),
+        i64::from(buffer.handle()),
+        top_row,
+        line,
+    )
+    .with_viewport_columns(metrics.left_col, metrics.text_offset)
+    .with_window_origin(metrics.window_row, metrics.window_col)
+    .with_window_dimensions(metrics.window_width, metrics.window_height)
+}
+
+pub(crate) fn cursor_location_for_ingress_fast_path() -> Option<CursorLocation> {
+    let window = api::get_current_win();
+    let buffer = api::get_current_buf();
+    if !window.is_valid() || !buffer.is_valid() {
+        return None;
+    }
+
+    let top_row = line_value("w0").ok()?;
+    let line = line_value(".").ok()?;
+    let metrics = current_window_surface_metrics(&window)?;
+    Some(cursor_location_from_live_window_state(
+        &window, &buffer, top_row, line, metrics,
+    ))
+}
+
 pub(crate) fn cursor_location_for_core_render(
     tracked_location: Option<CursorLocation>,
 ) -> CursorLocation {
@@ -97,15 +130,7 @@ pub(crate) fn cursor_location_for_core_render(
             window_width: default_window_width,
             window_height: default_window_height,
         });
-        return CursorLocation::new(
-            i64::from(window.handle()),
-            i64::from(buffer.handle()),
-            top_row,
-            line,
-        )
-        .with_viewport_columns(metrics.left_col, metrics.text_offset)
-        .with_window_origin(metrics.window_row, metrics.window_col)
-        .with_window_dimensions(metrics.window_width, metrics.window_height);
+        return cursor_location_from_live_window_state(&window, &buffer, top_row, line, metrics);
     }
 
     tracked_location.unwrap_or(CursorLocation::new(0, 0, 0, 0))

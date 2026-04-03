@@ -1,5 +1,6 @@
-use super::base::current_buffer_changedtick;
+use super::base::CurrentEditorSnapshot;
 use crate::core::state::CursorTextContext;
+use crate::core::state::CursorTextContextBoundary;
 use crate::core::state::ObservedTextRow;
 use crate::events::probe_cache::CursorTextContextCacheKey;
 use crate::events::probe_cache::CursorTextContextCacheLookup;
@@ -9,6 +10,26 @@ use crate::state::CursorLocation;
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use std::sync::Arc;
+
+pub(super) struct CurrentCursorTextContext {
+    context: Option<CursorTextContext>,
+    boundary: Option<CursorTextContextBoundary>,
+}
+
+impl CurrentCursorTextContext {
+    pub(super) fn new(
+        context: Option<CursorTextContext>,
+        boundary: Option<CursorTextContextBoundary>,
+    ) -> Self {
+        Self { context, boundary }
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (Option<CursorTextContext>, Option<CursorTextContextBoundary>) {
+        (self.context, self.boundary)
+    }
+}
 
 fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Arc<[ObservedTextRow]>> {
     if center_line < 1 {
@@ -39,35 +60,50 @@ fn tracked_cursor_text_context_line(
     })
 }
 
+fn should_skip_cursor_text_context_sampling(
+    retained_boundary: Option<CursorTextContextBoundary>,
+    buffer_handle: i64,
+    changedtick: u64,
+) -> bool {
+    retained_boundary.is_some_and(|boundary| boundary.matches(buffer_handle, changedtick))
+}
+
 pub(super) fn current_cursor_text_context(
+    editor: &CurrentEditorSnapshot,
     cursor_line: i64,
     tracked_location: Option<&CursorLocation>,
-) -> Result<Option<CursorTextContext>> {
+    retained_boundary: Option<CursorTextContextBoundary>,
+) -> Result<CurrentCursorTextContext> {
     if cursor_line < 1 {
-        return Ok(None);
+        return Ok(CurrentCursorTextContext::new(None, None));
     }
 
-    let buffer = api::get_current_buf();
-    if !buffer.is_valid() {
-        return Ok(None);
-    }
+    let Some(buffer) = editor.buffer() else {
+        return Ok(CurrentCursorTextContext::new(None, None));
+    };
 
     let buffer_handle = i64::from(buffer.handle());
-    let changedtick = current_buffer_changedtick(buffer_handle)?;
+    let changedtick = editor.current_changedtick()?;
+    let boundary = Some(CursorTextContextBoundary::new(buffer_handle, changedtick));
     let tracked_line = tracked_cursor_text_context_line(buffer_handle, tracked_location);
     let cache_key =
         CursorTextContextCacheKey::new(buffer_handle, changedtick, cursor_line, tracked_line);
     match cached_cursor_text_context(&cache_key) {
-        Ok(CursorTextContextCacheLookup::Hit(context)) => return Ok(context),
+        Ok(CursorTextContextCacheLookup::Hit(context)) => {
+            return Ok(CurrentCursorTextContext::new(context, boundary));
+        }
         Ok(CursorTextContextCacheLookup::Miss) => {}
         Err(err) => {
             crate::events::logging::warn(&format!("cursor text context cache read failed: {err}"))
         }
     }
+    if should_skip_cursor_text_context_sampling(retained_boundary, buffer_handle, changedtick) {
+        return Ok(CurrentCursorTextContext::new(None, boundary));
+    }
 
     // Surprising: embedded Neovim does not expose Neovide's redraw grid here, so semantic
     // mutation detection uses narrow buffer-line snapshots plus changedtick instead of UI cells.
-    let nearby_rows = observed_text_rows(&buffer, cursor_line)?;
+    let nearby_rows = observed_text_rows(buffer, cursor_line)?;
     let context = if nearby_rows.is_empty() {
         None
     } else {
@@ -75,7 +111,7 @@ pub(super) fn current_cursor_text_context(
             Some(tracked_line_number) if tracked_line_number != cursor_line => {
                 // Surprising: edits above the cursor renumber absolute lines, so we also sample
                 // the previously tracked cursor footprint and compare by relative row order.
-                let tracked_rows = observed_text_rows(&buffer, tracked_line_number)?;
+                let tracked_rows = observed_text_rows(buffer, tracked_line_number)?;
                 if tracked_rows.is_empty() {
                     None
                 } else {
@@ -97,5 +133,21 @@ pub(super) fn current_cursor_text_context(
     if let Err(err) = store_cursor_text_context(cache_key, context.clone()) {
         crate::events::logging::warn(&format!("cursor text context cache write failed: {err}"));
     }
-    Ok(context)
+    Ok(CurrentCursorTextContext::new(context, boundary))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_cursor_text_context_sampling;
+    use crate::core::state::CursorTextContextBoundary;
+
+    #[test]
+    fn sampling_skip_only_matches_the_retained_buffer_changedtick_boundary() {
+        let retained = Some(CursorTextContextBoundary::new(22, 14));
+
+        assert!(should_skip_cursor_text_context_sampling(retained, 22, 14));
+        assert!(!should_skip_cursor_text_context_sampling(retained, 23, 14));
+        assert!(!should_skip_cursor_text_context_sampling(retained, 22, 15));
+        assert!(!should_skip_cursor_text_context_sampling(None, 22, 14));
+    }
 }

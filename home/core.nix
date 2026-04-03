@@ -146,6 +146,7 @@ in
     # Productivity
 
     # LLM
+    codex
 
     # misc
     caddy

@@ -135,7 +135,11 @@ impl Default for BufferEventPolicyCache {
 
 impl BufferEventPolicyCache {
     pub(super) fn cached_policy(&self, buffer_handle: i64) -> Option<BufferEventPolicy> {
-        self.entries.peek_cloned(&buffer_handle)
+        self.entries.peek_copy(&buffer_handle)
+    }
+
+    pub(super) fn invalidate_buffer(&mut self, buffer_handle: i64) {
+        let _ = self.entries.remove(&buffer_handle);
     }
 
     pub(super) fn store_policy(&mut self, buffer_handle: i64, policy: BufferEventPolicy) {

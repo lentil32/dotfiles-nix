@@ -343,3 +343,36 @@ pub(super) fn record_planner_candidate_cells_built_count(count: usize) {
         RuntimeBehaviorMetrics::record_planner_candidate_cells_built_count,
     );
 }
+
+pub(super) fn record_particle_simulation_step(particle_count: usize) {
+    with_runtime_metrics(|metrics| metrics.record_particle_simulation_step(particle_count));
+}
+
+pub(super) fn record_particle_aggregation(particle_count: usize) {
+    with_runtime_metrics(|metrics| metrics.record_particle_aggregation(particle_count));
+}
+
+pub(super) fn record_particle_overlay_refresh(cell_count: usize) {
+    with_runtime_metrics(|metrics| metrics.record_particle_overlay_refresh(cell_count));
+}
+
+pub(super) fn record_buffer_metadata_read() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_buffer_metadata_read);
+}
+
+pub(super) fn record_current_buffer_changedtick_read() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_current_buffer_changedtick_read);
+}
+
+pub(super) fn record_editor_bounds_read() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_editor_bounds_read);
+}
+
+pub(super) fn record_command_row_read() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_command_row_read);
+}
+
+#[cfg(test)]
+pub(in crate::events) fn reset_for_test() {
+    with_event_loop_state_for_test(|state| *state = EventLoopState::new());
+}

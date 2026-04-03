@@ -24,6 +24,11 @@
     treefmt-nix.url = "github:numtide/treefmt-nix";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
+    codex-cli-nix = {
+      url = "github:sadjow/codex-cli-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
 
     nixCats.url = "github:BirdeeHub/nixCats-nvim";
 
@@ -82,6 +87,7 @@
       treefmt-nix,
       crane,
       flake-utils,
+      codex-cli-nix,
       nix-homebrew,
       nur,
       homebrew-core,
@@ -125,6 +131,7 @@
         overlays = [
           rust-overlay.overlays.default
           nur.overlays.default
+          codex-cli-nix.overlays.default
           (final: prev: {
             pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
           })

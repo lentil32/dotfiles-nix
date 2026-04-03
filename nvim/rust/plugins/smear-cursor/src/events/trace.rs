@@ -378,7 +378,7 @@ fn planned_render_summary(planned_render: &PlannedRender) -> String {
     format!(
         "proposal=({}) scene_revision={}",
         proposal_summary(planned_render.proposal()),
-        planned_render.next_scene().revision().value(),
+        planned_render.scene_update().revision().value(),
     )
 }
 
@@ -618,7 +618,7 @@ pub(super) fn effect_summary(effect: &Effect) -> String {
         Effect::RequestRenderPlan(payload) => format!(
             "proposal_id={} observation_id={} requested_at={} animation_schedule={}",
             payload.proposal_id.value(),
-            payload.observation.basis().observation_id().value(),
+            payload.observation_id.value(),
             millis_summary(payload.requested_at),
             animation_schedule_summary(payload.animation_schedule),
         ),

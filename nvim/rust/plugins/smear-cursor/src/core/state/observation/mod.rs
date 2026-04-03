@@ -20,6 +20,7 @@ pub(crate) use background_probe::BackgroundProbeProgress;
 pub(crate) use background_probe::BackgroundProbeUpdate;
 pub(crate) use cursor_context::CursorColorProbeWitness;
 pub(crate) use cursor_context::CursorTextContext;
+pub(crate) use cursor_context::CursorTextContextBoundary;
 pub(crate) use cursor_context::ObservedTextRow;
 pub(crate) use probe::CursorColorSample;
 pub(crate) use probe::ProbeFailure;

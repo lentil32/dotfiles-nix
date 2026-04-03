@@ -283,6 +283,34 @@ pub(crate) fn record_planner_candidate_cells_built_count(count: usize) {
     event_loop::record_planner_candidate_cells_built_count(count);
 }
 
+pub(crate) fn record_particle_simulation_step(particle_count: usize) {
+    event_loop::record_particle_simulation_step(particle_count);
+}
+
+pub(crate) fn record_particle_aggregation(particle_count: usize) {
+    event_loop::record_particle_aggregation(particle_count);
+}
+
+pub(crate) fn record_particle_overlay_refresh(cell_count: usize) {
+    event_loop::record_particle_overlay_refresh(cell_count);
+}
+
+pub(crate) fn record_buffer_metadata_read() {
+    event_loop::record_buffer_metadata_read();
+}
+
+pub(crate) fn record_current_buffer_changedtick_read() {
+    event_loop::record_current_buffer_changedtick_read();
+}
+
+pub(crate) fn record_editor_bounds_read() {
+    event_loop::record_editor_bounds_read();
+}
+
+pub(crate) fn record_command_row_read() {
+    event_loop::record_command_row_read();
+}
+
 #[cfg(test)]
 mod tests {
     use super::record_probe_extmark_fallback_for_buffer;

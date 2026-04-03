@@ -211,10 +211,10 @@ proptest! {
     ) {
         let frame = base_frame();
         let state = PlannerState {
-            previous_cells: BTreeMap::from([
+            previous_cells: Arc::new(BTreeMap::from([
                 ((8_i64, 8_i64), highlight_state(u32::from(left_level))),
                 ((8_i64, 8_i64 + far_span), highlight_state(u32::from(right_level))),
-            ]),
+            ])),
             ..PlannerState::default()
         };
 

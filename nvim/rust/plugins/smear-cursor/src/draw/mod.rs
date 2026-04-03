@@ -956,7 +956,9 @@ mod tests {
             vertical_bar: false,
             trail_stroke_id: StrokeId::new(1),
             retarget_epoch: 0,
-            particles: Vec::new().into(),
+            particle_count: 0,
+            aggregated_particle_cells: Arc::default(),
+            particle_screen_cells: Arc::default(),
             color_at_cursor: None,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: None,

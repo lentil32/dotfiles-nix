@@ -1,45 +1,8 @@
 use super::PlanResources;
 use super::cell_draw::draw_braille_character;
 use super::cell_draw::draw_octant_character;
-use super::geometry::frac01;
 use super::geometry::level_from_shade;
-use super::geometry::round_lua;
 use crate::types::RenderFrame;
-use std::collections::BTreeMap;
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ParticleCellAggregate {
-    cell: [[f64; 2]; 4],
-    dot_count: u8,
-    lifetime_sum: f64,
-}
-
-impl ParticleCellAggregate {
-    fn add_lifetime(&mut self, sub_row: usize, sub_col: usize, lifetime: f64) {
-        let previous = self.cell[sub_row][sub_col];
-        self.cell[sub_row][sub_col] = previous + lifetime;
-        self.lifetime_sum += lifetime;
-
-        let was_visible = previous > 0.0;
-        let is_visible = self.cell[sub_row][sub_col] > 0.0;
-        if was_visible == is_visible {
-            return;
-        }
-
-        if is_visible {
-            self.dot_count = self.dot_count.saturating_add(1);
-        } else {
-            self.dot_count = self.dot_count.saturating_sub(1);
-        }
-    }
-
-    fn lifetime_average(self) -> Option<f64> {
-        if self.dot_count == 0 {
-            return None;
-        }
-        Some(self.lifetime_sum / f64::from(self.dot_count))
-    }
-}
 
 pub(super) fn draw_particles(
     resources: &mut PlanResources<'_>,
@@ -47,7 +10,7 @@ pub(super) fn draw_particles(
     target_row: i64,
     target_col: i64,
 ) {
-    if frame.particles.is_empty() {
+    if !frame.has_particles() {
         return;
     }
 
@@ -67,22 +30,9 @@ pub(super) fn draw_particles(
 
     // Surprising-but-important invariant: output particles are already unique per screen cell,
     // so downstream probe logic should avoid re-deduplicating by `(row, col)`.
-    let mut cells: BTreeMap<(i64, i64), ParticleCellAggregate> = BTreeMap::new();
-    for particle in frame.particles.iter() {
-        let row = particle.position.row.floor() as i64;
-        let col = particle.position.col.floor() as i64;
-        let sub_row = round_lua(4.0 * frac01(particle.position.row) + 0.5).clamp(1, 4);
-        let sub_col = round_lua(2.0 * frac01(particle.position.col) + 0.5).clamp(1, 2);
-
-        let cell = cells.entry((row, col)).or_default();
-        cell.add_lifetime(
-            (sub_row.saturating_sub(1)) as usize,
-            (sub_col.saturating_sub(1)) as usize,
-            particle.lifetime,
-        );
-    }
-
-    for ((row, col), aggregate) in cells {
+    for aggregate in frame.aggregated_particle_cells() {
+        let row = aggregate.row();
+        let col = aggregate.col();
         if row == target_row && col == target_col {
             continue;
         }
@@ -108,7 +58,7 @@ pub(super) fn draw_particles(
                 resources,
                 row,
                 col,
-                &aggregate.cell,
+                aggregate.cell(),
                 level,
                 resources.particle_zindex,
                 requires_background_probe,
@@ -118,7 +68,7 @@ pub(super) fn draw_particles(
                 resources,
                 row,
                 col,
-                &aggregate.cell,
+                aggregate.cell(),
                 level,
                 resources.particle_zindex,
                 requires_background_probe,

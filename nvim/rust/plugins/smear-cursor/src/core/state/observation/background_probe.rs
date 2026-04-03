@@ -1,7 +1,6 @@
 use crate::core::types::ViewportSnapshot;
 use crate::types::RenderFrame;
 use crate::types::ScreenCell;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -36,6 +35,7 @@ pub(crate) struct BackgroundProbePackedMaskIter<'a> {
 }
 
 impl BackgroundProbePlan {
+    #[cfg(test)]
     pub(crate) fn from_cells(mut cells: Vec<ScreenCell>) -> Self {
         cells.sort_unstable();
         cells.dedup();
@@ -47,26 +47,17 @@ impl BackgroundProbePlan {
     pub(crate) fn from_render_frame(frame: &RenderFrame, viewport: ViewportSnapshot) -> Self {
         let target_cell = ScreenCell::from_rounded_point(frame.target)
             .filter(|cell| in_viewport(viewport, *cell));
-        let mut cells = BTreeSet::new();
+        let cells = frame
+            .particle_screen_cells()
+            .iter()
+            .copied()
+            .filter(|screen_cell| Some(*screen_cell) != target_cell)
+            .filter(|screen_cell| in_viewport(viewport, *screen_cell))
+            .collect::<Vec<_>>();
 
-        for particle in frame.particles.iter() {
-            if !particle.position.row.is_finite() || !particle.position.col.is_finite() {
-                continue;
-            }
-
-            let row = particle.position.row.floor() as i64;
-            let col = particle.position.col.floor() as i64;
-            let Some(cell) = ScreenCell::new(row, col) else {
-                continue;
-            };
-            if Some(cell) == target_cell || !in_viewport(viewport, cell) {
-                continue;
-            }
-
-            cells.insert(cell);
+        Self {
+            cells: Arc::from(cells),
         }
-
-        Self::from_cells(cells.into_iter().collect())
     }
 
     pub(crate) fn len(&self) -> usize {

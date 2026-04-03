@@ -1,4 +1,4 @@
-use super::base::current_buffer_changedtick;
+use super::base::CurrentEditorSnapshot;
 use super::base::current_core_cursor_position;
 use crate::core::effect::CursorColorFallback;
 use crate::core::effect::CursorPositionReadPolicy;
@@ -11,7 +11,6 @@ use crate::core::state::CursorColorSample;
 use crate::core::state::ProbeFailure;
 use crate::core::state::ProbeReuse;
 use crate::core::types::CursorPosition;
-use crate::events::cursor::mode_string;
 use crate::events::cursor::sampled_cursor_color_at_current_position;
 use crate::events::runtime::cached_cursor_color_sample_for_probe;
 use crate::events::runtime::cursor_color_cache_generation;
@@ -22,25 +21,17 @@ use crate::events::runtime::record_cursor_color_cache_miss;
 use crate::events::runtime::record_cursor_color_probe_reuse;
 use crate::events::runtime::store_cursor_color_sample;
 use nvim_oxi::Result;
-use nvim_oxi::api;
 
 pub(super) fn current_cursor_color_probe_witness(
-    mode: &str,
+    editor: &CurrentEditorSnapshot,
     cursor_position: Option<CursorPosition>,
 ) -> Result<CursorColorProbeWitness> {
-    let window = api::get_current_win();
-    if !window.is_valid() {
-        return Err(nvim_oxi::api::Error::Other("current window invalid".into()).into());
-    }
-
-    let buffer = api::get_current_buf();
-    if !buffer.is_valid() {
-        return Err(nvim_oxi::api::Error::Other("current buffer invalid".into()).into());
-    }
-
+    let window = editor.current_window()?;
+    let buffer = editor.current_buffer()?;
+    let mode = editor.mode();
     let window_handle = i64::from(window.handle());
     let buffer_handle = i64::from(buffer.handle());
-    let changedtick = current_buffer_changedtick(buffer_handle)?;
+    let changedtick = editor.current_changedtick()?;
     let colorscheme_generation = cursor_color_colorscheme_generation()?;
     let cache_generation = cursor_color_cache_generation()?;
     // Cursor-color reuse stays observation-scoped until the plugin has a true highlight
@@ -49,7 +40,7 @@ pub(super) fn current_cursor_color_probe_witness(
         window_handle,
         buffer_handle,
         changedtick,
-        mode.to_owned(),
+        mode.into_owned(),
         cursor_position,
         colorscheme_generation,
         cache_generation,
@@ -157,32 +148,25 @@ fn current_cursor_color_probe_validation(
     policy: CursorPositionReadPolicy,
     probe_policy: ProbePolicy,
 ) -> Result<CursorColorProbeValidation> {
-    let current_mode = mode_string();
-    if current_mode != expected_witness.mode() {
+    let editor = CurrentEditorSnapshot::capture()?;
+    let mode = editor.mode();
+    if mode.as_ref() != expected_witness.mode() {
         return Ok(CursorColorProbeValidation::RefreshRequired);
     }
 
-    let current_position = current_core_cursor_position(&current_mode, policy, probe_policy)?;
-    let current_buffer = api::get_current_buf();
-    if !current_buffer.is_valid() {
-        return Err(nvim_oxi::api::Error::Other("current buffer invalid".into()).into());
-    }
-
-    let current_window = api::get_current_win();
-    if !current_window.is_valid() {
-        return Err(nvim_oxi::api::Error::Other("current window invalid".into()).into());
-    }
-
+    let current_position = current_core_cursor_position(&editor, policy, probe_policy)?;
+    let current_buffer = editor.current_buffer()?;
+    let current_window = editor.current_window()?;
     let current_window_handle = i64::from(current_window.handle());
     let current_buffer_handle = i64::from(current_buffer.handle());
-    let current_changedtick = current_buffer_changedtick(current_buffer_handle)?;
+    let current_changedtick = editor.current_changedtick()?;
     let current_colorscheme_generation = cursor_color_colorscheme_generation()?;
     let current_cache_generation = cursor_color_cache_generation()?;
     let current_witness = CursorColorProbeWitness::new(
         current_window_handle,
         current_buffer_handle,
         current_changedtick,
-        current_mode,
+        mode.into_owned(),
         current_position.position,
         current_colorscheme_generation,
         current_cache_generation,

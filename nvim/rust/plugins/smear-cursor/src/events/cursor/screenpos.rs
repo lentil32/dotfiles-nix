@@ -19,11 +19,12 @@ use nvim_oxi::Result;
 use nvim_oxi::String as NvimString;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::OptionOpts;
+use nvim_oxi::api::types::ModeStr;
 use nvim_oxi::conversion::FromObject;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 
-pub(crate) fn mode_string() -> String {
-    api::get_mode().mode.to_string_lossy().into_owned()
+pub(crate) fn current_mode() -> ModeStr {
+    api::get_mode().mode
 }
 
 fn dictionary_i64_field(
@@ -394,10 +395,8 @@ pub(crate) fn line_value(key: &str) -> Result<i64> {
 }
 
 fn command_row() -> Result<f64> {
-    let opts = nvim_oxi::api::opts::OptionOpts::builder().build();
-    let lines: i64 = api::get_option_value("lines", &opts)?;
-    let cmdheight: i64 = api::get_option_value("cmdheight", &opts)?;
-    Ok(command_row_from_dimensions(lines, cmdheight) as f64)
+    let viewport = crate::events::runtime::editor_viewport_for_command_row()?;
+    Ok(viewport.command_row() as f64)
 }
 
 pub(crate) fn smear_outside_cmd_row(corners: &[Point; 4]) -> Result<bool> {

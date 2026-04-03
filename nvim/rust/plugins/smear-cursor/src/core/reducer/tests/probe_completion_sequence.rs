@@ -226,15 +226,19 @@ proptest! {
 
             match after_chunk.effects.as_slice() {
                 [Effect::RequestRenderPlan(effect)] => {
-                    let background = effect
-                        .observation
+                    let retained_observation = after_chunk
+                        .next
+                        .observation()
+                        .expect("planning state should retain the completed observation");
+                    let observation = effect
+                        .planning
+                        .observation()
+                        .expect("planning payload should retain the completed observation");
+                    let background = observation
                         .background_probe()
                         .expect("completed observation should carry the background probe batch");
 
-                    prop_assert_eq!(
-                        effect.observation.cursor_color(),
-                        expected_cursor_color,
-                    );
+                    prop_assert_eq!(retained_observation.cursor_color(), expected_cursor_color);
                     for (index, cell) in plan_cells.iter().copied().enumerate() {
                         prop_assert_eq!(
                             background.allows_particle(cell),
@@ -281,4 +285,153 @@ fn background_ready_probe_report_stores_allowed_cells_and_reuse_state_in_snapsho
         }
         other => panic!("expected ready background probe, got {other:?}"),
     }
+}
+
+#[test]
+fn background_probe_preparation_leaves_live_runtime_unchanged_until_completion() {
+    let ready = dual_probe_ready_state();
+    let observing =
+        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+    let request = active_request(&observing);
+    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+
+    let prepared = collect_observation_base(&observing, &request, basis, observation_motion());
+
+    pretty_assert_eq!(prepared.next.runtime(), observing.runtime());
+    assert!(
+        prepared.next.prepared_observation_plan().is_some(),
+        "background probe preparation should cache the reduced runtime motion separately",
+    );
+}
+
+#[test]
+fn final_background_probe_completion_reuses_the_cached_runtime_transition() {
+    let ready = dual_probe_ready_state();
+    let observing =
+        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+    let request = active_request(&observing);
+    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+    let based = collect_observation_base(&observing, &request, basis, observation_motion());
+    let prepared_plan = based
+        .next
+        .prepared_observation_plan()
+        .cloned()
+        .expect("background probe path should cache the first runtime transition");
+
+    let scenario = ObservationScenario::with_background_plan(
+        dual_probe_ready_state(),
+        vec![ScreenCell::new(7, 8).expect("background probe cell")],
+    );
+    let mut staged = scenario.based.next.clone();
+    assert!(
+        staged.set_prepared_observation_plan(Some(prepared_plan.clone())),
+        "manual observing scenario should accept a cached runtime transition",
+    );
+
+    let after_cursor = reduce(
+        &staged,
+        cursor_color_probe_report(&scenario.request, ProbeReuse::Exact, Some(0x00AB_CDEF)),
+    );
+    assert!(
+        after_cursor.next.prepared_observation_plan().is_some(),
+        "cursor-color completion should preserve the cached runtime transition",
+    );
+
+    let mutated_runtime = RuntimeState::default();
+    let mutated = after_cursor.next.with_runtime(mutated_runtime);
+    let mut expected_runtime = mutated.runtime().clone();
+    prepared_plan.apply_to_runtime(&mut expected_runtime);
+    assert_ne!(mutated.runtime(), &expected_runtime);
+
+    let resolved = reduce(
+        &mutated,
+        background_probe_report(
+            &scenario.request,
+            scenario.basis.viewport(),
+            &[(7, 8)],
+            ProbeReuse::Exact,
+        ),
+    );
+
+    let [Effect::RequestRenderPlan(payload)] = resolved.effects.as_slice() else {
+        panic!("expected render plan request after background probe completion");
+    };
+    pretty_assert_eq!(payload.planning.scene().motion(), &expected_runtime);
+    pretty_assert_eq!(
+        &payload.render_decision,
+        &prepared_plan.transition().render_decision,
+    );
+}
+
+#[test]
+fn background_only_probe_completion_reuses_the_cached_runtime_transition() {
+    let ready = background_probe_ready_state();
+    let observing =
+        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+    pretty_assert_eq!(
+        active_request(&observing).probes(),
+        ProbeRequestSet::new(false, true)
+    );
+
+    let mut prepared_runtime = ready.runtime().clone();
+    prepared_runtime.initialize_cursor(
+        Point {
+            row: 19.0,
+            col: 11.0,
+        },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(31, 32, 4, 12),
+    );
+    let prepared_transition = crate::core::runtime_reducer::CursorTransition {
+        render_decision: crate::core::runtime_reducer::RenderDecision {
+            render_action: crate::core::runtime_reducer::RenderAction::Noop,
+            render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+            render_allocation_policy:
+                crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
+            render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
+        },
+        motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
+        should_schedule_next_animation: false,
+        next_animation_at_ms: None,
+    };
+    let prepared_plan = crate::core::state::PreparedObservationPlan::new(
+        prepared_runtime.prepared_motion(),
+        prepared_transition,
+    );
+
+    let scenario = ObservationScenario::with_background_plan(
+        background_probe_ready_state(),
+        vec![ScreenCell::new(7, 8).expect("background probe cell")],
+    );
+    let mut staged = scenario.based.next.clone();
+    assert!(
+        staged.set_prepared_observation_plan(Some(prepared_plan.clone())),
+        "manual observing scenario should accept a cached runtime transition",
+    );
+
+    let mutated_runtime = RuntimeState::default();
+    let mutated = staged.with_runtime(mutated_runtime);
+    let mut expected_runtime = mutated.runtime().clone();
+    prepared_plan.apply_to_runtime(&mut expected_runtime);
+    assert_ne!(mutated.runtime(), &expected_runtime);
+
+    let resolved = reduce(
+        &mutated,
+        background_probe_report(
+            &scenario.request,
+            scenario.basis.viewport(),
+            &[(7, 8)],
+            ProbeReuse::Exact,
+        ),
+    );
+
+    let [Effect::RequestRenderPlan(payload)] = resolved.effects.as_slice() else {
+        panic!("expected render plan request after background-only probe completion");
+    };
+    pretty_assert_eq!(payload.planning.scene().motion(), &expected_runtime);
+    pretty_assert_eq!(
+        &payload.render_decision,
+        &prepared_plan.transition().render_decision,
+    );
 }

@@ -7,45 +7,49 @@ use crate::core::event::RenderPlanFailedEvent;
 use crate::core::reducer::build_planned_render;
 
 pub(crate) fn execute_core_request_render_plan_effect(
-    payload: &RequestRenderPlanEffect,
+    payload: RequestRenderPlanEffect,
 ) -> Vec<CoreEvent> {
+    let RequestRenderPlanEffect {
+        proposal_id,
+        planning,
+        observation_id,
+        render_decision,
+        animation_schedule,
+        requested_at,
+    } = payload;
+
     trace_lazy(|| {
         format!(
             "render_plan_start proposal_id={} observation_id={} requested_at={}",
-            payload.proposal_id.value(),
-            payload.observation.basis().observation_id().value(),
-            payload.requested_at.value(),
+            proposal_id.value(),
+            observation_id.value(),
+            requested_at.value(),
         )
     });
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        build_planned_render(
-            &payload.planning_state,
-            payload.proposal_id,
-            &payload.render_decision,
-            payload.animation_schedule,
-        )
+        build_planned_render(planning, proposal_id, &render_decision, animation_schedule)
     }));
 
     let follow_up = outcome.map_or_else(
         |_| {
             warn("core render planning panicked");
             CoreEvent::RenderPlanFailed(RenderPlanFailedEvent {
-                proposal_id: payload.proposal_id,
-                observed_at: payload.requested_at,
+                proposal_id,
+                observed_at: requested_at,
             })
         },
         |planned_render| match planned_render {
             Ok(planned_render) => CoreEvent::RenderPlanComputed(RenderPlanComputedEvent {
-                proposal_id: payload.proposal_id,
+                proposal_id,
                 planned_render: Box::new(planned_render),
-                observed_at: payload.requested_at,
+                observed_at: requested_at,
             }),
             Err(err) => {
                 warn(&format!("core render planning failed: {err}"));
                 CoreEvent::RenderPlanFailed(RenderPlanFailedEvent {
-                    proposal_id: payload.proposal_id,
-                    observed_at: payload.requested_at,
+                    proposal_id,
+                    observed_at: requested_at,
                 })
             }
         },
@@ -54,7 +58,7 @@ pub(crate) fn execute_core_request_render_plan_effect(
     trace_lazy(|| {
         format!(
             "render_plan_result proposal_id={} result={}",
-            payload.proposal_id.value(),
+            proposal_id.value(),
             match &follow_up {
                 CoreEvent::RenderPlanComputed(_) => "computed",
                 CoreEvent::RenderPlanFailed(_) => "failed",

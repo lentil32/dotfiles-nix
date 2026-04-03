@@ -6,11 +6,28 @@ use super::types::PendingTarget;
 use crate::core::types::StrokeId;
 use crate::types::Particle;
 use crate::types::Point;
+use crate::types::SharedAggregatedParticleCells;
+use crate::types::SharedParticleScreenCells;
+use crate::types::SharedParticles;
 use crate::types::StaticRenderConfig;
+use crate::types::aggregate_particle_cells;
+use crate::types::aggregate_particle_screen_cells;
 use crate::types::current_visual_cursor_anchor;
 use std::sync::Arc;
 
 impl RuntimeState {
+    pub(super) fn set_shared_particles(&mut self, particles: SharedParticles) {
+        self.particles = particles;
+        self.invalidate_cached_particle_artifacts();
+    }
+
+    pub(super) fn invalidate_cached_particle_artifacts(&mut self) {
+        self.aggregated_particle_cells = Arc::default();
+        self.aggregated_particle_cells_dirty = !self.particles.is_empty();
+        self.particle_screen_cells = Arc::default();
+        self.particle_screen_cells_dirty = !self.particles.is_empty();
+    }
+
     pub(crate) fn render_static_config(&self) -> Arc<StaticRenderConfig> {
         Arc::clone(&self.render_static_config)
     }
@@ -135,11 +152,46 @@ impl RuntimeState {
     }
 
     pub(crate) fn particles(&self) -> &[Particle] {
-        &self.particles
+        self.particles.as_slice()
+    }
+
+    pub(crate) fn shared_aggregated_particle_cells(&mut self) -> SharedAggregatedParticleCells {
+        if self.aggregated_particle_cells_dirty {
+            crate::events::record_particle_aggregation(self.particles.len());
+            self.aggregated_particle_cells = aggregate_particle_cells(self.particles.as_slice());
+            self.aggregated_particle_cells_dirty = false;
+        }
+        Arc::clone(&self.aggregated_particle_cells)
+    }
+
+    pub(crate) fn shared_particle_screen_cells(&mut self) -> SharedParticleScreenCells {
+        if self.particle_screen_cells_dirty {
+            let aggregated_particle_cells = self.shared_aggregated_particle_cells();
+            self.particle_screen_cells =
+                aggregate_particle_screen_cells(&aggregated_particle_cells);
+            self.particle_screen_cells_dirty = false;
+        }
+        Arc::clone(&self.particle_screen_cells)
     }
 
     pub(crate) fn take_particles(&mut self) -> Vec<Particle> {
-        std::mem::take(&mut self.particles)
+        let particles = std::sync::Arc::unwrap_or_clone(std::mem::take(&mut self.particles));
+        self.invalidate_cached_particle_artifacts();
+        particles
+    }
+
+    pub(crate) fn clear_particles(&mut self) {
+        self.set_shared_particles(Arc::default());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn aggregated_particle_cells_cache_is_dirty(&self) -> bool {
+        self.aggregated_particle_cells_dirty
+    }
+
+    #[cfg(test)]
+    pub(crate) fn particle_screen_cells_cache_is_dirty(&self) -> bool {
+        self.particle_screen_cells_dirty
     }
 
     pub(crate) fn previous_center(&self) -> Point {

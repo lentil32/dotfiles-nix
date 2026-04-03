@@ -5,10 +5,13 @@ pub(super) enum Ingress {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum AutocmdIngress {
+    BufWipeout,
     CmdlineChanged,
     CursorMoved,
     CursorMovedInsert,
     ModeChanged,
+    OptionSet,
+    VimResized,
     WinEnter,
     WinScrolled,
     BufEnter,
@@ -22,7 +25,11 @@ struct AutocmdIngressMapping {
     ingress: AutocmdIngress,
 }
 
-const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 8] = [
+const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 11] = [
+    AutocmdIngressMapping {
+        event_name: "BufWipeout",
+        ingress: AutocmdIngress::BufWipeout,
+    },
     AutocmdIngressMapping {
         event_name: "CmdlineChanged",
         ingress: AutocmdIngress::CmdlineChanged,
@@ -38,6 +45,14 @@ const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 8] = [
     AutocmdIngressMapping {
         event_name: "ModeChanged",
         ingress: AutocmdIngress::ModeChanged,
+    },
+    AutocmdIngressMapping {
+        event_name: "OptionSet",
+        ingress: AutocmdIngress::OptionSet,
+    },
+    AutocmdIngressMapping {
+        event_name: "VimResized",
+        ingress: AutocmdIngress::VimResized,
     },
     // Surprising: switching windows in the same buffer may not emit CursorMoved.
     AutocmdIngressMapping {
@@ -87,6 +102,17 @@ impl AutocmdIngress {
                 | Self::WinScrolled
                 | Self::CmdlineChanged
                 | Self::ModeChanged
+                | Self::BufEnter
+        )
+    }
+
+    pub(super) const fn supports_unchanged_fast_path(self) -> bool {
+        matches!(
+            self,
+            Self::CursorMoved
+                | Self::CursorMovedInsert
+                | Self::WinEnter
+                | Self::WinScrolled
                 | Self::BufEnter
         )
     }

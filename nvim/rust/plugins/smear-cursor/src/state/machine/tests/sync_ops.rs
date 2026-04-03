@@ -35,14 +35,16 @@ proptest! {
         state.velocity_corners = [velocity; 4];
         state.spring_velocity_corners = [spring_velocity; 4];
         state.trail_elapsed_ms = [trail_elapsed; 4];
-        state.particles = particles
+        state.particles = std::sync::Arc::new(
+            particles
             .iter()
             .map(|(position, velocity, lifetime)| Particle {
                 position: *position,
                 velocity: *velocity,
                 lifetime: *lifetime,
             })
-            .collect();
+            .collect(),
+        );
         state.set_last_tick_ms(last_tick_ms);
 
         match setup_phase {

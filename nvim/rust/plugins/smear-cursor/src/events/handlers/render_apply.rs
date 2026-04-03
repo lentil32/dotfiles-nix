@@ -601,7 +601,9 @@ mod tests {
                     vertical_bar: false,
                     trail_stroke_id: crate::core::types::StrokeId::new(1),
                     retarget_epoch: 1,
-                    particles: Vec::new().into(),
+                    particle_count: 0,
+                    aggregated_particle_cells: std::sync::Arc::default(),
+                    particle_screen_cells: std::sync::Arc::default(),
                     color_at_cursor: None,
                     static_config: std::sync::Arc::new(crate::types::StaticRenderConfig {
                         cursor_color: None,

@@ -2,7 +2,6 @@ use super::PatchBasis;
 use super::ProjectionSnapshot;
 use super::ScenePatch;
 use super::ScenePatchKind;
-use super::SceneState;
 use crate::core::realization::PaletteSpec;
 use crate::core::runtime_reducer::RenderAllocationPolicy;
 use crate::core::runtime_reducer::RenderCleanupAction;
@@ -379,14 +378,17 @@ pub(crate) struct InFlightProposal {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PlannedRender {
-    next_scene: SceneState,
+    scene_update: crate::core::state::PlannedSceneUpdate,
     proposal: InFlightProposal,
 }
 
 impl PlannedRender {
-    pub(crate) fn new(next_scene: SceneState, proposal: InFlightProposal) -> Self {
+    pub(crate) fn new(
+        scene_update: crate::core::state::PlannedSceneUpdate,
+        proposal: InFlightProposal,
+    ) -> Self {
         Self {
-            next_scene,
+            scene_update,
             proposal,
         }
     }
@@ -395,16 +397,16 @@ impl PlannedRender {
         self.proposal.proposal_id()
     }
 
-    pub(crate) const fn next_scene(&self) -> &SceneState {
-        &self.next_scene
+    pub(crate) const fn scene_update(&self) -> &crate::core::state::PlannedSceneUpdate {
+        &self.scene_update
     }
 
     pub(crate) const fn proposal(&self) -> &InFlightProposal {
         &self.proposal
     }
 
-    pub(crate) fn into_parts(self) -> (SceneState, InFlightProposal) {
-        (self.next_scene, self.proposal)
+    pub(crate) fn into_parts(self) -> (crate::core::state::PlannedSceneUpdate, InFlightProposal) {
+        (self.scene_update, self.proposal)
     }
 }
 
@@ -603,7 +605,9 @@ mod tests {
                 vertical_bar: false,
                 trail_stroke_id: crate::core::types::StrokeId::new(1),
                 retarget_epoch: 1,
-                particles: Vec::new().into(),
+                particle_count: 0,
+                aggregated_particle_cells: Arc::default(),
+                particle_screen_cells: Arc::default(),
                 color_at_cursor: None,
                 static_config: Arc::new(crate::types::StaticRenderConfig {
                     cursor_color: None,

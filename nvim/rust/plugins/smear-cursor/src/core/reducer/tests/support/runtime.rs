@@ -70,7 +70,7 @@ pub(in crate::core::reducer::tests) fn planned_state_after_animation_tick(
             proposal_id,
             planned_render: Box::new(
                 crate::core::reducer::build_planned_render(
-                    &payload.planning_state,
+                    payload.planning,
                     payload.proposal_id,
                     &payload.render_decision,
                     payload.animation_schedule,

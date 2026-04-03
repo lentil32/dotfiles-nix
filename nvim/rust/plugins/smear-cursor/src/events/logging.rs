@@ -5,6 +5,9 @@ use super::LOG_LEVEL_INFO;
 use super::LOG_LEVEL_TRACE;
 use super::LOG_LEVEL_WARN;
 use super::LOG_SOURCE_NAME;
+use super::RealCursorVisibility;
+use super::runtime::mutate_engine_state;
+use super::runtime::read_engine_state;
 use nvim_oxi::Array;
 use nvim_oxi::Object;
 use nvim_oxi::api;
@@ -239,30 +242,60 @@ pub(super) fn ensure_hideable_guicursor() {
     }
 }
 
-pub(super) fn hide_real_cursor() {
-    let opts = nvim_oxi::api::opts::SetHighlightOpts::builder()
-        .foreground("white")
-        .blend(100)
-        .build();
-    if let Err(err) = api::set_hl(0, "SmearCursorHideable", &opts) {
-        warn(&format!("set highlight failed: {err}"));
+fn should_skip_real_cursor_visibility_update(visibility: RealCursorVisibility) -> bool {
+    read_engine_state(|state| state.shell.real_cursor_visibility() == Some(visibility))
+        .unwrap_or(false)
+}
+
+fn apply_real_cursor_visibility(visibility: RealCursorVisibility) {
+    if should_skip_real_cursor_visibility_update(visibility) {
+        return;
     }
+
+    let (opts, error_message) = match visibility {
+        RealCursorVisibility::Hidden => (
+            nvim_oxi::api::opts::SetHighlightOpts::builder()
+                .foreground("white")
+                .blend(100)
+                .build(),
+            "set highlight failed",
+        ),
+        RealCursorVisibility::Visible => (
+            nvim_oxi::api::opts::SetHighlightOpts::builder()
+                .foreground("none")
+                .blend(0)
+                .build(),
+            "restore highlight failed",
+        ),
+    };
+
+    if let Err(err) = api::set_hl(0, "SmearCursorHideable", &opts) {
+        warn(&format!("{error_message}: {err}"));
+        return;
+    }
+
+    let _ = mutate_engine_state(|state| state.shell.note_real_cursor_visibility(visibility));
+}
+
+pub(super) fn invalidate_real_cursor_visibility() {
+    let _ = mutate_engine_state(|state| state.shell.clear_real_cursor_visibility());
+}
+
+pub(super) fn hide_real_cursor() {
+    apply_real_cursor_visibility(RealCursorVisibility::Hidden);
 }
 
 pub(super) fn unhide_real_cursor() {
-    let opts = nvim_oxi::api::opts::SetHighlightOpts::builder()
-        .foreground("none")
-        .blend(0)
-        .build();
-    if let Err(err) = api::set_hl(0, "SmearCursorHideable", &opts) {
-        warn(&format!("restore highlight failed: {err}"));
-    }
+    apply_real_cursor_visibility(RealCursorVisibility::Visible);
 }
 
 #[cfg(test)]
 mod tests {
     use super::LogFileFlushPolicy;
+    use super::RealCursorVisibility;
     use super::should_notify;
+    use super::should_skip_real_cursor_visibility_update;
+    use crate::events::runtime::mutate_engine_state;
 
     #[test]
     fn log_file_flush_policy_accepts_explicit_per_line_aliases() {
@@ -313,5 +346,30 @@ mod tests {
         assert!(should_notify(super::LOG_LEVEL_INFO));
         assert!(should_notify(super::LOG_LEVEL_WARN));
         assert!(should_notify(super::LOG_LEVEL_ERROR));
+    }
+
+    #[test]
+    fn real_cursor_visibility_skip_only_matches_the_cached_state() {
+        mutate_engine_state(|state| state.shell.clear_real_cursor_visibility())
+            .expect("engine state access should succeed");
+        assert!(!should_skip_real_cursor_visibility_update(
+            RealCursorVisibility::Hidden
+        ));
+        assert!(!should_skip_real_cursor_visibility_update(
+            RealCursorVisibility::Visible
+        ));
+
+        mutate_engine_state(|state| {
+            state
+                .shell
+                .note_real_cursor_visibility(RealCursorVisibility::Hidden);
+        })
+        .expect("engine state access should succeed");
+        assert!(should_skip_real_cursor_visibility_update(
+            RealCursorVisibility::Hidden
+        ));
+        assert!(!should_skip_real_cursor_visibility_update(
+            RealCursorVisibility::Visible
+        ));
     }
 }

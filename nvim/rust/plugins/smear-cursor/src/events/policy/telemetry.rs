@@ -119,7 +119,11 @@ impl Default for BufferPerfTelemetryCache {
 
 impl BufferPerfTelemetryCache {
     pub(in crate::events) fn telemetry(&self, buffer_handle: i64) -> Option<BufferPerfTelemetry> {
-        self.entries.peek_cloned(&buffer_handle)
+        self.entries.peek_copy(&buffer_handle)
+    }
+
+    pub(in crate::events) fn invalidate_buffer(&mut self, buffer_handle: i64) {
+        let _ = self.entries.remove(&buffer_handle);
     }
 
     fn update_telemetry_entry(

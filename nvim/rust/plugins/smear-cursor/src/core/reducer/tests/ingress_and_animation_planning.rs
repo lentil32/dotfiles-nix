@@ -172,7 +172,7 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     };
     pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
     let planned_render = crate::core::reducer::build_planned_render(
-        &payload.planning_state,
+        payload.planning.clone(),
         payload.proposal_id,
         &payload.render_decision,
         payload.animation_schedule,

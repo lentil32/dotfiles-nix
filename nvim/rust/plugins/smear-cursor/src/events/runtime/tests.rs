@@ -2,6 +2,7 @@ use super::*;
 use crate::config::BufferPerfMode;
 use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
+use crate::events::RealCursorVisibility;
 use crate::events::cursor::BufferMetadata;
 use crate::events::policy::BufferEventPolicy;
 use insta::assert_snapshot;
@@ -77,6 +78,21 @@ fn core_timer_handles_smoke_replace_lookup_and_clear_each_slot() {
 }
 
 #[test]
+fn core_timer_handles_only_consume_matching_generation_for_persistent_slots() {
+    let mut handles = CoreTimerHandles::default();
+    let original = handle(11, TimerId::Animation, 3);
+    let rearmed = handle(11, TimerId::Animation, 4);
+
+    assert_eq!(handles.replace(original), None);
+    assert_eq!(handles.replace(rearmed), Some(original));
+    assert!(handles.has_shell_timer_id(rearmed.shell_timer_id));
+    assert_eq!(handles.take_fired(rearmed.shell_timer_id, 3), None);
+    assert!(handles.has_shell_timer_id(rearmed.shell_timer_id));
+    assert_eq!(handles.take_fired(rearmed.shell_timer_id, 4), Some(rearmed));
+    assert!(!handles.has_shell_timer_id(rearmed.shell_timer_id));
+}
+
+#[test]
 fn nested_engine_state_access_returns_reentry_error_and_preserves_state() {
     let nested = mutate_engine_state(|state| {
         state.shell.set_namespace_id(77);
@@ -91,7 +107,42 @@ fn nested_engine_state_access_returns_reentry_error_and_preserves_state() {
 }
 
 #[test]
+fn colorscheme_boundary_clears_real_cursor_visibility_cache() {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .note_real_cursor_visibility(RealCursorVisibility::Hidden);
+    })
+    .expect("engine state access should succeed");
+
+    note_cursor_color_colorscheme_change().expect("colorscheme boundary should succeed");
+
+    assert_eq!(
+        read_engine_state(|state| state.shell.real_cursor_visibility()),
+        Ok(None)
+    );
+}
+
+#[test]
+fn transient_reset_clears_real_cursor_visibility_cache() {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .note_real_cursor_visibility(RealCursorVisibility::Visible);
+    })
+    .expect("engine state access should succeed");
+
+    reset_transient_event_state();
+
+    assert_eq!(
+        read_engine_state(|state| state.shell.real_cursor_visibility()),
+        Ok(None)
+    );
+}
+
+#[test]
 fn perf_diagnostics_report_includes_recovery_fields_within_bridge_budget() {
+    super::reset_event_loop_for_test();
     let report = test_perf_diagnostics_report();
 
     assert!(report.starts_with("smear_cursor "));
@@ -146,11 +197,53 @@ fn perf_diagnostics_report_includes_recovery_fields_within_bridge_budget() {
 
 #[test]
 fn perf_diagnostics_report_snapshot_renders_stable_field_order() {
+    super::reset_event_loop_for_test();
     assert_snapshot!(test_perf_diagnostics_report());
+}
+
+#[test]
+fn validation_counters_report_renders_particle_counter_summary() {
+    super::reset_event_loop_for_test();
+    crate::allocation_counters::reset_for_test();
+    crate::allocation_counters::set_enabled_for_test(false);
+    crate::events::record_particle_simulation_step(5);
+    crate::events::record_particle_simulation_step(3);
+    crate::events::record_particle_aggregation(7);
+    crate::events::record_particle_overlay_refresh(4);
+    crate::events::runtime::record_buffer_metadata_read();
+    crate::events::runtime::record_current_buffer_changedtick_read();
+    crate::events::runtime::record_current_buffer_changedtick_read();
+    crate::events::record_editor_bounds_read();
+    crate::events::record_editor_bounds_read();
+    crate::events::record_command_row_read();
+
+    let report = test_validation_counters_report();
+    assert!(report.starts_with("smear_cursor_validation "));
+    assert!(report.contains("pss=2"));
+    assert!(report.contains("psp=8"));
+    assert!(report.contains("pac=1"));
+    assert!(report.contains("pap=7"));
+    assert!(report.contains("por=1"));
+    assert!(report.contains("poc=4"));
+    assert!(report.contains("alc=0"));
+    assert!(report.contains("alb=0"));
+    assert!(report.contains("bmr=1"));
+    assert!(report.contains("cbtr=2"));
+    assert!(report.contains("ebr=2"));
+    assert!(report.contains("crr=1"));
+}
+
+#[test]
+fn validation_counters_report_snapshot_renders_stable_field_order() {
+    super::reset_event_loop_for_test();
+    crate::allocation_counters::reset_for_test();
+    crate::allocation_counters::set_enabled_for_test(false);
+    assert_snapshot!(test_validation_counters_report());
 }
 
 fn reset_buffer_event_policy_state() {
     mutate_engine_state(|state| {
+        state.shell.buffer_metadata_cache.clear();
         state.shell.buffer_perf_policy_cache.clear();
         state.shell.buffer_perf_telemetry_cache.clear();
     })

@@ -1,9 +1,5 @@
 use super::HighlightLevel;
 
-pub(super) fn frac01(value: f64) -> f64 {
-    value.rem_euclid(1.0)
-}
-
 pub(super) fn round_lua(value: f64) -> i64 {
     (value + 0.5).floor() as i64
 }

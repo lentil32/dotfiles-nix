@@ -86,6 +86,38 @@ fn event_loop_state_records_counter_updates() {
             record: RuntimeBehaviorMetrics::record_stale_token_event,
             expected: expected_metrics(|metrics| metrics.stale_token_events = 1),
         },
+        CounterCase {
+            name: "buffer_metadata_read",
+            repeat: 2,
+            record: RuntimeBehaviorMetrics::record_buffer_metadata_read,
+            expected: expected_metrics(|metrics| {
+                metrics.validation_reads.buffer_metadata_reads = 2;
+            }),
+        },
+        CounterCase {
+            name: "current_buffer_changedtick_read",
+            repeat: 3,
+            record: RuntimeBehaviorMetrics::record_current_buffer_changedtick_read,
+            expected: expected_metrics(|metrics| {
+                metrics.validation_reads.current_buffer_changedtick_reads = 3;
+            }),
+        },
+        CounterCase {
+            name: "editor_bounds_read",
+            repeat: 2,
+            record: RuntimeBehaviorMetrics::record_editor_bounds_read,
+            expected: expected_metrics(|metrics| {
+                metrics.validation_reads.editor_bounds_reads = 2;
+            }),
+        },
+        CounterCase {
+            name: "command_row_read",
+            repeat: 4,
+            record: RuntimeBehaviorMetrics::record_command_row_read,
+            expected: expected_metrics(|metrics| {
+                metrics.validation_reads.command_row_reads = 4;
+            }),
+        },
     ];
 
     for case in cases {

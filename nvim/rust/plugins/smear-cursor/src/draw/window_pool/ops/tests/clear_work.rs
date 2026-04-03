@@ -8,10 +8,7 @@ enum WindowLifecycleSpec {
 
 impl WindowLifecycleSpec {
     fn is_shell_visible(self) -> bool {
-        matches!(
-            self,
-            Self::AvailableVisible { .. } | Self::InUse { .. }
-        )
+        matches!(self, Self::AvailableVisible { .. } | Self::InUse { .. })
     }
 
     fn is_invalid(self) -> bool {
@@ -21,12 +18,10 @@ impl WindowLifecycleSpec {
 
 fn window_lifecycle_spec() -> BoxedStrategy<WindowLifecycleSpec> {
     prop_oneof![
-        any::<u8>().prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableVisible {
-            last_used_epoch,
-        }),
-        any::<u8>().prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableHidden {
-            last_used_epoch,
-        }),
+        any::<u8>()
+            .prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableVisible { last_used_epoch }),
+        any::<u8>()
+            .prop_map(|last_used_epoch| WindowLifecycleSpec::AvailableHidden { last_used_epoch }),
         any::<u8>().prop_map(|epoch| WindowLifecycleSpec::InUse { epoch }),
         Just(WindowLifecycleSpec::Invalid),
     ]

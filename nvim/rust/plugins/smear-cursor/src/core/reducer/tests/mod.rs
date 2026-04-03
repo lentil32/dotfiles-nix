@@ -193,3 +193,4 @@ mod probe_failure_retention;
 mod probe_refresh_retry_budget;
 mod probe_retry;
 mod protocol_shared_state_constructors;
+mod timer_interleavings;

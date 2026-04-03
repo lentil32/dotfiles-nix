@@ -315,10 +315,11 @@ impl RuntimeState {
         }
         self.previous_center = center(&self.current_corners);
         translate_corners(&mut self.trail_origin_corners, -row_shift, -col_shift);
-        for particle in &mut self.particles {
+        for particle in std::sync::Arc::make_mut(&mut self.particles) {
             particle.position.row -= row_shift;
             particle.position.col -= col_shift;
         }
+        self.invalidate_cached_particle_artifacts();
     }
 
     pub(crate) fn apply_step_output(&mut self, output: StepOutput) {
@@ -328,7 +329,7 @@ impl RuntimeState {
         self.trail_elapsed_ms = output.trail_elapsed_ms;
         self.previous_center = output.previous_center;
         self.rng_state = output.rng_state;
-        self.particles = output.particles;
+        self.set_shared_particles(std::sync::Arc::new(output.particles));
     }
 
     pub(crate) fn settle_at_target(&mut self) {

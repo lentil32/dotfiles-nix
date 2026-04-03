@@ -159,7 +159,7 @@ lze.load({
         cli = {
           tools = {
             codex = {
-              cmd = { "mise", "exec", "--", "codex" },
+              cmd = { "codex" },
             },
           },
           win = {

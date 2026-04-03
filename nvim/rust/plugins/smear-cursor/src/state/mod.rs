@@ -4,6 +4,7 @@ mod options_patch;
 
 pub(crate) use cursor::CursorLocation;
 pub(crate) use cursor::CursorShape;
+pub(crate) use machine::PreparedRuntimeMotion;
 pub(crate) use machine::RuntimeState;
 pub(crate) use options_patch::ColorOptionsPatch;
 pub(crate) use options_patch::CtermCursorColorsPatch;

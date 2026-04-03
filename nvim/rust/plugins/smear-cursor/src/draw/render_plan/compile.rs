@@ -80,7 +80,8 @@ fn ensure_latent_cache_current(state: &mut PlannerState) {
             state.latent_cache.latest_step().value() <= state.step_index.value(),
             "latent cache should only advance forward with planner state"
         );
-        state.latent_cache.advance_to(state.step_index);
+        let step_index = state.step_index;
+        state.latent_cache_mut().advance_to(step_index);
     }
 }
 

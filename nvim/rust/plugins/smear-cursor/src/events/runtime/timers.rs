@@ -8,6 +8,7 @@ use super::super::trace::timer_kind_name;
 use super::super::trace::timer_token_summary;
 use super::engine::read_engine_state;
 use super::telemetry::record_host_timer_rearm;
+use super::telemetry::record_stale_token_event;
 use super::telemetry::record_timer_fire_duration;
 use super::telemetry::record_timer_schedule_duration;
 use crate::core::effect::TimerKind;
@@ -62,6 +63,7 @@ impl CoreTimerHandles {
         self.handles.drain(..).collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn take_by_shell_timer_id(
         &mut self,
         shell_timer_id: NvimTimerId,
@@ -69,6 +71,26 @@ impl CoreTimerHandles {
         self.handles
             .iter()
             .position(|handle| handle.shell_timer_id == shell_timer_id)
+            .map(|index| self.handles.swap_remove(index))
+    }
+
+    pub(crate) fn has_shell_timer_id(&self, shell_timer_id: NvimTimerId) -> bool {
+        self.handles
+            .iter()
+            .any(|handle| handle.shell_timer_id == shell_timer_id)
+    }
+
+    pub(crate) fn take_fired(
+        &mut self,
+        shell_timer_id: NvimTimerId,
+        generation: u64,
+    ) -> Option<CoreTimerHandle> {
+        self.handles
+            .iter()
+            .position(|handle| {
+                handle.shell_timer_id == shell_timer_id
+                    && handle.token.generation().value() == generation
+            })
             .map(|index| self.handles.swap_remove(index))
     }
 }
@@ -89,8 +111,11 @@ fn with_core_timer_handles<R>(f: impl FnOnce(&mut CoreTimerHandles) -> R) -> R {
 }
 
 fn set_core_timer_handle(handle: CoreTimerHandle) -> bool {
+    let shell_timer_id = handle.shell_timer_id;
     let displaced = with_core_timer_handles(|handles| handles.replace(handle));
-    if let Some(displaced) = displaced {
+    if let Some(displaced) =
+        displaced.filter(|displaced| displaced.shell_timer_id != shell_timer_id)
+    {
         stop_core_timer_handle(displaced, "replace");
     }
     displaced.is_some()
@@ -122,19 +147,31 @@ pub(crate) fn clear_all_core_timer_handles() {
     }
 }
 
-fn take_core_timer_handle_by_shell_timer_id(
-    shell_timer_id: NvimTimerId,
-) -> Option<CoreTimerHandle> {
-    with_core_timer_handles(|handles| handles.take_by_shell_timer_id(shell_timer_id))
+fn has_core_timer_handle_by_shell_timer_id(shell_timer_id: NvimTimerId) -> bool {
+    with_core_timer_handles(|handles| handles.has_shell_timer_id(shell_timer_id))
 }
 
-pub(crate) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId) {
+fn take_fired_core_timer_handle(
+    shell_timer_id: NvimTimerId,
+    generation: u64,
+) -> Option<CoreTimerHandle> {
+    with_core_timer_handles(|handles| handles.take_fired(shell_timer_id, generation))
+}
+
+pub(crate) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId, generation: u64) {
     let started_at = Instant::now();
-    let Some(handle) = take_core_timer_handle_by_shell_timer_id(shell_timer_id) else {
+    let Some(handle) = take_fired_core_timer_handle(shell_timer_id, generation) else {
+        let reason = if has_core_timer_handle_by_shell_timer_id(shell_timer_id) {
+            record_stale_token_event();
+            "stale_generation"
+        } else {
+            "missing_handle"
+        };
         trace_lazy(|| {
             format!(
-                "timer_fire_ignored shell_timer_id={} reason=missing_handle",
+                "timer_fire_ignored shell_timer_id={} generation={} reason={reason}",
                 shell_timer_id.get(),
+                generation,
             )
         });
         return;
@@ -151,18 +188,20 @@ pub(crate) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId) {
         )
     });
 
-    let event = Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
+    let event = TimerFiredWithTokenEvent {
         token: handle.token,
         observed_at,
-    });
+    };
 
-    if let Err(err) =
-        super::super::handlers::dispatch_core_event_with_default_scheduler(event.clone())
-    {
+    if let Err(err) = super::super::handlers::dispatch_core_event_with_default_scheduler(
+        Event::TimerFiredWithToken(event),
+    ) {
         warn(&format!(
             "engine state re-entered while dispatching timer event; re-staging for recovery: {err}"
         ));
-        super::super::handlers::stage_core_event_with_default_scheduler(event);
+        super::super::handlers::stage_core_event_with_default_scheduler(
+            Event::TimerFiredWithToken(event),
+        );
     }
     record_timer_fire_duration(duration_to_micros(started_at.elapsed()));
 }
@@ -183,7 +222,7 @@ pub(crate) fn schedule_core_timer_effect(
         requested_at.value(),
     );
     let schedule_started_at = Instant::now();
-    let schedule_outcome = start_timer_once(host_bridge, timeout);
+    let schedule_outcome = start_timer_once(host_bridge, token, timeout);
     record_timer_schedule_duration(duration_to_micros(schedule_started_at.elapsed()));
     match schedule_outcome {
         Ok(shell_timer_id) => {

@@ -124,7 +124,9 @@ impl IngressReadSnapshot {
                 filetypes_disabled: Arc::clone(&config.filetypes_disabled),
             }
         })?;
-        snapshot.current_buffer_event_policy = snapshot.read_current_buffer_event_policy();
+        if snapshot.enabled {
+            snapshot.current_buffer_event_policy = snapshot.read_current_buffer_event_policy();
+        }
         Ok(snapshot)
     }
 
@@ -198,7 +200,9 @@ impl IngressReadSnapshot {
             buffer_perf_mode: input.buffer_perf_mode,
             callback_duration_estimate_ms: input.callback_duration_estimate_ms,
             current_buffer_event_policy: input
-                .current_buffer_perf_class
+                .enabled
+                .then_some(input.current_buffer_perf_class)
+                .flatten()
                 .map(test_policy_for_perf_class),
             filetypes_disabled: Arc::new(input.filetypes_disabled.into_iter().collect()),
         }
@@ -448,5 +452,25 @@ mod tests {
             snapshot.current_visual_cursor_shape(),
             crate::types::CursorCellShape::Block
         );
+    }
+
+    #[test]
+    fn disabled_ingress_snapshot_omits_current_buffer_policy() {
+        let disabled_snapshot = IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
+            enabled: false,
+            needs_initialize: false,
+            current_corners: [Point::ZERO; 4],
+            target_corners: [Point::ZERO; 4],
+            target_position: Point::ZERO,
+            tracked_location: None,
+            mode_flags: [true, true, true, true],
+            buffer_perf_mode: BufferPerfMode::Auto,
+            callback_duration_estimate_ms: 0.0,
+            current_buffer_perf_class: Some(BufferPerfClass::Skip),
+            filetypes_disabled: Vec::new(),
+        });
+
+        assert_eq!(disabled_snapshot.current_buffer_event_policy(), None);
+        assert_eq!(disabled_snapshot.current_buffer_perf_class(), None);
     }
 }

@@ -28,7 +28,9 @@ impl ReuseLifecycleSpec {
 
     fn rollover(self, previous_epoch: FrameEpoch) -> Self {
         match self {
-            Self::AvailableVisible { last_used_epoch } => Self::AvailableVisible { last_used_epoch },
+            Self::AvailableVisible { last_used_epoch } => {
+                Self::AvailableVisible { last_used_epoch }
+            }
             Self::AvailableHidden { last_used_epoch } => Self::AvailableHidden { last_used_epoch },
             Self::InUse { epoch } if u64::from(epoch) == previous_epoch.0 => {
                 Self::AvailableVisible {
@@ -60,12 +62,10 @@ enum ReuseAcquireCandidateSpec {
 
 fn reuse_lifecycle_spec() -> BoxedStrategy<ReuseLifecycleSpec> {
     prop_oneof![
-        any::<u8>().prop_map(|last_used_epoch| ReuseLifecycleSpec::AvailableVisible {
-            last_used_epoch,
-        }),
-        any::<u8>().prop_map(|last_used_epoch| ReuseLifecycleSpec::AvailableHidden {
-            last_used_epoch,
-        }),
+        any::<u8>()
+            .prop_map(|last_used_epoch| ReuseLifecycleSpec::AvailableVisible { last_used_epoch }),
+        any::<u8>()
+            .prop_map(|last_used_epoch| ReuseLifecycleSpec::AvailableHidden { last_used_epoch }),
         any::<u8>().prop_map(|epoch| ReuseLifecycleSpec::InUse { epoch }),
         Just(ReuseLifecycleSpec::Invalid),
     ]
@@ -256,9 +256,14 @@ fn reuse_available_window_index_baseline(
     windows: &[CachedRenderWindow],
     placement: WindowPlacement,
 ) -> Option<usize> {
-    windows.iter().enumerate().rev().find_map(|(index, cached)| {
-        (cached.available_epoch().is_some() && cached.placement == Some(placement)).then_some(index)
-    })
+    windows
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, cached)| {
+            (cached.available_epoch().is_some() && cached.placement == Some(placement))
+                .then_some(index)
+        })
 }
 
 fn reuse_lru_prune_indices_baseline(
@@ -295,10 +300,14 @@ fn reuse_single_acquire_reference(
     let mut reuse_failures = ReuseFailureCounters::default();
 
     loop {
-        let candidate_index = windows.iter().enumerate().rev().find_map(|(index, cached)| {
-            (cached.available_epoch().is_some() && cached.placement == Some(placement))
-                .then_some(index)
-        });
+        let candidate_index = windows
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, cached)| {
+                (cached.available_epoch().is_some() && cached.placement == Some(placement))
+                    .then_some(index)
+            });
         let Some(index) = candidate_index else {
             return (
                 Err(AcquireError::Exhausted {

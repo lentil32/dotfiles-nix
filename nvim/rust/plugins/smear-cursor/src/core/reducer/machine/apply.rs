@@ -166,7 +166,7 @@ fn reduce_apply_completed(
         effects.push(effect);
     }
 
-    let (base_state, dispatch) = start_next_observation(ready_state, observed_at);
+    let (base_state, dispatch) = start_next_observation(ready_state);
     let dispatched_observation = dispatch.is_some();
     let mut next_state = base_state;
     effects.extend(dispatch);

@@ -97,9 +97,9 @@ impl EffectExecutor for NeovimEffectExecutor {
                 handlers::execute_core_request_observation_base_effect(payload)
             }
             Effect::RequestProbe(payload) => self.execute_probe_effect(payload, false),
-            Effect::RequestRenderPlan(payload) => Ok(
-                handlers::execute_core_request_render_plan_effect(payload.as_ref()),
-            ),
+            Effect::RequestRenderPlan(payload) => {
+                Ok(handlers::execute_core_request_render_plan_effect(*payload))
+            }
             Effect::ApplyProposal(payload) => {
                 Ok(handlers::execute_core_apply_proposal_effect(*payload))
             }

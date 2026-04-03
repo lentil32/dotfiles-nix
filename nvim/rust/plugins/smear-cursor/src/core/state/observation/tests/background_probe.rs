@@ -1,4 +1,12 @@
 use super::*;
+use crate::core::runtime_reducer::build_render_frame;
+use crate::core::state::BufferPerfClass;
+use crate::state::CursorLocation;
+use crate::state::CursorShape;
+use crate::state::RuntimeState;
+use crate::types::Particle;
+use crate::types::Point;
+use crate::types::StepOutput;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -111,4 +119,69 @@ fn requested_background_probe_tracks_progress_until_completion() {
         ProbeSlot::Requested(ProbeState::Ready { .. })
     ));
     assert!(snapshot.background_probe().is_some());
+}
+
+#[test]
+fn background_probe_plan_from_render_frame_filters_target_and_out_of_viewport_cells() {
+    let mut state = RuntimeState::default();
+    state.config.particles_over_text = false;
+    let tracked = CursorLocation::new(10, 20, 1, 1);
+    state.initialize_cursor(
+        Point { row: 2.0, col: 2.0 },
+        CursorShape::new(false, false),
+        7,
+        &tracked,
+    );
+    state.apply_step_output(StepOutput {
+        current_corners: state.current_corners(),
+        velocity_corners: state.velocity_corners(),
+        spring_velocity_corners: state.spring_velocity_corners(),
+        trail_elapsed_ms: state.trail_elapsed_ms(),
+        particles: vec![
+            Particle {
+                position: Point { row: 2.2, col: 2.4 },
+                velocity: Point::ZERO,
+                lifetime: 0.75,
+            },
+            Particle {
+                position: Point { row: 1.1, col: 3.4 },
+                velocity: Point::ZERO,
+                lifetime: 0.75,
+            },
+            Particle {
+                position: Point { row: 6.1, col: 1.2 },
+                velocity: Point::ZERO,
+                lifetime: 0.75,
+            },
+        ],
+        previous_center: state.previous_center(),
+        index_head: 0,
+        index_tail: 0,
+        rng_state: state.rng_state(),
+    });
+    let viewport = ViewportSnapshot::new(CursorRow(5), CursorCol(5));
+    let current_corners = state.current_corners();
+    let target_position = state.target_position();
+    let frame = build_render_frame(
+        &mut state,
+        "n",
+        current_corners,
+        Vec::new(),
+        0,
+        target_position,
+        false,
+        BufferPerfClass::Full,
+    );
+    let progress = BackgroundProbeProgress::new(
+        viewport,
+        BackgroundProbePlan::from_render_frame(&frame, viewport),
+    );
+    let chunk = progress
+        .next_chunk()
+        .expect("probe plan should keep the visible non-target cell");
+
+    assert_eq!(
+        chunk.cells(),
+        &[ScreenCell::new(1, 3).expect("visible non-target screen cell")]
+    );
 }

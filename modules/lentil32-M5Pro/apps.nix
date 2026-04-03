@@ -42,10 +42,6 @@ let
     }
     { cask = "claude-code"; }
     {
-      desc = "OpenAI Codex CLI";
-      cask = "codex";
-    }
-    {
       desc = "OpenAI Codex Desktop";
       cask = "codex-app";
     }

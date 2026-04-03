@@ -160,15 +160,19 @@ pub(crate) struct CellCandidate {
     pub(crate) unary_cost: u64,
 }
 
+type SharedLatentFieldCache = Arc<LatentFieldCache>;
+type SharedCenterHistory = Arc<VecDeque<CenterPathSample>>;
+type SharedPreviousCells = Arc<BTreeMap<(i64, i64), DecodedCellState>>;
+
 #[derive(Debug, Default)]
 pub(crate) struct PlannerState {
     pub(in crate::draw::render_plan) step_index: StepIndex,
     pub(in crate::draw::render_plan) arc_len_q16: ArcLenQ16,
     pub(in crate::draw::render_plan) last_trail_stroke_id: Option<StrokeId>,
     pub(in crate::draw::render_plan) last_pose: Option<super::super::latent_field::Pose>,
-    pub(in crate::draw::render_plan) latent_cache: LatentFieldCache,
-    pub(in crate::draw::render_plan) center_history: VecDeque<CenterPathSample>,
-    pub(in crate::draw::render_plan) previous_cells: BTreeMap<(i64, i64), DecodedCellState>,
+    pub(in crate::draw::render_plan) latent_cache: SharedLatentFieldCache,
+    pub(in crate::draw::render_plan) center_history: SharedCenterHistory,
+    pub(in crate::draw::render_plan) previous_cells: SharedPreviousCells,
     pub(in crate::draw::render_plan) compiled_cache: CompiledFieldCache,
     pub(in crate::draw::render_plan) decode_scratch: PlannerDecodeScratch,
     // Production planner truth lives in `latent_cache`; tests keep a mirrored slice log for
@@ -182,8 +186,18 @@ impl PlannerState {
         self.step_index
     }
 
-    pub(crate) const fn history_revision(&self) -> u64 {
+    pub(crate) fn history_revision(&self) -> u64 {
         self.latent_cache.revision()
+    }
+
+    pub(in crate::draw::render_plan) fn latent_cache_mut(&mut self) -> &mut LatentFieldCache {
+        Arc::make_mut(&mut self.latent_cache)
+    }
+
+    pub(in crate::draw::render_plan) fn center_history_mut(
+        &mut self,
+    ) -> &mut VecDeque<CenterPathSample> {
+        Arc::make_mut(&mut self.center_history)
     }
 }
 
@@ -194,9 +208,9 @@ impl Clone for PlannerState {
             arc_len_q16: self.arc_len_q16,
             last_trail_stroke_id: self.last_trail_stroke_id,
             last_pose: self.last_pose,
-            latent_cache: self.latent_cache.clone(),
-            center_history: self.center_history.clone(),
-            previous_cells: self.previous_cells.clone(),
+            latent_cache: Arc::clone(&self.latent_cache),
+            center_history: Arc::clone(&self.center_history),
+            previous_cells: Arc::clone(&self.previous_cells),
             compiled_cache: self.compiled_cache.clone(),
             decode_scratch: PlannerDecodeScratch::default(),
             #[cfg(test)]

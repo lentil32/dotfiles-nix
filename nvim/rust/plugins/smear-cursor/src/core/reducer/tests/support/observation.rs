@@ -139,6 +139,24 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
     )))
 }
 
+pub(in crate::core::reducer::tests) fn observation_basis_with_text_context_boundary(
+    request: &ObservationRequest,
+    position: Option<CursorPosition>,
+    observed_at: u64,
+    cursor_line: i64,
+    boundary: crate::core::state::CursorTextContextBoundary,
+) -> ObservationBasis {
+    ObservationBasis::new(
+        request.observation_id(),
+        Millis::new(observed_at),
+        "n".to_string(),
+        position,
+        CursorLocation::new(11, 22, 3, cursor_line),
+        ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+    )
+    .with_cursor_text_context_boundary(Some(boundary))
+}
+
 pub(in crate::core::reducer::tests) fn observation_motion() -> ObservationMotion {
     ObservationMotion::default()
 }
@@ -336,10 +354,14 @@ pub(in crate::core::reducer::tests) fn observation_runtime_context_with_perf_cla
     buffer_perf_class: BufferPerfClass,
 ) -> ObservationRuntimeContext {
     let cursor_color_fallback = retained_cursor_color_fallback(state);
+    let cursor_text_context_boundary = state
+        .retained_observation()
+        .and_then(|observation| observation.basis().cursor_text_context_boundary());
     ObservationRuntimeContext::new(
         cursor_position_policy(state),
         state.runtime().config.scroll_buffer_space,
         state.runtime().tracked_location(),
+        cursor_text_context_boundary,
         state.runtime().current_corners(),
         buffer_perf_class,
         expected_probe_policy(

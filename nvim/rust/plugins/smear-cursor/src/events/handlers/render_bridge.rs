@@ -1,4 +1,4 @@
-use super::super::cursor::mode_string;
+use super::super::cursor::current_mode;
 use super::super::host_bridge::ensure_namespace_id;
 use super::super::logging::log_slow_callback;
 use super::super::logging::should_log_slow_callback;
@@ -68,11 +68,12 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
             Ok(metrics) if metrics.is_degraded_apply() => {
                 record_degraded_draw_application();
                 if should_log_apply_perf {
-                    let mode = mode_string();
+                    let mode = current_mode();
+                    let mode = mode.to_string_lossy();
                     let details = metrics.perf_details();
                     log_slow_callback(
                         "core_render_apply",
-                        &mode,
+                        mode.as_ref(),
                         apply_duration_ms,
                         apply_duration_estimate_ms,
                         &details,
@@ -89,11 +90,12 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
             }
             Ok(metrics) => {
                 if should_log_apply_perf {
-                    let mode = mode_string();
+                    let mode = current_mode();
+                    let mode = mode.to_string_lossy();
                     let details = metrics.perf_details();
                     log_slow_callback(
                         "core_render_apply",
-                        &mode,
+                        mode.as_ref(),
                         apply_duration_ms,
                         apply_duration_estimate_ms,
                         &details,

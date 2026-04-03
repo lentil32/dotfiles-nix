@@ -9,6 +9,7 @@ use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::effect::ObservationRuntimeContext;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RenderCleanupExecution;
+use crate::core::effect::RenderPlanningContext;
 use crate::core::effect::RequestObservationBaseEffect;
 use crate::core::effect::RequestProbeEffect;
 use crate::core::effect::RequestRenderPlanEffect;
@@ -22,6 +23,7 @@ use crate::core::runtime_reducer::render_hard_cleanup_delay_ms;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
+use crate::core::state::CursorTextContextBoundary;
 use crate::core::state::ExternalDemand;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
@@ -159,6 +161,12 @@ pub(super) fn retained_cursor_color_fallback(
     Some(CursorColorFallback::new(sample, witness))
 }
 
+fn retained_cursor_text_context_boundary(
+    observation: Option<&ObservationSnapshot>,
+) -> Option<CursorTextContextBoundary> {
+    observation.and_then(|snapshot| snapshot.basis().cursor_text_context_boundary())
+}
+
 pub(super) fn exact_boundary_refresh_required(state: &CoreState) -> bool {
     let Some(observation) = state.retained_observation() else {
         return false;
@@ -214,6 +222,8 @@ fn observation_runtime_context(
     request: &ObservationRequest,
 ) -> ObservationRuntimeContext {
     let cursor_color_fallback = retained_cursor_color_fallback(state.retained_observation());
+    let cursor_text_context_boundary =
+        retained_cursor_text_context_boundary(state.retained_observation());
     let buffer_perf_class = request.demand().buffer_perf_class();
     let probe_policy = ProbePolicy::for_demand(
         request.demand().kind(),
@@ -224,6 +234,7 @@ fn observation_runtime_context(
         cursor_position_read_policy(state),
         state.runtime().config.scroll_buffer_space,
         state.runtime().tracked_location(),
+        cursor_text_context_boundary,
         state.runtime().current_corners(),
         buffer_perf_class,
         probe_policy,
@@ -348,8 +359,8 @@ pub(super) fn apply_proposal_effect(proposal: InFlightProposal, requested_at: Mi
 }
 
 pub(super) fn request_render_plan_effect(
-    planning_state: CoreState,
-    observation: ObservationSnapshot,
+    planning: RenderPlanningContext,
+    observation_id: crate::core::types::ObservationId,
     proposal_id: ProposalId,
     render_decision: RenderDecision,
     animation_schedule: AnimationSchedule,
@@ -357,8 +368,8 @@ pub(super) fn request_render_plan_effect(
 ) -> Effect {
     Effect::RequestRenderPlan(Box::new(RequestRenderPlanEffect {
         proposal_id,
-        planning_state,
-        observation,
+        planning,
+        observation_id,
         render_decision,
         animation_schedule,
         requested_at,

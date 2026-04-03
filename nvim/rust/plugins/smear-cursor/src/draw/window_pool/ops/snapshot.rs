@@ -44,8 +44,8 @@ pub(crate) fn tab_visible_window_count_from_tab(tab_windows: &TabWindows) -> usi
 #[cfg(test)]
 mod snapshot_tests {
     use super::{
-        CachedRenderWindow, CachedWindowLifecycle, FrameEpoch, TabWindows, WindowBufferHandle,
-        WindowPlacement, TabPoolSnapshot, tab_in_use_window_count_from_tab, tab_pool_snapshot,
+        CachedRenderWindow, CachedWindowLifecycle, FrameEpoch, TabPoolSnapshot, TabWindows,
+        WindowBufferHandle, WindowPlacement, tab_in_use_window_count_from_tab, tab_pool_snapshot,
         tab_pool_snapshot_from_tab, tab_visible_window_count_from_tab,
     };
     use crate::test_support::proptest::pure_config;
@@ -70,10 +70,7 @@ mod snapshot_tests {
         }
 
         fn is_visible(self) -> bool {
-            matches!(
-                self,
-                Self::AvailableVisible { .. } | Self::InUse { .. }
-            )
+            matches!(self, Self::AvailableVisible { .. } | Self::InUse { .. })
         }
 
         fn is_in_use(self) -> bool {

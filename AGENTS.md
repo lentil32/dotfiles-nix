@@ -1,4 +1,5 @@
 ## Build, Test, and Development Commands
+
 ```bash
 make               # Build and apply the system configuration (darwin)
 make darwin-debug  # Build with verbose tracing
@@ -10,16 +11,13 @@ make gc            # Wipe old system generations and GC unused store paths
 make clean         # Remove the ./result symlink
 ```
 
-## Agent Notes
-- See `.tmp/` if library references needed. There are cloned libraries we are using in this repository. Treat these directories as readonly.
+See `.tmp/` if library references needed. There are cloned libraries we are using in this repository. Treat this directory as readonly.
+The cloned library repository directories are suffixed with `-repo`.
 
 List:
-- lualine.nvim
-- lze
-- lzextras
-- nixCats-nvim
-- nvim-oxi
-- oil.nvim
-- snacks.nvim
-- ...
 
+- nvim-oxi-repo/
+- oil.nvim-repo/
+- snacks.nvim-repo/
+- sidekick.nvim-repo/
+- ...

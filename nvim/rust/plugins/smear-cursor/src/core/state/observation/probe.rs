@@ -216,13 +216,6 @@ impl<T> ProbeSlot<T> {
             Self::Unrequested => None,
         }
     }
-
-    fn with_state(self, state: ProbeState<T>) -> Option<Self> {
-        match self {
-            Self::Unrequested => None,
-            Self::Requested(_) => Some(Self::Requested(state)),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -261,20 +254,30 @@ impl ProbeSet {
         }
     }
 
-    pub(super) fn with_cursor_color_state(
-        mut self,
+    pub(super) fn set_cursor_color_state(
+        &mut self,
         cursor_color: ProbeState<Option<CursorColorSample>>,
-    ) -> Option<Self> {
-        self.cursor_color = self.cursor_color.with_state(cursor_color)?;
-        Some(self)
+    ) -> bool {
+        match &mut self.cursor_color {
+            ProbeSlot::Unrequested => false,
+            ProbeSlot::Requested(current) => {
+                *current = cursor_color;
+                true
+            }
+        }
     }
 
-    pub(super) fn with_background_state(
-        mut self,
+    pub(super) fn set_background_state(
+        &mut self,
         background: ProbeState<BackgroundProbeBatch>,
-    ) -> Option<Self> {
-        self.background = self.background.with_state(background)?;
-        Some(self)
+    ) -> bool {
+        match &mut self.background {
+            ProbeSlot::Unrequested => false,
+            ProbeSlot::Requested(current) => {
+                *current = background;
+                true
+            }
+        }
     }
 
     pub(crate) fn sampled_cursor_color(&self) -> Option<u32> {

@@ -144,16 +144,18 @@ impl RenderExecutionMetrics {
 }
 
 pub(super) fn draw_projection_debug_summary(projection: &ProjectionSnapshot) -> String {
-    let logical_cells = projection.logical_raster().cells();
-    let logical_sample = if logical_cells.is_empty() {
+    let mut logical_cell_count = 0;
+    let mut logical_sample_cells = Vec::with_capacity(8);
+    for cell in projection.logical_raster().iter_cells() {
+        logical_cell_count += 1;
+        if logical_sample_cells.len() < 8 {
+            logical_sample_cells.push(format!("{}:{}@{}", cell.row, cell.col, cell.zindex));
+        }
+    }
+    let logical_sample = if logical_sample_cells.is_empty() {
         "none".to_string()
     } else {
-        logical_cells
-            .iter()
-            .take(8)
-            .map(|cell| format!("{}:{}@{}", cell.row, cell.col, cell.zindex))
-            .collect::<Vec<_>>()
-            .join(",")
+        logical_sample_cells.join(",")
     };
 
     let realized = realize_logical_raster(projection.logical_raster());
@@ -179,7 +181,7 @@ pub(super) fn draw_projection_debug_summary(projection: &ProjectionSnapshot) -> 
 
     format!(
         "logical_cells={} logical_sample=[{}] realized_spans={} span_sample=[{}]",
-        logical_cells.len(),
+        logical_cell_count,
         logical_sample,
         realized.spans().len(),
         span_sample,

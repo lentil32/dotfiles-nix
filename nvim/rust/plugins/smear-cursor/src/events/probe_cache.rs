@@ -29,7 +29,7 @@ pub(crate) struct ConcealRegion {
     pub(crate) replacement_width: i64,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct ConcealWindowState {
     conceallevel: i64,
     concealcursor: String,
@@ -52,7 +52,7 @@ impl ConcealWindowState {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct ConcealCacheKey {
     buffer_handle: i64,
     changedtick: u64,
@@ -92,7 +92,7 @@ impl ConcealCacheKey {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(super) struct ConcealScreenCellCacheKey {
     window_handle: i64,
     buffer_handle: i64,
@@ -144,7 +144,7 @@ impl ConcealScreenCellCacheKey {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(super) struct ConcealDeltaCacheKey {
     window_handle: i64,
     buffer_handle: i64,
@@ -193,7 +193,7 @@ impl ConcealDeltaCacheKey {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(super) struct CursorTextContextCacheKey {
     buffer_handle: i64,
     changedtick: u64,
@@ -252,7 +252,7 @@ pub(super) enum ConcealScreenCellCacheLookup {
     Hit(Option<ConcealScreenCell>),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) struct CachedConcealDelta {
     current_col1: i64,
     delta: i64,
@@ -390,7 +390,7 @@ impl ProbeCacheState {
         &mut self,
         key: &ConcealScreenCellCacheKey,
     ) -> ConcealScreenCellCacheLookup {
-        self.conceal_screen_cells.get_cloned(key).map_or(
+        self.conceal_screen_cells.get_copy(key).map_or(
             ConcealScreenCellCacheLookup::Miss,
             ConcealScreenCellCacheLookup::Hit,
         )
@@ -409,7 +409,7 @@ impl ProbeCacheState {
         key: &ConcealDeltaCacheKey,
     ) -> ConcealDeltaCacheLookup {
         self.conceal_deltas
-            .get_cloned(key)
+            .get_copy(key)
             .map_or(ConcealDeltaCacheLookup::Miss, ConcealDeltaCacheLookup::Hit)
     }
 

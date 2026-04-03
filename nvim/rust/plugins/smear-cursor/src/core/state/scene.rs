@@ -10,7 +10,7 @@ use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
 use crate::state::RuntimeState;
 use crate::types::Point;
 use crate::types::RenderFrame;
-use crate::types::SharedParticles;
+use crate::types::SharedAggregatedParticleCells;
 use crate::types::SharedRenderStepSamples;
 use crate::types::StaticRenderConfig;
 use std::collections::BTreeMap;
@@ -78,7 +78,8 @@ pub(crate) struct CursorTrailGeometry {
     vertical_bar: bool,
     trail_stroke_id: StrokeId,
     retarget_epoch: u64,
-    particles: SharedParticles,
+    particle_count: usize,
+    aggregated_particle_cells: SharedAggregatedParticleCells,
 }
 
 impl CursorTrailGeometry {
@@ -93,7 +94,8 @@ impl CursorTrailGeometry {
             vertical_bar: frame.vertical_bar,
             trail_stroke_id: frame.trail_stroke_id,
             retarget_epoch: frame.retarget_epoch,
-            particles: frame.particles.clone(),
+            particle_count: frame.particle_count,
+            aggregated_particle_cells: frame.aggregated_particle_cells.clone(),
         }
     }
 
@@ -139,14 +141,16 @@ impl CursorTrailGeometry {
             vertical_bar: self.vertical_bar,
             trail_stroke_id: self.trail_stroke_id,
             retarget_epoch: self.retarget_epoch,
-            particles: self.particles.clone(),
+            particle_count: self.particle_count,
+            aggregated_particle_cells: self.aggregated_particle_cells.clone(),
+            particle_screen_cells: Arc::default(),
             color_at_cursor: None,
             static_config: Arc::new(self.planner_static_config(policy)),
         }
     }
 
     pub(crate) fn requires_background_probe(&self, policy: &CursorTrailProjectionPolicy) -> bool {
-        !policy.particles_over_text && !self.particles.is_empty()
+        !policy.particles_over_text && self.particle_count > 0
     }
 }
 
@@ -282,7 +286,8 @@ impl ProjectionWitness {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProjectionReuseKey {
-    signature: Option<u64>,
+    trail_signature: Option<u64>,
+    particle_overlay_signature: Option<u64>,
     planner_clock: Option<ProjectionPlannerClock>,
     target_cell_presentation: TargetCellPresentation,
     policy: CursorTrailProjectionPolicy,
@@ -305,21 +310,27 @@ impl ProjectionPlannerClock {
 
 impl ProjectionReuseKey {
     pub(crate) fn new(
-        signature: Option<u64>,
+        trail_signature: Option<u64>,
+        particle_overlay_signature: Option<u64>,
         planner_clock: Option<ProjectionPlannerClock>,
         target_cell_presentation: TargetCellPresentation,
         policy: CursorTrailProjectionPolicy,
     ) -> Self {
         Self {
-            signature,
+            trail_signature,
+            particle_overlay_signature,
             planner_clock,
             target_cell_presentation,
             policy,
         }
     }
 
-    pub(crate) const fn signature(&self) -> Option<u64> {
-        self.signature
+    pub(crate) const fn trail_signature(&self) -> Option<u64> {
+        self.trail_signature
+    }
+
+    pub(crate) const fn particle_overlay_signature(&self) -> Option<u64> {
+        self.particle_overlay_signature
     }
 
     pub(crate) const fn planner_clock(&self) -> Option<ProjectionPlannerClock> {
@@ -418,6 +429,40 @@ impl ProjectionCache {
             Self::Invalid => None,
             Self::Ready(entry) => Some(entry.as_ref()),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PlannedProjectionUpdate {
+    Keep,
+    Replace(ProjectionCache),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlannedSceneUpdate {
+    revision: SceneRevision,
+    semantics: SemanticScene,
+    projection: PlannedProjectionUpdate,
+    dirty: DirtyEntitySet,
+}
+
+impl PlannedSceneUpdate {
+    pub(crate) fn new(
+        revision: SceneRevision,
+        semantics: SemanticScene,
+        projection: PlannedProjectionUpdate,
+        dirty: DirtyEntitySet,
+    ) -> Self {
+        Self {
+            revision,
+            semantics,
+            projection,
+            dirty,
+        }
+    }
+
+    pub(crate) const fn revision(&self) -> SceneRevision {
+        self.revision
     }
 }
 
@@ -534,28 +579,30 @@ impl SceneState {
         self.projection.entry()
     }
 
-    pub(crate) fn with_revision(mut self, revision: SceneRevision) -> Self {
+    pub(crate) fn apply_planned_update(&mut self, update: PlannedSceneUpdate) {
+        let PlannedSceneUpdate {
+            revision,
+            semantics,
+            projection,
+            dirty,
+        } = update;
         self.revision = revision;
-        self
+        self.semantics = semantics;
+        if let PlannedProjectionUpdate::Replace(projection) = projection {
+            self.projection = projection;
+        }
+        self.dirty = dirty;
     }
 
+    #[cfg(test)]
     pub(crate) fn with_semantics(mut self, semantics: SemanticScene) -> Self {
         self.semantics = semantics;
         self
     }
 
-    pub(crate) fn with_motion(mut self, motion: RuntimeState) -> Self {
-        self.motion = motion;
-        self
-    }
-
+    #[cfg(test)]
     pub(crate) fn with_projection(mut self, projection: ProjectionCache) -> Self {
         self.projection = projection;
-        self
-    }
-
-    pub(crate) fn with_dirty(mut self, dirty: DirtyEntitySet) -> Self {
-        self.dirty = dirty;
         self
     }
 }

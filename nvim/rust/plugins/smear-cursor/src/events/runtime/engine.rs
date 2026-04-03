@@ -18,6 +18,7 @@ use super::super::probe_cache::ConcealScreenCellCacheKey;
 use super::super::probe_cache::ConcealScreenCellCacheLookup;
 use super::super::probe_cache::CursorTextContextCacheKey;
 use super::super::probe_cache::CursorTextContextCacheLookup;
+use super::EditorViewport;
 use super::EngineAccessResult;
 use super::IngressReadSnapshot;
 use super::diagnostics::reset_transient_event_state;
@@ -71,12 +72,28 @@ pub(crate) fn ingress_read_snapshot() -> EngineAccessResult<IngressReadSnapshot>
     IngressReadSnapshot::capture()
 }
 
+pub(crate) fn editor_viewport_for_bounds() -> Result<EditorViewport> {
+    mutate_engine_state(|state| state.shell.editor_viewport_cache.read_for_bounds())
+        .map_err(nvim_oxi::Error::from)?
+}
+
+pub(crate) fn editor_viewport_for_command_row() -> Result<EditorViewport> {
+    mutate_engine_state(|state| state.shell.editor_viewport_cache.read_for_command_row())
+        .map_err(nvim_oxi::Error::from)?
+}
+
+pub(crate) fn refresh_editor_viewport_cache() -> Result<()> {
+    mutate_engine_state(|state| state.shell.editor_viewport_cache.refresh())
+        .map_err(nvim_oxi::Error::from)?
+}
+
 pub(crate) fn resolved_current_buffer_event_policy(
     snapshot: &IngressReadSnapshot,
     buffer: &api::Buffer,
 ) -> Result<BufferEventPolicy> {
     let buffer_handle = i64::from(buffer.handle());
-    let metadata = BufferMetadata::read(buffer)?;
+    let metadata = mutate_engine_state(|state| state.shell.buffer_metadata_cache.read(buffer))
+        .map_err(nvim_oxi::Error::from)??;
     resolve_buffer_event_policy_for_metadata(snapshot, buffer_handle, &metadata, now_ms())
 }
 
@@ -249,6 +266,7 @@ pub(crate) fn note_cursor_color_colorscheme_change() -> EngineAccessResult<()> {
             .shell
             .probe_cache
             .note_cursor_color_colorscheme_change();
+        state.shell.clear_real_cursor_visibility();
     })
 }
 

@@ -10,6 +10,80 @@ fn saturating_add_count(total: &mut u64, count: usize) {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::events) struct ValidationReadTelemetry {
+    pub(in crate::events) buffer_metadata_reads: u64,
+    pub(in crate::events) current_buffer_changedtick_reads: u64,
+    pub(in crate::events) editor_bounds_reads: u64,
+    pub(in crate::events) command_row_reads: u64,
+}
+
+impl ValidationReadTelemetry {
+    pub(super) const fn new() -> Self {
+        Self {
+            buffer_metadata_reads: 0,
+            current_buffer_changedtick_reads: 0,
+            editor_bounds_reads: 0,
+            command_row_reads: 0,
+        }
+    }
+
+    pub(super) fn record_buffer_metadata_read(&mut self) {
+        self.buffer_metadata_reads = self.buffer_metadata_reads.saturating_add(1);
+    }
+
+    pub(super) fn record_current_buffer_changedtick_read(&mut self) {
+        self.current_buffer_changedtick_reads =
+            self.current_buffer_changedtick_reads.saturating_add(1);
+    }
+
+    pub(super) fn record_editor_bounds_read(&mut self) {
+        self.editor_bounds_reads = self.editor_bounds_reads.saturating_add(1);
+    }
+
+    pub(super) fn record_command_row_read(&mut self) {
+        self.command_row_reads = self.command_row_reads.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::events) struct ParticlePathTelemetry {
+    pub(in crate::events) simulation_steps: u64,
+    pub(in crate::events) simulation_particles: u64,
+    pub(in crate::events) aggregation_calls: u64,
+    pub(in crate::events) aggregation_particles: u64,
+    pub(in crate::events) overlay_refreshes: u64,
+    pub(in crate::events) overlay_refresh_cells: u64,
+}
+
+impl ParticlePathTelemetry {
+    pub(super) const fn new() -> Self {
+        Self {
+            simulation_steps: 0,
+            simulation_particles: 0,
+            aggregation_calls: 0,
+            aggregation_particles: 0,
+            overlay_refreshes: 0,
+            overlay_refresh_cells: 0,
+        }
+    }
+
+    pub(super) fn record_simulation_step(&mut self, particle_count: usize) {
+        self.simulation_steps = self.simulation_steps.saturating_add(1);
+        saturating_add_count(&mut self.simulation_particles, particle_count);
+    }
+
+    pub(super) fn record_aggregation(&mut self, particle_count: usize) {
+        self.aggregation_calls = self.aggregation_calls.saturating_add(1);
+        saturating_add_count(&mut self.aggregation_particles, particle_count);
+    }
+
+    pub(super) fn record_overlay_refresh(&mut self, cell_count: usize) {
+        self.overlay_refreshes = self.overlay_refreshes.saturating_add(1);
+        saturating_add_count(&mut self.overlay_refresh_cells, cell_count);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::events) struct DurationTelemetry {
     pub(in crate::events) samples: u64,
     pub(in crate::events) total_micros: u64,
@@ -386,6 +460,8 @@ pub(in crate::events) struct RuntimeBehaviorMetrics {
     pub(in crate::events) background_probe: ProbeTelemetry,
     pub(in crate::events) conceal_probe: ConcealProbeTelemetry,
     pub(in crate::events) planner: PlannerTelemetry,
+    pub(in crate::events) particle_path: ParticlePathTelemetry,
+    pub(in crate::events) validation_reads: ValidationReadTelemetry,
 }
 
 impl RuntimeBehaviorMetrics {
@@ -432,6 +508,8 @@ impl RuntimeBehaviorMetrics {
             background_probe: ProbeTelemetry::new(),
             conceal_probe: ConcealProbeTelemetry::new(),
             planner: PlannerTelemetry::new(),
+            particle_path: ParticlePathTelemetry::new(),
+            validation_reads: ValidationReadTelemetry::new(),
         }
     }
 
@@ -668,5 +746,34 @@ impl RuntimeBehaviorMetrics {
 
     pub(in crate::events) fn record_planner_local_query_compile(&mut self) {
         self.planner.record_local_query_compile();
+    }
+
+    pub(in crate::events) fn record_particle_simulation_step(&mut self, particle_count: usize) {
+        self.particle_path.record_simulation_step(particle_count);
+    }
+
+    pub(in crate::events) fn record_particle_aggregation(&mut self, particle_count: usize) {
+        self.particle_path.record_aggregation(particle_count);
+    }
+
+    pub(in crate::events) fn record_particle_overlay_refresh(&mut self, cell_count: usize) {
+        self.particle_path.record_overlay_refresh(cell_count);
+    }
+
+    pub(in crate::events) fn record_buffer_metadata_read(&mut self) {
+        self.validation_reads.record_buffer_metadata_read();
+    }
+
+    pub(in crate::events) fn record_current_buffer_changedtick_read(&mut self) {
+        self.validation_reads
+            .record_current_buffer_changedtick_read();
+    }
+
+    pub(in crate::events) fn record_editor_bounds_read(&mut self) {
+        self.validation_reads.record_editor_bounds_read();
+    }
+
+    pub(in crate::events) fn record_command_row_read(&mut self) {
+        self.validation_reads.record_command_row_read();
     }
 }

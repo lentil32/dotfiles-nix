@@ -3,6 +3,7 @@
 .claude/
 .direnv/
 .envrc
+!nvim/rust/.envrc
 
 target/
 .tmp/

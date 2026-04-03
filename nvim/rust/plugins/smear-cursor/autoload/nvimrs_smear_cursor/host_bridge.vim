@@ -1,17 +1,24 @@
 " Comment: versioned host bridge contract for the Rust smear cursor runtime.
 
 function! nvimrs_smear_cursor#host_bridge#revision() abort
-  return 7
+  return 8
 endfunction
 
 function! nvimrs_smear_cursor#host_bridge#on_core_timer(timer_id) abort
   call luaeval("require('nvimrs_smear_cursor').on_core_timer(_A)", a:timer_id)
 endfunction
 
-function! nvimrs_smear_cursor#host_bridge#start_timer_once(timeout) abort
-  return timer_start(
-        \ a:timeout,
-        \ function('nvimrs_smear_cursor#host_bridge#on_core_timer')
+function! nvimrs_smear_cursor#host_bridge#start_timer_once(timer_slot, token_generation, timeout) abort
+  return luaeval(
+        \ "(package.loaded['nvimrs_smear_cursor.host_bridge'] or require('nvimrs_smear_cursor.host_bridge')).start_timer_once(_A[1], _A[2], _A[3])",
+        \ [a:timer_slot, a:token_generation, a:timeout]
+        \ )
+endfunction
+
+function! nvimrs_smear_cursor#host_bridge#stop_timer(timer_slot) abort
+  return luaeval(
+        \ "(package.loaded['nvimrs_smear_cursor.host_bridge'] or require('nvimrs_smear_cursor.host_bridge')).stop_timer(_A)",
+        \ a:timer_slot
         \ )
 endfunction
 

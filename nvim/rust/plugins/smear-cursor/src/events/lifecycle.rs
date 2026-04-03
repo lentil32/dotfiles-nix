@@ -5,8 +5,8 @@
 //! instead of leaving stale callbacks behind.
 
 use super::AUTOCMD_GROUP_NAME;
+use super::cursor::current_mode;
 use super::cursor::cursor_position_for_mode;
-use super::cursor::mode_string;
 use super::handlers::cursor_location_for_core_render;
 use super::host_bridge::ensure_namespace_id;
 use super::host_bridge::installed_host_bridge;
@@ -14,6 +14,7 @@ use super::host_bridge::verify_host_bridge;
 use super::ingress::registered_autocmd_event_names;
 use super::logging::debug;
 use super::logging::ensure_hideable_guicursor;
+use super::logging::invalidate_real_cursor_visibility;
 use super::logging::set_log_level;
 use super::logging::unhide_real_cursor;
 use super::logging::warn;
@@ -21,6 +22,7 @@ use super::options::apply_runtime_options;
 use super::runtime::diagnostics_report;
 use super::runtime::mutate_engine_state;
 use super::runtime::read_engine_state;
+use super::runtime::refresh_editor_viewport_cache;
 use super::runtime::reset_transient_event_state;
 use crate::draw::clear_highlight_cache;
 use crate::draw::initialize_runtime_capabilities;
@@ -34,10 +36,12 @@ use nvim_oxi::api;
 use nvim_oxi::api::opts::CreateAugroupOpts;
 use nvim_oxi::api::opts::CreateAutocmdOpts;
 use nvim_oxi::api::opts::CreateCommandOpts;
+use nvim_oxi::api::types::AutocmdCallbackArgs;
 
 fn jump_to_current_cursor() -> Result<()> {
     let namespace_id = ensure_namespace_id()?;
-    let mode = mode_string();
+    let mode = current_mode();
+    let mode = mode.to_string_lossy();
     let window = api::get_current_win();
     if !window.is_valid() {
         return Ok(());
@@ -49,7 +53,7 @@ fn jump_to_current_cursor() -> Result<()> {
     }
 
     let smear_to_cmd = read_engine_state(|state| state.core_state().runtime().config.smear_to_cmd)?;
-    let Some((row, col)) = cursor_position_for_mode(&window, &mode, smear_to_cmd)? else {
+    let Some((row, col)) = cursor_position_for_mode(&window, mode.as_ref(), smear_to_cmd)? else {
         return Ok(());
     };
 
@@ -59,8 +63,8 @@ fn jump_to_current_cursor() -> Result<()> {
         state.shell.set_namespace_id(namespace_id);
         let runtime = state.core_state_mut().runtime_mut();
         let cursor_shape = CursorShape::new(
-            runtime.config.cursor_is_vertical_bar(&mode),
-            runtime.config.cursor_is_horizontal_bar(&mode),
+            runtime.config.cursor_is_vertical_bar(mode.as_ref()),
+            runtime.config.cursor_is_horizontal_bar(mode.as_ref()),
         );
         runtime.sync_to_current_cursor(Point { row, col }, cursor_shape, &location);
         runtime.config.hide_target_hack
@@ -82,6 +86,16 @@ fn clear_autocmd_group() {
     }
 }
 
+fn dispatch_registered_autocmd(event: &str) -> Result<bool> {
+    crate::guard_plugin_call("on_autocmd", || super::handlers::on_autocmd_event(event))?;
+    Ok(false)
+}
+
+fn dispatch_registered_autocmd_callback(args: AutocmdCallbackArgs) -> Result<bool> {
+    crate::guard_plugin_call("on_autocmd", || super::handlers::on_autocmd_callback(args))?;
+    Ok(false)
+}
+
 fn setup_autocmds() -> Result<()> {
     let group = api::create_augroup(
         AUTOCMD_GROUP_NAME,
@@ -89,10 +103,10 @@ fn setup_autocmds() -> Result<()> {
     )?;
 
     for event in registered_autocmd_event_names() {
-        let command = format!("lua require('nvimrs_smear_cursor').on_autocmd('{event}')");
         let opts = CreateAutocmdOpts::builder()
             .group(group)
-            .command(command)
+            // Keep the bridge in Rust so autocmd wakeups avoid reparsing a Lua command string.
+            .callback(dispatch_registered_autocmd_callback)
             .build();
         api::create_autocmd([event], &opts)?;
     }
@@ -130,6 +144,7 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
     let namespace_id = ensure_namespace_id()?;
     initialize_runtime_capabilities()?;
     ensure_hideable_guicursor();
+    invalidate_real_cursor_visibility();
     unhide_real_cursor();
     clear_highlight_cache();
 
@@ -137,6 +152,7 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
         state.shell.set_namespace_id(namespace_id);
         state.core_state_mut().runtime_mut().disable();
     })?;
+    refresh_editor_viewport_cache()?;
     clear_autocmd_group();
     reset_transient_event_state();
 
@@ -199,6 +215,7 @@ pub(crate) fn toggle() -> Result<()> {
 
     if let Some(namespace_id) = namespace_id {
         if is_enabled {
+            refresh_editor_viewport_cache()?;
             setup_autocmds()?;
             jump_to_current_cursor()?;
         } else {
@@ -216,4 +233,21 @@ pub(crate) fn toggle() -> Result<()> {
 
 pub(crate) fn diagnostics() -> String {
     diagnostics_report()
+}
+
+pub(crate) fn validation_counters() -> String {
+    super::runtime::validation_counters_report()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_registered_autocmd;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn registered_autocmd_callback_keeps_the_handler_installed_after_unknown_events() {
+        let should_delete =
+            dispatch_registered_autocmd("DefinitelyNotReal").expect("unknown event should no-op");
+        assert_eq!(should_delete, false);
+    }
 }

@@ -26,6 +26,7 @@ use crate::animation::outside_stop_exit;
 use crate::animation::simulate_step;
 use crate::animation::stop_metrics;
 use crate::animation::within_stop_enter;
+use crate::core::state::BufferPerfClass;
 use crate::core::state::SemanticEvent;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
@@ -146,21 +147,25 @@ fn draw_discontinuous_jump_frame(
     state: &mut RuntimeState,
     mode: &str,
     spec: JumpFrameSpec,
+    buffer_perf_class: BufferPerfClass,
 ) -> CursorTransition {
+    let current_corners = state.current_corners();
+    let step_samples = jump_bridge_step_samples(
+        state,
+        spec.from_position,
+        spec.to_position,
+        spec.vertical_bar,
+        spec.horizontal_bar,
+    );
     let frame = build_render_frame(
         state,
         mode,
-        state.current_corners(),
-        jump_bridge_step_samples(
-            state,
-            spec.from_position,
-            spec.to_position,
-            spec.vertical_bar,
-            spec.horizontal_bar,
-        ),
+        current_corners,
+        step_samples,
         0,
         spec.to_position,
         spec.vertical_bar,
+        buffer_perf_class,
     );
     state.start_tail_drain(planner_tail_drain_steps(state));
     state.set_last_tick_ms(Some(spec.event_now_ms));
@@ -212,8 +217,10 @@ fn draw_drain_frame(
     event_now_ms: f64,
     target_position: Point,
     vertical_bar: bool,
+    buffer_perf_class: BufferPerfClass,
 ) -> CursorTransition {
     let allow_real_cursor_updates = !state.config.hide_target_hack;
+    let keeps_ornamental_effects = buffer_perf_class.keeps_ornamental_effects();
     let configured_interval = state.config.time_interval.max(1.0);
     let elapsed_ms = state
         .last_tick_ms()
@@ -230,7 +237,11 @@ fn draw_drain_frame(
     let mut executed_steps = 0_usize;
     while executed_steps < max_simulation_steps && state.consume_tail_drain_step(simulation_step_ms)
     {
-        let particles = state.take_particles();
+        let particles = if keeps_ornamental_effects {
+            state.take_particles()
+        } else {
+            Vec::new()
+        };
         let mut drain_input = step_input(
             state,
             mode,
@@ -238,10 +249,12 @@ fn draw_drain_frame(
             vertical_bar,
             false,
             particles,
+            buffer_perf_class,
         );
         // tail drain should age already-emitted particles, but it must not emit new
         // particles after motion has settled or the visual tail can linger as a frozen cloud.
         drain_input.particles_enabled = false;
+        crate::events::record_particle_simulation_step(drain_input.particles.len());
         let step_output = simulate_step(drain_input);
         state.apply_step_output(step_output);
         planner_idle_steps = planner_idle_steps.saturating_add(1);
@@ -278,6 +291,7 @@ fn draw_drain_frame(
         planner_idle_steps,
         target_position,
         vertical_bar,
+        buffer_perf_class,
     );
     CursorTransitions::draw(
         mode,
@@ -295,6 +309,16 @@ pub(crate) fn reduce_cursor_event(
     event: impl Borrow<CursorEventContext>,
     source: EventSource,
 ) -> CursorTransition {
+    reduce_cursor_event_for_perf_class(state, mode, event, source, BufferPerfClass::Full)
+}
+
+pub(crate) fn reduce_cursor_event_for_perf_class(
+    state: &mut RuntimeState,
+    mode: &str,
+    event: impl Borrow<CursorEventContext>,
+    source: EventSource,
+    buffer_perf_class: BufferPerfClass,
+) -> CursorTransition {
     let event = event.borrow();
     let allow_real_cursor_updates = !state.config.hide_target_hack;
     if !state.is_enabled() {
@@ -303,6 +327,11 @@ pub(crate) fn reduce_cursor_event(
         reset_animation_timing(state);
         return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+    }
+
+    let keeps_ornamental_effects = buffer_perf_class.keeps_ornamental_effects();
+    if !keeps_ornamental_effects {
+        state.clear_particles();
     }
 
     let vertical_bar = state.config.cursor_is_vertical_bar(mode);
@@ -391,6 +420,7 @@ pub(crate) fn reduce_cursor_event(
                         horizontal_bar,
                         motion_class,
                     },
+                    buffer_perf_class,
                 );
             }
             if external_mode_requires_jump(&state.config, mode) {
@@ -414,6 +444,7 @@ pub(crate) fn reduce_cursor_event(
                         horizontal_bar,
                         motion_class,
                     },
+                    buffer_perf_class,
                 );
             }
         }
@@ -427,19 +458,20 @@ pub(crate) fn reduce_cursor_event(
             event.seed,
             &event.cursor_location,
         );
+        let current_corners = state.current_corners();
+        let bootstrap_step_sample =
+            RenderStepSample::new(current_corners, state.config.simulation_step_interval_ms());
         let frame = build_render_frame(
             state,
             mode,
-            state.current_corners(),
+            current_corners,
             // Bootstrap the planner with a stationary head sample so the first frame renders
             // visible occupancy before the animation loop has emitted fixed-step samples.
-            vec![RenderStepSample::new(
-                state.current_corners(),
-                state.config.simulation_step_interval_ms(),
-            )],
+            vec![bootstrap_step_sample],
             0,
             target_position,
             vertical_bar,
+            buffer_perf_class,
         );
         return CursorTransitions::draw(
             mode,
@@ -563,7 +595,14 @@ pub(crate) fn reduce_cursor_event(
     }
 
     if matches!(source, EventSource::AnimationTick) && state.is_draining() {
-        return draw_drain_frame(state, mode, event.now_ms, target_position, vertical_bar);
+        return draw_drain_frame(
+            state,
+            mode,
+            event.now_ms,
+            target_position,
+            vertical_bar,
+            buffer_perf_class,
+        );
     }
 
     match source {
@@ -605,7 +644,11 @@ pub(crate) fn reduce_cursor_event(
         while executed_steps < max_simulation_steps
             && state.consume_simulation_step(simulation_step_ms)
         {
-            let particles = state.take_particles();
+            let particles = if keeps_ornamental_effects {
+                state.take_particles()
+            } else {
+                Vec::new()
+            };
             let step_input = step_input(
                 state,
                 mode,
@@ -613,7 +656,9 @@ pub(crate) fn reduce_cursor_event(
                 vertical_bar,
                 horizontal_bar,
                 particles,
+                buffer_perf_class,
             );
+            crate::events::record_particle_simulation_step(step_input.particles.len());
             let step_output = simulate_step(step_input);
             state.apply_step_output(step_output);
             let current_corners = state.current_corners();
@@ -625,7 +670,11 @@ pub(crate) fn reduce_cursor_event(
         }
 
         if executed_steps == 0 && just_started {
-            let particles = state.take_particles();
+            let particles = if keeps_ornamental_effects {
+                state.take_particles()
+            } else {
+                Vec::new()
+            };
             let step_input = step_input(
                 state,
                 mode,
@@ -633,7 +682,9 @@ pub(crate) fn reduce_cursor_event(
                 vertical_bar,
                 horizontal_bar,
                 particles,
+                buffer_perf_class,
             );
+            crate::events::record_particle_simulation_step(step_input.particles.len());
             let step_output = simulate_step(step_input);
             state.apply_step_output(step_output);
             let current_corners = state.current_corners();
@@ -668,6 +719,7 @@ pub(crate) fn reduce_cursor_event(
                 0,
                 target_position,
                 vertical_bar,
+                buffer_perf_class,
             );
             let next_animation_at_ms =
                 Some(next_animation_deadline_from_clock(state, event.now_ms));
@@ -688,6 +740,7 @@ pub(crate) fn reduce_cursor_event(
             0,
             target_position,
             vertical_bar,
+            buffer_perf_class,
         );
         let next_animation_at_ms = Some(next_animation_deadline_from_clock(state, event.now_ms));
         return CursorTransitions::draw(mode, frame, true, RenderAllocationPolicy::ReuseOnly)
@@ -738,6 +791,7 @@ pub(crate) fn reduce_cursor_event(
                 0,
                 target_position,
                 vertical_bar,
+                buffer_perf_class,
             );
             CursorTransitions::draw(mode, frame, false, RenderAllocationPolicy::ReuseOnly)
                 .with_motion_class(motion_class)

@@ -1,10 +1,6 @@
 /// Hashes the stable frame inputs that decide whether planner output can be
 /// reused across draw passes.
 pub(crate) fn frame_draw_signature(frame: &RenderFrame) -> Option<u64> {
-    if !frame.particles.is_empty() {
-        return None;
-    }
-
     let mut hasher = DefaultHasher::new();
     frame.mode.hash(&mut hasher);
     frame.vertical_bar.hash(&mut hasher);
@@ -36,6 +32,33 @@ pub(crate) fn frame_draw_signature(frame: &RenderFrame) -> Option<u64> {
         for corner in &sample.corners {
             hash_f64(&mut hasher, corner.row);
             hash_f64(&mut hasher, corner.col);
+        }
+    }
+
+    Some(hasher.finish())
+}
+
+/// Hashes the particle-overlay inputs that can change independently from the
+/// trail planner output.
+pub(crate) fn frame_particle_overlay_signature(frame: &RenderFrame) -> Option<u64> {
+    if frame.aggregated_particle_cells().is_empty() {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    hash_f64(&mut hasher, frame.particle_max_lifetime);
+    hash_f64(&mut hasher, frame.particle_switch_octant_braille);
+    frame.particles_over_text.hash(&mut hasher);
+    frame.color_levels.hash(&mut hasher);
+    frame.windows_zindex.hash(&mut hasher);
+    frame.aggregated_particle_cells().len().hash(&mut hasher);
+    for aggregate in frame.aggregated_particle_cells() {
+        aggregate.row().hash(&mut hasher);
+        aggregate.col().hash(&mut hasher);
+        for sample_row in aggregate.cell() {
+            for sample in sample_row {
+                hash_f64(&mut hasher, *sample);
+            }
         }
     }
 
@@ -86,6 +109,25 @@ pub(crate) fn render_frame_to_plan_with_signature(
 ) -> PlannerOutput {
     let compiled = compile_render_frame(frame, state);
     decode_compiled_frame(frame, compiled, viewport, maybe_signature)
+}
+
+pub(crate) fn particle_overlay_plan(frame: &RenderFrame, viewport: Viewport) -> RenderPlan {
+    let target_row = frame.target.row.round() as i64;
+    let target_col = frame.target.col.round() as i64;
+    let mut builder = PlanBuilder::with_capacity(viewport, 0, frame.aggregated_particle_cells().len());
+    builder.set_punch_through_cell(target_row, target_col);
+
+    {
+        let mut resources = PlanResources {
+            builder: &mut builder,
+            windows_zindex: frame.windows_zindex,
+            particle_zindex: frame.windows_zindex.saturating_sub(PARTICLE_ZINDEX_OFFSET),
+        };
+
+        draw_particles(&mut resources, frame, target_row, target_col);
+    }
+
+    builder.finish(None, None)
 }
 
 pub(in crate::draw::render_plan) fn decode_compiled_frame(
@@ -139,7 +181,11 @@ pub(in crate::draw::render_plan) fn decode_compiled_frame(
     let target_row = frame.target.row.round() as i64;
     let target_col = frame.target.col.round() as i64;
 
-    let mut builder = PlanBuilder::with_capacity(viewport, next_cells.len(), frame.particles.len());
+    let mut builder = PlanBuilder::with_capacity(
+        viewport,
+        next_cells.len(),
+        frame.aggregated_particle_cells().len(),
+    );
     builder.set_punch_through_cell(target_row, target_col);
 
     {
@@ -156,7 +202,7 @@ pub(in crate::draw::render_plan) fn decode_compiled_frame(
         }
     }
 
-    next_state.previous_cells = next_cells;
+    next_state.previous_cells = std::sync::Arc::new(next_cells);
 
     PlannerOutput {
         plan: builder.finish(

@@ -1,4 +1,6 @@
 use crate::core::types::StrokeId;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -173,6 +175,114 @@ pub(crate) struct Particle {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AggregatedParticleCell {
+    row: i64,
+    col: i64,
+    cell: [[f64; 2]; 4],
+    dot_count: u8,
+    lifetime_sum: f64,
+}
+
+pub(crate) type SharedAggregatedParticleCells = Arc<[AggregatedParticleCell]>;
+
+thread_local! {
+    static PARTICLE_CELL_SCRATCH: RefCell<HashMap<(i64, i64), AggregatedParticleCell>> =
+        RefCell::new(HashMap::new());
+}
+
+impl AggregatedParticleCell {
+    const fn new(row: i64, col: i64) -> Self {
+        Self {
+            row,
+            col,
+            cell: [[0.0; 2]; 4],
+            dot_count: 0,
+            lifetime_sum: 0.0,
+        }
+    }
+
+    pub(crate) const fn row(&self) -> i64 {
+        self.row
+    }
+
+    pub(crate) const fn col(&self) -> i64 {
+        self.col
+    }
+
+    pub(crate) fn screen_cell(&self) -> Option<ScreenCell> {
+        ScreenCell::new(self.row, self.col)
+    }
+
+    pub(crate) const fn cell(&self) -> &[[f64; 2]; 4] {
+        &self.cell
+    }
+
+    pub(crate) fn lifetime_average(&self) -> Option<f64> {
+        if self.dot_count == 0 {
+            return None;
+        }
+        Some(self.lifetime_sum / f64::from(self.dot_count))
+    }
+
+    fn add_lifetime(&mut self, sub_row: usize, sub_col: usize, lifetime: f64) {
+        let previous = self.cell[sub_row][sub_col];
+        self.cell[sub_row][sub_col] = previous + lifetime;
+        self.lifetime_sum += lifetime;
+
+        let was_visible = previous > 0.0;
+        let is_visible = self.cell[sub_row][sub_col] > 0.0;
+        if was_visible == is_visible {
+            return;
+        }
+
+        if is_visible {
+            self.dot_count = self.dot_count.saturating_add(1);
+        } else {
+            self.dot_count = self.dot_count.saturating_sub(1);
+        }
+    }
+}
+
+fn frac01(value: f64) -> f64 {
+    value.rem_euclid(1.0)
+}
+
+fn round_lua(value: f64) -> i64 {
+    (value + 0.5).floor() as i64
+}
+
+pub(crate) fn aggregate_particle_cells(particles: &[Particle]) -> SharedAggregatedParticleCells {
+    if particles.is_empty() {
+        return Arc::default();
+    }
+
+    PARTICLE_CELL_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.clear();
+
+        for particle in particles {
+            let row = particle.position.row.floor() as i64;
+            let col = particle.position.col.floor() as i64;
+            let sub_row = round_lua(4.0 * frac01(particle.position.row) + 0.5).clamp(1, 4);
+            let sub_col = round_lua(2.0 * frac01(particle.position.col) + 0.5).clamp(1, 2);
+
+            scratch
+                .entry((row, col))
+                .or_insert_with(|| AggregatedParticleCell::new(row, col))
+                .add_lifetime(
+                    (sub_row.saturating_sub(1)) as usize,
+                    (sub_col.saturating_sub(1)) as usize,
+                    particle.lifetime,
+                );
+        }
+
+        let mut ordered = scratch.values().cloned().collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|cell| (cell.row(), cell.col()));
+        Arc::from(ordered)
+    })
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RenderStepSample {
     pub(crate) corners: [Point; 4],
     pub(crate) dt_ms: f64,
@@ -190,7 +300,23 @@ impl RenderStepSample {
 }
 
 pub(crate) type SharedRenderStepSamples = Arc<[RenderStepSample]>;
-pub(crate) type SharedParticles = Arc<[Particle]>;
+pub(crate) type SharedParticles = Arc<Vec<Particle>>;
+pub(crate) type SharedParticleScreenCells = Arc<[ScreenCell]>;
+
+pub(crate) fn aggregate_particle_screen_cells(
+    aggregated_particle_cells: &[AggregatedParticleCell],
+) -> SharedParticleScreenCells {
+    if aggregated_particle_cells.is_empty() {
+        return Arc::default();
+    }
+
+    Arc::from(
+        aggregated_particle_cells
+            .iter()
+            .filter_map(AggregatedParticleCell::screen_cell)
+            .collect::<Vec<_>>(),
+    )
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StaticRenderConfig {
@@ -230,7 +356,9 @@ pub(crate) struct RenderFrame {
     pub(crate) vertical_bar: bool,
     pub(crate) trail_stroke_id: StrokeId,
     pub(crate) retarget_epoch: u64,
-    pub(crate) particles: SharedParticles,
+    pub(crate) particle_count: usize,
+    pub(crate) aggregated_particle_cells: SharedAggregatedParticleCells,
+    pub(crate) particle_screen_cells: SharedParticleScreenCells,
     pub(crate) color_at_cursor: Option<u32>,
     pub(crate) static_config: Arc<StaticRenderConfig>,
 }
@@ -240,6 +368,27 @@ impl Deref for RenderFrame {
 
     fn deref(&self) -> &Self::Target {
         &self.static_config
+    }
+}
+
+impl RenderFrame {
+    pub(crate) const fn has_particles(&self) -> bool {
+        self.particle_count > 0
+    }
+
+    pub(crate) fn aggregated_particle_cells(&self) -> &[AggregatedParticleCell] {
+        &self.aggregated_particle_cells
+    }
+
+    pub(crate) fn particle_screen_cells(&self) -> &[ScreenCell] {
+        &self.particle_screen_cells
+    }
+
+    pub(crate) fn set_particles(&mut self, particles: SharedParticles) {
+        self.particle_count = particles.len();
+        self.aggregated_particle_cells = aggregate_particle_cells(particles.as_slice());
+        self.particle_screen_cells =
+            aggregate_particle_screen_cells(&self.aggregated_particle_cells);
     }
 }
 
@@ -329,8 +478,10 @@ impl Rng32 {
 
 #[cfg(test)]
 mod tests {
+    use super::Particle;
     use super::Point;
     use super::ScreenCell;
+    use super::aggregate_particle_cells;
     use super::current_visual_cursor_anchor;
     use crate::animation::scaled_corners_for_trail;
     use crate::test_support::proptest::DEFAULT_FLOAT_EPSILON;
@@ -338,6 +489,7 @@ mod tests {
     use crate::test_support::proptest::cursor_rectangle;
     use crate::test_support::proptest::positive_scale;
     use crate::test_support::proptest::pure_config;
+    use pretty_assertions::assert_eq;
     use proptest::prelude::*;
 
     fn expected_screen_cell_from_point(point: Point) -> Option<ScreenCell> {
@@ -431,5 +583,36 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn aggregate_particle_cells_orders_and_coalesces_particle_overlays() {
+        let aggregated = aggregate_particle_cells(&[
+            Particle {
+                position: Point { row: 4.1, col: 2.1 },
+                velocity: Point::ZERO,
+                lifetime: 2.0,
+            },
+            Particle {
+                position: Point { row: 3.2, col: 5.4 },
+                velocity: Point::ZERO,
+                lifetime: 3.0,
+            },
+            Particle {
+                position: Point { row: 4.6, col: 2.6 },
+                velocity: Point::ZERO,
+                lifetime: 4.0,
+            },
+        ]);
+
+        assert_eq!(
+            aggregated
+                .iter()
+                .map(|cell| (cell.row(), cell.col()))
+                .collect::<Vec<_>>(),
+            vec![(3, 5), (4, 2)]
+        );
+        assert_eq!(aggregated[0].lifetime_average(), Some(3.0));
+        assert_eq!(aggregated[1].lifetime_average(), Some(3.0));
     }
 }

@@ -15,9 +15,9 @@ struct CompactionFixture {
 
 fn compaction_window_lifecycle_spec() -> BoxedStrategy<CompactionLifecycleSpec> {
     prop_oneof![
-        any::<u8>().prop_map(|last_used_epoch| CompactionLifecycleSpec::AvailableVisible {
-            last_used_epoch,
-        }),
+        any::<u8>().prop_map(
+            |last_used_epoch| CompactionLifecycleSpec::AvailableVisible { last_used_epoch }
+        ),
         any::<u8>().prop_map(|last_used_epoch| CompactionLifecycleSpec::AvailableHidden {
             last_used_epoch,
         }),
@@ -94,7 +94,10 @@ fn compaction_tab_windows(
 
 fn compaction_fixture() -> BoxedStrategy<CompactionFixture> {
     vec(
-        (0_usize..=128, vec(compaction_window_lifecycle_spec(), 0..=16)),
+        (
+            0_usize..=128,
+            vec(compaction_window_lifecycle_spec(), 0..=16),
+        ),
         0..=6,
     )
     .prop_flat_map(|tab_specs| {

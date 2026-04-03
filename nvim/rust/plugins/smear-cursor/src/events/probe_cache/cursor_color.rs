@@ -33,7 +33,7 @@ impl CachedCursorColorProbeSample {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct CursorColorMotionCacheKey {
     window_handle: i64,
     buffer_handle: i64,
@@ -82,7 +82,7 @@ impl CursorColorProbeCache {
         witness: &CursorColorProbeWitness,
     ) -> CursorColorCacheLookup {
         self.exact
-            .get_cloned(witness)
+            .get_copy(witness)
             .map_or(CursorColorCacheLookup::Miss, CursorColorCacheLookup::Hit)
     }
 
@@ -102,7 +102,7 @@ impl CursorColorProbeCache {
 
         let motion_key = CursorColorMotionCacheKey::from_witness(witness)?;
         self.motion
-            .get_cloned(&motion_key)
+            .get_copy(&motion_key)
             .map(|sample| CachedCursorColorProbeSample::new(ProbeReuse::Compatible, sample))
     }
 

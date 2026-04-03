@@ -1,0 +1,69 @@
+use super::*;
+use pretty_assertions::assert_eq;
+
+#[test]
+fn aggregated_particle_cache_reuses_cached_cells_until_particles_change() {
+    let mut state = RuntimeState::default();
+    let tracked = location(10, 20, 1, 1);
+    state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
+    state.apply_step_output(sample_step_output());
+
+    assert!(state.aggregated_particle_cells_cache_is_dirty());
+
+    let initial_aggregates = state.shared_aggregated_particle_cells();
+    assert!(!state.aggregated_particle_cells_cache_is_dirty());
+
+    let repeated_aggregates = state.shared_aggregated_particle_cells();
+    assert!(std::sync::Arc::ptr_eq(
+        &initial_aggregates,
+        &repeated_aggregates
+    ));
+
+    state.apply_scroll_shift(1.0, -2.0, 0.0, 40.0);
+    assert!(state.aggregated_particle_cells_cache_is_dirty());
+
+    let shifted_aggregates = state.shared_aggregated_particle_cells();
+    assert!(!state.aggregated_particle_cells_cache_is_dirty());
+    assert!(!std::sync::Arc::ptr_eq(
+        &initial_aggregates,
+        &shifted_aggregates
+    ));
+    assert_eq!(state.particles()[0].position, point(5.0, 9.0));
+    assert_eq!(
+        shifted_aggregates[0].screen_cell(),
+        crate::types::ScreenCell::new(5, 9)
+    );
+}
+
+#[test]
+fn particle_screen_cell_cache_reuses_cached_cells_until_particles_change() {
+    let mut state = RuntimeState::default();
+    let tracked = location(10, 20, 1, 1);
+    state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
+    state.apply_step_output(sample_step_output());
+
+    assert!(state.particle_screen_cells_cache_is_dirty());
+
+    let initial_screen_cells = state.shared_particle_screen_cells();
+    assert!(!state.particle_screen_cells_cache_is_dirty());
+
+    let repeated_screen_cells = state.shared_particle_screen_cells();
+    assert!(std::sync::Arc::ptr_eq(
+        &initial_screen_cells,
+        &repeated_screen_cells
+    ));
+
+    state.apply_scroll_shift(1.0, -2.0, 0.0, 40.0);
+    assert!(state.particle_screen_cells_cache_is_dirty());
+
+    let shifted_screen_cells = state.shared_particle_screen_cells();
+    assert!(!state.particle_screen_cells_cache_is_dirty());
+    assert!(!std::sync::Arc::ptr_eq(
+        &initial_screen_cells,
+        &shifted_screen_cells
+    ));
+    assert_eq!(
+        shifted_screen_cells.as_ref(),
+        &[crate::types::ScreenCell::new(5, 9).expect("shifted screen cell")]
+    );
+}

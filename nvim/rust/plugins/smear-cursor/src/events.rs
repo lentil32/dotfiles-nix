@@ -18,9 +18,11 @@ mod runtime;
 mod timers;
 mod trace;
 
+use cursor::BufferMetadataCache;
 use policy::BufferEventPolicyCache;
 use policy::BufferPerfTelemetryCache;
 use probe_cache::ProbeCacheState;
+use runtime::EditorViewportCache;
 
 #[cfg(test)]
 mod tests;
@@ -31,8 +33,15 @@ pub(crate) use handlers::on_autocmd_event;
 pub(crate) use lifecycle::diagnostics;
 pub(crate) use lifecycle::setup;
 pub(crate) use lifecycle::toggle;
+pub(crate) use lifecycle::validation_counters;
 pub(crate) use logging::warn;
+pub(crate) use runtime::editor_viewport_for_bounds;
+pub(crate) use runtime::record_command_row_read;
+pub(crate) use runtime::record_editor_bounds_read;
 pub(crate) use runtime::record_effect_failure;
+pub(crate) use runtime::record_particle_aggregation;
+pub(crate) use runtime::record_particle_overlay_refresh;
+pub(crate) use runtime::record_particle_simulation_step;
 pub(crate) use runtime::record_planner_candidate_cells_built_count;
 pub(crate) use runtime::record_planner_candidate_query_cells_count;
 pub(crate) use runtime::record_planner_compiled_cells_emitted_count;
@@ -42,6 +51,7 @@ pub(crate) use runtime::record_planner_local_query_compile;
 pub(crate) use runtime::record_planner_local_query_envelope_area_cells;
 pub(crate) use runtime::record_planner_reference_compile;
 pub(crate) use timers::on_core_timer_event;
+pub(crate) use timers::on_core_timer_slot_event;
 pub(crate) use timers::schedule_guarded;
 
 const LOG_SOURCE_NAME: &str = "smear_cursor";
@@ -70,7 +80,7 @@ fn update_callback_duration_ewma(previous_estimate_ms: f64, duration_ms: f64) ->
 struct HostBridgeRevision(u32);
 
 impl HostBridgeRevision {
-    const CURRENT: Self = Self(7);
+    const CURRENT: Self = Self(8);
 
     const fn get(self) -> u32 {
         self.0
@@ -86,13 +96,22 @@ enum HostBridgeState {
     },
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum RealCursorVisibility {
+    Hidden,
+    Visible,
+}
+
 #[derive(Debug, Default)]
 struct ShellState {
     namespace_id: Option<u32>,
     host_bridge_state: HostBridgeState,
     probe_cache: ProbeCacheState,
+    editor_viewport_cache: EditorViewportCache,
+    buffer_metadata_cache: BufferMetadataCache,
     buffer_perf_policy_cache: BufferEventPolicyCache,
     buffer_perf_telemetry_cache: BufferPerfTelemetryCache,
+    real_cursor_visibility: Option<RealCursorVisibility>,
 }
 
 impl ShellState {
@@ -110,6 +129,18 @@ impl ShellState {
 
     fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
         self.host_bridge_state = HostBridgeState::Verified { revision };
+    }
+
+    const fn real_cursor_visibility(&self) -> Option<RealCursorVisibility> {
+        self.real_cursor_visibility
+    }
+
+    fn note_real_cursor_visibility(&mut self, visibility: RealCursorVisibility) {
+        self.real_cursor_visibility = Some(visibility);
+    }
+
+    fn clear_real_cursor_visibility(&mut self) {
+        self.real_cursor_visibility = None;
     }
 }
 

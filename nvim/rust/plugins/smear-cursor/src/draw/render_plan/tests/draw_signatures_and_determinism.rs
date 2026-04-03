@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_support::proptest::pure_config;
 use crate::types::Particle;
+use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use std::sync::Arc;
@@ -47,6 +48,37 @@ fn mutate_signature_axis(frame: &mut RenderFrame, axis: usize, row: i16, col: i1
     }
 }
 
+#[test]
+fn planner_state_clone_shares_retained_storage_until_the_next_mutation() {
+    let viewport = test_viewport();
+    let seeded = render_frame_to_plan(&base_frame(), PlannerState::default(), viewport).next_state;
+    let shared = seeded.clone();
+
+    assert!(Arc::ptr_eq(&seeded.latent_cache, &shared.latent_cache));
+    assert!(Arc::ptr_eq(&seeded.center_history, &shared.center_history));
+    assert!(Arc::ptr_eq(&seeded.previous_cells, &shared.previous_cells));
+    assert!(shared.decode_scratch.centerline.is_empty());
+
+    let advanced = render_frame_to_plan(&single_sample_frame(12, 14), shared, viewport).next_state;
+
+    assert!(!Arc::ptr_eq(&seeded.latent_cache, &advanced.latent_cache));
+    assert!(!Arc::ptr_eq(
+        &seeded.center_history,
+        &advanced.center_history
+    ));
+    assert!(!Arc::ptr_eq(
+        &seeded.previous_cells,
+        &advanced.previous_cells
+    ));
+    assert_eq!(seeded.center_history.len(), 1);
+    assert_eq!(advanced.center_history.len(), 2);
+}
+
+#[test]
+fn frame_particle_overlay_signature_skips_empty_overlay_frames() {
+    assert_eq!(frame_particle_overlay_signature(&base_frame()), None);
+}
+
 proptest! {
     #![proptest_config(pure_config())]
 
@@ -85,14 +117,14 @@ proptest! {
     }
 
     #[test]
-    fn prop_frame_draw_signature_is_none_when_particles_are_present(
+    fn prop_frame_draw_signature_ignores_particle_overlay_inputs(
         row in 8_i16..=20_i16,
         col in 8_i16..=20_i16,
         particle_count in 1_usize..=4_usize,
         lifetime in 0.1_f64..5.0_f64,
     ) {
         let mut frame = single_sample_frame(row, col);
-        frame.particles = (0..particle_count)
+        frame.set_particles(std::sync::Arc::new((0..particle_count)
             .map(|index| Particle {
                 position: Point {
                     row: f64::from(row) + index as f64 * 0.25,
@@ -101,9 +133,61 @@ proptest! {
                 velocity: Point::ZERO,
                 lifetime,
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Vec<_>>()));
+        let baseline_signature = frame_draw_signature(&frame);
+        let mut moved_particles = frame.clone();
+        moved_particles.set_particles(std::sync::Arc::new((0..particle_count)
+            .map(|index| Particle {
+                position: Point {
+                    row: f64::from(row) + index as f64 * 0.25 + 0.5,
+                    col: f64::from(col) + index as f64 * 0.25 + 0.5,
+                },
+                velocity: Point::ZERO,
+                lifetime,
+            })
+            .collect::<Vec<_>>()));
 
-        prop_assert_eq!(frame_draw_signature(&frame), None);
+        prop_assert!(baseline_signature.is_some());
+        prop_assert_eq!(baseline_signature, frame_draw_signature(&frame));
+        prop_assert_eq!(baseline_signature, frame_draw_signature(&moved_particles));
+    }
+
+    #[test]
+    fn prop_frame_particle_overlay_signature_tracks_particle_overlay_inputs(
+        row in 8_i16..=20_i16,
+        col in 8_i16..=20_i16,
+        particle_count in 1_usize..=4_usize,
+        lifetime in 0.1_f64..5.0_f64,
+    ) {
+        let mut frame = single_sample_frame(row, col);
+        frame.set_particles(std::sync::Arc::new((0..particle_count)
+            .map(|index| Particle {
+                position: Point {
+                    row: f64::from(row) + index as f64 * 0.25,
+                    col: f64::from(col) + index as f64 * 0.25,
+                },
+                velocity: Point::ZERO,
+                lifetime,
+            })
+            .collect::<Vec<_>>()));
+        let baseline_signature = frame_particle_overlay_signature(&frame);
+        let mut moved_particles = frame.clone();
+        moved_particles.set_particles(std::sync::Arc::new((0..particle_count)
+            .map(|index| Particle {
+                position: Point {
+                    row: f64::from(row) + index as f64 * 0.25 + 0.5,
+                    col: f64::from(col) + index as f64 * 0.25 + 0.5,
+                },
+                velocity: Point::ZERO,
+                lifetime,
+            })
+            .collect::<Vec<_>>()));
+
+        prop_assert!(baseline_signature.is_some());
+        prop_assert_eq!(baseline_signature, frame_particle_overlay_signature(&frame));
+        prop_assert_ne!(
+            baseline_signature,
+            frame_particle_overlay_signature(&moved_particles)
+        );
     }
 }

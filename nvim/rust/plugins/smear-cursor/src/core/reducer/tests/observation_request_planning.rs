@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::state::CursorTextContextBoundary;
 use crate::test_support::proptest::pure_config;
 use proptest::prelude::*;
 
@@ -150,4 +151,76 @@ proptest! {
             ),
         );
     }
+}
+
+#[test]
+fn retained_cursor_text_context_boundary_is_carried_into_observation_runtime_context() {
+    let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
+    let retained = ObservationSnapshot::new(
+        request.clone(),
+        observation_basis_with_text_context(
+            &request,
+            Some(cursor(9, 9)),
+            91,
+            9,
+            10,
+            &["before", "alpha", "after"],
+            None,
+        ),
+        observation_motion(),
+    );
+    let ready = ready_state().into_ready_with_observation(retained);
+
+    let transition = reduce(
+        &ready,
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+    );
+
+    let Some(Effect::RequestObservationBase(payload)) = transition
+        .effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::RequestObservationBase(_)))
+    else {
+        panic!("expected observation base request effect");
+    };
+
+    pretty_assert_eq!(
+        payload.context.cursor_text_context_boundary(),
+        Some(CursorTextContextBoundary::new(22, 10))
+    );
+}
+
+#[test]
+fn retained_cursor_text_context_boundary_survives_without_sampled_rows() {
+    let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
+    let retained = ObservationSnapshot::new(
+        request.clone(),
+        observation_basis_with_text_context_boundary(
+            &request,
+            Some(cursor(9, 9)),
+            91,
+            9,
+            CursorTextContextBoundary::new(22, 10),
+        ),
+        observation_motion(),
+    );
+    let ready = ready_state().into_ready_with_observation(retained);
+
+    let transition = reduce(
+        &ready,
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+    );
+
+    let Some(Effect::RequestObservationBase(payload)) = transition
+        .effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::RequestObservationBase(_)))
+    else {
+        panic!("expected observation base request effect");
+    };
+
+    pretty_assert_eq!(
+        payload.context.cursor_text_context_boundary(),
+        Some(CursorTextContextBoundary::new(22, 10))
+    );
 }

@@ -15,6 +15,8 @@ mod epochs;
 mod fixtures;
 mod lifecycle;
 mod lifecycle_model;
+mod particle_cache;
+mod prepared_motion;
 mod scroll;
 mod settling;
 mod step_output;

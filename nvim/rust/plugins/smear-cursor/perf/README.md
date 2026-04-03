@@ -10,6 +10,9 @@ Regenerate the checked-in reports whenever the corresponding behavior changes:
 - Planner compile or local-query changes: `planner-compile-current.md`
 - Window-pool cap or retained-window policy changes: `window-pool-cap-current.md`
 - Particle step-path changes: `particle-toggle-current.md`
+- Degraded particle-buffer policy changes: `particle-degraded-buffer-current.md`
+- Long-animation particle allocation changes: `long-animation-allocation-current.md`
+- Validation counter instrumentation changes: `validation-counters-current.md`
 
 If you refresh several checked-in reports in one patch, later captures may record
 `Working tree: dirty` because earlier reports in the same patch are already updated.
@@ -21,6 +24,8 @@ Reviewers should verify these expectations after rerunning the reports:
 - Planner compile: the bounded local-query path should stay competitive on baseline time, worst-case spikes should remain explainable, and the emitted planner telemetry should match the realized path.
 - Window cap: the local side should represent the shipped `64` default, cap hits should remain visible, and the report should still show why that smaller cap is acceptable relative to the measured peak demand.
 - Particle toggle: both runs should share the same deterministic trajectory, only `SMEAR_PARTICLES_ENABLED` should differ, and the particle tax should stay explicit in the report.
+- Degraded particle buffer policy: the `particles_on` workload should realize `full` vs `fast` as requested, the degraded `fast` path should stay competitive on baseline CPU, and both modes should keep probe fallback counters at zero.
+- Long-animation particle allocations: the `long_running_repetition` workload should keep particles enabled, report both baseline CPU and allocation rates, and preserve the particle simulation or aggregation counts so future cache work has a stable comparison point.
 
 Regenerate the adaptive buffer-policy snapshot with:
 
@@ -47,6 +52,30 @@ This capture uses the dedicated `smear.step()` particle harness rather than the
 window-switch scenario sweep, so both cases share the same deterministic
 trajectory and only `SMEAR_PARTICLES_ENABLED` changes between them.
 
+Regenerate the degraded particle-buffer snapshot with:
+
+```bash
+SMEAR_COMPARE_MODES=full,fast \
+SMEAR_COMPARE_SCENARIOS=particles_on \
+SMEAR_COMPARE_REPORT_FILE=plugins/smear-cursor/perf/particle-degraded-buffer-current.md \
+plugins/smear-cursor/scripts/compare_buffer_perf_modes.sh
+```
+
+This capture keeps the current tree fixed and compares the `particles_on`
+workload under `buffer_perf_mode=full` versus `buffer_perf_mode=fast` so the
+degraded particle-path CPU envelope stays explicit.
+
+Regenerate the long-animation allocation snapshot with:
+
+```bash
+SMEAR_LONG_ANIMATION_REPORT_FILE=plugins/smear-cursor/perf/long-animation-allocation-current.md \
+plugins/smear-cursor/scripts/capture_long_animation_allocations.sh
+```
+
+This capture keeps the current tree fixed, enables particle effects for the
+`long_running_repetition` workload, and records both baseline CPU plus
+allocation deltas for the active animation window.
+
 Regenerate the window-pool cap snapshot with:
 
 ```bash
@@ -57,3 +86,14 @@ plugins/smear-cursor/scripts/compare_window_pool_cap_perf.sh
 This capture reuses the same window-switch code on both sides and only changes
 `SMEAR_MAX_KEPT_WINDOWS` between the local shipped default (`64`) and the base
 comparison value (`384`).
+
+Regenerate the validation-counter baseline with:
+
+```bash
+SMEAR_VALIDATION_REPORT_FILE=plugins/smear-cursor/perf/validation-counters-current.md \
+plugins/smear-cursor/scripts/capture_validation_counters.sh
+```
+
+This capture uses `validation_counters()` deltas between the harness warmup and
+baseline phases so the saved rates represent the active animation window instead
+of cumulative plugin lifetime totals.

@@ -6,10 +6,11 @@
 //!
 //! ```lua
 //! local smear = require("nvimrs_smear_cursor")
+//! -- `setup()` installs the Rust autocmd callbacks.
 //! smear.setup({ enabled = true, fps = 120 })
-//! smear.on_autocmd("CursorMoved")
 //! ```
 
+mod allocation_counters;
 mod animation;
 mod config;
 mod core;
@@ -29,6 +30,10 @@ use crate::core::event::EffectFailureSource;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Function;
 use nvim_oxi::Result;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: allocation_counters::CountingAllocator =
+    allocation_counters::CountingAllocator;
 
 pub(crate) fn other_error(message: impl Into<String>) -> nvim_oxi::Error {
     nvim_oxi::api::Error::Other(message.into()).into()
@@ -50,6 +55,8 @@ fn guard_plugin_call<T>(
 #[nvim_oxi::plugin]
 /// Registers the Lua-facing plugin functions exported to Neovim.
 fn nvimrs_smear_cursor() -> Dictionary {
+    allocation_counters::configure_from_env();
+
     let mut api = Dictionary::new();
     api.insert(
         "step",
@@ -76,6 +83,15 @@ fn nvimrs_smear_cursor() -> Dictionary {
         }),
     );
     api.insert(
+        "on_core_timer_slot",
+        Function::<(i64, u64), ()>::from_fn(|(timer_id, generation)| {
+            guard_plugin_call("on_core_timer_slot", || {
+                events::on_core_timer_slot_event(timer_id, generation);
+                Ok(())
+            })
+        }),
+    );
+    api.insert(
         "on_autocmd",
         Function::<String, ()>::from_fn(|event| {
             guard_plugin_call("on_autocmd", || events::on_autocmd_event(&event))
@@ -91,6 +107,12 @@ fn nvimrs_smear_cursor() -> Dictionary {
         "diagnostics",
         Function::<(), String>::from_fn(|()| {
             guard_plugin_call("diagnostics", || Ok(events::diagnostics()))
+        }),
+    );
+    api.insert(
+        "validation_counters",
+        Function::<(), String>::from_fn(|()| {
+            guard_plugin_call("validation_counters", || Ok(events::validation_counters()))
         }),
     );
     api

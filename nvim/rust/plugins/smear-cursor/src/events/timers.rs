@@ -3,16 +3,14 @@ use super::logging::trace_lazy;
 use super::logging::warn;
 use super::runtime::record_effect_failure;
 use crate::core::event::EffectFailureSource;
-use nvim_oxi::Array;
-use nvim_oxi::Object;
+use crate::core::types::TimerToken;
 use nvim_oxi::Result;
-use nvim_oxi::api;
 use nvim_oxi::schedule;
 use std::num::NonZeroI64;
 use std::time::Duration;
 
 // Surprising: the local nvim-oxi libuv timer wrapper never closes its raw
-// handle on drop, so core timers must use Neovim's managed timer lifecycle.
+// handle on drop, so core timers use a Lua-owned persistent timer bridge.
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(super) struct NvimTimerId(NonZeroI64);
@@ -55,20 +53,27 @@ pub(crate) fn schedule_guarded(context: &'static str, callback: impl FnOnce() + 
 
 pub(super) fn start_timer_once(
     host_bridge: InstalledHostBridge,
+    token: TimerToken,
     timeout: Duration,
 ) -> Result<NvimTimerId> {
     let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
-    let timer_id = host_bridge.start_timer_once(timeout_ms)?;
+    let timer_id = host_bridge.start_timer_once(
+        i64::from(timer_slot_id(token)),
+        token.generation().value(),
+        timeout_ms,
+    )?;
     NvimTimerId::try_new(timer_id)
 }
 
 pub(super) fn stop_timer(timer_id: NvimTimerId) -> Result<()> {
-    let args = Array::from_iter([Object::from(timer_id.get())]);
-    let _: Object = api::call_function("timer_stop", args)?;
-    Ok(())
+    Ok(InstalledHostBridge.stop_timer(timer_id.get())?)
 }
 
 pub(crate) fn on_core_timer_event(timer_id: i64) {
+    on_core_timer_slot_event(timer_id, 0);
+}
+
+pub(crate) fn on_core_timer_slot_event(timer_id: i64, generation: u64) {
     let timer_id = match NvimTimerId::try_new(timer_id) {
         Ok(timer_id) => timer_id,
         Err(err) => {
@@ -81,13 +86,23 @@ pub(crate) fn on_core_timer_event(timer_id: i64) {
 
     trace_lazy(|| {
         format!(
-            "shell_timer_callback shell_timer_id={} result=queued",
-            timer_id.get()
+            "shell_timer_callback shell_timer_id={} generation={} result=queued",
+            timer_id.get(),
+            generation,
         )
     });
     schedule_guarded("core timer dispatch", move || {
-        super::runtime::dispatch_shell_timer_fired(timer_id);
+        super::runtime::dispatch_shell_timer_fired(timer_id, generation);
     });
+}
+
+fn timer_slot_id(token: TimerToken) -> u8 {
+    match token.id() {
+        crate::core::types::TimerId::Animation => 1,
+        crate::core::types::TimerId::Ingress => 2,
+        crate::core::types::TimerId::Recovery => 3,
+        crate::core::types::TimerId::Cleanup => 4,
+    }
 }
 
 #[cfg(test)]

@@ -92,20 +92,51 @@ impl PaletteSpec {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct LogicalRaster {
     clear: Option<ClearOp>,
-    cells: Arc<[CellOp]>,
+    particle_cells: Arc<[CellOp]>,
+    static_cells: Arc<[CellOp]>,
 }
 
 impl LogicalRaster {
+    #[cfg(test)]
     pub(crate) fn new(clear: Option<ClearOp>, cells: Arc<[CellOp]>) -> Self {
-        Self { clear, cells }
+        Self {
+            clear,
+            particle_cells: Arc::default(),
+            static_cells: cells,
+        }
+    }
+
+    pub(crate) fn from_segments(
+        clear: Option<ClearOp>,
+        particle_cells: Arc<[CellOp]>,
+        static_cells: Arc<[CellOp]>,
+    ) -> Self {
+        Self {
+            clear,
+            particle_cells,
+            static_cells,
+        }
     }
 
     pub(crate) const fn clear(&self) -> Option<ClearOp> {
         self.clear
     }
 
-    pub(crate) fn cells(&self) -> &[CellOp] {
-        self.cells.as_ref()
+    pub(crate) fn iter_cells(&self) -> impl Iterator<Item = &CellOp> {
+        self.particle_cells.iter().chain(self.static_cells.iter())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn collected_cells(&self) -> Vec<CellOp> {
+        self.iter_cells().copied().collect()
+    }
+
+    pub(crate) fn into_particle_cells(self) -> Arc<[CellOp]> {
+        self.particle_cells
+    }
+
+    pub(crate) fn replace_particle_cells(&self, particle_cells: Arc<[CellOp]>) -> Self {
+        Self::from_segments(self.clear, particle_cells, Arc::clone(&self.static_cells))
     }
 }
 
@@ -328,19 +359,18 @@ pub(crate) fn project_cell_ops_to_spans<'a>(
 pub(crate) fn realize_logical_raster(raster: &LogicalRaster) -> RealizationProjection {
     RealizationProjection::new(
         raster.clear(),
-        project_cell_ops_to_spans(raster.cells().iter()),
+        project_cell_ops_to_spans(raster.iter_cells()),
     )
 }
 
-pub(crate) fn project_render_plan(
-    plan: &RenderPlan,
+fn project_particle_ops(
+    particle_ops: &[crate::draw::render_plan::ParticleOp],
     viewport: Viewport,
     background_probe: Option<&BackgroundProbeBatch>,
-) -> LogicalRaster {
-    let mut linear_cells =
-        Vec::<CellOp>::with_capacity(plan.cell_ops.len() + plan.particle_ops.len() + 1);
+) -> Arc<[CellOp]> {
+    let mut cells = Vec::<CellOp>::with_capacity(particle_ops.len());
 
-    for op in &plan.particle_ops {
+    for op in particle_ops {
         if !in_bounds(viewport, op.cell.row, op.cell.col) {
             continue;
         }
@@ -349,14 +379,25 @@ pub(crate) fn project_render_plan(
                 continue;
             };
             if background_probe.is_some_and(|probe| probe.allows_particle(screen_cell)) {
-                linear_cells.push(op.cell);
+                cells.push(op.cell);
             }
         } else {
-            linear_cells.push(op.cell);
+            cells.push(op.cell);
         }
     }
 
-    linear_cells.extend(
+    Arc::from(cells)
+}
+
+pub(crate) fn project_render_plan(
+    plan: &RenderPlan,
+    viewport: Viewport,
+    background_probe: Option<&BackgroundProbeBatch>,
+) -> LogicalRaster {
+    let particle_cells = project_particle_ops(&plan.particle_ops, viewport, background_probe);
+    let mut static_cells = Vec::<CellOp>::with_capacity(plan.cell_ops.len() + 1);
+
+    static_cells.extend(
         plan.cell_ops
             .iter()
             .filter(|op| in_bounds(viewport, op.row, op.col))
@@ -366,13 +407,13 @@ pub(crate) fn project_render_plan(
     if let Some(overlay) = plan.target_cell_overlay
         && in_bounds(viewport, overlay.row, overlay.col)
     {
-        linear_cells.push(overlay_cell(overlay));
+        static_cells.push(overlay_cell(overlay));
     }
 
     // background-dependent particle admission is resolved from the explicit
     // observation probe before snapshot retention. The snapshot keeps only logical
     // raster cells, and shell apply derives spans later.
-    LogicalRaster::new(plan.clear, Arc::from(linear_cells))
+    LogicalRaster::from_segments(plan.clear, particle_cells, Arc::from(static_cells))
 }
 
 #[cfg(test)]
@@ -443,7 +484,9 @@ mod tests {
             vertical_bar: false,
             trail_stroke_id: StrokeId::new(1),
             retarget_epoch: 1,
-            particles: Vec::new().into(),
+            particle_count: 0,
+            aggregated_particle_cells: Arc::default(),
+            particle_screen_cells: Arc::default(),
             color_at_cursor: None,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: None,
@@ -796,7 +839,7 @@ mod tests {
                 expected_visible_cells(&fixture.plan, fixture.viewport, background_probe);
 
             assert_eq!(raster.clear(), fixture.plan.clear);
-            assert_eq!(raster.cells(), expected.as_slice());
+            assert_eq!(raster.collected_cells(), expected);
             assert_eq!(flatten_projection_cells(&realized), expected);
             if let Some(background_probe) = fixture.background_probe.as_ref() {
                 prop_assert_eq!(background_probe.viewport(), fixture.viewport_snapshot);
@@ -845,6 +888,63 @@ mod tests {
         assert_eq!(
             flatten_projection_cells(&realized),
             legacy_visible_cells_without_probe(&planner_output.plan, viewport)
+        );
+    }
+
+    #[test]
+    fn replace_particle_cells_reuses_the_static_segment() {
+        let original_particle_cells: Arc<[CellOp]> = Arc::from(vec![CellOp {
+            row: 3,
+            col: 4,
+            zindex: 50,
+            glyph: Glyph::Braille(1),
+            highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(1)),
+        }]);
+        let static_cells: Arc<[CellOp]> = Arc::from(vec![
+            CellOp {
+                row: 4,
+                col: 5,
+                zindex: 60,
+                glyph: Glyph::BLOCK,
+                highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(2)),
+            },
+            CellOp {
+                row: 4,
+                col: 6,
+                zindex: 60,
+                glyph: Glyph::Static("x"),
+                highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(3)),
+            },
+        ]);
+        let raster = LogicalRaster::from_segments(
+            Some(ClearOp {
+                max_kept_windows: 4,
+            }),
+            Arc::clone(&original_particle_cells),
+            Arc::clone(&static_cells),
+        );
+        let replacement_particle_cells: Arc<[CellOp]> = Arc::from(vec![CellOp {
+            row: 8,
+            col: 9,
+            zindex: 70,
+            glyph: Glyph::Braille(2),
+            highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(4)),
+        }]);
+
+        let replaced = raster.replace_particle_cells(Arc::clone(&replacement_particle_cells));
+
+        assert!(Arc::ptr_eq(&replaced.static_cells, &static_cells));
+        assert!(Arc::ptr_eq(
+            &replaced.particle_cells,
+            &replacement_particle_cells
+        ));
+        assert_eq!(
+            replaced.collected_cells(),
+            vec![
+                replacement_particle_cells[0],
+                static_cells[0],
+                static_cells[1],
+            ]
         );
     }
 }

@@ -470,6 +470,14 @@ local function read_diagnostics(smear)
   }
 end
 
+local function read_validation_counters(smear)
+  local raw = smear.validation_counters()
+  return {
+    raw = raw,
+    fields = parse_diagnostics_fields(raw),
+  }
+end
+
 local function run_switch_phase(label, windows, iterations, drain_every)
   local start_ns = uv.hrtime()
   for iteration = 1, iterations do
@@ -523,6 +531,12 @@ local function print_diagnostics(label, smear)
   local diagnostics = read_diagnostics(smear)
   emit_line(string.format("PERF_DIAGNOSTICS phase=%s %s", label, diagnostics.raw))
   return diagnostics
+end
+
+local function print_validation_counters(label, smear)
+  local validation = read_validation_counters(smear)
+  emit_line(string.format("PERF_VALIDATION phase=%s %s", label, validation.raw))
+  return validation
 end
 
 local function wait_for_cleanup(delay_ms)
@@ -884,7 +898,9 @@ local function main()
   )
 
   run_switch_phase("warmup", windows, warmup_iterations, drain_every)
+  print_validation_counters("post_warmup", smear)
   local baseline = run_switch_phase("baseline", windows, baseline_iterations, drain_every)
+  print_validation_counters("post_baseline", smear)
   print_diagnostics("post_baseline", smear)
 
   local stress_results = {}
@@ -930,8 +946,10 @@ local function main()
     )
   )
   print_diagnostics("post_recovery_wait", smear)
+  print_validation_counters("post_recovery_wait", smear)
   local recovery = run_switch_phase("recovery", windows, recovery_iterations, drain_every)
   print_diagnostics("post_recovery", smear)
+  print_validation_counters("post_recovery", smear)
   local recovery_ratio = recovery.avg_us / baseline.avg_us
 
   local stress_max_avg_us = baseline.avg_us

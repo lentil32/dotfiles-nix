@@ -121,7 +121,7 @@ fn handle_stroke_transition(state: &mut PlannerState, frame: &RenderFrame) {
     if stroke_changed {
         state.arc_len_q16 = ArcLenQ16::ZERO;
         state.last_pose = None;
-        state.center_history.clear();
+        state.center_history_mut().clear();
     }
     state.last_trail_stroke_id = Some(frame.trail_stroke_id);
 }
@@ -162,7 +162,8 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
         );
 
         state.step_index = state.step_index.next();
-        state.latent_cache.advance_to(state.step_index);
+        let step_index = state.step_index;
+        state.latent_cache_mut().advance_to(step_index);
         state.arc_len_q16 = state.arc_len_q16.saturating_add(arc_len_delta_q16);
         let (sheath_gain, core_gain) = band_speed_gains(
             start_pose,
@@ -217,14 +218,15 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
                 intensity_q16,
                 microtiles,
             };
-            state.latent_cache.insert_slice(&slice);
+            state.latent_cache_mut().insert_slice(&slice);
             #[cfg(test)]
             {
                 record_history_slice(state, &slice);
             }
         }
-        state.center_history.push_back(CenterPathSample {
-            step_index: state.step_index,
+        let step_index = state.step_index;
+        state.center_history_mut().push_back(CenterPathSample {
+            step_index,
             pos: current_pose.center,
         });
         latest_pose = Some(current_pose);
@@ -235,7 +237,8 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
     // the normal render pipeline instead of falling back to shell-side cleanup truth.
     for _ in 0..frame.planner_idle_steps {
         state.step_index = state.step_index.next();
-        state.latent_cache.advance_to(state.step_index);
+        let step_index = state.step_index;
+        state.latent_cache_mut().advance_to(step_index);
     }
 
     #[cfg(test)]
@@ -253,7 +256,7 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
             .saturating_sub(sample.step_index.value())
             >= support_steps_u64
     }) {
-        let _ = state.center_history.pop_front();
+        let _ = state.center_history_mut().pop_front();
     }
     if let Some(latest_pose) = latest_pose {
         state.last_pose = Some(latest_pose);

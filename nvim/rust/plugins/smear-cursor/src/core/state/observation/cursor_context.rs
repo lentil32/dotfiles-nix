@@ -2,7 +2,26 @@ use crate::core::types::CursorPosition;
 use crate::core::types::Generation;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CursorTextContextBoundary {
+    buffer_handle: i64,
+    changedtick: u64,
+}
+
+impl CursorTextContextBoundary {
+    pub(crate) const fn new(buffer_handle: i64, changedtick: u64) -> Self {
+        Self {
+            buffer_handle,
+            changedtick,
+        }
+    }
+
+    pub(crate) const fn matches(self, buffer_handle: i64, changedtick: u64) -> bool {
+        self.buffer_handle == buffer_handle && self.changedtick == changedtick
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct CursorColorProbeWitness {
     window_handle: i64,
     buffer_handle: i64,

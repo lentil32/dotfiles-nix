@@ -6,7 +6,7 @@ use nvimrs_nvim_utils::mode::is_replace_like_mode;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-pub(crate) const DEFAULT_ANIMATION_FPS: f64 = 144.0;
+pub(crate) const DEFAULT_ANIMATION_FPS: f64 = 72.0;
 pub(crate) const DEFAULT_BLOCK_ASPECT_RATIO: f64 = 2.0;
 // Keep the default cap aligned with the measured window-switch scenarios: the
 // refreshed `perf/window-pool-cap-current.md` snapshot peaks at 18 requested
@@ -288,6 +288,7 @@ impl From<&RuntimeConfig> for StaticRenderConfig {
 #[cfg(test)]
 mod tests {
     use super::BufferPerfMode;
+    use super::DEFAULT_ANIMATION_FPS;
     use super::DEFAULT_MAX_KEPT_WINDOWS;
     use super::RuntimeConfig;
     use crate::test_support::proptest::ModeFamily;
@@ -400,6 +401,18 @@ mod tests {
         let config = RuntimeConfig::default();
 
         assert_eq!(config.delay_event_to_smear, 1.0);
+    }
+
+    #[test]
+    fn default_animation_fps_lowers_draw_cadence_without_changing_simulation_rate() {
+        let config = RuntimeConfig::default();
+
+        assert_eq!(config.fps, DEFAULT_ANIMATION_FPS);
+        assert_eq!(
+            config.time_interval,
+            RuntimeConfig::interval_ms_for_fps(DEFAULT_ANIMATION_FPS)
+        );
+        assert_eq!(config.simulation_hz, 120.0);
     }
 
     #[test]

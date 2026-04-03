@@ -1,4 +1,4 @@
-local EXPECTED_HOST_BRIDGE_REVISION = 7
+local EXPECTED_HOST_BRIDGE_REVISION = 8
 
 local function prepend_runtimepath(path)
   if path == nil or path == "" then
@@ -60,6 +60,10 @@ local function main()
     error("missing nvimrs_smear_cursor#host_bridge#start_timer_once bridge")
   end
 
+  if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#stop_timer") ~= 1 then
+    error("missing nvimrs_smear_cursor#host_bridge#stop_timer bridge")
+  end
+
   if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#install_probe_helpers") ~= 1 then
     error("missing nvimrs_smear_cursor#host_bridge#install_probe_helpers bridge")
   end
@@ -78,6 +82,10 @@ local function main()
 
   if vim.fn.luaeval("_G.__nvimrs_smear_cursor_on_core_timer ~= nil") then
     error("legacy Lua timer callback global unexpectedly installed")
+  end
+
+  if type(smear.on_core_timer_slot) ~= "function" then
+    error("missing nvimrs_smear_cursor.on_core_timer_slot bridge")
   end
 
   if package.loaded["nvimrs_smear_cursor.probes"] == nil then

@@ -1,4 +1,5 @@
-use super::super::cursor::mode_string;
+use super::super::cursor::current_mode;
+use super::super::cursor::cursor_position_for_mode;
 use super::super::cursor::smear_outside_cmd_row;
 use super::super::ingress::AutocmdIngress;
 use super::super::ingress::Ingress;
@@ -6,16 +7,20 @@ use super::super::ingress::parse_autocmd_ingress;
 use super::super::logging::warn;
 use super::super::runtime::IngressReadSnapshot;
 use super::super::runtime::ingress_read_snapshot;
+use super::super::runtime::mutate_engine_state;
 use super::super::runtime::note_autocmd_event_now;
 use super::super::runtime::note_cursor_color_colorscheme_change;
 use super::super::runtime::now_ms;
+use super::super::runtime::read_engine_state;
 use super::super::runtime::record_ingress_applied;
 use super::super::runtime::record_ingress_coalesced;
 use super::super::runtime::record_ingress_dropped;
 use super::super::runtime::record_ingress_received;
+use super::super::runtime::refresh_editor_viewport_cache;
 use super::super::runtime::to_core_millis;
 use super::core_dispatch::dispatch_core_events_with_default_scheduler;
 use super::source_selection::should_request_observation_for_autocmd;
+use super::viewport::cursor_location_for_ingress_fast_path;
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ExternalDemandQueuedEvent;
@@ -24,8 +29,12 @@ use crate::core::state::BufferPerfClass;
 use crate::core::state::ExternalDemandKind;
 use crate::core::types::Millis;
 use crate::draw::clear_highlight_cache;
+use crate::state::CursorLocation;
+use crate::types::EPSILON;
+use crate::types::Point;
 use nvim_oxi::Result;
 use nvim_oxi::api;
+use nvim_oxi::api::types::AutocmdCallbackArgs;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum IngressDispatchOutcome {
@@ -39,6 +48,66 @@ enum CursorAutocmdPreflight {
     Dropped,
     MissingPerfClass,
     Continue { buffer_perf_class: BufferPerfClass },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CursorAutocmdFastPathSnapshot {
+    enabled: bool,
+    needs_initialize: bool,
+    tracked_location: Option<CursorLocation>,
+    target_position: Point,
+    smear_to_cmd: bool,
+}
+
+fn cursor_autocmd_fast_path_snapshot()
+-> super::super::runtime::EngineAccessResult<CursorAutocmdFastPathSnapshot> {
+    read_engine_state(|state| {
+        let runtime = state.core_state().runtime();
+        CursorAutocmdFastPathSnapshot {
+            enabled: runtime.is_enabled(),
+            needs_initialize: state.core_state().needs_initialize(),
+            tracked_location: runtime.tracked_location(),
+            target_position: runtime.target_position(),
+            smear_to_cmd: runtime.config.smear_to_cmd,
+        }
+    })
+}
+
+fn current_cursor_position_for_fast_path(
+    window: &api::Window,
+    smear_to_cmd: bool,
+) -> Option<Point> {
+    let mode = current_mode();
+    let mode = mode.to_string_lossy();
+    cursor_position_for_mode(window, mode.as_ref(), smear_to_cmd)
+        .ok()
+        .flatten()
+        .map(|(row, col)| Point { row, col })
+}
+
+fn should_drop_unchanged_cursor_autocmd(
+    ingress: AutocmdIngress,
+    snapshot: &CursorAutocmdFastPathSnapshot,
+    current_location: Option<&CursorLocation>,
+    current_target_position: Option<Point>,
+) -> bool {
+    if !ingress.supports_unchanged_fast_path() || !snapshot.enabled || snapshot.needs_initialize {
+        return false;
+    }
+
+    let (Some(tracked_location), Some(current_location), Some(current_target_position)) = (
+        snapshot.tracked_location.as_ref(),
+        current_location,
+        current_target_position,
+    ) else {
+        return false;
+    };
+
+    tracked_location == current_location
+        && snapshot
+            .target_position
+            .distance_squared(current_target_position)
+            <= EPSILON
 }
 
 fn build_cursor_autocmd_events(
@@ -85,9 +154,10 @@ fn demand_kind_for_autocmd(ingress: AutocmdIngress) -> ExternalDemandKind {
 fn collect_ingress_cursor_presentation_request(
     snapshot: &IngressReadSnapshot,
 ) -> Result<IngressCursorPresentationRequest> {
-    let mode = mode_string();
+    let mode = current_mode();
+    let mode = mode.to_string_lossy();
     let current_corners = snapshot.current_corners();
-    let mode_allowed = snapshot.mode_allowed(&mode);
+    let mode_allowed = snapshot.mode_allowed(mode.as_ref());
 
     Ok(IngressCursorPresentationRequest::new(
         mode_allowed,
@@ -130,7 +200,48 @@ fn cursor_autocmd_preflight(
     }
 }
 
+fn maybe_drop_unchanged_cursor_autocmd(
+    ingress: AutocmdIngress,
+) -> Result<Option<IngressDispatchOutcome>> {
+    if !ingress.supports_unchanged_fast_path() {
+        return Ok(None);
+    }
+
+    let fast_path_snapshot = cursor_autocmd_fast_path_snapshot()?;
+    if !fast_path_snapshot.enabled
+        || fast_path_snapshot.needs_initialize
+        || fast_path_snapshot.tracked_location.is_none()
+    {
+        return Ok(None);
+    }
+
+    let Some(current_location) = cursor_location_for_ingress_fast_path() else {
+        return Ok(None);
+    };
+    let window = api::get_current_win();
+    if !window.is_valid() {
+        return Ok(None);
+    }
+    let current_target_position =
+        current_cursor_position_for_fast_path(&window, fast_path_snapshot.smear_to_cmd);
+
+    if should_drop_unchanged_cursor_autocmd(
+        ingress,
+        &fast_path_snapshot,
+        Some(&current_location),
+        current_target_position,
+    ) {
+        note_autocmd_event_now();
+        return Ok(Some(IngressDispatchOutcome::Dropped));
+    }
+
+    Ok(None)
+}
+
 fn on_cursor_event_core_for_autocmd(ingress: AutocmdIngress) -> Result<IngressDispatchOutcome> {
+    if let Some(outcome) = maybe_drop_unchanged_cursor_autocmd(ingress)? {
+        return Ok(outcome);
+    }
     let snapshot = ingress_read_snapshot()?;
     let window = api::get_current_win();
     let buffer = api::get_current_buf();
@@ -185,21 +296,92 @@ fn on_colorscheme_impl() -> Result<IngressDispatchOutcome> {
     Ok(IngressDispatchOutcome::Applied)
 }
 
-fn on_autocmd_ingress(ingress: AutocmdIngress) -> Result<IngressDispatchOutcome> {
+fn should_invalidate_buffer_metadata_for_option(option_name: &str) -> bool {
+    matches!(option_name, "filetype" | "buftype" | "buflisted")
+}
+
+fn should_refresh_editor_viewport_for_option(option_name: &str) -> bool {
+    matches!(option_name, "cmdheight" | "lines" | "columns")
+}
+
+fn invalidate_buffer_metadata_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
+    if !should_invalidate_buffer_metadata_for_option(args.r#match.as_str()) {
+        return Ok(());
+    }
+
+    let buffer_handle = i64::from(args.buffer.handle());
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .buffer_metadata_cache
+            .invalidate_buffer(buffer_handle);
+    })
+    .map_err(nvim_oxi::Error::from)?;
+    Ok(())
+}
+
+fn refresh_editor_viewport_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
+    if !should_refresh_editor_viewport_for_option(args.r#match.as_str()) {
+        return Ok(());
+    }
+
+    refresh_editor_viewport_cache()
+}
+
+fn invalidate_buffer_local_caches(buffer_handle: i64) -> Result<()> {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .buffer_metadata_cache
+            .invalidate_buffer(buffer_handle);
+        state
+            .shell
+            .buffer_perf_policy_cache
+            .invalidate_buffer(buffer_handle);
+        state
+            .shell
+            .buffer_perf_telemetry_cache
+            .invalidate_buffer(buffer_handle);
+    })
+    .map_err(nvim_oxi::Error::from)?;
+    Ok(())
+}
+
+fn on_autocmd_ingress(
+    ingress: AutocmdIngress,
+    args: Option<&AutocmdCallbackArgs>,
+) -> Result<IngressDispatchOutcome> {
     if ingress.is_colorscheme() {
         return on_colorscheme_impl();
     }
-    if ingress == AutocmdIngress::Unknown {
-        return Ok(IngressDispatchOutcome::Dropped);
-    }
 
-    on_cursor_event_core_for_autocmd(ingress)
+    match ingress {
+        AutocmdIngress::BufWipeout => {
+            if let Some(args) = args {
+                invalidate_buffer_local_caches(i64::from(args.buffer.handle()))?;
+            }
+            Ok(IngressDispatchOutcome::Dropped)
+        }
+        AutocmdIngress::OptionSet => {
+            if let Some(args) = args {
+                invalidate_buffer_metadata_for_option_set(args)?;
+                refresh_editor_viewport_for_option_set(args)?;
+            }
+            Ok(IngressDispatchOutcome::Dropped)
+        }
+        AutocmdIngress::VimResized => {
+            refresh_editor_viewport_cache()?;
+            Ok(IngressDispatchOutcome::Dropped)
+        }
+        AutocmdIngress::Unknown => Ok(IngressDispatchOutcome::Dropped),
+        _ => on_cursor_event_core_for_autocmd(ingress),
+    }
 }
 
-fn dispatch_ingress(ingress: Ingress) -> Result<()> {
+fn dispatch_ingress(ingress: Ingress, args: Option<&AutocmdCallbackArgs>) -> Result<()> {
     record_ingress_received();
     let outcome = match ingress {
-        Ingress::Autocmd(autocmd_ingress) => on_autocmd_ingress(autocmd_ingress),
+        Ingress::Autocmd(autocmd_ingress) => on_autocmd_ingress(autocmd_ingress, args),
     };
     match outcome {
         Ok(dispatch_outcome) => {
@@ -221,16 +403,27 @@ fn dispatch_ingress(ingress: Ingress) -> Result<()> {
 }
 
 pub(crate) fn on_autocmd_event(event: &str) -> Result<()> {
-    dispatch_ingress(Ingress::Autocmd(parse_autocmd_ingress(event)))
+    dispatch_ingress(Ingress::Autocmd(parse_autocmd_ingress(event)), None)
+}
+
+pub(in crate::events) fn on_autocmd_callback(args: AutocmdCallbackArgs) -> Result<()> {
+    dispatch_ingress(
+        Ingress::Autocmd(parse_autocmd_ingress(args.event.as_str())),
+        Some(&args),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::CursorAutocmdFastPathSnapshot;
     use super::CursorAutocmdPreflight;
     use super::build_cursor_autocmd_events;
     use super::cursor_autocmd_preflight;
     use super::demand_kind_for_autocmd;
     use super::should_coalesce_window_follow_up_autocmd;
+    use super::should_drop_unchanged_cursor_autocmd;
+    use super::should_invalidate_buffer_metadata_for_option;
+    use super::should_refresh_editor_viewport_for_option;
     use crate::config::BufferPerfMode;
     use crate::core::effect::IngressCursorPresentationRequest;
     use crate::core::event::Event as CoreEvent;
@@ -245,6 +438,7 @@ mod tests {
     use crate::test_support::proptest::pure_config;
     use crate::types::CursorCellShape;
     use crate::types::Point;
+    use pretty_assertions::assert_eq;
     use proptest::prelude::*;
 
     fn presentation() -> IngressCursorPresentationRequest {
@@ -292,6 +486,21 @@ mod tests {
             current_buffer_perf_class: buffer_perf_class,
             filetypes_disabled: Vec::new(),
         })
+    }
+
+    fn fast_path_snapshot(
+        enabled: bool,
+        needs_initialize: bool,
+        tracked_location: Option<CursorLocation>,
+        target_position: Point,
+    ) -> CursorAutocmdFastPathSnapshot {
+        CursorAutocmdFastPathSnapshot {
+            enabled,
+            needs_initialize,
+            tracked_location,
+            target_position,
+            smear_to_cmd: true,
+        }
     }
 
     proptest! {
@@ -390,6 +599,172 @@ mod tests {
                     current_window_handle,
                 ),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn buffer_metadata_invalidation_only_tracks_the_buffer_local_policy_inputs() {
+        for (option_name, expected) in [
+            ("filetype", true),
+            ("buftype", true),
+            ("buflisted", true),
+            ("conceallevel", false),
+            ("number", false),
+        ] {
+            assert_eq!(
+                should_invalidate_buffer_metadata_for_option(option_name),
+                expected,
+                "unexpected invalidation result for {option_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn editor_viewport_refresh_tracks_only_global_viewport_inputs() {
+        for (option_name, expected) in [
+            ("cmdheight", true),
+            ("lines", true),
+            ("columns", true),
+            ("filetype", false),
+            ("number", false),
+        ] {
+            assert_eq!(
+                should_refresh_editor_viewport_for_option(option_name),
+                expected,
+                "unexpected viewport refresh result for {option_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
+        let tracked_location = CursorLocation::new(10, 20, 4, 12)
+            .with_viewport_columns(3, 1)
+            .with_window_origin(5, 7)
+            .with_window_dimensions(80, 24);
+        let matching_target = Point {
+            row: 11.0,
+            col: 22.0,
+        };
+        let matching_snapshot =
+            fast_path_snapshot(true, false, Some(tracked_location.clone()), matching_target);
+
+        for (label, ingress, snapshot, current_location, current_target, expected) in [
+            (
+                "cursor moved repeat",
+                AutocmdIngress::CursorMoved,
+                matching_snapshot.clone(),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                true,
+            ),
+            (
+                "insert repeat",
+                AutocmdIngress::CursorMovedInsert,
+                matching_snapshot.clone(),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                true,
+            ),
+            (
+                "window scrolled repeat",
+                AutocmdIngress::WinScrolled,
+                matching_snapshot.clone(),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                true,
+            ),
+            (
+                "window enter repeat",
+                AutocmdIngress::WinEnter,
+                matching_snapshot.clone(),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                true,
+            ),
+            (
+                "buffer enter repeat",
+                AutocmdIngress::BufEnter,
+                matching_snapshot.clone(),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                true,
+            ),
+            (
+                "mode changes still require full path",
+                AutocmdIngress::ModeChanged,
+                matching_snapshot.clone(),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                false,
+            ),
+            (
+                "surface changes stay live",
+                AutocmdIngress::CursorMoved,
+                matching_snapshot.clone(),
+                Some(CursorLocation::new(10, 20, 4, 13)),
+                Some(matching_target),
+                false,
+            ),
+            (
+                "target changes stay live",
+                AutocmdIngress::CursorMoved,
+                matching_snapshot.clone(),
+                Some(tracked_location.clone()),
+                Some(Point {
+                    row: 12.0,
+                    col: 22.0,
+                }),
+                false,
+            ),
+            (
+                "missing live position disables the fast path",
+                AutocmdIngress::CursorMoved,
+                matching_snapshot,
+                Some(tracked_location.clone()),
+                None,
+                false,
+            ),
+            (
+                "uninitialized runtime disables the fast path",
+                AutocmdIngress::CursorMoved,
+                fast_path_snapshot(true, true, Some(tracked_location.clone()), matching_target),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                false,
+            ),
+            (
+                "disabled runtime disables the fast path",
+                AutocmdIngress::CursorMoved,
+                fast_path_snapshot(
+                    false,
+                    false,
+                    Some(tracked_location.clone()),
+                    matching_target,
+                ),
+                Some(tracked_location.clone()),
+                Some(matching_target),
+                false,
+            ),
+            (
+                "missing tracked location disables the fast path",
+                AutocmdIngress::CursorMoved,
+                fast_path_snapshot(true, false, None, matching_target),
+                Some(tracked_location),
+                Some(matching_target),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                should_drop_unchanged_cursor_autocmd(
+                    ingress,
+                    &snapshot,
+                    current_location.as_ref(),
+                    current_target,
+                ),
+                expected,
+                "{label}"
             );
         }
     }

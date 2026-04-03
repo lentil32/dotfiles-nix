@@ -1,5 +1,6 @@
 use super::Transition;
 use super::observation::observe_or_plan;
+use super::observation::plan_or_stay;
 use super::observation::start_next_observation;
 use super::observation::transition_ready_or_observe;
 use super::support::arm_render_cleanup_timer;
@@ -46,7 +47,7 @@ fn reduce_ingress_timer_signal(state: CoreState, observed_at: Millis) -> Transit
 
     let cleared_policy = state.ingress_policy().clear_pending_delay();
     let cleared_state = state.with_ingress_policy(cleared_policy);
-    transition_ready_or_observe(cleared_state, observed_at)
+    transition_ready_or_observe(cleared_state)
 }
 
 pub(super) fn reduce_timer_signal_with_token(
@@ -72,20 +73,33 @@ pub(super) fn reduce_timer_signal_with_token(
             if disarmed_state.needs_initialize() {
                 Transition::stay_owned(disarmed_state)
             } else {
-                let (next_state, effect) = start_next_observation(disarmed_state, observed_at);
-                if let Some(effect) = effect {
-                    Transition::new(next_state, vec![effect])
-                } else if exact_boundary_refresh_required(&next_state) {
-                    let Some((refresh_state, refresh_effect)) =
-                        start_boundary_refresh_observation(next_state, observed_at)
-                    else {
-                        unreachable!(
-                            "boundary refresh eligibility changed between check and start"
-                        );
-                    };
-                    Transition::new(refresh_state, vec![refresh_effect])
-                } else {
-                    observe_or_plan(next_state, observed_at)
+                match disarmed_state.protocol() {
+                    crate::core::state::ProtocolState::Primed { .. }
+                    | crate::core::state::ProtocolState::Ready { .. } => {
+                        let (next_state, effect) = start_next_observation(disarmed_state);
+                        if let Some(effect) = effect {
+                            Transition::new(next_state, vec![effect])
+                        } else if exact_boundary_refresh_required(&next_state) {
+                            let Some((refresh_state, refresh_effect)) =
+                                start_boundary_refresh_observation(next_state, observed_at)
+                            else {
+                                unreachable!(
+                                    "boundary refresh eligibility changed between check and start"
+                                );
+                            };
+                            Transition::new(refresh_state, vec![refresh_effect])
+                        } else {
+                            plan_or_stay(next_state, observed_at)
+                        }
+                    }
+                    crate::core::state::ProtocolState::Idle { .. }
+                    | crate::core::state::ProtocolState::ObservingRequest { .. }
+                    | crate::core::state::ProtocolState::ObservingActive { .. }
+                    | crate::core::state::ProtocolState::Planning { .. }
+                    | crate::core::state::ProtocolState::Applying { .. }
+                    | crate::core::state::ProtocolState::Recovering { .. } => {
+                        Transition::new(disarmed_state, Vec::new())
+                    }
                 }
             }
         }
@@ -94,7 +108,8 @@ pub(super) fn reduce_timer_signal_with_token(
             if disarmed_state.lifecycle() != crate::core::types::Lifecycle::Recovering {
                 Transition::stay_owned(disarmed_state)
             } else {
-                let settled = match disarmed_state.retained_observation().cloned() {
+                let mut disarmed_state = disarmed_state;
+                let settled = match disarmed_state.take_retained_observation() {
                     Some(observation) => reset_recovery_attempt(
                         disarmed_state.into_ready_with_observation(observation),
                     ),

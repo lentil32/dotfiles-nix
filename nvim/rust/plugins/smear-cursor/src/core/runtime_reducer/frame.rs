@@ -1,11 +1,13 @@
 use super::ScrollShift;
 use super::as_delay_ms;
+use crate::core::state::BufferPerfClass;
 use crate::state::RuntimeState;
 use crate::types::Particle;
 use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
 use crate::types::StepInput;
+use std::sync::Arc;
 
 fn build_step_input(
     state: &RuntimeState,
@@ -14,6 +16,7 @@ fn build_step_input(
     vertical_bar: bool,
     horizontal_bar: bool,
     particles: Vec<Particle>,
+    buffer_perf_class: BufferPerfClass,
 ) -> StepInput {
     StepInput {
         mode: mode.to_string(),
@@ -35,7 +38,8 @@ fn build_step_input(
         particles,
         previous_center: state.previous_center(),
         particle_damping: state.config.particle_damping,
-        particles_enabled: state.config.particles_enabled,
+        particles_enabled: state.config.particles_enabled
+            && buffer_perf_class.keeps_ornamental_effects(),
         particle_gravity: state.config.particle_gravity,
         particle_random_velocity: state.config.particle_random_velocity,
         particle_max_num: state.config.particle_max_num,
@@ -57,14 +61,33 @@ fn build_step_input(
 }
 
 pub(crate) fn build_render_frame(
-    state: &RuntimeState,
+    state: &mut RuntimeState,
     mode: &str,
     render_corners: [Point; 4],
     step_samples: Vec<RenderStepSample>,
     planner_idle_steps: u32,
     target: Point,
     vertical_bar: bool,
+    buffer_perf_class: BufferPerfClass,
 ) -> RenderFrame {
+    let (particle_count, aggregated_particle_cells, particle_screen_cells) =
+        if buffer_perf_class.keeps_ornamental_effects() {
+            let particle_count = state.particles().len();
+            let aggregated_particle_cells = state.shared_aggregated_particle_cells();
+            let particle_screen_cells = if state.config.particles_over_text {
+                Arc::default()
+            } else {
+                state.shared_particle_screen_cells()
+            };
+            (
+                particle_count,
+                aggregated_particle_cells,
+                particle_screen_cells,
+            )
+        } else {
+            (0, Arc::default(), Arc::default())
+        };
+
     RenderFrame {
         mode: mode.to_string(),
         corners: render_corners,
@@ -75,7 +98,9 @@ pub(crate) fn build_render_frame(
         vertical_bar,
         trail_stroke_id: state.trail_stroke_id(),
         retarget_epoch: state.retarget_epoch(),
-        particles: std::sync::Arc::from(state.particles().to_vec()),
+        particle_count,
+        aggregated_particle_cells,
+        particle_screen_cells,
         color_at_cursor: state.color_at_cursor(),
         static_config: state.render_static_config(),
     }
@@ -119,6 +144,7 @@ pub(super) fn step_input(
     vertical_bar: bool,
     horizontal_bar: bool,
     particles: Vec<Particle>,
+    buffer_perf_class: BufferPerfClass,
 ) -> StepInput {
     build_step_input(
         state,
@@ -127,5 +153,6 @@ pub(super) fn step_input(
         vertical_bar,
         horizontal_bar,
         particles,
+        buffer_perf_class,
     )
 }

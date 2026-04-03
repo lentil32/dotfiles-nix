@@ -39,7 +39,6 @@ pub(crate) use self::infra::shared::ClearOp;
 pub(crate) use self::infra::shared::Glyph;
 pub(crate) use self::infra::shared::HighlightLevel;
 pub(crate) use self::infra::shared::HighlightRef;
-#[cfg(test)]
 pub(crate) use self::infra::shared::ParticleOp;
 pub(crate) use self::infra::shared::PlannerOutput;
 pub(crate) use self::infra::shared::PlannerState;

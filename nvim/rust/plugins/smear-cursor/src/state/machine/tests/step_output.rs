@@ -17,7 +17,7 @@ fn apply_step_output_replaces_the_mutable_simulation_snapshot() {
     expected.trail_elapsed_ms = output.trail_elapsed_ms;
     expected.previous_center = output.previous_center;
     expected.rng_state = output.rng_state;
-    expected.particles = output.particles.clone();
+    expected.particles = std::sync::Arc::new(output.particles.clone());
 
     state.apply_step_output(output);
 

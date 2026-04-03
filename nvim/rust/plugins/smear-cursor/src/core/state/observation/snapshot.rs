@@ -3,6 +3,7 @@ use super::background_probe::BackgroundProbePlan;
 use super::background_probe::BackgroundProbeProgress;
 use super::cursor_context::CursorColorProbeWitness;
 use super::cursor_context::CursorTextContext;
+use super::cursor_context::CursorTextContextBoundary;
 use super::probe::CursorColorSample;
 use super::probe::ProbeKind;
 use super::probe::ProbeRequestSet;
@@ -36,17 +37,23 @@ impl BackgroundProbeProgressState {
         }
     }
 
-    fn with_progress(self, progress: BackgroundProbeProgress) -> Option<Self> {
+    fn set_progress(&mut self, progress: BackgroundProbeProgress) -> bool {
         match self {
-            Self::Pending(_) => Some(Self::Pending(progress)),
-            Self::Unrequested | Self::Complete => None,
+            Self::Pending(current) => {
+                *current = progress;
+                true
+            }
+            Self::Unrequested | Self::Complete => false,
         }
     }
 
-    fn complete(self) -> Option<Self> {
+    fn mark_complete(&mut self) -> bool {
         match self {
-            Self::Unrequested => None,
-            Self::Pending(_) | Self::Complete => Some(Self::Complete),
+            Self::Unrequested => false,
+            Self::Pending(_) | Self::Complete => {
+                *self = Self::Complete;
+                true
+            }
         }
     }
 }
@@ -89,6 +96,7 @@ pub(crate) struct ObservationBasis {
     cursor_location: CursorLocation,
     viewport: ViewportSnapshot,
     cursor_color_witness: Option<CursorColorProbeWitness>,
+    cursor_text_context_boundary: Option<CursorTextContextBoundary>,
     cursor_text_context: Option<CursorTextContext>,
 }
 
@@ -109,6 +117,7 @@ impl ObservationBasis {
             cursor_location,
             viewport,
             cursor_color_witness: None,
+            cursor_text_context_boundary: None,
             cursor_text_context: None,
         }
     }
@@ -145,6 +154,10 @@ impl ObservationBasis {
         self.cursor_text_context.as_ref()
     }
 
+    pub(crate) const fn cursor_text_context_boundary(&self) -> Option<CursorTextContextBoundary> {
+        self.cursor_text_context_boundary
+    }
+
     pub(crate) fn with_cursor_color_witness(
         mut self,
         cursor_color_witness: Option<CursorColorProbeWitness>,
@@ -157,7 +170,21 @@ impl ObservationBasis {
         mut self,
         cursor_text_context: Option<CursorTextContext>,
     ) -> Self {
+        if let Some(context) = cursor_text_context.as_ref() {
+            self.cursor_text_context_boundary = Some(CursorTextContextBoundary::new(
+                context.buffer_handle(),
+                context.changedtick(),
+            ));
+        }
         self.cursor_text_context = cursor_text_context;
+        self
+    }
+
+    pub(crate) fn with_cursor_text_context_boundary(
+        mut self,
+        cursor_text_context_boundary: Option<CursorTextContextBoundary>,
+    ) -> Self {
+        self.cursor_text_context_boundary = cursor_text_context_boundary;
         self
     }
 }
@@ -249,31 +276,60 @@ impl ObservationSnapshot {
         self.motion
     }
 
+    #[cfg(test)]
     pub(crate) fn with_cursor_color_probe(
         mut self,
         cursor_color: ProbeState<Option<CursorColorSample>>,
     ) -> Option<Self> {
-        self.probes = self.probes.with_cursor_color_state(cursor_color)?;
-        Some(self)
+        self.set_cursor_color_probe(cursor_color).then_some(self)
     }
 
+    pub(crate) fn set_cursor_color_probe(
+        &mut self,
+        cursor_color: ProbeState<Option<CursorColorSample>>,
+    ) -> bool {
+        self.probes.set_cursor_color_state(cursor_color)
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_background_progress(
         mut self,
         background_progress: BackgroundProbeProgress,
     ) -> Option<Self> {
-        self.background_progress = self
-            .background_progress
-            .with_progress(background_progress)?;
-        Some(self)
+        self.set_background_progress(background_progress)
+            .then_some(self)
     }
 
+    pub(crate) fn set_background_progress(
+        &mut self,
+        background_progress: BackgroundProbeProgress,
+    ) -> bool {
+        self.background_progress.set_progress(background_progress)
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_background_probe(
         mut self,
         background: ProbeState<BackgroundProbeBatch>,
     ) -> Option<Self> {
-        self.probes = self.probes.with_background_state(background)?;
-        self.background_progress = self.background_progress.complete()?;
-        Some(self)
+        self.set_background_probe(background).then_some(self)
+    }
+
+    pub(crate) fn set_background_probe(
+        &mut self,
+        background: ProbeState<BackgroundProbeBatch>,
+    ) -> bool {
+        if !matches!(
+            self.background_progress,
+            BackgroundProbeProgressState::Pending(_) | BackgroundProbeProgressState::Complete
+        ) {
+            return false;
+        }
+        if !self.probes.set_background_state(background) {
+            return false;
+        }
+
+        self.background_progress.mark_complete()
     }
 
     pub(crate) fn with_background_probe_plan(mut self, plan: BackgroundProbePlan) -> Self {
