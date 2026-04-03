@@ -1,5 +1,5 @@
 use super::Transition;
-use super::planning::plan_ready_state;
+use super::planning::{plan_ready_state, plan_runtime_transition};
 use super::support::{
     delay_budget_from_ms, enter_hot_cleanup_state, ingress_cursor_presentation_effect,
     ingress_marks_cursor_autocmd_freshness, next_pending_probe_effect,
@@ -11,10 +11,11 @@ use crate::core::effect::{Effect, EventLoopMetricEffect, TimerKind};
 use crate::core::event::{
     ExternalDemandQueuedEvent, InitializeEvent, ObservationBaseCollectedEvent, ProbeReportedEvent,
 };
+use crate::core::runtime_reducer::RenderAction;
 use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::{
-    BackgroundProbeUpdate, CoreState, ExternalDemand, ObservationRequest, ObservationSnapshot,
-    ProbeKind, ProbeReuse, ProbeState, QueuedDemand,
+    BackgroundProbePlan, BackgroundProbeUpdate, CoreState, ExternalDemand, ObservationRequest,
+    ObservationSnapshot, ProbeKind, ProbeReuse, ProbeState, QueuedDemand,
 };
 use crate::core::types::Millis;
 
@@ -209,7 +210,19 @@ pub(super) fn reduce_observation_base_collected(
         .basis
         .cursor_position()
         .or_else(|| state.last_cursor());
+    let observed_at = payload.basis.observed_at();
+    let previous_observation = state.retained_observation().cloned();
     let next_observation = ObservationSnapshot::new(payload.request, payload.basis, payload.motion);
+    let next_observation = if let Some(plan) = background_probe_plan_for_observation(
+        state,
+        previous_observation.as_ref(),
+        &next_observation,
+        observed_at,
+    ) {
+        next_observation.with_background_probe_plan(plan)
+    } else {
+        next_observation
+    };
     let base_state = reset_recovery_attempt(state.clone().with_last_cursor(next_cursor));
     let next_probe = next_pending_probe_effect(&base_state, &next_observation);
     let Some(next_probe) = next_probe else {
@@ -220,6 +233,27 @@ pub(super) fn reduce_observation_base_collected(
     };
 
     Transition::new(observing, vec![next_probe])
+}
+
+fn background_probe_plan_for_observation(
+    state: &CoreState,
+    previous_observation: Option<&ObservationSnapshot>,
+    observation: &ObservationSnapshot,
+    observed_at: Millis,
+) -> Option<BackgroundProbePlan> {
+    if !observation.request().probes().background() {
+        return None;
+    }
+
+    let (_, cursor_transition) =
+        plan_runtime_transition(state, previous_observation, observation, observed_at);
+    match cursor_transition.render_decision.render_action {
+        RenderAction::Draw(frame) => Some(BackgroundProbePlan::from_render_frame(
+            frame.as_ref(),
+            observation.basis().viewport(),
+        )),
+        RenderAction::ClearAll | RenderAction::Noop => None,
+    }
 }
 
 enum ProbeReportResolution {
@@ -317,7 +351,7 @@ fn apply_probe_report(
                 return None;
             }
             let progress = observation.background_progress()?;
-            match progress.apply_chunk(*chunk, allowed_mask) {
+            match progress.apply_chunk(chunk, allowed_mask) {
                 Some(BackgroundProbeUpdate::InProgress(next_progress)) => {
                     let updated = observation
                         .clone()

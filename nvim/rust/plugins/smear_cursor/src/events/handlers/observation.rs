@@ -3,10 +3,12 @@ use super::super::cursor::{
 };
 use super::super::host_bridge::installed_host_bridge;
 use super::super::logging::warn;
-use super::super::probe_cache::CursorColorCacheLookup;
+use super::super::probe_cache::{
+    CursorColorCacheLookup, CursorTextContextCacheKey, CursorTextContextCacheLookup,
+};
 use super::super::runtime::{
-    cached_cursor_color_sample, cursor_color_colorscheme_generation, now_ms,
-    store_cursor_color_sample, to_core_millis,
+    cached_cursor_color_sample, cached_cursor_text_context, cursor_color_colorscheme_generation,
+    now_ms, store_cursor_color_sample, store_cursor_text_context, to_core_millis,
 };
 use super::viewport::{cursor_location_for_core_render, maybe_scroll_shift_for_core_event};
 use crate::core::effect::{
@@ -14,18 +16,19 @@ use crate::core::effect::{
 };
 use crate::core::event::{Event as CoreEvent, ObservationBaseCollectedEvent, ProbeReportedEvent};
 use crate::core::state::{
-    BackgroundProbeBatch, BackgroundProbeChunk, CursorColorProbeWitness, CursorColorSample,
-    CursorTextContext, ObservationBasis, ObservationMotion, ObservedTextRow, ProbeFailure,
-    ProbeKind, ProbeReuse,
+    BackgroundProbeBatch, BackgroundProbeChunk, BackgroundProbeChunkMask, CursorColorProbeWitness,
+    CursorColorSample, CursorTextContext, ObservationBasis, ObservationMotion, ObservedTextRow,
+    ProbeFailure, ProbeKind, ProbeReuse,
 };
-use crate::core::types::{CursorCol, CursorPosition, CursorRow, ViewportSnapshot};
+use crate::core::types::{CursorCol, CursorPosition, CursorRow, Generation, ViewportSnapshot};
 use crate::draw::{
     BRAILLE_CODE_MAX, BRAILLE_CODE_MIN, OCTANT_CODE_MAX, OCTANT_CODE_MIN, editor_bounds,
 };
 use crate::lua::{
-    LuaParseError, bool_from_object_typed, i64_from_object, parse_indexed_objects_typed,
+    LuaParseError, i64_from_object, parse_indexed_objects_typed, u8_from_object_typed,
 };
 use nvim_oxi::{Array, Object, Result, api};
+use std::sync::Arc;
 use thiserror::Error;
 
 fn to_core_coordinate(value: f64) -> Option<u32> {
@@ -90,9 +93,9 @@ fn current_buffer_changedtick(buffer_handle: i64) -> Result<u64> {
     Ok(changedtick as u64)
 }
 
-fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Vec<ObservedTextRow>> {
+fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Arc<[ObservedTextRow]>> {
     if center_line < 1 {
-        return Ok(Vec::new());
+        return Ok(Arc::default());
     }
 
     let start_line = center_line.saturating_sub(1).max(1);
@@ -100,10 +103,10 @@ fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Vec<Obse
     let start_index = usize::try_from(start_line.saturating_sub(1)).ok();
     let end_index = usize::try_from(end_line).ok();
     let (Some(start_index), Some(end_index)) = (start_index, end_index) else {
-        return Ok(Vec::new());
+        return Ok(Arc::default());
     };
 
-    buffer
+    let rows = buffer
         .get_lines(start_index..end_index, false)?
         .enumerate()
         .map(|(offset, line)| {
@@ -116,7 +119,17 @@ fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Vec<Obse
                 line.to_string_lossy().into_owned(),
             ))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows.into())
+}
+
+fn tracked_cursor_text_context_line(
+    buffer_handle: i64,
+    tracked_location: Option<&crate::state::CursorLocation>,
+) -> Option<i64> {
+    tracked_location.and_then(|location| {
+        (location.buffer_handle == buffer_handle && location.line >= 1).then_some(location.line)
+    })
 }
 
 fn current_cursor_text_context(
@@ -134,46 +147,53 @@ fn current_cursor_text_context(
 
     let buffer_handle = i64::from(buffer.handle());
     let changedtick = current_buffer_changedtick(buffer_handle)?;
-    // Surprising: embedded Neovim does not expose Neovide's redraw grid here, so semantic
-    // mutation detection uses narrow buffer-line snapshots plus changedtick instead of UI cells.
-    let nearby_rows = observed_text_rows(&buffer, cursor_line)?;
-    if nearby_rows.is_empty() {
-        return Ok(None);
-    }
-
-    let (tracked_cursor_line, tracked_nearby_rows) = match tracked_location {
-        Some(location)
-            if location.buffer_handle == buffer_handle
-                && location.line >= 1
-                && location.line != cursor_line =>
-        {
-            // Surprising: edits above the cursor renumber absolute lines, so we also sample the
-            // previously tracked cursor footprint and compare by relative row order.
-            let tracked_rows = observed_text_rows(&buffer, location.line)?;
-            if tracked_rows.is_empty() {
-                (None, None)
-            } else {
-                (Some(location.line), Some(tracked_rows))
-            }
-        }
-        Some(location)
-            if location.buffer_handle == buffer_handle
-                && location.line >= 1
-                && location.line == cursor_line =>
-        {
-            (Some(cursor_line), Some(nearby_rows.clone()))
-        }
-        _ => (None, None),
-    };
-
-    Ok(Some(CursorTextContext::new(
+    let tracked_cursor_line = tracked_cursor_text_context_line(buffer_handle, tracked_location);
+    let cache_key = CursorTextContextCacheKey::new(
         buffer_handle,
         changedtick,
         cursor_line,
-        nearby_rows,
         tracked_cursor_line,
-        tracked_nearby_rows,
-    )))
+    );
+    match cached_cursor_text_context(&cache_key) {
+        Ok(CursorTextContextCacheLookup::Hit(context)) => return Ok(context),
+        Ok(CursorTextContextCacheLookup::Miss) => {}
+        Err(err) => warn(&format!("cursor text context cache read failed: {err}")),
+    }
+
+    // Surprising: embedded Neovim does not expose Neovide's redraw grid here, so semantic
+    // mutation detection uses narrow buffer-line snapshots plus changedtick instead of UI cells.
+    let nearby_rows = observed_text_rows(&buffer, cursor_line)?;
+    let context = if nearby_rows.is_empty() {
+        None
+    } else {
+        let (tracked_cursor_line, tracked_nearby_rows) = match tracked_cursor_line {
+            Some(tracked_cursor_line) if tracked_cursor_line != cursor_line => {
+                // Surprising: edits above the cursor renumber absolute lines, so we also sample the
+                // previously tracked cursor footprint and compare by relative row order.
+                let tracked_rows = observed_text_rows(&buffer, tracked_cursor_line)?;
+                if tracked_rows.is_empty() {
+                    (None, None)
+                } else {
+                    (Some(tracked_cursor_line), Some(tracked_rows))
+                }
+            }
+            Some(_) => (Some(cursor_line), Some(Arc::clone(&nearby_rows))),
+            None => (None, None),
+        };
+
+        Some(CursorTextContext::from_shared(
+            buffer_handle,
+            changedtick,
+            cursor_line,
+            nearby_rows,
+            tracked_cursor_line,
+            tracked_nearby_rows,
+        ))
+    };
+    if let Err(err) = store_cursor_text_context(cache_key, context.clone()) {
+        warn(&format!("cursor text context cache write failed: {err}"));
+    }
+    Ok(context)
 }
 
 #[derive(Debug, Error)]
@@ -212,6 +232,58 @@ fn current_cursor_color_probe_witness(
         mode.to_owned(),
         cursor_position,
         colorscheme_generation,
+    ))
+}
+
+fn validate_cursor_color_probe_witness(
+    expected_witness: &CursorColorProbeWitness,
+    current_mode: &str,
+    current_position: Option<CursorPosition>,
+    current_buffer_handle: i64,
+    current_changedtick: u64,
+    current_colorscheme_generation: Generation,
+) -> ProbeReuse {
+    if expected_witness.mode() != current_mode
+        || expected_witness.cursor_position() != current_position
+        || expected_witness.buffer_handle() != current_buffer_handle
+        || expected_witness.changedtick() != current_changedtick
+        || expected_witness.colorscheme_generation() != current_colorscheme_generation
+    {
+        ProbeReuse::RefreshRequired
+    } else {
+        ProbeReuse::Exact
+    }
+}
+
+fn current_cursor_color_probe_reuse(
+    expected_witness: &CursorColorProbeWitness,
+    policy: CursorPositionReadPolicy,
+) -> Result<ProbeReuse> {
+    let current_mode = mode_string();
+    if current_mode != expected_witness.mode() {
+        return Ok(ProbeReuse::RefreshRequired);
+    }
+
+    let current_position = current_core_cursor_position(&current_mode, policy)?;
+    if current_position != expected_witness.cursor_position() {
+        return Ok(ProbeReuse::RefreshRequired);
+    }
+
+    let current_buffer = api::get_current_buf();
+    if !current_buffer.is_valid() {
+        return Err(nvim_oxi::api::Error::Other("current buffer invalid".into()).into());
+    }
+
+    let current_buffer_handle = i64::from(current_buffer.handle());
+    let current_changedtick = current_buffer_changedtick(current_buffer_handle)?;
+    let current_colorscheme_generation = cursor_color_colorscheme_generation()?;
+    Ok(validate_cursor_color_probe_witness(
+        expected_witness,
+        &current_mode,
+        current_position,
+        current_buffer_handle,
+        current_changedtick,
+        current_colorscheme_generation,
     ))
 }
 
@@ -291,51 +363,42 @@ fn collect_observation_basis(
 
 fn batch_background_allowed_mask(
     viewport: ViewportSnapshot,
-    chunk: BackgroundProbeChunk,
-) -> std::result::Result<Vec<bool>, BackgroundProbeMaskError> {
-    let start_row = chunk.start_row().value();
-    if start_row == 0 || start_row > viewport.max_row.value() {
-        return Ok(Vec::new());
+    chunk: &BackgroundProbeChunk,
+) -> std::result::Result<BackgroundProbeChunkMask, BackgroundProbeMaskError> {
+    let cells = chunk.cells();
+    if cells.is_empty() {
+        return Ok(BackgroundProbeChunkMask::from_allowed_mask(&[]));
+    }
+    if cells.iter().any(|cell| {
+        let Ok(row) = u32::try_from(cell.row()) else {
+            return true;
+        };
+        let Ok(col) = u32::try_from(cell.col()) else {
+            return true;
+        };
+        row == 0 || col == 0 || row > viewport.max_row.value() || col > viewport.max_col.value()
+    }) {
+        return Err(BackgroundProbeMaskError::Shape(
+            crate::lua::invalid_key_error(
+                "background_probe_mask",
+                "chunk cells within viewport bounds",
+            ),
+        ));
     }
 
-    let row_count = chunk.row_count().min(
-        viewport
-            .max_row
-            .value()
-            .saturating_sub(start_row)
-            .saturating_add(1),
-    );
-    let width = usize::try_from(viewport.max_col.value()).map_err(|_| {
-        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
-            "background_probe_mask",
-            "viewport width that fits in usize",
-        ))
-    })?;
-    let row_count_usize = usize::try_from(row_count).map_err(|_| {
-        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
-            "background_probe_mask",
-            "row count that fits in usize",
-        ))
-    })?;
-    let expected_len = width.checked_mul(row_count_usize).ok_or_else(|| {
-        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
-            "background_probe_mask",
-            "mask length that fits in usize",
-        ))
-    })?;
-    if expected_len == 0 {
-        return Ok(Vec::new());
+    let expected_len = cells.len();
+    let expected_packed_len = expected_len / 8 + usize::from(expected_len % 8 != 0);
+    let mut request = Vec::with_capacity(4 + expected_len.saturating_mul(2));
+    request.push(Object::from(BRAILLE_CODE_MIN));
+    request.push(Object::from(BRAILLE_CODE_MAX));
+    request.push(Object::from(OCTANT_CODE_MIN));
+    request.push(Object::from(OCTANT_CODE_MAX));
+    for cell in cells {
+        request.push(Object::from(cell.row()));
+        request.push(Object::from(cell.col()));
     }
 
-    let request = Array::from_iter([
-        Object::from(i64::from(start_row)),
-        Object::from(i64::from(row_count)),
-        Object::from(i64::from(viewport.max_col.value())),
-        Object::from(BRAILLE_CODE_MIN),
-        Object::from(BRAILLE_CODE_MAX),
-        Object::from(OCTANT_CODE_MIN),
-        Object::from(OCTANT_CODE_MAX),
-    ]);
+    let request = Array::from_iter(request);
     let host_bridge = installed_host_bridge()
         .map_err(nvim_oxi::Error::from)
         .map_err(BackgroundProbeMaskError::BridgeCall)?;
@@ -343,44 +406,45 @@ fn batch_background_allowed_mask(
         .background_allowed_mask(request)
         .map_err(nvim_oxi::Error::from)
         .map_err(BackgroundProbeMaskError::BridgeCall)?;
-    let values = parse_indexed_objects_typed("background_probe_mask", value, Some(expected_len))
-        .map_err(BackgroundProbeMaskError::Shape)?;
-
-    values
+    let values =
+        parse_indexed_objects_typed("background_probe_mask", value, Some(expected_packed_len))
+            .map_err(BackgroundProbeMaskError::Shape)?;
+    let packed = values
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
-            bool_from_object_typed("background_probe_mask", value)
+            u8_from_object_typed("background_probe_mask", value)
                 .map_err(|source| BackgroundProbeMaskError::ValueDecode { index, source })
         })
-        .collect()
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    BackgroundProbeChunkMask::from_packed_bytes(expected_len, packed).ok_or_else(|| {
+        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
+            "background_probe_mask",
+            "packed byte array",
+        ))
+    })
 }
 
-fn collect_cursor_color_report(payload: &RequestProbeEffect) -> CoreEvent {
+fn collect_cursor_color_report(payload: &RequestProbeEffect, same_reducer_wave: bool) -> CoreEvent {
     let Some(expected_witness) = payload.observation_basis.cursor_color_witness() else {
         warn("cursor color probe missing witness");
         return cursor_color_failed_event(payload);
     };
-    let current_mode = mode_string();
-    let current_position =
-        match current_core_cursor_position(&current_mode, payload.cursor_position_policy) {
-            Ok(position) => position,
+    if !same_reducer_wave {
+        let reuse = match current_cursor_color_probe_reuse(
+            expected_witness,
+            payload.cursor_position_policy,
+        ) {
+            Ok(reuse) => reuse,
             Err(err) => {
-                warn(&format!("cursor color probe failed: {err}"));
+                warn(&format!("cursor color probe witness read failed: {err}"));
                 return cursor_color_failed_event(payload);
             }
         };
-    let current_witness = match current_cursor_color_probe_witness(&current_mode, current_position)
-    {
-        Ok(witness) => witness,
-        Err(err) => {
-            warn(&format!("cursor color probe witness read failed: {err}"));
-            return cursor_color_failed_event(payload);
+        if reuse == ProbeReuse::RefreshRequired {
+            return cursor_color_ready_event(payload, ProbeReuse::RefreshRequired, None);
         }
-    };
-
-    if &current_witness != expected_witness {
-        return cursor_color_ready_event(payload, ProbeReuse::RefreshRequired, None);
     }
 
     match cached_cursor_color_sample(expected_witness) {
@@ -394,10 +458,10 @@ fn collect_cursor_color_report(payload: &RequestProbeEffect) -> CoreEvent {
         }
     }
 
-    match sampled_cursor_color_at_current_position() {
+    match sampled_cursor_color_at_current_position(expected_witness.colorscheme_generation()) {
         Ok(sample) => {
             let sample = sample.map(CursorColorSample::new);
-            if let Err(err) = store_cursor_color_sample(current_witness, sample.clone()) {
+            if let Err(err) = store_cursor_color_sample(expected_witness.clone(), sample.clone()) {
                 warn(&format!("cursor color cache write failed: {err}"));
             }
             cursor_color_ready_event(payload, ProbeReuse::Exact, sample)
@@ -432,7 +496,7 @@ fn collect_background_report(payload: &RequestProbeEffect) -> CoreEvent {
     }
 
     let viewport = payload.observation_basis.viewport();
-    let Some(chunk) = payload.background_chunk else {
+    let Some(chunk) = payload.background_chunk.as_ref() else {
         warn("background probe missing chunk request");
         return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
             observation_id: payload.observation_basis.observation_id(),
@@ -455,7 +519,7 @@ fn collect_background_report(payload: &RequestProbeEffect) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
         observation_id: payload.observation_basis.observation_id(),
         probe_request_id: payload.probe_request_id,
-        chunk,
+        chunk: chunk.clone(),
         allowed_mask,
     })
 }
@@ -474,9 +538,97 @@ pub(crate) fn execute_core_request_observation_base_effect(
 }
 
 pub(crate) fn execute_core_request_probe_effect(payload: &RequestProbeEffect) -> Vec<CoreEvent> {
+    execute_core_request_probe_effect_with_reuse(payload, false)
+}
+
+pub(crate) fn execute_core_request_probe_effect_same_reducer_wave(
+    payload: &RequestProbeEffect,
+) -> Vec<CoreEvent> {
+    execute_core_request_probe_effect_with_reuse(payload, true)
+}
+
+fn execute_core_request_probe_effect_with_reuse(
+    payload: &RequestProbeEffect,
+    same_reducer_wave: bool,
+) -> Vec<CoreEvent> {
     let event = match payload.kind {
-        ProbeKind::CursorColor => collect_cursor_color_report(payload),
+        ProbeKind::CursorColor => collect_cursor_color_report(payload, same_reducer_wave),
         ProbeKind::Background => collect_background_report(payload),
     };
     vec![event]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_cursor_color_probe_witness;
+    use crate::core::state::{CursorColorProbeWitness, ProbeReuse};
+    use crate::core::types::{CursorCol, CursorPosition, CursorRow, Generation};
+
+    fn cursor(row: u32, col: u32) -> CursorPosition {
+        CursorPosition {
+            row: CursorRow(row),
+            col: CursorCol(col),
+        }
+    }
+
+    fn witness(
+        buffer_handle: i64,
+        changedtick: u64,
+        mode: &str,
+        cursor_position: Option<CursorPosition>,
+        colorscheme_generation: u64,
+    ) -> CursorColorProbeWitness {
+        CursorColorProbeWitness::new(
+            buffer_handle,
+            changedtick,
+            mode.to_string(),
+            cursor_position,
+            Generation::new(colorscheme_generation),
+        )
+    }
+
+    #[test]
+    fn validate_cursor_color_probe_witness_reuses_captured_snapshot_when_shell_reads_match() {
+        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
+
+        assert_eq!(
+            validate_cursor_color_probe_witness(
+                &expected,
+                "n",
+                Some(cursor(7, 8)),
+                22,
+                14,
+                Generation::new(3),
+            ),
+            ProbeReuse::Exact,
+        );
+    }
+
+    #[test]
+    fn validate_cursor_color_probe_witness_requires_refresh_when_snapshot_goes_stale() {
+        let expected = witness(22, 14, "n", Some(cursor(7, 8)), 3);
+
+        assert_eq!(
+            validate_cursor_color_probe_witness(
+                &expected,
+                "n",
+                Some(cursor(7, 8)),
+                22,
+                15,
+                Generation::new(3),
+            ),
+            ProbeReuse::RefreshRequired,
+        );
+        assert_eq!(
+            validate_cursor_color_probe_witness(
+                &expected,
+                "i",
+                Some(cursor(7, 8)),
+                22,
+                14,
+                Generation::new(3),
+            ),
+            ProbeReuse::RefreshRequired,
+        );
+    }
 }

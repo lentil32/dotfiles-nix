@@ -23,6 +23,7 @@ pub(super) use core_dispatch::{
 pub(crate) use ingress_router::on_autocmd_event;
 pub(super) use observation::{
     execute_core_request_observation_base_effect, execute_core_request_probe_effect,
+    execute_core_request_probe_effect_same_reducer_wave,
 };
 pub(super) use render_apply::{
     apply_ingress_cursor_presentation_effect, execute_core_apply_render_cleanup_effect,

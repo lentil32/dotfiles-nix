@@ -15,12 +15,13 @@ use crate::core::runtime_reducer::{
     render_hard_cleanup_delay_ms,
 };
 use crate::core::state::{
-    BackgroundProbeBatch, BackgroundProbeChunk, CoreState, CursorColorSample, CursorTextContext,
-    DegradedApplyMetrics, DemandQueue, ExternalDemand, ExternalDemandKind, InFlightProposal,
-    ObservationBasis, ObservationMotion, ObservationRequest, ObservationSnapshot, ObservedTextRow,
-    PatchBasis, ProbeFailure, ProbeKind, ProbeRequestSet, ProbeReuse, ProbeSlot, ProbeState,
-    RealizationClear, RealizationDivergence, RealizationLedger, RealizationPlan,
-    RecoveryPolicyState, RenderThermalState, ScenePatch, SemanticEntityId,
+    BackgroundProbeBatch, BackgroundProbeChunk, BackgroundProbeChunkMask, BackgroundProbePlan,
+    CoreState, CursorColorSample, CursorTextContext, DegradedApplyMetrics, DemandQueue,
+    ExternalDemand, ExternalDemandKind, InFlightProposal, ObservationBasis, ObservationMotion,
+    ObservationRequest, ObservationSnapshot, ObservedTextRow, PatchBasis, ProbeFailure, ProbeKind,
+    ProbeRequestSet, ProbeReuse, ProbeSlot, ProbeState, RealizationClear, RealizationDivergence,
+    RealizationLedger, RealizationPlan, RecoveryPolicyState, RenderThermalState, ScenePatch,
+    SemanticEntityId,
 };
 use crate::core::types::{
     CursorCol, CursorPosition, CursorRow, DelayBudgetMs, IngressSeq, Lifecycle, Millis, ProposalId,
@@ -234,6 +235,18 @@ struct ObservationScenario {
     based: Transition,
 }
 
+fn sparse_probe_cells(viewport: ViewportSnapshot, count: usize) -> Vec<ScreenCell> {
+    let width = i64::from(viewport.max_col.value());
+    (0..count)
+        .map(|index| {
+            let index = i64::try_from(index).expect("probe cell index");
+            let row = index / width + 1;
+            let col = index % width + 1;
+            ScreenCell::new(row, col).expect("probe cell")
+        })
+        .collect()
+}
+
 impl ObservationScenario {
     fn new(ready: CoreState) -> Self {
         let observing =
@@ -248,6 +261,55 @@ impl ObservationScenario {
             basis,
             based,
         }
+    }
+
+    fn with_background_plan(ready: CoreState, plan_cells: Vec<ScreenCell>) -> Self {
+        let observing =
+            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+        let request = active_request(&observing);
+        let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+        let observation =
+            ObservationSnapshot::new(request.clone(), basis.clone(), observation_motion())
+                .with_background_probe_plan(BackgroundProbePlan::from_cells(plan_cells));
+        let next = observing
+            .clone()
+            .with_last_cursor(Some(cursor(7, 8)))
+            .with_active_observation(Some(observation.clone()))
+            .expect("observation should stay active");
+        let effect = if ready.runtime().config.requires_cursor_color_sampling() {
+            Effect::RequestProbe(RequestProbeEffect {
+                observation_basis: basis.clone(),
+                probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
+                kind: ProbeKind::CursorColor,
+                cursor_position_policy: cursor_position_policy(&observing),
+                background_chunk: None,
+            })
+        } else {
+            Effect::RequestProbe(RequestProbeEffect {
+                observation_basis: basis.clone(),
+                probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
+                kind: ProbeKind::Background,
+                cursor_position_policy: cursor_position_policy(&observing),
+                background_chunk: observation
+                    .background_progress()
+                    .and_then(crate::core::state::BackgroundProbeProgress::next_chunk),
+            })
+        };
+
+        Self {
+            observing,
+            request,
+            basis,
+            based: Transition::new(next, vec![effect]),
+        }
+    }
+
+    fn with_background_probe_cell_count(ready: CoreState, cell_count: usize) -> Self {
+        let observing =
+            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+        let request = active_request(&observing);
+        let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+        Self::with_background_plan(ready, sparse_probe_cells(basis.viewport(), cell_count))
     }
 }
 
@@ -267,13 +329,13 @@ fn observation_runtime_context(state: &CoreState) -> ObservationRuntimeContext {
 fn cursor_color_probe_report(
     request: &ObservationRequest,
     reuse: ProbeReuse,
-    color: Option<&str>,
+    color: Option<u32>,
 ) -> Event {
     Event::ProbeReported(ProbeReportedEvent::CursorColorReady {
         observation_id: request.observation_id(),
         probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
         reuse,
-        sample: color.map(|value| CursorColorSample::new(value.to_string())),
+        sample: color.map(CursorColorSample::new),
     })
 }
 
@@ -318,31 +380,29 @@ fn background_probe_report(
 
 fn background_chunk_probe_report(
     request: &ObservationRequest,
-    chunk: BackgroundProbeChunk,
-    viewport: ViewportSnapshot,
+    chunk: &BackgroundProbeChunk,
+    _viewport: ViewportSnapshot,
     allowed_cells: &[(u32, u32)],
 ) -> Event {
-    let width = usize::try_from(viewport.max_col.value()).expect("viewport width");
-    let row_count = usize::try_from(chunk.row_count()).expect("chunk row count");
-    let mut allowed_mask = vec![false; width * row_count];
-    let start_row = chunk.start_row().value();
-    let end_row = start_row.saturating_add(chunk.row_count().saturating_sub(1));
-
-    for &(row, col) in allowed_cells {
-        if row < start_row || row > end_row {
-            continue;
-        }
-        let row_index = usize::try_from(row.saturating_sub(start_row)).expect("row index");
-        let col_index = usize::try_from(col.saturating_sub(1)).expect("col index");
-        let index = row_index * width + col_index;
-        allowed_mask[index] = true;
-    }
+    let allowed_mask = chunk
+        .cells()
+        .iter()
+        .map(|cell| {
+            let Ok(row) = u32::try_from(cell.row()) else {
+                return false;
+            };
+            let Ok(col) = u32::try_from(cell.col()) else {
+                return false;
+            };
+            allowed_cells.contains(&(row, col))
+        })
+        .collect::<Vec<_>>();
 
     Event::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
         observation_id: request.observation_id(),
         probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
-        chunk,
-        allowed_mask,
+        chunk: chunk.clone(),
+        allowed_mask: BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
     })
 }
 
@@ -1193,10 +1253,10 @@ fn observation_base_collection_stages_only_first_pending_probe_when_multiple_pro
         observation.probes().cursor_color(),
         ProbeSlot::Requested(ProbeState::Pending { .. })
     ));
-    assert!(matches!(
-        observation.probes().background(),
-        ProbeSlot::Requested(ProbeState::Pending { .. })
-    ));
+    assert!(
+        !observation.probes().background().is_pending(),
+        "background probing should not preempt the cursor-color request when no sparse plan is active",
+    );
 }
 
 #[test]
@@ -1229,14 +1289,14 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
 
     let completed = reduce(
         &based.next,
-        cursor_color_probe_report(&request, ProbeReuse::Compatible, Some("#abcdef")),
+        cursor_color_probe_report(&request, ProbeReuse::Compatible, Some(0x00AB_CDEF)),
     );
 
     let observation = completed
         .next
         .observation()
         .expect("stored observation snapshot");
-    assert_eq!(observation.cursor_color(), Some("#abcdef"));
+    assert_eq!(observation.cursor_color(), Some(0x00AB_CDEF));
     match observation.probes().cursor_color() {
         ProbeSlot::Requested(ProbeState::Ready { reuse, .. }) => {
             assert_eq!(*reuse, ProbeReuse::Compatible)
@@ -1249,18 +1309,28 @@ mod probe_completion_sequence {
     use super::*;
 
     fn dual_probe_scenario() -> ObservationScenario {
-        ObservationScenario::new(dual_probe_ready_state())
+        ObservationScenario::with_background_plan(
+            dual_probe_ready_state(),
+            vec![ScreenCell::new(7, 8).expect("background probe cell")],
+        )
     }
 
     fn background_probe_scenario() -> ObservationScenario {
-        ObservationScenario::new(background_probe_ready_state())
+        ObservationScenario::with_background_probe_cell_count(background_probe_ready_state(), 2050)
+    }
+
+    fn single_background_probe_scenario() -> ObservationScenario {
+        ObservationScenario::with_background_plan(
+            background_probe_ready_state(),
+            vec![ScreenCell::new(7, 8).expect("background probe cell")],
+        )
     }
 
     fn after_cursor_color_probe_ready() -> (ObservationScenario, Transition) {
         let scenario = dual_probe_scenario();
         let after_cursor = reduce(
             &scenario.based.next,
-            cursor_color_probe_report(&scenario.request, ProbeReuse::Compatible, Some("#abcdef")),
+            cursor_color_probe_report(&scenario.request, ProbeReuse::Compatible, Some(0x00AB_CDEF)),
         );
         (scenario, after_cursor)
     }
@@ -1278,7 +1348,7 @@ mod probe_completion_sequence {
             &scenario.based.next,
             background_chunk_probe_report(
                 &scenario.request,
-                first_chunk,
+                &first_chunk,
                 scenario.basis.viewport(),
                 &[(7, 8)],
             ),
@@ -1325,7 +1395,7 @@ mod probe_completion_sequence {
             .next
             .observation()
             .expect("observation should stay active while background probe is pending");
-        assert_eq!(observation.cursor_color(), Some("#abcdef"));
+        assert_eq!(observation.cursor_color(), Some(0x00AB_CDEF));
         assert!(matches!(
             observation.probes().background(),
             ProbeSlot::Requested(ProbeState::Pending { .. })
@@ -1335,14 +1405,20 @@ mod probe_completion_sequence {
     #[test]
     fn final_background_probe_completion_enters_planning_and_requests_render_plan() {
         let (scenario, after_cursor) = after_cursor_color_probe_ready();
+        let first_chunk = after_cursor
+            .next
+            .observation()
+            .and_then(|observation| observation.background_progress())
+            .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
+            .expect("first background chunk");
 
         let after_background = reduce(
             &after_cursor.next,
-            background_probe_report(
+            background_chunk_probe_report(
                 &scenario.request,
+                &first_chunk,
                 scenario.basis.viewport(),
                 &[(7, 8)],
-                ProbeReuse::Exact,
             ),
         );
 
@@ -1381,14 +1457,21 @@ mod probe_completion_sequence {
 
     #[test]
     fn background_probe_report_stores_allowed_cells_in_snapshot() {
-        let scenario = background_probe_scenario();
+        let scenario = single_background_probe_scenario();
+        let first_chunk = scenario
+            .based
+            .next
+            .observation()
+            .and_then(|observation| observation.background_progress())
+            .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
+            .expect("single background chunk");
         let resolved = reduce(
             &scenario.based.next,
-            background_probe_report(
+            background_chunk_probe_report(
                 &scenario.request,
+                &first_chunk,
                 scenario.basis.viewport(),
                 &[(7, 8)],
-                ProbeReuse::Exact,
             ),
         );
 
@@ -1405,7 +1488,7 @@ mod probe_completion_sequence {
 
     #[test]
     fn background_probe_report_stores_probe_reuse_state_in_snapshot() {
-        let scenario = background_probe_scenario();
+        let scenario = single_background_probe_scenario();
         let resolved = reduce(
             &scenario.based.next,
             background_probe_report(
@@ -1440,13 +1523,8 @@ mod probe_completion_sequence {
             .background_progress()
             .expect("background progress after first chunk");
         assert_eq!(
-            progressed.next_row(),
-            CursorRow(
-                first_chunk
-                    .start_row()
-                    .value()
-                    .saturating_add(first_chunk.row_count())
-            )
+            progressed.next_cell_index(),
+            first_chunk.start_index().saturating_add(first_chunk.len())
         );
         assert!(progressed_observation.background_probe().is_none());
     }

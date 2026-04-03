@@ -429,6 +429,50 @@ mod field_compilation_and_cache {
     }
 
     #[test]
+    fn cell_candidate_scratch_reuses_per_cell_vector_capacity() {
+        let sample_q12 = quantized_level_to_sample_q12(HighlightLevel::from_raw_clamped(12), 16);
+        let compiled = compiled_single_cell(
+            tile_for_column_span(0, latent_field::MICRO_W - 1, sample_q12),
+            AgeMoment::default(),
+        );
+        let mut scratch = PlannerDecodeScratch::default();
+
+        populate_cell_candidates_with_scratch(
+            &compiled,
+            &BTreeMap::new(),
+            16,
+            0.35,
+            5,
+            &mut scratch,
+        );
+        let first_capacity = scratch
+            .cell_candidates
+            .get(&(10_i64, 10_i64))
+            .expect("compiled cell should populate scratch candidates")
+            .capacity();
+
+        populate_cell_candidates_with_scratch(
+            &compiled,
+            &BTreeMap::new(),
+            16,
+            0.35,
+            5,
+            &mut scratch,
+        );
+        let second_capacity = scratch
+            .cell_candidates
+            .get(&(10_i64, 10_i64))
+            .expect("compiled cell should keep scratch candidates addressable")
+            .capacity();
+
+        assert!(first_capacity > 0);
+        assert_eq!(
+            second_capacity, first_capacity,
+            "candidate scratch should retain the existing per-cell vector allocation"
+        );
+    }
+
+    #[test]
     fn planner_idle_steps_age_history_without_new_motion_samples() {
         let viewport = Viewport {
             max_row: 200,
@@ -1447,6 +1491,7 @@ mod decode_path_selection_and_salience {
             &candidates,
             &centerline,
             &frame,
+            &mut SolverScratch::default(),
             |_, _| None,
         );
 
@@ -1454,6 +1499,125 @@ mod decode_path_selection_and_salience {
         assert_eq!(
             decoded.cells,
             solve_pairwise_fallback(&candidates, sanitize_spatial_weight_q10(&frame))
+        );
+    }
+
+    #[test]
+    fn pairwise_fallback_solver_scratch_reuses_dense_assignment_capacity() {
+        let candidates = BTreeMap::from([
+            (
+                (10_i64, 10_i64),
+                ordered_candidates(vec![
+                    CellCandidate {
+                        state: Some(highlight_state(8)),
+                        unary_cost: 0,
+                    },
+                    CellCandidate {
+                        state: None,
+                        unary_cost: 40_000,
+                    },
+                ]),
+            ),
+            (
+                (10_i64, 11_i64),
+                ordered_candidates(vec![
+                    CellCandidate {
+                        state: Some(highlight_state(8)),
+                        unary_cost: 0,
+                    },
+                    CellCandidate {
+                        state: None,
+                        unary_cost: 40_000,
+                    },
+                ]),
+            ),
+            (
+                (11_i64, 10_i64),
+                ordered_candidates(vec![
+                    CellCandidate {
+                        state: Some(highlight_state(8)),
+                        unary_cost: 0,
+                    },
+                    CellCandidate {
+                        state: None,
+                        unary_cost: 40_000,
+                    },
+                ]),
+            ),
+        ]);
+        let mut scratch = SolverScratch::default();
+
+        let _ = solve_pairwise_fallback_with_scratch(
+            &candidates,
+            sanitize_spatial_weight_q10(&base_frame()),
+            &mut scratch,
+        );
+        let coord_capacity = scratch.fallback_coords.capacity();
+        let index_capacity = scratch.fallback_coord_index.capacity();
+        let assignment_capacity = scratch.fallback_assignment.capacity();
+
+        let _ = solve_pairwise_fallback_with_scratch(
+            &candidates,
+            sanitize_spatial_weight_q10(&base_frame()),
+            &mut scratch,
+        );
+
+        assert_eq!(scratch.fallback_coords.capacity(), coord_capacity);
+        assert_eq!(scratch.fallback_coord_index.capacity(), index_capacity);
+        assert_eq!(scratch.fallback_assignment.capacity(), assignment_capacity);
+    }
+
+    #[test]
+    fn ribbon_vote_tie_break_stays_deterministic_when_vote_order_flips() {
+        let coord = (10_i64, 10_i64);
+        let make_slice = || RibbonSlice {
+            cells: vec![slice_cell_with_candidates(
+                coord,
+                0.0,
+                0.5,
+                1_000,
+                vec![
+                    CellCandidate {
+                        state: Some(decoded_state(DecodedGlyph::Block, 4)),
+                        unary_cost: 10,
+                    },
+                    CellCandidate {
+                        state: Some(decoded_state(DecodedGlyph::Matrix(1), 4)),
+                        unary_cost: 10,
+                    },
+                ],
+            )],
+            tail_u: 0.5,
+            target_width_cells: 1.0,
+            tip_width_cap_cells: 1.0,
+            transverse_width_penalty: 0.0,
+        };
+        let run = RunSpan::try_new(0, 0).expect("single-cell slice should build a run");
+        let choose_first = SliceState::with_run(run, [0; RIBBON_MAX_RUN_LENGTH], 0);
+        let mut second_offsets = [0; RIBBON_MAX_RUN_LENGTH];
+        second_offsets[0] = 1;
+        let choose_second = SliceState::with_run(run, second_offsets, 0);
+        let mut scratch = SolverScratch::default();
+        let mut forward = BTreeMap::new();
+        let mut reversed = BTreeMap::new();
+
+        merge_ribbon_assignments(
+            &mut forward,
+            &[make_slice(), make_slice()],
+            &[choose_second, choose_first],
+            &mut scratch,
+        );
+        merge_ribbon_assignments(
+            &mut reversed,
+            &[make_slice(), make_slice()],
+            &[choose_first, choose_second],
+            &mut scratch,
+        );
+
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward.get(&coord).copied(),
+            Some(decoded_state(DecodedGlyph::Block, 4))
         );
     }
 
@@ -2397,6 +2561,59 @@ mod staged_deposits_and_metric_projection {
 
         assert_eq!(aspect_one.len(), 2);
         assert_eq!(aspect_two.len(), 3);
+    }
+
+    #[test]
+    fn centerline_resample_scratch_reuses_buffer_capacity() {
+        let mut history = VecDeque::new();
+        history.push_back(CenterPathSample {
+            step_index: StepIndex::new(1),
+            pos: Point {
+                row: 10.0,
+                col: 10.0,
+            },
+        });
+        history.push_back(CenterPathSample {
+            step_index: StepIndex::new(2),
+            pos: Point {
+                row: 10.5,
+                col: 11.0,
+            },
+        });
+        history.push_back(CenterPathSample {
+            step_index: StepIndex::new(3),
+            pos: Point {
+                row: 11.0,
+                col: 12.0,
+            },
+        });
+        let mut scratch = PlannerDecodeScratch::default();
+
+        populate_resampled_centerline_with_scratch(&history, 0.5, 1.0, &mut scratch);
+        let first_points_capacity = scratch.centerline_points.capacity();
+        let first_cumulative_capacity = scratch.centerline_cumulative.capacity();
+        let first_centerline_capacity = scratch.centerline.capacity();
+
+        populate_resampled_centerline_with_scratch(&history, 0.5, 1.0, &mut scratch);
+
+        assert!(first_points_capacity > 0);
+        assert!(first_cumulative_capacity > 0);
+        assert!(first_centerline_capacity > 0);
+        assert_eq!(
+            scratch.centerline_points.capacity(),
+            first_points_capacity,
+            "resample scratch should keep the deduplicated point buffer allocation"
+        );
+        assert_eq!(
+            scratch.centerline_cumulative.capacity(),
+            first_cumulative_capacity,
+            "resample scratch should keep the cumulative arc-length buffer allocation"
+        );
+        assert_eq!(
+            scratch.centerline.capacity(),
+            first_centerline_capacity,
+            "resample scratch should keep the output centerline allocation"
+        );
     }
 
     #[test]

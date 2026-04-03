@@ -144,20 +144,35 @@ pub(crate) fn decode_compiled_frame(
         compiled,
     } = compiled_frame;
     let temporal_weight = sanitize_temporal_weight(frame);
-    let cell_candidates = build_cell_candidates(
+    populate_cell_candidates_with_scratch(
         &compiled,
         &next_state.previous_cells,
         frame.color_levels,
         temporal_weight,
         sanitize_top_k(frame),
+        &mut next_state.decode_scratch,
     );
-    let centerline = resample_centerline(
+    populate_resampled_centerline_with_scratch(
         &next_state.center_history,
         RIBBON_SAMPLE_SPACING_CELLS,
         frame.block_aspect_ratio,
+        &mut next_state.decode_scratch,
     );
-    let decoded =
-        decode_compiled_field_trace_with_compiled(&compiled, &cell_candidates, &centerline, frame);
+    let decoded = {
+        let PlannerDecodeScratch {
+            cell_candidates,
+            centerline,
+            solver,
+            ..
+        } = &mut next_state.decode_scratch;
+        decode_compiled_field_trace_with_compiled_and_scratch(
+            &compiled,
+            cell_candidates,
+            centerline,
+            frame,
+            solver,
+        )
+    };
     let next_cells = decoded.cells;
 
     let target_row = frame.target.row.round() as i64;

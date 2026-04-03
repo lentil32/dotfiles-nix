@@ -41,7 +41,7 @@ impl Point {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ScreenCell {
     row: i64,
     col: i64,
@@ -148,7 +148,7 @@ pub(crate) struct RenderFrame {
     pub(crate) trail_stroke_id: StrokeId,
     pub(crate) retarget_epoch: u64,
     pub(crate) particles: SharedParticles,
-    pub(crate) color_at_cursor: Option<String>,
+    pub(crate) color_at_cursor: Option<u32>,
     pub(crate) static_config: Arc<StaticRenderConfig>,
 }
 

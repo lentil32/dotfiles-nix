@@ -223,11 +223,11 @@ impl RuntimeState {
         self.rng_state
     }
 
-    pub(crate) fn color_at_cursor(&self) -> Option<&str> {
-        self.transient.color_at_cursor.as_deref()
+    pub(crate) const fn color_at_cursor(&self) -> Option<u32> {
+        self.transient.color_at_cursor
     }
 
-    pub(crate) fn set_color_at_cursor(&mut self, color: Option<String>) {
+    pub(crate) fn set_color_at_cursor(&mut self, color: Option<u32>) {
         self.transient.color_at_cursor = color;
     }
 

@@ -1,19 +1,19 @@
 use super::super::logging::{trace_lazy, warn};
 use super::super::runtime::{
-    EffectExecutor, NeovimEffectExecutor, core_state, now_ms,
+    EffectExecutor, NeovimEffectExecutor, mutate_engine_state, now_ms, read_engine_state,
     record_delayed_ingress_pending_update_count, record_ingress_coalesced_count,
     record_post_burst_convergence, record_probe_refresh_budget_exhausted_count,
     record_probe_refresh_retried_count, record_scheduled_drain_items,
     record_scheduled_drain_items_for_thermal, record_scheduled_drain_reschedule,
     record_scheduled_drain_reschedule_for_thermal, record_scheduled_queue_depth,
-    record_scheduled_queue_depth_for_thermal, record_stale_token_event_count, set_core_state,
-    to_core_millis,
+    record_scheduled_queue_depth_for_thermal, record_stale_token_event_count, to_core_millis,
 };
 use super::super::timers::schedule_guarded;
 use super::super::trace::{core_event_summary, core_state_summary, effect_summary};
 use super::labels::{core_event_label, effect_label};
 use crate::core::effect::{
-    ApplyRenderCleanupEffect, Effect, EventLoopMetricEffect, ScheduleTimerEffect, TimerKind,
+    ApplyRenderCleanupEffect, Effect, EventLoopMetricEffect, RequestProbeEffect,
+    ScheduleTimerEffect, TimerKind,
 };
 use crate::core::event::{EffectFailedEvent, Event as CoreEvent, ProbeReportedEvent};
 use crate::core::reducer::reduce as reduce_core_event;
@@ -283,9 +283,7 @@ impl ScheduledEffectQueueState {
                     match self.items.front_mut() {
                         Some(ScheduledWorkItem::EffectOnlyAgenda(agenda)) => {
                             let Some(step) = agenda.pop_step() else {
-                                unreachable!(
-                                    "non-empty effect-only agenda should yield a step"
-                                );
+                                unreachable!("non-empty effect-only agenda should yield a step");
                             };
                             (step, agenda.is_empty())
                         }
@@ -331,9 +329,7 @@ fn schedule_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
 }
 
 fn current_cleanup_thermal_state() -> Option<RenderThermalState> {
-    core_state()
-        .ok()
-        .map(|state| state.render_cleanup().thermal())
+    read_engine_state(|state| state.core_state().render_cleanup().thermal()).ok()
 }
 
 fn stage_effect_batch_on_default_queue(effects: Vec<Effect>) {
@@ -362,31 +358,47 @@ fn stage_core_event_on_default_queue(event: CoreEvent) {
     }
 }
 
+fn dispatch_core_event_with_effect_handler<E>(
+    initial_event: CoreEvent,
+    handle_effects: &mut impl FnMut(Vec<Effect>) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E>
+where
+    E: From<crate::events::EngineAccessError>,
+{
+    let event_label = core_event_label(&initial_event);
+    let event_summary = core_event_summary(&initial_event);
+    let (effects, previous_state_summary, next_state_summary) = mutate_engine_state(|state| {
+        let previous_state_summary = core_state_summary(state.core_state());
+        let transition = reduce_core_event(state.core_state(), initial_event);
+        let next_state_summary = core_state_summary(&transition.next);
+        let effects = transition.effects;
+        state.set_core_state(transition.next);
+        (effects, previous_state_summary, next_state_summary)
+    })
+    .map_err(E::from)?;
+    let effect_count = effects.len();
+    trace_lazy(|| {
+        format!(
+            "core_transition event={} details={} from=[{}] to=[{}] effects={}",
+            event_label, event_summary, previous_state_summary, next_state_summary, effect_count
+        )
+    });
+
+    if !effects.is_empty() {
+        handle_effects(effects)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn dispatch_core_event(
     initial_event: CoreEvent,
     stage_effect_batch: &mut impl FnMut(Vec<Effect>),
 ) -> Result<()> {
-    let previous_state = core_state()?;
-    let event_label = core_event_label(&initial_event);
-    let event_summary = core_event_summary(&initial_event);
-    let transition = reduce_core_event(&previous_state, initial_event);
-    trace_lazy(|| {
-        format!(
-            "core_transition event={} details={} from=[{}] to=[{}] effects={}",
-            event_label,
-            event_summary,
-            core_state_summary(&previous_state),
-            core_state_summary(&transition.next),
-            transition.effects.len()
-        )
-    });
-
-    let effects = transition.effects;
-    set_core_state(transition.next)?;
-    if !effects.is_empty() {
+    let mut handle_effects = |effects| {
         stage_effect_batch(effects);
-    }
-    Ok(())
+        Ok(())
+    };
+    dispatch_core_event_with_effect_handler(initial_event, &mut handle_effects)
 }
 
 pub(crate) fn dispatch_core_events(
@@ -422,6 +434,21 @@ pub(crate) fn reset_scheduled_effect_queue() {
 struct ScheduledWorkExecutionError {
     work_name: &'static str,
     error: nvim_oxi::Error,
+}
+
+impl From<nvim_oxi::Error> for ScheduledWorkExecutionError {
+    fn from(error: nvim_oxi::Error) -> Self {
+        Self {
+            work_name: "core event dispatch",
+            error,
+        }
+    }
+}
+
+impl From<crate::events::EngineAccessError> for ScheduledWorkExecutionError {
+    fn from(error: crate::events::EngineAccessError) -> Self {
+        Self::from(nvim_oxi::Error::from(error))
+    }
 }
 
 fn handle_scheduled_work_drain_failure(work_name: &'static str, error: &nvim_oxi::Error) {
@@ -469,37 +496,107 @@ fn execute_scheduled_effect_batch(
 ) -> std::result::Result<(), ScheduledWorkExecutionError> {
     let mut follow_ups = VecDeque::new();
     for effect in effects {
-        let effect_name = effect_label(&effect);
-        let effect_details = effect_summary(&effect);
-        trace_lazy(|| format!("effect_dispatch effect={effect_name} details={effect_details}"));
-        match executor.execute_effect(effect) {
-            Ok(new_follow_ups) => {
-                trace_lazy(|| {
-                    format!(
-                        "effect_outcome effect={effect_name} details={effect_details} result=ok follow_ups={}",
-                        new_follow_ups.len()
-                    )
-                });
-                follow_ups.extend(new_follow_ups);
-            }
-            Err(err) => {
-                trace_lazy(|| {
-                    format!(
-                        "effect_outcome effect={effect_name} details={effect_details} result=err error={err}"
-                    )
-                });
-                return Err(ScheduledWorkExecutionError {
-                    work_name: effect_name,
-                    error: err,
-                });
-            }
-        }
+        execute_effect_and_collect_follow_ups(effect, executor, false, &mut follow_ups)?;
     }
 
     if follow_ups.is_empty() {
         return Ok(());
     }
 
+    dispatch_effect_follow_ups(follow_ups, executor)
+}
+
+fn execute_single_effect(
+    effect: Effect,
+    executor: &mut impl EffectExecutor,
+) -> std::result::Result<(), ScheduledWorkExecutionError> {
+    execute_scheduled_effect_batch(vec![effect], executor)
+}
+
+fn execute_effect_and_collect_follow_ups(
+    effect: Effect,
+    executor: &mut impl EffectExecutor,
+    same_reducer_wave_probe: bool,
+    follow_ups: &mut VecDeque<CoreEvent>,
+) -> std::result::Result<(), ScheduledWorkExecutionError> {
+    let effect_name = effect_label(&effect);
+    let effect_details = effect_summary(&effect);
+    trace_lazy(|| format!("effect_dispatch effect={effect_name} details={effect_details}"));
+    let outcome = match effect {
+        Effect::RequestProbe(payload) => {
+            executor.execute_probe_effect(payload, same_reducer_wave_probe)
+        }
+        other => executor.execute_effect(other),
+    };
+
+    match outcome {
+        Ok(new_follow_ups) => {
+            trace_lazy(|| {
+                format!(
+                    "effect_outcome effect={effect_name} details={effect_details} result=ok follow_ups={}",
+                    new_follow_ups.len()
+                )
+            });
+            follow_ups.extend(new_follow_ups);
+            Ok(())
+        }
+        Err(err) => {
+            trace_lazy(|| {
+                format!(
+                    "effect_outcome effect={effect_name} details={effect_details} result=err error={err}"
+                )
+            });
+            Err(ScheduledWorkExecutionError {
+                work_name: effect_name,
+                error: err,
+            })
+        }
+    }
+}
+
+fn single_cursor_color_probe_effect(effects: &[Effect]) -> Option<RequestProbeEffect> {
+    let [Effect::RequestProbe(payload)] = effects else {
+        return None;
+    };
+    (payload.kind == ProbeKind::CursorColor).then_some(payload.clone())
+}
+
+fn execute_same_wave_cursor_color_probe(
+    payload: RequestProbeEffect,
+    executor: &mut impl EffectExecutor,
+) -> std::result::Result<(), ScheduledWorkExecutionError> {
+    let mut follow_ups = VecDeque::new();
+    execute_effect_and_collect_follow_ups(
+        Effect::RequestProbe(payload),
+        executor,
+        true,
+        &mut follow_ups,
+    )?;
+    dispatch_effect_follow_ups(follow_ups, executor)
+}
+
+fn dispatch_follow_up_effects_for_source(
+    source_allows_same_wave_probe: bool,
+    effects: Vec<Effect>,
+    executor: &mut impl EffectExecutor,
+) -> std::result::Result<(), ScheduledWorkExecutionError> {
+    if source_allows_same_wave_probe
+        && let Some(payload) = single_cursor_color_probe_effect(&effects)
+    {
+        // CONTEXT: a cursor-color probe spawned directly by the freshly collected observation has
+        // not crossed a scheduled queue boundary yet, so it can reuse the captured witness
+        // exactly once here instead of paying another shell-edge revalidation round-trip.
+        return execute_same_wave_cursor_color_probe(payload, executor);
+    }
+
+    stage_effect_batch_on_default_queue(effects);
+    Ok(())
+}
+
+fn dispatch_effect_follow_ups(
+    follow_ups: VecDeque<CoreEvent>,
+    executor: &mut impl EffectExecutor,
+) -> std::result::Result<(), ScheduledWorkExecutionError> {
     for follow_up in follow_ups {
         let work_name = core_event_label(&follow_up);
         if should_schedule_follow_up_event(&follow_up) {
@@ -509,19 +606,26 @@ fn execute_scheduled_effect_batch(
             continue;
         }
 
-        let mut stage_effect_batch = stage_effect_batch_on_default_queue;
-        dispatch_core_event(follow_up, &mut stage_effect_batch)
-            .map_err(|error| ScheduledWorkExecutionError { work_name, error })?;
+        let source_allows_same_wave_probe = matches!(
+            follow_up,
+            CoreEvent::ObservationBaseCollected(ref payload) if !payload.request.probes().background()
+        );
+        let mut handle_effects = |effects| {
+            dispatch_follow_up_effects_for_source(source_allows_same_wave_probe, effects, executor)
+        };
+        if let Err(error) = dispatch_core_event_with_effect_handler(follow_up, &mut handle_effects)
+        {
+            if error.work_name == "core event dispatch" {
+                return Err(ScheduledWorkExecutionError {
+                    work_name,
+                    error: error.error,
+                });
+            }
+            return Err(error);
+        }
     }
 
     Ok(())
-}
-
-fn execute_single_effect(
-    effect: Effect,
-    executor: &mut impl EffectExecutor,
-) -> std::result::Result<(), ScheduledWorkExecutionError> {
-    execute_scheduled_effect_batch(vec![effect], executor)
 }
 
 fn execute_effect_only_step(
@@ -733,8 +837,9 @@ fn drain_scheduled_work_with_executor(
         // Once Hot drains the full pre-existing snapshot, any remaining cleanup/timer batches were
         // spawned mid-pass by reducer follow-ups inside this callback. Continue through a bounded
         // number of those low-risk waves here so immediate cleanup convergence does not pay an
-        // extra schedule edge per reducer hop. Observation and probe batches still remain deferred
-        // to the next edge.
+        // extra schedule edge per reducer hop. Observation batches and queued probe batches still
+        // remain deferred; only the single cursor-color probe attached directly to an
+        // ObservationBaseCollected follow-up can execute inline before that queue hop exists.
         if should_continue_effect_only_follow_up_chain(
             snapshot,
             drained_items_this_pass,
@@ -801,7 +906,8 @@ mod tests {
         scheduled_drain_budget_for_thermal, with_scheduled_effect_queue,
     };
     use crate::core::effect::{
-        Effect, EventLoopMetricEffect, IngressCursorPresentationEffect, ScheduleTimerEffect,
+        Effect, EventLoopMetricEffect, IngressCursorPresentationEffect, RequestProbeEffect,
+        ScheduleTimerEffect,
     };
     use crate::core::event::{
         Event as CoreEvent, ExternalDemandQueuedEvent, ObservationBaseCollectedEvent,
@@ -809,9 +915,10 @@ mod tests {
     };
     use crate::core::reducer::reduce as reduce_core_event;
     use crate::core::state::{
-        BackgroundProbeBatch, BackgroundProbeChunk, CoreState, CursorColorSample,
-        ExternalDemandKind, ObservationBasis, ObservationMotion, ObservationRequest, ProbeKind,
-        ProbeReuse, RenderCleanupState, RenderThermalState,
+        BackgroundProbeBatch, BackgroundProbeChunk, BackgroundProbeChunkMask, BackgroundProbePlan,
+        CoreState, CursorColorSample, ExternalDemandKind, ObservationBasis, ObservationMotion,
+        ObservationRequest, ObservationSnapshot, ProbeKind, ProbeReuse, RenderCleanupState,
+        RenderThermalState,
     };
     use crate::core::types::{
         CursorCol, CursorPosition, CursorRow, DelayBudgetMs, Lifecycle, Millis, TimerGeneration,
@@ -820,6 +927,7 @@ mod tests {
     use crate::events::runtime::{core_state, set_core_state};
     use crate::mutex::lock_with_poison_recovery;
     use crate::state::CursorLocation;
+    use crate::types::ScreenCell;
     use nvim_oxi::Result;
     use std::collections::VecDeque;
     use std::sync::{LazyLock, Mutex};
@@ -884,7 +992,7 @@ mod tests {
             observation_id: request.observation_id(),
             probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
             reuse: ProbeReuse::RefreshRequired,
-            sample: Some(CursorColorSample::new("#abcdef".to_string())),
+            sample: Some(CursorColorSample::new(0x00AB_CDEF)),
         })
     }
 
@@ -893,7 +1001,7 @@ mod tests {
             observation_id: request.observation_id(),
             probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
             reuse: ProbeReuse::Compatible,
-            sample: Some(CursorColorSample::new("#abcdef".to_string())),
+            sample: Some(CursorColorSample::new(0x00AB_CDEF)),
         })
     }
 
@@ -911,16 +1019,15 @@ mod tests {
 
     fn background_chunk_probe_report(
         request: &ObservationRequest,
-        chunk: BackgroundProbeChunk,
-        viewport: ViewportSnapshot,
+        chunk: &BackgroundProbeChunk,
+        _viewport: ViewportSnapshot,
     ) -> CoreEvent {
-        let width = usize::try_from(viewport.max_col.value()).expect("viewport width");
-        let row_count = usize::try_from(chunk.row_count()).expect("chunk row count");
+        let allowed_mask = vec![false; chunk.len()];
         CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
             observation_id: request.observation_id(),
             probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
-            chunk,
-            allowed_mask: vec![false; width * row_count],
+            chunk: chunk.clone(),
+            allowed_mask: BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
         })
     }
 
@@ -1031,6 +1138,32 @@ mod tests {
         ready_state().with_runtime(runtime)
     }
 
+    fn sparse_probe_cells(viewport: ViewportSnapshot, count: usize) -> Vec<ScreenCell> {
+        let width = i64::from(viewport.max_col.value());
+        (0..count)
+            .map(|index| {
+                let index = i64::try_from(index).expect("probe cell index");
+                let row = index / width + 1;
+                let col = index % width + 1;
+                ScreenCell::new(row, col).expect("probe cell")
+            })
+            .collect()
+    }
+
+    fn install_background_probe_plan(request: &ObservationRequest, basis: &ObservationBasis) {
+        let observation =
+            ObservationSnapshot::new(request.clone(), basis.clone(), ObservationMotion::default())
+                .with_background_probe_plan(BackgroundProbePlan::from_cells(sparse_probe_cells(
+                    basis.viewport(),
+                    2050,
+                )));
+        let next = current_core_state()
+            .with_last_cursor(Some(cursor(7, 8)))
+            .with_active_observation(Some(observation))
+            .expect("active observation state");
+        replace_core_state(next);
+    }
+
     fn render_cleanup_for_thermal(thermal: RenderThermalState) -> RenderCleanupState {
         let scheduled = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 12);
         match thermal {
@@ -1126,13 +1259,13 @@ mod tests {
 
     fn only_background_probe_request_for_chunk(
         effects: &[Effect],
-        expected_chunk: BackgroundProbeChunk,
+        expected_chunk: &BackgroundProbeChunk,
     ) -> bool {
         matches!(
             effects,
             [Effect::RequestProbe(payload)]
                 if payload.kind == ProbeKind::Background
-                    && payload.background_chunk == Some(expected_chunk)
+                    && payload.background_chunk.as_ref() == Some(expected_chunk)
         )
     }
 
@@ -1850,7 +1983,7 @@ mod tests {
         }
     }
 
-    mod deferred_single_probe_observation {
+    mod single_cursor_probe_observation {
         use super::*;
 
         fn setup_cursor_probe_ingress() -> (CoreDispatchTestContext, ObservationRequest) {
@@ -1881,7 +2014,7 @@ mod tests {
         }
 
         #[test]
-        fn observation_base_edge_executes_only_the_observation_request() {
+        fn observation_base_edge_executes_the_same_wave_cursor_probe() {
             let (_scope, request) = setup_cursor_probe_ingress();
             let mut executor = RecordingExecutor::default();
             executor
@@ -1890,21 +2023,32 @@ mod tests {
                     &request,
                     observation_basis(&request, Some(cursor(7, 8)), 26),
                 )]);
+            executor.planned_follow_ups.push_back(Vec::new());
+            executor
+                .planned_follow_ups
+                .push_back(vec![compatible_probe_report(&request)]);
 
             let has_more_items = drain_next_edge(&mut executor);
 
             assert!(
                 has_more_items,
-                "observation collection should stage probe work for a later edge"
+                "same-wave cursor probe completion should still leave planning/apply work for a later edge"
             );
             assert!(matches!(
                 executor.executed_effects.as_slice(),
-                [Effect::RequestObservationBase(_), Effect::ScheduleTimer(_)]
+                [
+                    Effect::RequestObservationBase(_),
+                    Effect::ScheduleTimer(_),
+                    Effect::RequestProbe(RequestProbeEffect {
+                        kind: ProbeKind::CursorColor,
+                        ..
+                    })
+                ]
             ));
         }
 
         #[test]
-        fn observation_base_edge_records_the_observation_and_queues_probe_work() {
+        fn observation_base_edge_updates_the_retained_observation_from_same_wave_probe() {
             let (_scope, request) = setup_cursor_probe_ingress();
             let mut executor = RecordingExecutor::default();
             executor
@@ -1913,22 +2057,22 @@ mod tests {
                     &request,
                     observation_basis(&request, Some(cursor(7, 8)), 26),
                 )]);
+            executor.planned_follow_ups.push_back(Vec::new());
+            executor
+                .planned_follow_ups
+                .push_back(vec![compatible_probe_report(&request)]);
 
             let _ = drain_next_edge(&mut executor);
-            let after_observation = current_core_state();
 
-            assert_eq!(after_observation.lifecycle(), Lifecycle::Observing);
-            assert!(after_observation.observation().is_some());
-            assert!(after_observation.pending_proposal().is_none());
-            assert_eq!(queued_work_count(), 1, "probe work should remain queued");
-            assert!(matches!(
-                queued_front_work_item(),
-                Some(ScheduledWorkUnit::EffectBatch(ref effects))
-                    if contains_probe_request(effects)
-            ));
+            assert_eq!(
+                current_core_state()
+                    .observation()
+                    .and_then(|observation| observation.cursor_color()),
+                Some(0x00AB_CDEF)
+            );
         }
 
-        fn setup_after_observation_base_edge() -> (
+        fn setup_after_same_wave_cursor_probe() -> (
             CoreDispatchTestContext,
             ObservationRequest,
             RecordingExecutor,
@@ -1941,50 +2085,28 @@ mod tests {
                     &request,
                     observation_basis(&request, Some(cursor(7, 8)), 26),
                 )]);
+            executor.planned_follow_ups.push_back(Vec::new());
+            executor
+                .planned_follow_ups
+                .push_back(vec![compatible_probe_report(&request)]);
             let _ = drain_next_edge(&mut executor);
             (scope, request, executor)
         }
 
         #[test]
-        fn cursor_color_probe_edge_updates_the_retained_observation() {
-            let (_scope, request, mut executor) = setup_after_observation_base_edge();
-            executor
-                .planned_follow_ups
-                .push_back(vec![compatible_probe_report(&request)]);
-
-            let _ = drain_next_edge(&mut executor);
-
-            assert_eq!(
-                current_core_state()
-                    .observation()
-                    .and_then(|observation| observation.cursor_color()),
-                Some("#abcdef")
-            );
-        }
-
-        #[test]
-        fn cursor_color_probe_edge_keeps_apply_work_deferred() {
-            let (_scope, request, mut executor) = setup_after_observation_base_edge();
-            executor
-                .planned_follow_ups
-                .push_back(vec![compatible_probe_report(&request)]);
-
-            let _ = drain_next_edge(&mut executor);
+        fn same_wave_cursor_probe_keeps_apply_work_deferred() {
+            let (_scope, _request, executor) = setup_after_same_wave_cursor_probe();
 
             assert!(
                 !executor.executed_effects.iter().any(is_apply_proposal),
-                "apply work must remain deferred after the probe shell read finishes because planning still runs first"
+                "apply work must remain deferred after the same-wave probe finishes because planning still runs first"
             );
         }
 
         #[test]
-        fn cursor_color_probe_edge_leaves_follow_up_shell_work_for_later_edges() {
-            let (_scope, request, mut executor) = setup_after_observation_base_edge();
-            executor
-                .planned_follow_ups
-                .push_back(vec![compatible_probe_report(&request)]);
-
-            let has_more_items = drain_next_edge(&mut executor);
+        fn same_wave_cursor_probe_leaves_only_non_probe_follow_up_work_queued() {
+            let (_scope, _request, _executor) = setup_after_same_wave_cursor_probe();
+            let has_more_items = queued_work_count() > 0;
             let queued_follow_up = queued_front_work_item();
 
             assert!(
@@ -1992,13 +2114,14 @@ mod tests {
                     matches!(
                         queued_follow_up,
                         Some(ScheduledWorkUnit::EffectBatch(ref effects))
-                            if contains_render_plan_request(effects)
-                                || effects.iter().any(is_apply_proposal)
+                            if !contains_probe_request(effects)
+                                && (contains_render_plan_request(effects)
+                                    || effects.iter().any(is_apply_proposal))
                     )
                 } else {
                     queued_follow_up.is_none()
                 },
-                "probe completion should either queue planning/apply work or finish without extra shell work"
+                "same-wave probe completion should either queue planning/apply work or finish without extra shell work"
             );
         }
     }
@@ -2030,6 +2153,7 @@ mod tests {
                 .planned_follow_ups
                 .push_back(vec![observation_base_collected(&request, basis.clone())]);
             let _ = drain_next_edge(&mut executor);
+            install_background_probe_plan(&request, &basis);
             (scope, request, basis, executor)
         }
 
@@ -2089,7 +2213,7 @@ mod tests {
             assert!(matches!(
                 queued_front_work_item(),
                 Some(ScheduledWorkUnit::EffectBatch(ref effects))
-                    if only_background_probe_request_for_chunk(effects, first_background_chunk)
+                    if only_background_probe_request_for_chunk(effects, &first_background_chunk)
             ));
         }
 
@@ -2101,7 +2225,7 @@ mod tests {
                 .planned_follow_ups
                 .push_back(vec![background_chunk_probe_report(
                     &request,
-                    first_background_chunk,
+                    &first_background_chunk,
                     basis.viewport(),
                 )]);
 
@@ -2121,7 +2245,7 @@ mod tests {
                     effect,
                     Effect::RequestProbe(payload)
                         if payload.kind == ProbeKind::Background
-                            && payload.background_chunk == Some(first_background_chunk)
+                            && payload.background_chunk.as_ref() == Some(&first_background_chunk)
                 )),
                 "background-chunk edge should execute the current background probe request",
             );
@@ -2129,7 +2253,7 @@ mod tests {
             assert!(matches!(
                 queued_front_work_item(),
                 Some(ScheduledWorkUnit::EffectBatch(ref effects))
-                    if only_background_probe_request_for_chunk(effects, second_background_chunk)
+                    if only_background_probe_request_for_chunk(effects, &second_background_chunk)
             ));
         }
 
@@ -2141,7 +2265,7 @@ mod tests {
                 .planned_follow_ups
                 .push_back(vec![background_chunk_probe_report(
                     &request,
-                    first_background_chunk,
+                    &first_background_chunk,
                     basis.viewport(),
                 )]);
             let _ = drain_next_edge(&mut executor);
@@ -2165,7 +2289,7 @@ mod tests {
                 .planned_follow_ups
                 .push_back(vec![background_chunk_probe_report(
                     &request,
-                    first_background_chunk,
+                    &first_background_chunk,
                     basis.viewport(),
                 )]);
             let _ = drain_next_edge(&mut executor);

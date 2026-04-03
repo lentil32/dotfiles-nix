@@ -251,19 +251,11 @@ fn reusable_prepared_projection_entry(
     policy: &CursorTrailProjectionPolicy,
     target_cell_presentation: TargetCellPresentation,
 ) -> Option<ProjectionCacheEntry> {
-    if prepared.background_probe.is_some() {
-        // the typed probe loop now keeps observation ownership explicit, but background
-        // reuse still stays conservative because the retained cache is viewport-wide rather than
-        // witness-bound to exact probe cells.
-        return None;
-    }
-
-    let signature = prepared.signature?;
     let entry = projection_entry_for_witness(current_scene, prepared.witness, policy)?;
     let snapshot = entry.snapshot();
     let reuse_key = entry.reuse_key();
 
-    if reuse_key.signature() != Some(signature)
+    if reuse_key.signature() != prepared.signature
         || reuse_key.planner_clock() != prepared.reuse_planner_clock
         || reuse_key.target_cell_presentation() != target_cell_presentation
         || reuse_key.policy() != policy
@@ -449,7 +441,7 @@ fn realization_plan_for_render_decision(
     }
 }
 
-fn plan_runtime_transition(
+pub(super) fn plan_runtime_transition(
     state: &CoreState,
     previous_observation: Option<&ObservationSnapshot>,
     observation: &ObservationSnapshot,
@@ -459,7 +451,7 @@ fn plan_runtime_transition(
     crate::core::runtime_reducer::CursorTransition,
 ) {
     let mut runtime = state.runtime().clone();
-    runtime.set_color_at_cursor(observation.cursor_color().map(str::to_owned));
+    runtime.set_color_at_cursor(observation.cursor_color());
 
     let mode = observation.basis().mode();
     let cursor_location = observation.basis().cursor_location();
@@ -626,12 +618,13 @@ mod tests {
     };
     use crate::core::runtime_reducer::{RenderAction, RenderDecision, TargetCellPresentation};
     use crate::core::state::{
-        CoreState, CursorTrailGeometry, CursorTrailProjectionPolicy, CursorTrailSemantic,
-        ExternalDemand, ExternalDemandKind, ObservationBasis, ObservationMotion,
-        ObservationRequest, ObservationSnapshot, PatchBasis, ProbeRequestSet, ProjectionCache,
-        RealizationClear, RealizationDivergence, RealizationDraw, RealizationLedger,
-        RealizationPlan, ScenePatch, ScenePatchKind, SceneState, SemanticEntity, SemanticEntityId,
-        SemanticScene,
+        BackgroundProbeChunkMask, BackgroundProbePlan, BackgroundProbeUpdate, CoreState,
+        CursorTrailGeometry, CursorTrailProjectionPolicy, CursorTrailSemantic, ExternalDemand,
+        ExternalDemandKind, ObservationBasis, ObservationMotion, ObservationRequest,
+        ObservationSnapshot, PatchBasis, ProbeKind, ProbeRequestSet, ProbeReuse, ProbeState,
+        ProjectionCache, RealizationClear, RealizationDivergence, RealizationDraw,
+        RealizationLedger, RealizationPlan, ScenePatch, ScenePatchKind, SceneState, SemanticEntity,
+        SemanticEntityId, SemanticScene,
     };
     use crate::core::types::{
         CursorCol, CursorPosition, CursorRow, IngressSeq, Millis, ObservationId, ProposalId,
@@ -639,7 +632,9 @@ mod tests {
     };
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
     use crate::state::CursorLocation;
-    use crate::types::{Point, RenderFrame, RenderStepSample, StaticRenderConfig};
+    use crate::types::{
+        Particle, Point, RenderFrame, RenderStepSample, ScreenCell, StaticRenderConfig,
+    };
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -746,6 +741,58 @@ mod tests {
         ObservationSnapshot::new(request, basis, ObservationMotion::default())
     }
 
+    fn observation_with_background_probe(
+        seq: u64,
+        allowed_cells: &[ScreenCell],
+    ) -> ObservationSnapshot {
+        let request = ObservationRequest::new(
+            ExternalDemand::new(
+                IngressSeq::new(seq),
+                ExternalDemandKind::ExternalCursor,
+                Millis::new(seq),
+                None,
+            ),
+            ProbeRequestSet::new(false, true),
+        );
+        let basis = ObservationBasis::new(
+            ObservationId::from_ingress_seq(IngressSeq::new(seq)),
+            Millis::new(seq),
+            "n".to_string(),
+            Some(CursorPosition {
+                row: CursorRow(10),
+                col: CursorCol(10),
+            }),
+            CursorLocation::new(1, 1, 1, 1),
+            ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        );
+        let snapshot =
+            ObservationSnapshot::new(request.clone(), basis, ObservationMotion::default())
+                .with_background_probe_plan(BackgroundProbePlan::from_cells(
+                    allowed_cells.to_vec(),
+                ));
+        let progress = snapshot
+            .background_progress()
+            .expect("background probe plan should remain pending until sampled");
+        let chunk = progress
+            .next_chunk()
+            .expect("single-cell sparse probe should emit one chunk");
+        let allowed_mask = BackgroundProbeChunkMask::from_allowed_mask(&vec![true; chunk.len()]);
+        let BackgroundProbeUpdate::Complete(batch) = progress
+            .apply_chunk(&chunk, &allowed_mask)
+            .expect("sparse chunk should materialize a ready background batch")
+        else {
+            panic!("single chunk sparse probe should complete immediately");
+        };
+        snapshot
+            .with_background_probe(ProbeState::ready(
+                ProbeKind::Background.request_id(request.observation_id()),
+                request.observation_id(),
+                ProbeReuse::Exact,
+                batch,
+            ))
+            .expect("requested background probe should accept the sampled batch")
+    }
+
     #[test]
     fn dirty_entities_track_target_cell_presentation_explicitly() {
         let frame = base_frame();
@@ -769,7 +816,7 @@ mod tests {
     fn dirty_entities_ignore_palette_only_drift() {
         let previous_frame = base_frame();
         let mut next_frame = previous_frame.clone();
-        next_frame.color_at_cursor = Some("#abcdef".to_string());
+        next_frame.color_at_cursor = Some(0x00AB_CDEF);
 
         let previous = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
             CursorTrailSemantic::from_render_frame(&previous_frame, TargetCellPresentation::None),
@@ -883,6 +930,57 @@ mod tests {
             reused.reuse_key().target_cell_presentation(),
             TargetCellPresentation::OverlayBlockCell
         );
+        assert_eq!(
+            reused.snapshot().witness().observation_id(),
+            cached_observation.request().observation_id()
+        );
+    }
+
+    #[test]
+    fn reusable_projection_entry_keeps_exact_witness_background_probe_cache() {
+        let mut frame = base_frame();
+        frame.step_samples = Vec::new().into();
+        let mut static_config = (*frame.static_config).clone();
+        static_config.particles_over_text = false;
+        frame.static_config = Arc::new(static_config);
+        frame.particles = vec![Particle {
+            position: Point {
+                row: 16.2,
+                col: 18.4,
+            },
+            velocity: Point::ZERO,
+            lifetime: 0.75,
+        }]
+        .into();
+
+        let geometry = CursorTrailGeometry::from_render_frame(&frame);
+        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
+        let cached_observation = observation_with_background_probe(
+            1,
+            &[ScreenCell::new(16, 18).expect("particle cell should be visible")],
+        );
+        let cached = project_draw_frame(
+            &SceneState::default(),
+            SceneRevision::INITIAL,
+            &cached_observation,
+            &geometry,
+            &policy,
+            TargetCellPresentation::None,
+        )
+        .expect("projection with a sparse background probe should succeed");
+        let current_scene =
+            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
+
+        let reused = reusable_projection_entry(
+            &current_scene,
+            SceneRevision::INITIAL,
+            &cached_observation,
+            &geometry,
+            &policy,
+            TargetCellPresentation::None,
+        )
+        .expect("exact-witness sparse background probes should remain reusable");
+
         assert_eq!(
             reused.snapshot().witness().observation_id(),
             cached_observation.request().observation_id()

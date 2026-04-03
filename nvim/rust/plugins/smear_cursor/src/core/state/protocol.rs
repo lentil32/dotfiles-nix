@@ -357,6 +357,14 @@ impl CoreState {
         self.payload.scene.motion()
     }
 
+    pub(crate) fn runtime_mut(&mut self) -> &mut crate::state::RuntimeState {
+        self.payload.scene.motion_mut()
+    }
+
+    pub(crate) fn take_runtime(&mut self) -> crate::state::RuntimeState {
+        self.payload.scene.take_motion()
+    }
+
     pub(crate) fn pending_proposal(&self) -> Option<&InFlightProposal> {
         match &self.protocol {
             ProtocolState::Applying { proposal, .. } => Some(proposal.as_ref()),

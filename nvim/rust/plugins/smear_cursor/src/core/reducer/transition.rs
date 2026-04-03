@@ -31,6 +31,11 @@ fn debug_fingerprint(value: &(impl std::fmt::Debug + ?Sized)) -> u64 {
         .fold(0_u64, |seed, byte| seed.rotate_left(5) ^ u64::from(byte))
 }
 
+fn screen_cell_fingerprint(cell: crate::types::ScreenCell) -> u64 {
+    u64::from_ne_bytes(cell.row().to_ne_bytes())
+        ^ u64::from_ne_bytes(cell.col().to_ne_bytes()).rotate_left(7)
+}
+
 fn lifecycle_fingerprint(lifecycle: Lifecycle) -> u64 {
     match lifecycle {
         Lifecycle::Idle => 0_u64,
@@ -162,15 +167,15 @@ fn probe_set_fingerprint(probes: &ProbeSet) -> u64 {
     let cursor_color_seed = probe_slot_fingerprint(probes.cursor_color(), |sample| {
         sample
             .as_ref()
-            .map_or(0_u64, |color| debug_fingerprint(color.as_str()))
+            .map_or(0_u64, |color| u64::from(color.value()))
     });
     let background_seed = probe_slot_fingerprint(probes.background(), |batch| {
         let viewport = batch.viewport();
         let allowed_seed = batch
             .allowed_mask_iter()
-            .enumerate()
-            .filter(|(_, allowed)| *allowed)
-            .map(|(index, _)| u64::try_from(index).unwrap_or(u64::MAX).rotate_left(11))
+            .zip(batch.probed_cells().iter().copied())
+            .filter(|(allowed, _)| *allowed)
+            .map(|(_, cell)| screen_cell_fingerprint(cell).rotate_left(11))
             .fold(0_u64, u64::wrapping_add);
         u64::from(viewport.max_row.value())
             ^ u64::from(viewport.max_col.value()).rotate_left(7)
@@ -187,37 +192,29 @@ fn background_progress_fingerprint(
         return 0_u64;
     };
     let viewport = progress.viewport();
-    let row_width = usize::try_from(viewport.max_col.value()).unwrap_or(0);
-    let mut next_row_index = 0usize;
     let sampled_rows_seed = progress
         .sampled_chunks()
-        .flat_map(|chunk| {
-            let row_count = if row_width == 0 {
-                0
-            } else {
-                chunk.len() / row_width
-            };
-            let chunk_start_row = next_row_index;
-            next_row_index = next_row_index.saturating_add(row_count);
-            (0..row_count).map(move |row_offset| {
-                let row_start = row_offset.saturating_mul(row_width);
-                let row_end = row_start.saturating_add(row_width).min(chunk.len());
-                let row_seed = chunk[row_start..row_end]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, allowed)| **allowed)
-                    .map(|(col, _)| u64::try_from(col).unwrap_or(u64::MAX).rotate_left(11))
-                    .fold(0_u64, u64::wrapping_add);
-                u64::try_from(chunk_start_row.saturating_add(row_offset))
-                    .unwrap_or(u64::MAX)
-                    .rotate_left(17)
-                    ^ row_seed
-            })
+        .map(|sampled| {
+            let chunk_seed = sampled
+                .chunk()
+                .cells()
+                .iter()
+                .copied()
+                .zip(sampled.mask().iter())
+                .filter(|(_, allowed)| *allowed)
+                .map(|(cell, _)| screen_cell_fingerprint(cell).rotate_left(11))
+                .fold(0_u64, u64::wrapping_add);
+            u64::try_from(sampled.chunk().start_index())
+                .unwrap_or(u64::MAX)
+                .rotate_left(17)
+                ^ chunk_seed
         })
         .fold(0_u64, u64::wrapping_add);
     u64::from(viewport.max_row.value())
         ^ u64::from(viewport.max_col.value()).rotate_left(7)
-        ^ u64::from(progress.next_row().value()).rotate_left(13)
+        ^ u64::try_from(progress.next_cell_index())
+            .unwrap_or(u64::MAX)
+            .rotate_left(13)
         ^ sampled_rows_seed.rotate_left(19)
 }
 
@@ -377,7 +374,7 @@ fn palette_spec_fingerprint(spec: &PaletteSpec) -> u64 {
             .map(u64::from)
             .fold(0_u64, u64::wrapping_add)
     });
-    let color_at_cursor_seed = spec.color_at_cursor().map_or(0_u64, debug_fingerprint);
+    let color_at_cursor_seed = spec.color_at_cursor().map_or(0_u64, u64::from);
 
     mode_seed
         ^ cursor_color_seed.rotate_left(3)

@@ -2,20 +2,23 @@ use super::event_loop;
 use super::host_bridge::{InstalledHostBridge, installed_host_bridge};
 use super::logging::{set_log_level, trace_lazy, warn};
 use super::probe_cache::{
-    ConcealCacheKey, ConcealCacheLookup, ConcealRegion, CursorColorCacheLookup,
+    ConcealCacheKey, ConcealCacheLookup, ConcealRegion, ConcealScreenCell,
+    ConcealScreenCellCacheKey, ConcealScreenCellCacheLookup, CursorColorCacheLookup,
+    CursorTextContextCacheKey, CursorTextContextCacheLookup,
 };
 use super::timers::{NvimTimerId, start_timer_once, stop_timer};
 use super::trace::{timer_kind_name, timer_token_summary};
 use super::{ENGINE_CONTEXT, EngineAccessError, EngineContext, EngineState, HostBridgeState};
 use crate::config::RuntimeConfig;
-use crate::core::effect::{Effect, EventLoopMetricEffect, TimerKind};
+use crate::core::effect::{Effect, EventLoopMetricEffect, RequestProbeEffect, TimerKind};
 use crate::core::event::{
     EffectFailedEvent, EffectFailureSource, Event, TimerFiredWithTokenEvent,
     TimerLostWithTokenEvent,
 };
 use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::{
-    CoreState, CursorColorProbeWitness, CursorColorSample, ProbeKind, RenderThermalState,
+    CoreState, CursorColorProbeWitness, CursorColorSample, CursorTextContext, ProbeKind,
+    RenderThermalState,
 };
 use crate::core::types::{DelayBudgetMs, Generation, Millis, TimerToken};
 use crate::draw::{recover_all_namespaces, render_pool_diagnostics};
@@ -662,7 +665,7 @@ pub(super) fn ingress_read_snapshot() -> EngineAccessResult<IngressReadSnapshot>
 }
 
 pub(super) fn core_state() -> EngineAccessResult<CoreState> {
-    read_engine_state(EngineState::core_state)
+    read_engine_state(EngineState::clone_core_state)
 }
 
 pub(super) fn set_core_state(next_state: CoreState) -> EngineAccessResult<()> {
@@ -678,7 +681,7 @@ pub(super) fn cursor_color_colorscheme_generation() -> EngineAccessResult<Genera
 pub(super) fn cached_cursor_color_sample(
     witness: &CursorColorProbeWitness,
 ) -> EngineAccessResult<CursorColorCacheLookup> {
-    read_engine_state(|state| state.shell.cached_cursor_color_sample(witness))
+    mutate_engine_state(|state| state.shell.cached_cursor_color_sample(witness))
 }
 
 pub(super) fn store_cursor_color_sample(
@@ -690,10 +693,25 @@ pub(super) fn store_cursor_color_sample(
     })
 }
 
+pub(super) fn cached_cursor_text_context(
+    key: &CursorTextContextCacheKey,
+) -> EngineAccessResult<CursorTextContextCacheLookup> {
+    mutate_engine_state(|state| state.shell.cached_cursor_text_context(key))
+}
+
+pub(super) fn store_cursor_text_context(
+    key: CursorTextContextCacheKey,
+    context: Option<CursorTextContext>,
+) -> EngineAccessResult<()> {
+    mutate_engine_state(|state| {
+        state.shell.store_cursor_text_context(key, context);
+    })
+}
+
 pub(super) fn cached_conceal_regions(
     key: &ConcealCacheKey,
 ) -> EngineAccessResult<ConcealCacheLookup> {
-    read_engine_state(|state| state.shell.cached_conceal_regions(key))
+    mutate_engine_state(|state| state.shell.cached_conceal_regions(key))
 }
 
 pub(super) fn store_conceal_regions(
@@ -705,6 +723,21 @@ pub(super) fn store_conceal_regions(
         state
             .shell
             .store_conceal_regions(key, scanned_to_col1, regions);
+    })
+}
+
+pub(super) fn cached_conceal_screen_cell(
+    key: &ConcealScreenCellCacheKey,
+) -> EngineAccessResult<ConcealScreenCellCacheLookup> {
+    mutate_engine_state(|state| state.shell.cached_conceal_screen_cell(key))
+}
+
+pub(super) fn store_conceal_screen_cell(
+    key: ConcealScreenCellCacheKey,
+    cell: Option<ConcealScreenCell>,
+) -> EngineAccessResult<()> {
+    mutate_engine_state(|state| {
+        state.shell.store_conceal_screen_cell(key, cell);
     })
 }
 
@@ -769,7 +802,7 @@ pub(super) fn dispatch_shell_timer_fired(shell_timer_id: NvimTimerId) {
 
 fn reset_core_state() {
     if let Err(err) = mutate_engine_state(|state| {
-        let runtime = state.core_state.runtime().clone();
+        let runtime = state.core_state_mut().take_runtime();
         state.set_core_state(CoreState::default().with_runtime(runtime));
     }) {
         warn(&format!(
@@ -859,6 +892,14 @@ fn resolved_timer_delay_ms(kind: TimerKind, delay: DelayBudgetMs) -> u64 {
 
 pub(super) trait EffectExecutor {
     fn execute_effect(&mut self, effect: Effect) -> Result<Vec<Event>>;
+
+    fn execute_probe_effect(
+        &mut self,
+        payload: RequestProbeEffect,
+        _same_reducer_wave: bool,
+    ) -> Result<Vec<Event>> {
+        self.execute_effect(Effect::RequestProbe(payload))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -875,6 +916,22 @@ impl NeovimEffectExecutor {
 }
 
 impl EffectExecutor for NeovimEffectExecutor {
+    fn execute_probe_effect(
+        &mut self,
+        payload: RequestProbeEffect,
+        same_reducer_wave: bool,
+    ) -> Result<Vec<Event>> {
+        let kind = payload.kind;
+        let started_at = Instant::now();
+        let result = if same_reducer_wave {
+            super::handlers::execute_core_request_probe_effect_same_reducer_wave(&payload)
+        } else {
+            super::handlers::execute_core_request_probe_effect(&payload)
+        };
+        record_probe_duration(kind, duration_to_micros(started_at.elapsed()));
+        Ok(result)
+    }
+
     fn execute_effect(&mut self, effect: Effect) -> Result<Vec<Event>> {
         match effect {
             Effect::ScheduleTimer(payload) => Ok(schedule_core_timer_effect(
@@ -891,13 +948,7 @@ impl EffectExecutor for NeovimEffectExecutor {
                 record_observation_request_executed();
                 super::handlers::execute_core_request_observation_base_effect(payload)
             }
-            Effect::RequestProbe(payload) => {
-                let kind = payload.kind;
-                let started_at = Instant::now();
-                let result = super::handlers::execute_core_request_probe_effect(&payload);
-                record_probe_duration(kind, duration_to_micros(started_at.elapsed()));
-                Ok(result)
-            }
+            Effect::RequestProbe(payload) => self.execute_probe_effect(payload, false),
             Effect::RequestRenderPlan(payload) => Ok(
                 super::handlers::execute_core_request_render_plan_effect(payload.as_ref()),
             ),

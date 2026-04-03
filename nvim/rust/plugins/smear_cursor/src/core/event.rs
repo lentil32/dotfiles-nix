@@ -1,8 +1,8 @@
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::state::{
-    ApplyFailureKind, BackgroundProbeBatch, BackgroundProbeChunk, CursorColorSample,
-    ExternalDemandKind, ObservationBasis, ObservationMotion, ObservationRequest, PlannedRender,
-    ProbeFailure, ProbeReuse, RealizationDivergence,
+    ApplyFailureKind, BackgroundProbeBatch, BackgroundProbeChunk, BackgroundProbeChunkMask,
+    CursorColorSample, ExternalDemandKind, ObservationBasis, ObservationMotion, ObservationRequest,
+    PlannedRender, ProbeFailure, ProbeReuse, RealizationDivergence,
 };
 use crate::core::types::{
     CursorPosition, Millis, ObservationId, ProbeRequestId, ProposalId, TimerToken,
@@ -51,7 +51,7 @@ pub(crate) enum ProbeReportedEvent {
         observation_id: ObservationId,
         probe_request_id: ProbeRequestId,
         chunk: BackgroundProbeChunk,
-        allowed_mask: Vec<bool>,
+        allowed_mask: BackgroundProbeChunkMask,
     },
     BackgroundFailed {
         observation_id: ObservationId,

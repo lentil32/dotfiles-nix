@@ -11,6 +11,8 @@ use crate::draw::render_plan::{
     CellOp, ClearOp, Glyph, HighlightRef, RenderPlan, TargetCellOverlay, Viewport,
 };
 use crate::types::{RenderFrame, ScreenCell, StaticRenderConfig};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 #[cfg(test)]
 use thiserror::Error;
@@ -19,7 +21,7 @@ use thiserror::Error;
 pub(crate) struct PaletteSpec {
     mode: String,
     static_config: Arc<StaticRenderConfig>,
-    color_at_cursor: Option<String>,
+    color_at_cursor: Option<u32>,
 }
 
 impl PaletteSpec {
@@ -71,8 +73,8 @@ impl PaletteSpec {
         self.static_config.gamma.to_bits()
     }
 
-    pub(crate) fn color_at_cursor(&self) -> Option<&str> {
-        self.color_at_cursor.as_deref()
+    pub(crate) const fn color_at_cursor(&self) -> Option<u32> {
+        self.color_at_cursor
     }
 }
 
@@ -122,16 +124,28 @@ pub(crate) struct RealizationSpan {
     col: i64,
     width: u32,
     zindex: u32,
+    payload_hash: u64,
     chunks: Arc<[RealizationSpanChunk]>,
 }
 
 impl RealizationSpan {
+    fn payload_hash_for_chunks(chunks: &[RealizationSpanChunk]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for chunk in chunks {
+            chunk.glyph().hash(&mut hasher);
+            chunk.highlight().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     fn new(row: i64, col: i64, width: u32, zindex: u32, chunks: Vec<RealizationSpanChunk>) -> Self {
+        let payload_hash = Self::payload_hash_for_chunks(&chunks);
         Self {
             row,
             col,
             width,
             zindex,
+            payload_hash,
             chunks: Arc::from(chunks),
         }
     }
@@ -150,6 +164,10 @@ impl RealizationSpan {
 
     pub(crate) const fn zindex(&self) -> u32 {
         self.zindex
+    }
+
+    pub(crate) const fn payload_hash(&self) -> u64 {
+        self.payload_hash
     }
 
     pub(crate) fn chunks(&self) -> &[RealizationSpanChunk] {

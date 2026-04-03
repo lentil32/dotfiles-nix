@@ -1,5 +1,6 @@
 use super::runtime::{mutate_engine_state, read_engine_state};
 use super::{EngineAccessError, HostBridgeRevision, HostBridgeState};
+use crate::core::types::Generation;
 use nvim_oxi::{Array, Object, api};
 use thiserror::Error;
 
@@ -7,6 +8,12 @@ const HOST_BRIDGE_REVISION_FUNCTION_NAME: &str = "rs_smear_cursor#host_bridge#re
 const START_TIMER_ONCE_FUNCTION_NAME: &str = "rs_smear_cursor#host_bridge#start_timer_once";
 const INSTALL_PROBE_HELPERS_FUNCTION_NAME: &str =
     "rs_smear_cursor#host_bridge#install_probe_helpers";
+const LUAEVAL_FUNCTION_NAME: &str = "luaeval";
+const CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR: &str = concat!(
+    "(package.loaded['rs_smear_cursor.probes'] or require('rs_smear_cursor.probes'))",
+    ".cursor_color_at_cursor(_A)"
+);
+#[cfg(test)]
 const CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME: &str =
     "rs_smear_cursor#host_bridge#cursor_color_at_cursor";
 const BACKGROUND_ALLOWED_MASK_FUNCTION_NAME: &str =
@@ -15,6 +22,8 @@ const BACKGROUND_ALLOWED_MASK_FUNCTION_NAME: &str =
 const CORE_TIMER_CALLBACK_FUNCTION_NAME: &str = "rs_smear_cursor#host_bridge#on_core_timer";
 #[cfg(test)]
 const HOST_BRIDGE_SCRIPT: &str = include_str!("../../autoload/rs_smear_cursor/host_bridge.vim");
+#[cfg(test)]
+const PROBE_HELPERS_SCRIPT: &str = include_str!("../../lua/rs_smear_cursor/probes.lua");
 
 fn host_bridge_state() -> Result<HostBridgeState, EngineAccessError> {
     read_engine_state(|state| state.shell.host_bridge_state())
@@ -53,6 +62,8 @@ pub(super) enum HostBridgeError {
     InstallProbeHelpers(#[source] nvim_oxi::Error),
     #[error("failed to call smear cursor cursor-color probe: {0}")]
     CursorColorProbe(#[source] nvim_oxi::Error),
+    #[error("failed to encode smear cursor colorscheme generation for host bridge: {value}")]
+    CursorColorGenerationEncode { value: u64 },
     #[error("failed to call smear cursor background-mask probe: {0}")]
     BackgroundAllowedMask(#[source] nvim_oxi::Error),
     #[error("engine state access failed while resolving host bridge state: {0}")]
@@ -81,8 +92,20 @@ impl InstalledHostBridge {
         Ok(())
     }
 
-    pub(super) fn cursor_color_at_cursor(self) -> HostBridgeResult<Object> {
-        api::call_function(CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME, Array::new())
+    pub(super) fn cursor_color_at_cursor(
+        self,
+        colorscheme_generation: Generation,
+    ) -> HostBridgeResult<Object> {
+        let generation = i64::try_from(colorscheme_generation.value()).map_err(|_| {
+            HostBridgeError::CursorColorGenerationEncode {
+                value: colorscheme_generation.value(),
+            }
+        })?;
+        let args = Array::from_iter([
+            Object::from(CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR),
+            Object::from(generation),
+        ]);
+        api::call_function(LUAEVAL_FUNCTION_NAME, args)
             .map_err(|error| HostBridgeError::CursorColorProbe(error.into()))
     }
 
@@ -205,5 +228,27 @@ mod tests {
         assert!(script.contains("require('rs_smear_cursor.probes')"));
         assert!(!script.contains("CURSOR_COLOR_LUAEVAL_EXPR"));
         assert!(!script.contains("BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR"));
+    }
+
+    #[test]
+    fn host_bridge_script_passes_colorscheme_generation_to_cursor_probe() {
+        let script = HOST_BRIDGE_SCRIPT;
+        assert!(script.contains("cursor_color_at_cursor(colorscheme_generation) abort"));
+        assert!(script.contains(".cursor_color_at_cursor(_A)"));
+    }
+
+    #[test]
+    fn cursor_color_probe_luaeval_expr_loads_probe_helpers_from_runtime_module() {
+        let expr = CURSOR_COLOR_AT_CURSOR_LUAEVAL_EXPR;
+        assert!(expr.contains("require('rs_smear_cursor.probes')"));
+        assert!(expr.contains(".cursor_color_at_cursor(_A)"));
+    }
+
+    #[test]
+    fn probe_helpers_cache_highlight_colors_by_generation() {
+        let script = PROBE_HELPERS_SCRIPT;
+        assert!(script.contains("hl_color_cache_generation"));
+        assert!(script.contains("reset_hl_color_cache(colorscheme_generation)"));
+        assert!(script.contains("hl_fg_cache[group]"));
     }
 }

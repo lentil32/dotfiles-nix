@@ -9,11 +9,15 @@
 use super::{ExternalDemand, ExternalDemandKind};
 use crate::core::runtime_reducer::ScrollShift;
 use crate::core::types::{
-    CursorPosition, CursorRow, Generation, Millis, ObservationId, ProbeRequestId, ViewportSnapshot,
+    CursorPosition, Generation, Millis, ObservationId, ProbeRequestId, ViewportSnapshot,
 };
 use crate::state::CursorLocation;
-use crate::types::ScreenCell;
+use crate::types::{RenderFrame, ScreenCell};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+
+#[cfg(test)]
+use crate::core::types::CursorRow;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) struct ProbeRequestSet {
@@ -145,16 +149,16 @@ pub(crate) fn phase2_probe_fingerprint_seed() -> u64 {
     reuse_seed ^ ProbeFailure::ShellReadFailed.fingerprint().rotate_left(7)
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct CursorColorSample(String);
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CursorColorSample(u32);
 
 impl CursorColorSample {
-    pub(crate) fn new(value: String) -> Self {
+    pub(crate) const fn new(value: u32) -> Self {
         Self(value)
     }
 
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+    pub(crate) const fn value(self) -> u32 {
+        self.0
     }
 }
 
@@ -230,9 +234,9 @@ pub(crate) struct CursorTextContext {
     buffer_handle: i64,
     changedtick: u64,
     cursor_line: i64,
-    nearby_rows: Vec<ObservedTextRow>,
+    nearby_rows: Arc<[ObservedTextRow]>,
     tracked_cursor_line: Option<i64>,
-    tracked_nearby_rows: Option<Vec<ObservedTextRow>>,
+    tracked_nearby_rows: Option<Arc<[ObservedTextRow]>>,
 }
 
 impl CursorTextContext {
@@ -243,6 +247,24 @@ impl CursorTextContext {
         nearby_rows: Vec<ObservedTextRow>,
         tracked_cursor_line: Option<i64>,
         tracked_nearby_rows: Option<Vec<ObservedTextRow>>,
+    ) -> Self {
+        Self::from_shared(
+            buffer_handle,
+            changedtick,
+            cursor_line,
+            nearby_rows.into(),
+            tracked_cursor_line,
+            tracked_nearby_rows.map(Into::into),
+        )
+    }
+
+    pub(crate) fn from_shared(
+        buffer_handle: i64,
+        changedtick: u64,
+        cursor_line: i64,
+        nearby_rows: Arc<[ObservedTextRow]>,
+        tracked_cursor_line: Option<i64>,
+        tracked_nearby_rows: Option<Arc<[ObservedTextRow]>>,
     ) -> Self {
         Self {
             buffer_handle,
@@ -267,7 +289,7 @@ impl CursorTextContext {
     }
 
     pub(crate) fn nearby_rows(&self) -> &[ObservedTextRow] {
-        &self.nearby_rows
+        self.nearby_rows.as_ref()
     }
 
     pub(crate) const fn tracked_cursor_line(&self) -> Option<i64> {
@@ -289,135 +311,227 @@ pub(crate) enum SemanticEvent {
     ViewportOrWindowMoved,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct BackgroundProbeChunk {
-    start_row: CursorRow,
-    row_count: u32,
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct BackgroundProbePlan {
+    cells: Arc<[ScreenCell]>,
 }
 
-impl BackgroundProbeChunk {
-    pub(crate) const fn new(start_row: CursorRow, row_count: u32) -> Self {
-        Self {
-            start_row,
-            row_count,
-        }
-    }
-
-    pub(crate) const fn start_row(self) -> CursorRow {
-        self.start_row
-    }
-
-    pub(crate) const fn row_count(self) -> u32 {
-        self.row_count
-    }
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct BackgroundProbeChunk {
+    cells: Arc<[ScreenCell]>,
+    start_index: usize,
+    end_index: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct BackgroundProbeBatch {
     viewport: ViewportSnapshot,
-    allowed_mask: BackgroundProbeMask,
+    probed_cells: Arc<[ScreenCell]>,
+    allowed_mask: BackgroundProbeChunkMask,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum BackgroundProbeMask {
-    Flat(Arc<[bool]>),
-    Chunked {
-        row_width: usize,
-        row_start_offsets: Arc<[usize]>,
-        chunks: Arc<[Arc<[bool]>]>,
-    },
+pub(crate) struct BackgroundProbeChunkMask {
+    cell_count: usize,
+    packed: Arc<[u8]>,
 }
 
-pub(crate) enum BackgroundProbeMaskIter<'a> {
-    Flat(std::iter::Copied<std::slice::Iter<'a, bool>>),
-    Chunked(BackgroundProbeChunkMaskIter<'a>),
+pub(crate) struct BackgroundProbePackedMaskIter<'a> {
+    packed: &'a [u8],
+    cell_count: usize,
+    next_index: usize,
 }
 
-pub(crate) struct BackgroundProbeChunkMaskIter<'a> {
-    chunks: std::slice::Iter<'a, Arc<[bool]>>,
-    current: Option<std::iter::Copied<std::slice::Iter<'a, bool>>>,
-}
-
-impl<'a> BackgroundProbeChunkMaskIter<'a> {
-    fn new(chunks: &'a [Arc<[bool]>]) -> Self {
+impl BackgroundProbePlan {
+    pub(crate) fn from_cells(mut cells: Vec<ScreenCell>) -> Self {
+        cells.sort_unstable();
+        cells.dedup();
         Self {
-            chunks: chunks.iter(),
-            current: None,
+            cells: Arc::from(cells),
         }
+    }
+
+    pub(crate) fn from_render_frame(frame: &RenderFrame, viewport: ViewportSnapshot) -> Self {
+        let target_cell = ScreenCell::from_rounded_point(frame.target)
+            .filter(|cell| in_viewport(viewport, *cell));
+        let mut cells = BTreeSet::new();
+
+        for particle in frame.particles.iter() {
+            if !particle.position.row.is_finite() || !particle.position.col.is_finite() {
+                continue;
+            }
+
+            let row = particle.position.row.floor() as i64;
+            let col = particle.position.col.floor() as i64;
+            let Some(cell) = ScreenCell::new(row, col) else {
+                continue;
+            };
+            if Some(cell) == target_cell || !in_viewport(viewport, cell) {
+                continue;
+            }
+
+            cells.insert(cell);
+        }
+
+        Self::from_cells(cells.into_iter().collect())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    fn chunk(&self, start_index: usize) -> Option<BackgroundProbeChunk> {
+        if start_index >= self.cells.len() {
+            return None;
+        }
+
+        let end_index = start_index
+            .saturating_add(MAX_BACKGROUND_PROBE_CELLS_PER_CHUNK)
+            .min(self.cells.len());
+        Some(BackgroundProbeChunk::new(
+            Arc::clone(&self.cells),
+            start_index,
+            end_index,
+        ))
     }
 }
 
-impl Iterator for BackgroundProbeChunkMaskIter<'_> {
+impl BackgroundProbeChunk {
+    pub(crate) const fn new(
+        cells: Arc<[ScreenCell]>,
+        start_index: usize,
+        end_index: usize,
+    ) -> Self {
+        Self {
+            cells,
+            start_index,
+            end_index,
+        }
+    }
+
+    pub(crate) const fn start_index(&self) -> usize {
+        self.start_index
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.end_index.saturating_sub(self.start_index)
+    }
+
+    pub(crate) fn cells(&self) -> &[ScreenCell] {
+        &self.cells[self.start_index..self.end_index]
+    }
+}
+
+impl BackgroundProbeChunkMask {
+    fn packed_len_for(cell_count: usize) -> usize {
+        let whole_bytes = cell_count / 8;
+        if cell_count % 8 == 0 {
+            whole_bytes
+        } else {
+            whole_bytes.saturating_add(1)
+        }
+    }
+
+    fn trailing_byte_mask(cell_count: usize) -> u8 {
+        match cell_count % 8 {
+            0 => u8::MAX,
+            bits => ((1_u16 << bits) - 1) as u8,
+        }
+    }
+
+    fn all_disallowed(cell_count: usize) -> Self {
+        Self {
+            cell_count,
+            packed: Arc::from(vec![0; Self::packed_len_for(cell_count)]),
+        }
+    }
+
+    pub(crate) fn from_allowed_mask(allowed_mask: &[bool]) -> Self {
+        let mut packed = vec![0_u8; Self::packed_len_for(allowed_mask.len())];
+        for (index, allowed) in allowed_mask.iter().copied().enumerate() {
+            if allowed {
+                packed[index / 8] |= 1_u8 << (index % 8);
+            }
+        }
+
+        Self {
+            cell_count: allowed_mask.len(),
+            packed: Arc::from(packed),
+        }
+    }
+
+    pub(crate) fn from_packed_bytes(cell_count: usize, packed: Vec<u8>) -> Option<Self> {
+        if packed.len() != Self::packed_len_for(cell_count) {
+            return None;
+        }
+
+        let mut packed = packed;
+        if let Some(last_byte) = packed.last_mut() {
+            *last_byte &= Self::trailing_byte_mask(cell_count);
+        }
+
+        Some(Self {
+            cell_count,
+            packed: Arc::from(packed),
+        })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.cell_count
+    }
+
+    pub(crate) fn packed_len(&self) -> usize {
+        self.packed.len()
+    }
+
+    fn get(&self, index: usize) -> Option<bool> {
+        if index >= self.cell_count {
+            return None;
+        }
+
+        let byte = *self.packed.get(index / 8)?;
+        Some(byte & (1_u8 << (index % 8)) != 0)
+    }
+
+    pub(crate) fn iter(&self) -> BackgroundProbePackedMaskIter<'_> {
+        BackgroundProbePackedMaskIter {
+            packed: &self.packed,
+            cell_count: self.cell_count,
+            next_index: 0,
+        }
+    }
+
+    fn concatenate(masks: &[BackgroundProbeChunkMask]) -> Self {
+        let total_len = masks.iter().map(Self::len).sum();
+        let mut allowed = Vec::with_capacity(total_len);
+        for mask in masks {
+            allowed.extend(mask.iter());
+        }
+        Self::from_allowed_mask(&allowed)
+    }
+}
+
+impl Iterator for BackgroundProbePackedMaskIter<'_> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(current) = &mut self.current
-                && let Some(value) = current.next()
-            {
-                return Some(value);
-            }
-
-            let next_chunk = self.chunks.next()?;
-            self.current = Some(next_chunk.iter().copied());
+        if self.next_index >= self.cell_count {
+            return None;
         }
-    }
-}
 
-impl Iterator for BackgroundProbeMaskIter<'_> {
-    type Item = bool;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Flat(iter) => iter.next(),
-            Self::Chunked(iter) => iter.next(),
-        }
-    }
-}
-
-impl BackgroundProbeMask {
-    fn len(&self) -> usize {
-        match self {
-            Self::Flat(mask) => mask.len(),
-            Self::Chunked { chunks, .. } => chunks.iter().map(|chunk| chunk.len()).sum(),
-        }
-    }
-
-    fn iter(&self) -> BackgroundProbeMaskIter<'_> {
-        match self {
-            Self::Flat(mask) => BackgroundProbeMaskIter::Flat(mask.iter().copied()),
-            Self::Chunked { chunks, .. } => {
-                BackgroundProbeMaskIter::Chunked(BackgroundProbeChunkMaskIter::new(chunks))
-            }
-        }
-    }
-
-    fn allows(&self, row_width: usize, row_index: usize, col_index: usize) -> Option<bool> {
-        match self {
-            Self::Flat(mask) => {
-                let index = row_index.checked_mul(row_width)?.checked_add(col_index)?;
-                mask.get(index).copied()
-            }
-            Self::Chunked {
-                row_width: chunk_row_width,
-                row_start_offsets,
-                chunks,
-            } => {
-                let chunk_boundary = row_start_offsets.partition_point(|start| *start <= row_index);
-                let chunk_index = chunk_boundary.checked_sub(1)?;
-                let chunk_start_row = *row_start_offsets.get(chunk_index)?;
-                let row_in_chunk = row_index.checked_sub(chunk_start_row)?;
-                let index = row_in_chunk
-                    .checked_mul(*chunk_row_width)?
-                    .checked_add(col_index)?;
-                chunks.get(chunk_index)?.get(index).copied()
-            }
-        }
+        let index = self.next_index;
+        self.next_index = self.next_index.saturating_add(1);
+        let byte = *self.packed.get(index / 8)?;
+        Some(byte & (1_u8 << (index % 8)) != 0)
     }
 }
 
 impl BackgroundProbeBatch {
-    fn mask_len(viewport: ViewportSnapshot) -> usize {
+    fn viewport_cell_len(viewport: ViewportSnapshot) -> usize {
         usize::try_from(viewport.max_row.value())
             .ok()
             .and_then(|rows| {
@@ -431,77 +545,49 @@ impl BackgroundProbeBatch {
     pub(crate) fn empty(viewport: ViewportSnapshot) -> Self {
         Self {
             viewport,
-            allowed_mask: BackgroundProbeMask::Flat(Arc::from(vec![
-                false;
-                Self::mask_len(viewport)
-            ])),
+            probed_cells: Arc::from(Vec::<ScreenCell>::new()),
+            allowed_mask: BackgroundProbeChunkMask::all_disallowed(0),
         }
     }
 
     pub(crate) fn from_allowed_mask(viewport: ViewportSnapshot, allowed_mask: Vec<bool>) -> Self {
-        let expected_len = Self::mask_len(viewport);
+        let expected_len = Self::viewport_cell_len(viewport);
         if allowed_mask.len() != expected_len {
             // Surprising: the shell returned a malformed background probe batch. Keep the
             // probe conservative instead of fusing partial screen state into semantic truth.
             return Self::empty(viewport);
         }
 
-        Self {
+        let Some(probed_cells) = viewport_cells(viewport) else {
+            return Self::empty(viewport);
+        };
+
+        Self::from_probed_cells(
             viewport,
-            allowed_mask: BackgroundProbeMask::Flat(Arc::from(allowed_mask)),
-        }
+            Arc::from(probed_cells),
+            BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
+        )
     }
 
-    fn from_chunk_masks(viewport: ViewportSnapshot, chunks: Vec<Arc<[bool]>>) -> Self {
-        let row_width = usize::try_from(viewport.max_col.value()).unwrap_or(0);
-        let expected_len = Self::mask_len(viewport);
-        if row_width == 0 {
-            return if expected_len == 0 {
-                Self {
-                    viewport,
-                    allowed_mask: BackgroundProbeMask::Chunked {
-                        row_width,
-                        row_start_offsets: Arc::from(Vec::<usize>::new()),
-                        chunks: Arc::from(chunks),
-                    },
-                }
-            } else {
-                Self::empty(viewport)
-            };
-        }
-
-        let mut row_start_offsets = Vec::with_capacity(chunks.len());
-        let mut row_count = 0usize;
-        let mut total_len = 0usize;
-        for chunk in &chunks {
-            if chunk.len() % row_width != 0 {
-                // Surprising: probe progress assembled a non-rectangular background chunk.
-                // Keep the batch conservative instead of trusting malformed shell state.
-                return Self::empty(viewport);
-            }
-            row_start_offsets.push(row_count);
-            row_count = match row_count.checked_add(chunk.len() / row_width) {
-                Some(next) => next,
-                None => return Self::empty(viewport),
-            };
-            total_len = match total_len.checked_add(chunk.len()) {
-                Some(next) => next,
-                None => return Self::empty(viewport),
-            };
-        }
-
-        if total_len != expected_len {
-            // Surprising: chunked probe progress completed with a malformed total mask length.
+    fn from_probed_cells(
+        viewport: ViewportSnapshot,
+        probed_cells: Arc<[ScreenCell]>,
+        allowed_mask: BackgroundProbeChunkMask,
+    ) -> Self {
+        if probed_cells.len() != allowed_mask.len()
+            || !is_sorted_unique(&probed_cells)
+            || probed_cells
+                .iter()
+                .copied()
+                .any(|cell| !in_viewport(viewport, cell))
+        {
             return Self::empty(viewport);
         }
 
         Self {
             viewport,
-            allowed_mask: BackgroundProbeMask::Chunked {
-                row_width,
-                row_start_offsets: Arc::from(row_start_offsets),
-                chunks: Arc::from(chunks),
-            },
+            probed_cells,
+            allowed_mask,
         }
     }
 
@@ -509,46 +595,61 @@ impl BackgroundProbeBatch {
         self.viewport
     }
 
-    pub(crate) fn allowed_mask_len(&self) -> usize {
-        self.allowed_mask.len()
+    pub(crate) fn probed_cells(&self) -> &[ScreenCell] {
+        &self.probed_cells
     }
 
-    pub(crate) fn allowed_mask_iter(&self) -> BackgroundProbeMaskIter<'_> {
+    pub(crate) fn allowed_mask_len(&self) -> usize {
+        self.probed_cells.len()
+    }
+
+    pub(crate) fn allowed_mask_iter(&self) -> BackgroundProbePackedMaskIter<'_> {
         self.allowed_mask.iter()
     }
 
-    fn coordinates_for(&self, cell: ScreenCell) -> Option<(usize, usize)> {
-        let row = u32::try_from(cell.row()).ok()?;
-        let col = u32::try_from(cell.col()).ok()?;
-        if row == 0
-            || col == 0
-            || row > self.viewport.max_row.value()
-            || col > self.viewport.max_col.value()
-        {
-            return None;
-        }
-
-        let row_index = usize::try_from(row.saturating_sub(1)).ok()?;
-        let col_index = usize::try_from(col.saturating_sub(1)).ok()?;
-        Some((row_index, col_index))
-    }
-
     pub(crate) fn allows_particle(&self, cell: ScreenCell) -> bool {
-        self.coordinates_for(cell)
-            .and_then(|(row_index, col_index)| {
-                let row_width = usize::try_from(self.viewport.max_col.value()).ok()?;
-                self.allowed_mask.allows(row_width, row_index, col_index)
-            })
+        self.probed_cells
+            .binary_search(&cell)
+            .ok()
+            .and_then(|index| self.allowed_mask.get(index))
             .unwrap_or(false)
     }
 }
 
-const MAX_BACKGROUND_PROBE_CELLS_PER_EDGE: u32 = 2048;
+fn viewport_cells(viewport: ViewportSnapshot) -> Option<Vec<ScreenCell>> {
+    let max_row = i64::from(viewport.max_row.value());
+    let max_col = i64::from(viewport.max_col.value());
+    let capacity = BackgroundProbeBatch::viewport_cell_len(viewport);
+    let mut cells = Vec::with_capacity(capacity);
+    for row in 1..=max_row {
+        for col in 1..=max_col {
+            cells.push(ScreenCell::new(row, col)?);
+        }
+    }
+    Some(cells)
+}
+
+fn is_sorted_unique(cells: &[ScreenCell]) -> bool {
+    cells.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn in_viewport(viewport: ViewportSnapshot, cell: ScreenCell) -> bool {
+    let Ok(row) = u32::try_from(cell.row()) else {
+        return false;
+    };
+    let Ok(col) = u32::try_from(cell.col()) else {
+        return false;
+    };
+    row >= 1 && row <= viewport.max_row.value() && col >= 1 && col <= viewport.max_col.value()
+}
+
+const MAX_BACKGROUND_PROBE_CELLS_PER_CHUNK: usize = 2048;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct BackgroundProbeProgress {
     viewport: ViewportSnapshot,
-    next_row: CursorRow,
+    plan: BackgroundProbePlan,
+    next_cell_index: usize,
     sampled_chunk_tail: Option<Arc<BackgroundProbeChunkNode>>,
     sampled_chunk_count: usize,
 }
@@ -562,34 +663,46 @@ pub(crate) enum BackgroundProbeUpdate {
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct BackgroundProbeChunkNode {
     previous: Option<Arc<BackgroundProbeChunkNode>>,
-    mask: Arc<[bool]>,
+    chunk: BackgroundProbeChunk,
+    mask: BackgroundProbeChunkMask,
 }
 
 pub(crate) struct BackgroundProbeChunks<'a> {
     nodes: Vec<&'a BackgroundProbeChunkNode>,
 }
 
+pub(crate) struct BackgroundProbeSampledChunk<'a> {
+    chunk: &'a BackgroundProbeChunk,
+    mask: &'a BackgroundProbeChunkMask,
+}
+
+impl BackgroundProbeSampledChunk<'_> {
+    pub(crate) const fn chunk(&self) -> &BackgroundProbeChunk {
+        self.chunk
+    }
+
+    pub(crate) const fn mask(&self) -> &BackgroundProbeChunkMask {
+        self.mask
+    }
+}
+
 impl<'a> Iterator for BackgroundProbeChunks<'a> {
-    type Item = &'a Arc<[bool]>;
+    type Item = BackgroundProbeSampledChunk<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.nodes.pop().map(|node| &node.mask)
+        self.nodes.pop().map(|node| BackgroundProbeSampledChunk {
+            chunk: &node.chunk,
+            mask: &node.mask,
+        })
     }
 }
 
 impl BackgroundProbeProgress {
-    fn row_width(viewport: ViewportSnapshot) -> usize {
-        usize::try_from(viewport.max_col.value()).unwrap_or(0)
-    }
-
-    fn row_count(viewport: ViewportSnapshot) -> usize {
-        usize::try_from(viewport.max_row.value()).unwrap_or(0)
-    }
-
-    pub(crate) fn new(viewport: ViewportSnapshot) -> Self {
+    pub(crate) fn new(viewport: ViewportSnapshot, plan: BackgroundProbePlan) -> Self {
         Self {
             viewport,
-            next_row: CursorRow(1),
+            plan,
+            next_cell_index: 0,
             sampled_chunk_tail: None,
             sampled_chunk_count: 0,
         }
@@ -599,8 +712,8 @@ impl BackgroundProbeProgress {
         self.viewport
     }
 
-    pub(crate) const fn next_row(&self) -> CursorRow {
-        self.next_row
+    pub(crate) const fn next_cell_index(&self) -> usize {
+        self.next_cell_index
     }
 
     pub(crate) fn sampled_chunks(&self) -> BackgroundProbeChunks<'_> {
@@ -617,11 +730,11 @@ impl BackgroundProbeProgress {
     fn collect_sampled_chunks(
         tail: Option<&BackgroundProbeChunkNode>,
         chunk_count: usize,
-    ) -> Vec<Arc<[bool]>> {
+    ) -> Vec<(BackgroundProbeChunk, BackgroundProbeChunkMask)> {
         let mut chunks = Vec::with_capacity(chunk_count);
         let mut current = tail;
         while let Some(node) = current {
-            chunks.push(Arc::clone(&node.mask));
+            chunks.push((node.chunk.clone(), node.mask.clone()));
             current = node.previous.as_deref();
         }
         chunks.reverse();
@@ -629,68 +742,45 @@ impl BackgroundProbeProgress {
     }
 
     pub(crate) fn next_chunk(&self) -> Option<BackgroundProbeChunk> {
-        if self.next_row.value() == 0 || self.next_row.value() > self.viewport.max_row.value() {
-            return None;
-        }
-
-        let width = self.viewport.max_col.value().max(1);
-        let rows_per_chunk = (MAX_BACKGROUND_PROBE_CELLS_PER_EDGE / width).max(1);
-        let remaining_rows = self
-            .viewport
-            .max_row
-            .value()
-            .saturating_sub(self.next_row.value())
-            .saturating_add(1);
-        Some(BackgroundProbeChunk::new(
-            self.next_row,
-            remaining_rows.min(rows_per_chunk),
-        ))
+        self.plan.chunk(self.next_cell_index)
     }
 
     pub(crate) fn apply_chunk(
         &self,
-        chunk: BackgroundProbeChunk,
-        allowed_mask: &[bool],
+        chunk: &BackgroundProbeChunk,
+        allowed_mask: &BackgroundProbeChunkMask,
     ) -> Option<BackgroundProbeUpdate> {
-        if chunk.row_count() == 0 || chunk.start_row() != self.next_row {
-            return None;
-        }
-
-        let width = Self::row_width(self.viewport);
-        let row_count = usize::try_from(chunk.row_count()).ok()?;
-        let expected_len = width.checked_mul(row_count)?;
-        if allowed_mask.len() != expected_len {
-            return None;
-        }
-
-        let start_row = usize::try_from(chunk.start_row().value().saturating_sub(1)).ok()?;
-        let end_row = start_row.checked_add(row_count)?;
-        if end_row > Self::row_count(self.viewport) {
+        let expected_chunk = self.next_chunk()?;
+        if expected_chunk != *chunk || chunk.len() == 0 || allowed_mask.len() != chunk.len() {
             return None;
         }
 
         let sampled_chunk_tail = Some(Arc::new(BackgroundProbeChunkNode {
             previous: self.sampled_chunk_tail.clone(),
-            mask: Arc::<[bool]>::from(allowed_mask),
+            chunk: chunk.clone(),
+            mask: allowed_mask.clone(),
         }));
         let sampled_chunk_count = self.sampled_chunk_count.saturating_add(1);
-
-        let next_row_value = chunk.start_row().value().saturating_add(chunk.row_count());
-        if next_row_value > self.viewport.max_row.value() {
+        let next_cell_index = chunk.end_index;
+        if next_cell_index >= self.plan.len() {
+            let masks =
+                Self::collect_sampled_chunks(sampled_chunk_tail.as_deref(), sampled_chunk_count)
+                    .into_iter()
+                    .map(|(_, mask)| mask)
+                    .collect::<Vec<_>>();
             return Some(BackgroundProbeUpdate::Complete(
-                BackgroundProbeBatch::from_chunk_masks(
+                BackgroundProbeBatch::from_probed_cells(
                     self.viewport,
-                    Self::collect_sampled_chunks(
-                        sampled_chunk_tail.as_deref(),
-                        sampled_chunk_count,
-                    ),
+                    Arc::clone(&self.plan.cells),
+                    BackgroundProbeChunkMask::concatenate(&masks),
                 ),
             ));
         }
 
         Some(BackgroundProbeUpdate::InProgress(Self {
             viewport: self.viewport,
-            next_row: CursorRow(next_row_value),
+            plan: self.plan.clone(),
+            next_cell_index,
             sampled_chunk_tail,
             sampled_chunk_count,
         }))
@@ -829,11 +919,7 @@ impl ProbeSet {
             } else {
                 ProbeSlot::unrequested()
             },
-            background: if request.probes().background() {
-                ProbeSlot::pending(ProbeKind::Background.request_id(observation_id))
-            } else {
-                ProbeSlot::unrequested()
-            },
+            background: ProbeSlot::unrequested(),
         }
     }
 
@@ -853,11 +939,12 @@ impl ProbeSet {
         Some(self)
     }
 
-    pub(crate) fn sampled_cursor_color(&self) -> Option<&str> {
+    pub(crate) fn sampled_cursor_color(&self) -> Option<u32> {
         self.cursor_color
             .value()
             .and_then(|sample| sample.as_ref())
-            .map(CursorColorSample::as_str)
+            .copied()
+            .map(CursorColorSample::value)
     }
 
     pub(crate) fn sampled_background(&self) -> Option<&BackgroundProbeBatch> {
@@ -873,12 +960,8 @@ enum BackgroundProbeProgressState {
 }
 
 impl BackgroundProbeProgressState {
-    fn from_request(request: &ObservationRequest, viewport: ViewportSnapshot) -> Self {
-        if request.probes().background() {
-            Self::Pending(BackgroundProbeProgress::new(viewport))
-        } else {
-            Self::Unrequested
-        }
+    const fn unrequested() -> Self {
+        Self::Unrequested
     }
 
     fn progress(&self) -> Option<&BackgroundProbeProgress> {
@@ -1046,10 +1129,7 @@ impl ObservationSnapshot {
     ) -> Self {
         Self {
             probes: ProbeSet::from_request(&request),
-            background_progress: BackgroundProbeProgressState::from_request(
-                &request,
-                basis.viewport(),
-            ),
+            background_progress: BackgroundProbeProgressState::unrequested(),
             request,
             basis,
             motion,
@@ -1103,7 +1183,31 @@ impl ObservationSnapshot {
         Some(self)
     }
 
-    pub(crate) fn cursor_color(&self) -> Option<&str> {
+    pub(crate) fn with_background_probe_plan(mut self, plan: BackgroundProbePlan) -> Self {
+        if !self.request.probes().background() {
+            return self;
+        }
+
+        let request_id = ProbeKind::Background.request_id(self.request.observation_id());
+        if plan.is_empty() {
+            self.probes.background = ProbeSlot::Requested(ProbeState::ready(
+                request_id,
+                self.request.observation_id(),
+                ProbeReuse::Exact,
+                BackgroundProbeBatch::empty(self.basis.viewport()),
+            ));
+            self.background_progress = BackgroundProbeProgressState::Complete;
+            return self;
+        }
+
+        self.probes.background = ProbeSlot::pending(request_id);
+        self.background_progress = BackgroundProbeProgressState::Pending(
+            BackgroundProbeProgress::new(self.basis.viewport(), plan),
+        );
+        self
+    }
+
+    pub(crate) fn cursor_color(&self) -> Option<u32> {
         self.probes.sampled_cursor_color()
     }
 
@@ -1339,14 +1443,17 @@ mod tests {
                     ProbeKind::CursorColor.request_id(request.observation_id()),
                     request.observation_id(),
                     ProbeReuse::Exact,
-                    Some(CursorColorSample::new("#abcdef".to_string())),
+                    Some(CursorColorSample::new(0x00AB_CDEF)),
                 ))
                 .is_none()
         );
         assert!(
             snapshot
                 .clone()
-                .with_background_progress(BackgroundProbeProgress::new(viewport))
+                .with_background_progress(BackgroundProbeProgress::new(
+                    viewport,
+                    BackgroundProbePlan::from_cells(Vec::new()),
+                ))
                 .is_none()
         );
         assert!(
@@ -1360,14 +1467,71 @@ mod tests {
     }
 
     #[test]
+    fn background_probe_chunk_mask_decodes_packed_bytes_and_truncates_padding() {
+        let mask = BackgroundProbeChunkMask::from_packed_bytes(10, vec![0b1000_1001, 0b1111_1111])
+            .expect("packed mask should decode");
+
+        assert_eq!(mask.len(), 10);
+        assert_eq!(mask.packed_len(), 2);
+        assert_eq!(
+            mask.iter().collect::<Vec<_>>(),
+            vec![
+                true, false, false, true, false, false, false, true, true, true,
+            ]
+        );
+    }
+
+    #[test]
+    fn background_probe_progress_materializes_particles_from_packed_chunk_masks() {
+        let viewport = ViewportSnapshot::new(CursorRow(2), CursorCol(5));
+        let progress = BackgroundProbeProgress::new(
+            viewport,
+            BackgroundProbePlan::from_cells(vec![
+                ScreenCell::new(1, 1).expect("cell"),
+                ScreenCell::new(1, 2).expect("cell"),
+                ScreenCell::new(1, 3).expect("cell"),
+                ScreenCell::new(1, 4).expect("cell"),
+                ScreenCell::new(1, 5).expect("cell"),
+                ScreenCell::new(2, 1).expect("cell"),
+                ScreenCell::new(2, 2).expect("cell"),
+                ScreenCell::new(2, 3).expect("cell"),
+                ScreenCell::new(2, 4).expect("cell"),
+                ScreenCell::new(2, 5).expect("cell"),
+            ]),
+        );
+        let chunk = progress.next_chunk().expect("single chunk viewport");
+        let packed_mask =
+            BackgroundProbeChunkMask::from_packed_bytes(10, vec![0b0000_0010, 0b0000_0010])
+                .expect("packed chunk mask should decode");
+
+        let Some(BackgroundProbeUpdate::Complete(batch)) =
+            progress.apply_chunk(&chunk, &packed_mask)
+        else {
+            panic!("packed chunk should complete a ten-cell sparse probe");
+        };
+
+        assert!(batch.allows_particle(ScreenCell::new(1, 2).expect("allowed cell")));
+        assert!(batch.allows_particle(ScreenCell::new(2, 5).expect("allowed cell")));
+        assert!(!batch.allows_particle(ScreenCell::new(1, 1).expect("blocked cell")));
+    }
+
+    #[test]
     fn requested_background_probe_tracks_progress_until_completion() {
         let request = observation_request(ProbeRequestSet::new(false, true));
         let viewport = ViewportSnapshot::new(CursorRow(600), CursorCol(4));
+        let cells = (0_i64..2050_i64)
+            .map(|index| {
+                let row = index / 4 + 1;
+                let col = index % 4 + 1;
+                ScreenCell::new(row, col).expect("cell")
+            })
+            .collect::<Vec<_>>();
         let mut snapshot = ObservationSnapshot::new(
             request.clone(),
             observation_basis(&request, viewport),
             ObservationMotion::default(),
-        );
+        )
+        .with_background_probe_plan(BackgroundProbePlan::from_cells(cells));
         let probe_request_id = ProbeKind::Background.request_id(request.observation_id());
         let mut saw_in_progress = false;
 
@@ -1376,12 +1540,11 @@ mod tests {
                 .background_progress()
                 .expect("requested background probe should own chunk progress");
             let chunk = progress.next_chunk().expect("remaining background chunk");
-            let width = usize::try_from(viewport.max_col.value()).expect("viewport width");
-            let row_count = usize::try_from(chunk.row_count()).expect("chunk rows");
-            let allowed_mask = vec![true; width * row_count];
+            let allowed_mask = vec![true; chunk.len()];
+            let packed_mask = BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask);
 
             match progress
-                .apply_chunk(chunk, &allowed_mask)
+                .apply_chunk(&chunk, &packed_mask)
                 .expect("chunk should match the active progress cursor")
             {
                 BackgroundProbeUpdate::InProgress(next_progress) => {

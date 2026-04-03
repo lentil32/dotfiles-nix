@@ -402,10 +402,16 @@ impl Effect {
                     .cursor_position()
                     .map_or(0_u64, CursorPosition::fingerprint);
                 let viewport = basis.viewport();
-                let background_chunk_seed = payload.background_chunk.map_or(0_u64, |chunk| {
-                    u64::from(chunk.start_row().value())
-                        ^ u64::from(chunk.row_count()).rotate_left(7)
-                });
+                let background_chunk_seed =
+                    payload.background_chunk.as_ref().map_or(0_u64, |chunk| {
+                        chunk.cells().iter().copied().enumerate().fold(
+                            u64::try_from(chunk.start_index()).unwrap_or(u64::MAX),
+                            |seed, (index, cell)| {
+                                seed ^ u64::try_from(index).unwrap_or(u64::MAX).rotate_left(5)
+                                    ^ screen_cell_fingerprint(cell).rotate_left(11)
+                            },
+                        )
+                    });
                 let cursor_color_witness_seed =
                     cursor_color_witness_fingerprint(basis.cursor_color_witness());
                 let cursor_text_context_seed =

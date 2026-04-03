@@ -1,4 +1,6 @@
-use crate::core::state::{CoreState, CursorColorProbeWitness, CursorColorSample};
+use crate::core::state::{
+    CoreState, CursorColorProbeWitness, CursorColorSample, CursorTextContext,
+};
 use crate::core::types::Generation;
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -19,7 +21,9 @@ mod timers;
 mod trace;
 
 use probe_cache::{
-    ConcealCacheKey, ConcealCacheLookup, ConcealRegion, CursorColorCacheLookup, ProbeCacheState,
+    ConcealCacheKey, ConcealCacheLookup, ConcealRegion, ConcealScreenCell,
+    ConcealScreenCellCacheKey, ConcealScreenCellCacheLookup, CursorColorCacheLookup,
+    CursorTextContextCacheKey, CursorTextContextCacheLookup, ProbeCacheState,
 };
 
 #[cfg(test)]
@@ -44,7 +48,7 @@ const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
 struct HostBridgeRevision(u32);
 
 impl HostBridgeRevision {
-    const CURRENT: Self = Self(3);
+    const CURRENT: Self = Self(7);
 
     const fn get(self) -> u32 {
         self.0
@@ -89,7 +93,7 @@ impl ShellState {
     }
 
     fn cached_cursor_color_sample(
-        &self,
+        &mut self,
         witness: &CursorColorProbeWitness,
     ) -> CursorColorCacheLookup {
         self.probe_cache.cached_cursor_color_sample(witness)
@@ -103,7 +107,22 @@ impl ShellState {
         self.probe_cache.store_cursor_color_sample(witness, sample);
     }
 
-    fn cached_conceal_regions(&self, key: &ConcealCacheKey) -> ConcealCacheLookup {
+    fn cached_cursor_text_context(
+        &mut self,
+        key: &CursorTextContextCacheKey,
+    ) -> CursorTextContextCacheLookup {
+        self.probe_cache.cached_cursor_text_context(key)
+    }
+
+    fn store_cursor_text_context(
+        &mut self,
+        key: CursorTextContextCacheKey,
+        context: Option<CursorTextContext>,
+    ) {
+        self.probe_cache.store_cursor_text_context(key, context);
+    }
+
+    fn cached_conceal_regions(&mut self, key: &ConcealCacheKey) -> ConcealCacheLookup {
         self.probe_cache.cached_conceal_regions(key)
     }
 
@@ -115,6 +134,21 @@ impl ShellState {
     ) {
         self.probe_cache
             .store_conceal_regions(key, scanned_to_col1, regions);
+    }
+
+    fn cached_conceal_screen_cell(
+        &mut self,
+        key: &ConcealScreenCellCacheKey,
+    ) -> ConcealScreenCellCacheLookup {
+        self.probe_cache.cached_conceal_screen_cell(key)
+    }
+
+    fn store_conceal_screen_cell(
+        &mut self,
+        key: ConcealScreenCellCacheKey,
+        cell: Option<ConcealScreenCell>,
+    ) {
+        self.probe_cache.store_conceal_screen_cell(key, cell);
     }
 
     fn note_cursor_color_colorscheme_change(&mut self) {
@@ -133,7 +167,15 @@ struct EngineState {
 }
 
 impl EngineState {
-    fn core_state(&self) -> CoreState {
+    fn core_state(&self) -> &CoreState {
+        &self.core_state
+    }
+
+    fn core_state_mut(&mut self) -> &mut CoreState {
+        &mut self.core_state
+    }
+
+    fn clone_core_state(&self) -> CoreState {
         self.core_state.clone()
     }
 

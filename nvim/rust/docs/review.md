@@ -1,110 +1,43 @@
-I did a static code review of `plugins/smear_cursor`. I couldn’t run `cargo test` or benchmarks here because `cargo` is not installed in this environment, so this is a source-based review rather than an execution-based one.
+I reviewed the code paths in `smear_cursor`. I couldn’t run the Neovim perf harness in this container because `nvim` isn’t installed, so this is a code-path review rather than a measured profile.
 
-Overall: **yes, it is well written**. It is much more disciplined than the average Neovim plugin. I do see **real performance hotspots**, but they are mostly in a few specific host-facing or render-facing paths, not signs of generally sloppy code.
+My expected ROI order is: **background probes**, **conceal/cursor probe caching**, **render-planner allocation churn**, then **state-clone / apply-path micro-opts**.
 
-## What looks strong
+A couple of fast no-code wins first: background sampling only turns on when `particles_enabled && !particles_over_text` in `src/config.rs:134-136`, and cursor-color probing only turns on when `cursor_color` or `cursor_color_insert_mode` is `"none"` in `src/config.rs:129-132`. So `particles_over_text = true` and avoiding `"none"` are the easiest immediate performance levers.
 
-The architecture is good.
+Here’s what I’d change in the code, in priority order:
 
-- The reducer/effect split is clean and intentional: `src/core/reducer/mod.rs:1-18` keeps the core transition logic separate from side effects, and `src/events/handlers/core_dispatch.rs:365-389` stages effects after the state transition instead of mixing everything together.
-- Reentrancy and panic handling are better than usual for plugin code. Engine state is guarded with an `InUse` slot in `src/events.rs:200-257`, runtime state is restored even across panics in `src/events/runtime.rs:629-643`, and plugin entrypoints are wrapped by `guard_plugin_call` in `src/lib.rs:32-43`.
-- The draw/apply side already has useful reuse mechanisms. `src/draw/apply.rs:151-170` prepares span hashes, and `src/draw/apply.rs:260-318` skips `set_extmark` when cached payloads already match. That is exactly the kind of optimization that matters in Neovim host code.
-- The project clearly takes performance seriously. You have diagnostics in `src/events/runtime.rs:413-510`, perf scripts under `scripts/`, and internal investigation notes like `investigations/latent-field-compile.md` and `investigations/scheduled-drain-current-state.md`.
-- The workspace lint policy is strong. `Cargo.toml:39-70` denies a lot of sloppy patterns, including `unwrap_used` and `redundant_clone`.
+- **Stop probing the whole viewport for background masking.**
+  Right now background progress is row-chunked over the viewport (`src/core/state/observation.rs:546`, `631-647`), Lua does `vim.fn.screenchar(row, col)` for every cell (`lua/rs_smear_cursor/probes.lua:76-95`), and Rust decodes every returned bool object one by one (`src/events/handlers/observation.rs:330-356`). That is expensive on both the Neovim side and the bridge side.
+  The render path already deduplicates particle output per screen cell in `src/draw/render/particles.rs:65-80`, so I’d change the background probe to a **sparse probe over the active smear/particle cells** instead of a full-width viewport mask. Even if you keep chunking, return **packed bytes / row bitmasks** rather than `Vec<bool>`. Also, background probes currently disable projection-cache reuse entirely in `src/core/reducer/machine/planning.rs:254-259`; making the probe local or witness-bound would let more projections reuse.
 
-My main quality concern is not the architecture; it is **size/complexity**. Several modules are very large, especially `src/events/handlers/core_dispatch.rs`, `src/draw/render_plan/solver.rs`, `src/core/state/observation.rs`, `src/draw/render/latent_field.rs`, `src/draw/mod.rs`, and `src/events/runtime.rs`. That does not make the plugin bad, but it does increase regression risk.
+- **Make cursor-color probes cheaper at the wire format and bridge layers.**
+  Cursor-color probing currently goes Rust → Vimscript → `luaeval` → Lua (`src/events/host_bridge.rs:84-92`, `autoload/rs_smear_cursor/host_bridge.vim:23-29`), and Lua formats colors as `"#RRGGBB"` strings (`lua/rs_smear_cursor/probes.lua:3-8`, `11-73`), which Rust parses back as strings in `src/events/cursor.rs:555-567`.
+  I’d return a **numeric `u32` color** instead of a hex string, and collapse the hot probe path to **one bridge hop**. Also cache `nvim_get_hl()` results by highlight group in Lua for the current colorscheme generation; the Rust side already has colorscheme invalidation hooks in `src/events/probe_cache.rs:156-159`.
 
-## The main performance issues I see
+- **Fix the cache sizes and cache shape.**
+  `CURSOR_COLOR_CACHE_CAPACITY` is only `4`, linearly scanned in a `VecDeque`, and conceal caching stores exactly **one line** (`src/events/probe_cache.rs:6`, `81-85`, `102-154`). That is almost guaranteed to thrash during normal navigation.
+  I’d make cursor-color caching a real small LRU, around **16–32 entries**, and change conceal caching to a **multi-line LRU keyed by `(buffer, changedtick, line)`**. Right now a partial conceal miss copies cached regions back to a `Vec`, rescans columns with `synconcealed`, and then still calls `screenpos()` for region boundaries (`src/events/cursor.rs:256-277`, `340-375`, `393-460`). Caching **prefix conceal deltas** or **region-boundary screen cells** would remove a lot of repeated work.
 
-### 1. Conceal-aware cursor position resolution is probably expensive on long lines
+- **Reduce repeated observation reads.**
+  `collect_observation_basis()` already reads mode, cursor position, viewport, text context, and cursor-color witness (`src/events/handlers/observation.rs:239-289`), but `collect_cursor_color_report()` immediately re-reads mode, cursor position, and witness before probing (`359-409`).
+  Some of that is for correctness, but there is probably room for a fast path: reuse the already-captured snapshot when the probe executes in the same reducer wave, and only revalidate cheap fields when there was an actual queue hop. Also, `current_cursor_text_context()` does `get_lines()` plus string allocation every observation (`93-176`); that wants a small cache keyed by `(buffer_handle, changedtick, cursor_line, tracked_line)`.
 
-`src/events/cursor.rs:235-320` is the sharpest host-side hotspot I found.
+- **Add reusable scratch for the render planner and stop rebuilding ordered maps everywhere.**
+  `decode_compiled_frame()` rebuilds `cell_candidates`, resamples the centerline, and rebuilds `next_cells` every frame (`src/draw/render_plan/lifecycle.rs:136-183`). `build_cell_candidates()`, `decode_locally()`, and `non_empty_candidates()` allocate fresh `BTreeMap` / `Vec`s each time (`src/draw/render_plan/infra.rs:1136-1194`), and `resample_centerline()` allocates three vectors per call (`src/draw/render_plan/solver.rs:150-234`).
+  The compiled-field path already has a good scratch reuse pattern in `src/draw/render/latent_field.rs:895-920`; I’d do the same for planner decode. Internally, I’d strongly consider `HashMap` or dense scratch buffers instead of `BTreeMap` for hot accumulation, then sort only at the edge if deterministic order is required for tests or output.
 
-It does this:
+- **Avoid doing three full swept-occupancy builds per frame sample.**
+  `stage_deposited_samples()` calls `deposit_swept_occupancy()` once for each tail band—sheath, core, filament—on every sample (`src/draw/render_plan/solver.rs:1546-1587`). But `deposit_swept_occupancy()` recomputes row intervals, column intervals, nested microtile loops, and allocates a fresh `BTreeMap` every time (`src/draw/render/latent_field.rs:665-753`).
+  That should become a two-phase path: **compute sweep geometry once**, then materialize the three bands from shared coverage data. Even a partial refactor that shares intervals and output buffers across bands should help a lot.
 
-- loops from column `1..=cursor_column`
-- calls `synconcealed()` for each column
-- computes replacement widths
-- then calls `screenpos()` again for conceal region boundaries
+- **Cut whole-state clones in the reducer path.**
+  `EngineState::core_state()` clones `CoreState` (`src/events.rs:135-138`), `runtime::core_state()` exposes that clone (`src/events/runtime.rs:664-665`), and `dispatch_core_event()` clones again for every reducer call (`src/events/handlers/core_dispatch.rs:365-389`). `CoreState` includes scene and realization payloads in `src/core/state/protocol.rs:224-237`, so those clones are not free.
+  Longer-term, I’d move the reducer toward **in-place mutation** or split large payloads behind `Arc`/copy-on-write so hot events stop copying the whole world.
 
-That is a lot of Neovim function traffic for one cursor read. On long lines, or files using conceal heavily, this can get expensive fast.
+- **Trim apply-path overhead.**
+  `prepare_apply_plan()` hashes every span payload every frame (`src/draw/apply.rs:100-107`, `151-170`), then `draw_span()` checks whether the target window already has that payload (`260-318`). I’d move hash generation upstream into realization/projection so the apply phase just reads it.
+  Also, `redraw()` does a `luaeval` capability check every time before falling back to `redraw!` (`src/draw/apply.rs:49-67`). Resolve that once during setup and keep a direct fast path.
 
-### 2. Cursor-color sampling is expensive when enabled
+If I were only going to try **three** changes first, I’d do: **(1) sparse/bitpacked background probes**, **(2) multi-line conceal LRU**, and **(3) shared planner scratch plus single-sweep occupancy generation**.
 
-This path is conditional, which is good: it only matters when `cursor_color` or `cursor_color_insert_mode` is `"none"` in `src/config.rs:128-130`.
-
-But when it is enabled, the probe is not cheap:
-
-- `CURSOR_COLOR_LUAEVAL_EXPR` in `src/events.rs:39-110` does syntax lookup, Treesitter capture probing, and extmark inspection.
-- It is invoked through `luaeval` in `src/events/cursor.rs:412-425`.
-- Cache reuse is exact-match only in `src/events/handlers/observation.rs:379-429`.
-
-One extra detail: the current probe cache is only a **single entry** in `src/events/probe_cache.rs:17-59`. So even modest cursor movement can churn the cache.
-
-### 3. Background probing can be costly for particle mode
-
-Again, this is conditional: only when `particles_enabled && !particles_over_text` in `src/config.rs:133-135`.
-
-The actual probe in `src/events/handlers/observation.rs:313-377` runs a Lua loop calling `screenchar()` over a chunk of cells. You do chunk the work with `MAX_BACKGROUND_PROBE_CELLS_PER_EDGE = 2048` in `src/core/state/observation.rs:546-648`, which is a good mitigation, but this is still the kind of shell-side scan that can show up in latency.
-
-### 4. Latent-field recompilation is the biggest renderer-side hotspot
-
-This matches your own investigation note, and I agree with it.
-
-- `src/draw/render_plan/lifecycle.rs:104-133` recompiles whenever the latent revision changes.
-- `src/draw/render/latent_field.rs:369-387` bumps revision on every inserted slice.
-- `src/draw/render/latent_field.rs:665-752` rasterizes swept occupancy over the covered cell product.
-- `src/draw/render/latent_field.rs:895-920` recompiles from the retained cache every time the compiled revision is stale.
-
-That is the most plausible “plugin feels slow while moving” path in normal use.
-
-### 5. Scheduler slowdown looks like churn, not a broken queue
-
-I do **not** see a catastrophic scheduler algorithm bug.
-
-The queue itself is a `VecDeque` in `src/events/handlers/core_dispatch.rs:204-230`, and the drain logic is bounded in `src/events/handlers/core_dispatch.rs:566-760`. Your note in `investigations/scheduled-drain-current-state.md` is consistent with the code: the issue is repeated hot-drain convergence under churn, not accidental quadratic behavior.
-
-### 6. A few smaller issues
-
-These are secondary, but worth cleaning up:
-
-- Disabled filetype checks are linear scans over a `Vec<String>` in `src/events/runtime.rs:195-203`.
-- Logging flushes every line in `src/events/logging.rs:60-99`, which can distort perf when file logging is on.
-- Every dispatched event clones `CoreState` through `core_state()` in `src/events/handlers/core_dispatch.rs:365-385` and `src/events/runtime.rs:663-670`. I would **measure** this, not optimize it blindly, because some big pieces are already shared, like `Arc<LogicalRaster>` in `src/core/state/scene.rs:346-356`.
-
-## What I would change first
-
-### Highest priority
-
-1. **Cache conceal information by `(buffer, changedtick, line)`** and skip conceal correction entirely when conceal cannot matter. Right now the per-column `synconcealed()` walk is the most obvious avoidable host cost.
-2. **Replace repeated `luaeval` probe strings with setup-installed Lua helpers** using your existing host-bridge approach. That would help both cursor-color and background probes. It reduces parse/bridge overhead and makes those probe paths easier to evolve.
-3. **Upgrade cursor-color caching from a single-entry cache to a small LRU** keyed by something like `(buffer, changedtick, line, col, mode, colorscheme_generation)`. `src/events/probe_cache.rs:17-59` is too narrow for real cursor motion patterns.
-
-### Next
-
-4. **Make latent-field compilation incremental or dirty-region based.** That is the biggest likely win in active motion. Even partial dirty-tile recompilation would be valuable.
-5. **Keep the current queue model, but tune it adaptively** based on observed backlog/churn rather than only the current thermal snapshots. I would not rewrite the queue structure.
-6. **Convert disabled filetypes to a set**. Small win, easy change.
-
-### Maintainability
-
-7. **Split the giant files.** `core_dispatch.rs` especially wants decomposition into queueing, budgeting, draining, metrics, and probe retry logic. This is mostly about keeping future perf regressions from creeping in.
-
-## One thing I would _not_ chase first
-
-The recursive ribbon solver in `src/draw/render_plan/solver.rs:789-889` looks scary at first glance, but it is tightly capped by constants in `src/draw/render_plan/infra.rs:581-583`. I would profile it, but I would not put it ahead of conceal scanning, color probing, or latent-field recompilation.
-
-## Bottom line
-
-**Verdict:** well-written, thoughtful, and robust.
-
-**Performance verdict:** no obvious disaster, but yes, there are meaningful hotspots:
-
-- conceal-aware cursor reads,
-- cursor/background host probes,
-- latent-field rebuilds during active motion.
-
-**Best enhancements:**
-cache conceal work, turn the heavy `luaeval` probes into installed helpers plus better caching, and make latent-field compile more incremental.
-
-The next profiling pass in your repo should focus on those three areas first.
+The repo already has the right validation hooks for this: `scripts/run_perf_window_switch.sh:4-49`, `scripts/compare_particle_probe_perf.sh:4-22`, and per-probe timing around `src/events/runtime.rs:894-899`.

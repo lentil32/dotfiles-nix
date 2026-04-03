@@ -1,7 +1,14 @@
 use super::host_bridge::installed_host_bridge;
 use super::logging::{trace_lazy, warn};
-use super::probe_cache::{ConcealCacheKey, ConcealCacheLookup, ConcealRegion};
-use super::runtime::{cached_conceal_regions, store_conceal_regions};
+use super::probe_cache::{
+    ConcealCacheKey, ConcealCacheLookup, ConcealRegion, ConcealScreenCellCacheKey,
+    ConcealScreenCellCacheLookup,
+};
+use super::runtime::{
+    cached_conceal_regions, cached_conceal_screen_cell, store_conceal_regions,
+    store_conceal_screen_cell,
+};
+use crate::core::types::Generation;
 use crate::lua::{
     LuaParseError, i64_from_object_ref_with_typed, i64_from_object_typed, string_from_object_typed,
 };
@@ -27,10 +34,21 @@ enum CursorParseError {
     ScreenposDictionary,
     #[error("screenpos missing row/col pair")]
     ScreenposMissingRowCol,
+    #[error("getwininfo returned invalid list")]
+    GetwininfoInvalidList,
+    #[error("getwininfo returned unexpected list length")]
+    GetwininfoUnexpectedLen,
+    #[error("getwininfo returned invalid dictionary")]
+    GetwininfoDictionary,
     #[error("synconcealed returned invalid list")]
     SynconcealedInvalidList,
     #[error("synconcealed returned unexpected list length")]
     SynconcealedUnexpectedLen,
+    #[error("{context} missing {field}")]
+    DictionaryMissingField {
+        context: &'static str,
+        field: &'static str,
+    },
     #[error("{context} parse failed: {source}")]
     Value {
         context: String,
@@ -89,6 +107,15 @@ fn dictionary_i64_field(
         .map_err(|source| cursor_parse_error(format!("{context}.{field}"), source))
 }
 
+fn required_dictionary_i64_field(
+    dict: &Dictionary,
+    context: &'static str,
+    field: &'static str,
+) -> CursorResult<i64> {
+    dictionary_i64_field(dict, context, field)?
+        .ok_or(CursorParseError::DictionaryMissingField { context, field }.into())
+}
+
 fn screenpos_dictionary(screenpos: Object) -> CursorResult<Dictionary> {
     Dictionary::from_object(screenpos).map_err(|_| CursorParseError::ScreenposDictionary.into())
 }
@@ -115,6 +142,62 @@ fn buffer_column_to_col1(column: usize) -> i64 {
 
 fn screen_cell_to_point((row, col): ScreenCell) -> ScreenPoint {
     (row as f64, col as f64)
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ConcealScreenCellView {
+    window_row: i64,
+    window_col: i64,
+    window_width: i64,
+    window_height: i64,
+    topline: i64,
+    leftcol: i64,
+    textoff: i64,
+}
+
+impl ConcealScreenCellView {
+    fn capture(window: &api::Window) -> CursorResult<Self> {
+        let args = Array::from_iter([Object::from(window.handle())]);
+        let [entry]: [Object; 1] =
+            Vec::<Object>::from_object(api::call_function("getwininfo", args)?)
+                .map_err(|_| CursorParseError::GetwininfoInvalidList)?
+                .try_into()
+                .map_err(|_| CursorParseError::GetwininfoUnexpectedLen)?;
+        let dict =
+            Dictionary::from_object(entry).map_err(|_| CursorParseError::GetwininfoDictionary)?;
+
+        Ok(Self {
+            window_row: required_dictionary_i64_field(&dict, "getwininfo", "winrow")?,
+            window_col: required_dictionary_i64_field(&dict, "getwininfo", "wincol")?,
+            window_width: required_dictionary_i64_field(&dict, "getwininfo", "width")?,
+            window_height: required_dictionary_i64_field(&dict, "getwininfo", "height")?,
+            topline: required_dictionary_i64_field(&dict, "getwininfo", "topline")?,
+            leftcol: required_dictionary_i64_field(&dict, "getwininfo", "leftcol")?,
+            textoff: required_dictionary_i64_field(&dict, "getwininfo", "textoff")?,
+        })
+    }
+
+    fn cache_key(
+        self,
+        window_handle: i64,
+        conceal_key: &ConcealCacheKey,
+        col1: i64,
+    ) -> ConcealScreenCellCacheKey {
+        ConcealScreenCellCacheKey::new(
+            window_handle,
+            conceal_key.buffer_handle(),
+            conceal_key.changedtick(),
+            conceal_key.line(),
+            col1,
+            self.window_row,
+            self.window_col,
+            self.window_width,
+            self.window_height,
+            self.topline,
+            self.leftcol,
+            self.textoff,
+        )
+    }
 }
 
 struct BufferCursorRead {
@@ -338,11 +421,9 @@ fn conceal_cache_key(window: &api::Window, line: usize) -> CursorResult<ConcealC
 }
 
 fn cached_concealed_regions_for_cursor(
-    window: &api::Window,
-    line: usize,
+    key: ConcealCacheKey,
     column: usize,
 ) -> CursorResult<Arc<[ConcealRegion]>> {
-    let key = conceal_cache_key(window, line)?;
     let required_col1 = i64::try_from(column).unwrap_or(i64::MAX);
     let cached = match cached_conceal_regions(&key) {
         Ok(ConcealCacheLookup::Hit(cached)) => Some(cached),
@@ -365,7 +446,7 @@ fn cached_concealed_regions_for_cursor(
     let scan_start_col1 = cached
         .as_ref()
         .map_or(1, |cached| cached.scanned_to_col1().saturating_add(1));
-    extend_concealed_regions(line, scan_start_col1, required_col1, &mut regions)?;
+    extend_concealed_regions(key.line(), scan_start_col1, required_col1, &mut regions)?;
 
     let regions: Arc<[ConcealRegion]> = regions.into();
     if let Err(err) = store_conceal_regions(key, required_col1, Arc::clone(&regions)) {
@@ -381,6 +462,35 @@ fn screenpos_for_buffer_column(window: &api::Window, line: usize, col1: i64) -> 
         Object::from(col1),
     ]);
     Ok(api::call_function("screenpos", args)?)
+}
+
+fn screen_cell_for_buffer_column(
+    window: &api::Window,
+    line: usize,
+    col1: i64,
+) -> CursorResult<Option<ScreenCell>> {
+    parse_screenpos_cell(screenpos_for_buffer_column(window, line, col1)?)
+}
+
+fn cached_screen_cell_for_buffer_column(
+    window: &api::Window,
+    conceal_key: &ConcealCacheKey,
+    view: ConcealScreenCellView,
+    col1: i64,
+) -> CursorResult<Option<ScreenCell>> {
+    let window_handle = i64::from(window.handle());
+    let cache_key = view.cache_key(window_handle, conceal_key, col1);
+    match cached_conceal_screen_cell(&cache_key) {
+        Ok(ConcealScreenCellCacheLookup::Hit(cell)) => return Ok(cell),
+        Ok(ConcealScreenCellCacheLookup::Miss) => {}
+        Err(err) => warn(&format!("conceal screen cell cache read failed: {err}")),
+    }
+
+    let cell = screen_cell_for_buffer_column(window, conceal_key.line(), col1)?;
+    if let Err(err) = store_conceal_screen_cell(cache_key, cell) {
+        warn(&format!("conceal screen cell cache write failed: {err}"));
+    }
+    Ok(cell)
 }
 
 fn apply_conceal_delta(raw_cell: ScreenCell, conceal_delta: i64) -> ScreenPoint {
@@ -440,15 +550,27 @@ fn resolve_buffer_cursor_position(
         return Ok(screen_cell_to_point(raw_cell));
     }
 
-    let regions = cached_concealed_regions_for_cursor(window, line, column)?;
+    let conceal_key = conceal_cache_key(window, line)?;
+    let regions = cached_concealed_regions_for_cursor(conceal_key.clone(), column)?;
     if regions.is_empty() {
         return Ok(screen_cell_to_point(raw_cell));
     }
 
+    let screen_cell_view = match ConcealScreenCellView::capture(window) {
+        Ok(screen_cell_view) => Some(screen_cell_view),
+        Err(err) => {
+            warn(&format!("conceal screen cell view capture failed: {err}"));
+            None
+        }
+    };
     let current_col1 = buffer_column_to_col1(column);
     let Some(conceal_delta) =
         conceal_delta_for_regions(current_col1, raw_cell, regions.as_ref(), |col1| {
-            parse_screenpos_cell(screenpos_for_buffer_column(window, line, col1)?)
+            if let Some(screen_cell_view) = screen_cell_view {
+                cached_screen_cell_for_buffer_column(window, &conceal_key, screen_cell_view, col1)
+            } else {
+                screen_cell_for_buffer_column(window, line, col1)
+            }
         })?
     else {
         // this conceal correction is proven for same-row drift. If a concealed region
@@ -552,19 +674,26 @@ pub(super) fn current_buffer_filetype(buffer: &api::Buffer) -> Result<String> {
     current_buffer_option_string(buffer, "filetype")
 }
 
-fn cursor_color_at_current_position() -> Result<Option<String>> {
-    let value = installed_host_bridge()?.cursor_color_at_cursor()?;
+fn cursor_color_at_current_position(colorscheme_generation: Generation) -> Result<Option<u32>> {
+    let value = installed_host_bridge()?.cursor_color_at_cursor(colorscheme_generation)?;
     if value.is_nil() {
         return Ok(None);
     }
-    let parsed = string_from_object_typed("cursor_color_host_bridge", value).map_err(|source| {
+    let parsed = i64_from_object_typed("cursor_color_host_bridge", value).map_err(|source| {
         nvim_oxi::Error::from(cursor_parse_error("cursor_color_host_bridge", source))
+    })?;
+    let parsed = u32::try_from(parsed).map_err(|_| {
+        nvim_oxi::api::Error::Other(
+            "cursor_color_host_bridge parse failed: color out of range".into(),
+        )
     })?;
     Ok(Some(parsed))
 }
 
-pub(super) fn sampled_cursor_color_at_current_position() -> Result<Option<String>> {
-    cursor_color_at_current_position()
+pub(super) fn sampled_cursor_color_at_current_position(
+    colorscheme_generation: Generation,
+) -> Result<Option<u32>> {
+    cursor_color_at_current_position(colorscheme_generation)
 }
 
 pub(super) fn line_value(key: &str) -> Result<i64> {
@@ -589,9 +718,10 @@ pub(super) fn smear_outside_cmd_row(corners: &[Point; 4]) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BufferCursorRead, ConcealRegion, apply_conceal_delta, command_row_from_dimensions,
-        conceal_delta_for_regions, concealcursor_allows_mode, merge_conceal_region,
-        parse_screenpos_cell, screen_cell_to_point, should_use_real_cmdline_cursor,
+        BufferCursorRead, ConcealCacheKey, ConcealRegion, ConcealScreenCellView,
+        apply_conceal_delta, command_row_from_dimensions, conceal_delta_for_regions,
+        concealcursor_allows_mode, merge_conceal_region, parse_screenpos_cell,
+        screen_cell_to_point, should_use_real_cmdline_cursor,
     };
     use nvim_oxi::{Dictionary, Object};
 
@@ -615,6 +745,26 @@ mod tests {
             end_col1,
             match_id,
             replacement_width,
+        }
+    }
+
+    fn conceal_screen_cell_view(
+        window_row: i64,
+        window_col: i64,
+        window_width: i64,
+        window_height: i64,
+        topline: i64,
+        leftcol: i64,
+        textoff: i64,
+    ) -> ConcealScreenCellView {
+        ConcealScreenCellView {
+            window_row,
+            window_col,
+            window_width,
+            window_height,
+            topline,
+            leftcol,
+            textoff,
         }
     }
 
@@ -660,6 +810,24 @@ mod tests {
         assert_eq!(
             regions,
             vec![conceal_region(3, 4, 17, 1), conceal_region(7, 7, 18, 0)],
+        );
+    }
+
+    #[test]
+    fn conceal_screen_cell_cache_key_tracks_window_view_state() {
+        let conceal_key = ConcealCacheKey::new(22, 14, 7);
+        let base = conceal_screen_cell_view(2, 3, 120, 40, 11, 0, 4);
+
+        let moved_view = conceal_screen_cell_view(2, 3, 120, 40, 12, 0, 4);
+        let changed_textoff = conceal_screen_cell_view(2, 3, 120, 40, 11, 0, 5);
+
+        assert_ne!(
+            base.cache_key(8, &conceal_key, 5),
+            moved_view.cache_key(8, &conceal_key, 5),
+        );
+        assert_ne!(
+            base.cache_key(8, &conceal_key, 5),
+            changed_textoff.cache_key(8, &conceal_key, 5),
         );
     }
 

@@ -147,51 +147,68 @@ fn solve_slice_band_half_width(frame: &RenderFrame, u: f64, curvature: f64) -> f
     compressed.clamp(filament_half_width, head_half_width)
 }
 
-fn resample_centerline(
+fn populate_resampled_centerline_with_scratch(
     history: &VecDeque<CenterPathSample>,
     spacing: f64,
     block_aspect_ratio: f64,
-) -> Vec<CenterSample> {
+    scratch: &mut PlannerDecodeScratch,
+) {
+    let PlannerDecodeScratch {
+        centerline_points,
+        centerline_cumulative,
+        centerline,
+        ..
+    } = scratch;
+    centerline_points.clear();
+    centerline_cumulative.clear();
+    centerline.clear();
+
     if history.is_empty() {
-        return Vec::new();
+        return;
     }
 
-    let mut points = Vec::<Point>::with_capacity(history.len());
+    centerline_points.reserve(history.len().saturating_sub(centerline_points.capacity()));
     for sample in history {
-        let should_push = points.last().is_none_or(|last| {
+        let should_push = centerline_points.last().is_none_or(|last| {
             aspect_metric_distance(*last, sample.pos, block_aspect_ratio) > 1.0e-3
         });
         if should_push {
-            points.push(sample.pos);
+            centerline_points.push(sample.pos);
         }
     }
 
-    if points.is_empty() {
-        return Vec::new();
+    if centerline_points.is_empty() {
+        return;
     }
-    if points.len() == 1 {
-        return vec![CenterSample {
-            pos: points[0],
+    if centerline_points.len() == 1 {
+        centerline.push(CenterSample {
+            pos: centerline_points[0],
             tangent_row: 0.0,
             tangent_col: 1.0,
-        }];
+        });
+        return;
     }
 
-    let mut cumulative = Vec::<f64>::with_capacity(points.len());
-    cumulative.push(0.0);
-    for pair in points.windows(2) {
+    centerline_cumulative.reserve(
+        centerline_points
+            .len()
+            .saturating_sub(centerline_cumulative.capacity()),
+    );
+    centerline_cumulative.push(0.0);
+    for pair in centerline_points.windows(2) {
         let delta = aspect_metric_distance(pair[1], pair[0], block_aspect_ratio);
-        let previous = cumulative.last().copied().unwrap_or(0.0);
-        cumulative.push(previous + delta.max(0.0));
+        let previous = centerline_cumulative.last().copied().unwrap_or(0.0);
+        centerline_cumulative.push(previous + delta.max(0.0));
     }
 
-    let total_len = cumulative.last().copied().unwrap_or(0.0);
+    let total_len = centerline_cumulative.last().copied().unwrap_or(0.0);
     if total_len <= f64::EPSILON {
-        return vec![CenterSample {
-            pos: points[0],
+        centerline.push(CenterSample {
+            pos: centerline_points[0],
             tangent_row: 0.0,
             tangent_col: 1.0,
-        }];
+        });
+        return;
     }
 
     let safe_spacing = if spacing.is_finite() {
@@ -201,18 +218,20 @@ fn resample_centerline(
     };
     let sample_count = (total_len / safe_spacing).ceil() as usize + 1;
 
-    let mut resampled = Vec::<CenterSample>::with_capacity(sample_count);
+    centerline.reserve(sample_count.saturating_sub(centerline.capacity()));
     let mut segment = 0_usize;
     for sample_index in 0..sample_count {
         let target_arc = (sample_index as f64 * safe_spacing).min(total_len);
-        while segment + 2 < cumulative.len() && target_arc > cumulative[segment + 1] {
+        while segment + 2 < centerline_cumulative.len()
+            && target_arc > centerline_cumulative[segment + 1]
+        {
             segment = segment.saturating_add(1);
         }
 
-        let start = points[segment];
-        let end = points[segment + 1];
-        let segment_start = cumulative[segment];
-        let segment_end = cumulative[segment + 1];
+        let start = centerline_points[segment];
+        let end = centerline_points[segment + 1];
+        let segment_start = centerline_cumulative[segment];
+        let segment_end = centerline_cumulative[segment + 1];
         let segment_len = (segment_end - segment_start).max(f64::EPSILON);
         let t = ((target_arc - segment_start) / segment_len).clamp(0.0, 1.0);
         let pos = Point {
@@ -224,13 +243,28 @@ fn resample_centerline(
             end.col - start.col,
             block_aspect_ratio,
         );
-        resampled.push(CenterSample {
+        centerline.push(CenterSample {
             pos,
             tangent_row,
             tangent_col,
         });
     }
-    resampled
+}
+
+#[cfg(test)]
+fn resample_centerline(
+    history: &VecDeque<CenterPathSample>,
+    spacing: f64,
+    block_aspect_ratio: f64,
+) -> Vec<CenterSample> {
+    let mut scratch = PlannerDecodeScratch::default();
+    populate_resampled_centerline_with_scratch(
+        history,
+        spacing,
+        block_aspect_ratio,
+        &mut scratch,
+    );
+    scratch.centerline
 }
 
 fn slice_band_half_width(frame: &RenderFrame) -> f64 {
@@ -1151,8 +1185,14 @@ fn merge_ribbon_assignments(
     baseline: &mut BTreeMap<(i64, i64), DecodedCellState>,
     slices: &[RibbonSlice],
     solved_states: &[SliceState],
+    scratch: &mut SolverScratch,
 ) {
-    let mut votes = BTreeMap::<(i64, i64), BTreeMap<Option<DecodedCellState>, VoteStats>>::new();
+    let SolverScratch {
+        vote_buckets,
+        reusable_vote_lists,
+        ..
+    } = scratch;
+    recycle_vote_lists(vote_buckets, reusable_vote_lists);
 
     for (slice, solved_state) in slices.iter().zip(solved_states.iter().copied()) {
         let peak_highlight_level = slice_peak_highlight_level(slice);
@@ -1164,37 +1204,38 @@ fn merge_ribbon_assignments(
                 cell_index,
                 peak_highlight_level,
             );
-            let bucket = votes
-                .entry(slice.cells[cell_index].coord)
-                .or_default()
-                .entry(state)
-                .or_default();
-            bucket.count = bucket.count.saturating_add(1);
-            bucket.total_cost = bucket.total_cost.saturating_add(cost);
+            let coord = slice.cells[cell_index].coord;
+            let bucket = match vote_buckets.entry(coord) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(reusable_vote_lists.pop().unwrap_or_default())
+                }
+            };
+            record_state_vote(bucket, state, cost);
         }
     }
 
-    for (coord, per_state_votes) in votes {
-        let mut best: Option<(Option<DecodedCellState>, VoteStats)> = None;
-        for (state, stats) in per_state_votes {
+    for (&coord, per_state_votes) in vote_buckets.iter() {
+        let mut best: Option<StateVote> = None;
+        for vote in per_state_votes.iter().copied() {
             let should_replace = match best {
                 None => true,
-                Some((best_state, best_stats)) => {
-                    stats.count > best_stats.count
-                        || (stats.count == best_stats.count
-                            && stats.total_cost < best_stats.total_cost)
-                        || (stats.count == best_stats.count
-                            && stats.total_cost == best_stats.total_cost
-                            && state_sort_key(state) < state_sort_key(best_state))
+                Some(best_vote) => {
+                    vote.stats.count > best_vote.stats.count
+                        || (vote.stats.count == best_vote.stats.count
+                            && vote.stats.total_cost < best_vote.stats.total_cost)
+                        || (vote.stats.count == best_vote.stats.count
+                            && vote.stats.total_cost == best_vote.stats.total_cost
+                            && state_sort_key(vote.state) < state_sort_key(best_vote.state))
                 }
             };
             if should_replace {
-                best = Some((state, stats));
+                best = Some(vote);
             }
         }
 
-        if let Some((state, _)) = best {
-            match state {
+        if let Some(best_vote) = best {
+            match best_vote.state {
                 Some(decoded) => {
                     baseline.insert(coord, decoded);
                 }
@@ -1204,6 +1245,32 @@ fn merge_ribbon_assignments(
             }
         }
     }
+}
+
+fn recycle_vote_lists(
+    vote_buckets: &mut std::collections::HashMap<(i64, i64), Vec<StateVote>>,
+    reusable_vote_lists: &mut Vec<Vec<StateVote>>,
+) {
+    for (_, mut votes) in vote_buckets.drain() {
+        votes.clear();
+        reusable_vote_lists.push(votes);
+    }
+}
+
+fn record_state_vote(votes: &mut Vec<StateVote>, state: Option<DecodedCellState>, cost: u64) {
+    if let Some(existing) = votes.iter_mut().find(|vote| vote.state == state) {
+        existing.stats.count = existing.stats.count.saturating_add(1);
+        existing.stats.total_cost = existing.stats.total_cost.saturating_add(cost);
+        return;
+    }
+
+    votes.push(StateVote {
+        state,
+        stats: VoteStats {
+            count: 1,
+            total_cost: cost,
+        },
+    });
 }
 
 fn spatial_distance(previous: Option<DecodedCellState>, next: Option<DecodedCellState>) -> u64 {
@@ -1256,19 +1323,58 @@ fn active_support_is_disconnected(active_cells: &BTreeMap<(i64, i64), DecodedCel
     component_count > 1
 }
 
-fn solve_pairwise_fallback(
+fn prepare_fallback_assignment(
+    cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
+    scratch: &mut SolverScratch,
+) {
+    let SolverScratch {
+        fallback_coords,
+        fallback_coord_index,
+        fallback_assignment,
+        ..
+    } = scratch;
+    fallback_coords.clear();
+    fallback_coords.reserve(cell_candidates.len().saturating_sub(fallback_coords.capacity()));
+    fallback_coord_index.clear();
+    fallback_coord_index.reserve(
+        cell_candidates
+            .len()
+            .saturating_sub(fallback_coord_index.capacity()),
+    );
+    fallback_assignment.clear();
+    fallback_assignment.reserve(
+        cell_candidates
+            .len()
+            .saturating_sub(fallback_assignment.capacity()),
+    );
+
+    for (index, (&coord, candidates)) in cell_candidates.iter().enumerate() {
+        fallback_coords.push(coord);
+        fallback_coord_index.insert(coord, index);
+        fallback_assignment.push(candidates.first().and_then(|candidate| candidate.state));
+    }
+}
+
+fn solve_pairwise_fallback_with_scratch(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     spatial_weight_q10: u32,
+    scratch: &mut SolverScratch,
 ) -> BTreeMap<(i64, i64), DecodedCellState> {
-    let mut assignment = BTreeMap::<(i64, i64), Option<DecodedCellState>>::new();
-    for (&coord, candidates) in cell_candidates {
-        let state = candidates.first().and_then(|candidate| candidate.state);
-        assignment.insert(coord, state);
+    prepare_fallback_assignment(cell_candidates, scratch);
+    let SolverScratch {
+        fallback_coords,
+        fallback_coord_index,
+        fallback_assignment,
+        ..
+    } = scratch;
+
+    if fallback_coords.is_empty() {
+        return BTreeMap::new();
     }
 
     for _ in 0..FALLBACK_ITERATIONS {
         let mut changed = false;
-        for (&coord, candidates) in cell_candidates {
+        for (cell_index, (coord, candidates)) in cell_candidates.iter().enumerate() {
             let neighbors = [
                 (coord.0 - 1, coord.1),
                 (coord.0 + 1, coord.1),
@@ -1283,10 +1389,10 @@ fn solve_pairwise_fallback(
 
             for candidate in candidates.iter().copied() {
                 let pairwise = neighbors.into_iter().fold(0_u64, |acc, neighbor| {
-                    if !cell_candidates.contains_key(&neighbor) {
+                    let Some(&neighbor_index) = fallback_coord_index.get(&neighbor) else {
                         return acc;
-                    }
-                    let neighbor_state = assignment.get(&neighbor).copied().flatten();
+                    };
+                    let neighbor_state = fallback_assignment[neighbor_index];
                     let raw = spatial_distance(candidate.state, neighbor_state);
                     acc.saturating_add(scale_penalty(raw, spatial_weight_q10))
                 });
@@ -1300,10 +1406,10 @@ fn solve_pairwise_fallback(
                 }
             }
 
-            let current = assignment.get(&coord).copied().flatten();
+            let current = fallback_assignment[cell_index];
             if current != best.state {
                 changed = true;
-                assignment.insert(coord, best.state);
+                fallback_assignment[cell_index] = best.state;
             }
         }
         if !changed {
@@ -1311,10 +1417,21 @@ fn solve_pairwise_fallback(
         }
     }
 
-    assignment
-        .into_iter()
+    fallback_coords
+        .iter()
+        .copied()
+        .zip(fallback_assignment.iter().copied())
         .filter_map(|(coord, state)| state.map(|decoded| (coord, decoded)))
         .collect::<BTreeMap<_, _>>()
+}
+
+#[cfg(test)]
+fn solve_pairwise_fallback(
+    cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
+    spatial_weight_q10: u32,
+) -> BTreeMap<(i64, i64), DecodedCellState> {
+    let mut scratch = SolverScratch::default();
+    solve_pairwise_fallback_with_scratch(cell_candidates, spatial_weight_q10, &mut scratch)
 }
 
 fn decode_compiled_field_with_solver(
@@ -1322,6 +1439,7 @@ fn decode_compiled_field_with_solver(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
     frame: &RenderFrame,
+    scratch: &mut SolverScratch,
     solve_ribbon: impl FnOnce(&[RibbonSlice], u32) -> Option<Vec<SliceState>>,
 ) -> DecodedField {
     let mut baseline = decode_locally(cell_candidates);
@@ -1340,7 +1458,11 @@ fn decode_compiled_field_with_solver(
             // support can take the explicit fallback path instead of silently collapsing to local
             // decode.
             return DecodedField {
-                cells: solve_pairwise_fallback(cell_candidates, spatial_weight_q10),
+                cells: solve_pairwise_fallback_with_scratch(
+                    cell_candidates,
+                    spatial_weight_q10,
+                    scratch,
+                ),
                 path,
             };
         }
@@ -1350,11 +1472,15 @@ fn decode_compiled_field_with_solver(
 
     let Some(path) = solve_ribbon(&slices, spatial_weight_q10) else {
         return DecodedField {
-            cells: solve_pairwise_fallback(cell_candidates, spatial_weight_q10),
+            cells: solve_pairwise_fallback_with_scratch(
+                cell_candidates,
+                spatial_weight_q10,
+                scratch,
+            ),
             path: DecodePathTrace::RibbonDpSolveFailed,
         };
     };
-    merge_ribbon_assignments(&mut baseline, &slices, &path);
+    merge_ribbon_assignments(&mut baseline, &slices, &path, scratch);
     DecodedField {
         cells: baseline,
         path: DecodePathTrace::RibbonDp,
@@ -1370,17 +1496,36 @@ fn decode_compiled_field_trace(
     decode_compiled_field_trace_with_compiled(&BTreeMap::new(), cell_candidates, centerline, frame)
 }
 
+#[cfg(test)]
 fn decode_compiled_field_trace_with_compiled(
     compiled: &BTreeMap<(i64, i64), CompiledCell>,
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
     frame: &RenderFrame,
 ) -> DecodedField {
+    let mut scratch = SolverScratch::default();
+    decode_compiled_field_trace_with_compiled_and_scratch(
+        compiled,
+        cell_candidates,
+        centerline,
+        frame,
+        &mut scratch,
+    )
+}
+
+fn decode_compiled_field_trace_with_compiled_and_scratch(
+    compiled: &BTreeMap<(i64, i64), CompiledCell>,
+    cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
+    centerline: &[CenterSample],
+    frame: &RenderFrame,
+    scratch: &mut SolverScratch,
+) -> DecodedField {
     decode_compiled_field_with_solver(
         compiled,
         cell_candidates,
         centerline,
         frame,
+        scratch,
         solve_ribbon_dp,
     )
 }
@@ -1547,6 +1692,7 @@ fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
     handle_stroke_transition(state, frame);
 
     let mut latest_pose = state.last_pose;
+    let mut sweep_scratch = latent_field::SweepMaterializeScratch::default();
 
     for (sample, current_pose) in frame.step_samples.iter().zip(frame_sample_poses(frame)) {
         let start_pose = latest_pose.unwrap_or(current_pose);
@@ -1565,7 +1711,18 @@ fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
             frame.block_aspect_ratio,
             sample.dt_ms,
         );
-        for profile in latent_field::comet_tail_profiles(frame.tail_duration_ms) {
+        let tail_profiles = latent_field::comet_tail_profiles(frame.tail_duration_ms);
+        let max_width_scale = tail_profiles
+            .iter()
+            .fold(0.0_f64, |max, profile| max.max(profile.width_scale));
+        let sweep_geometry = latent_field::prepare_swept_occupancy_geometry(
+            start_pose,
+            current_pose,
+            frame.block_aspect_ratio,
+            frame.trail_thickness * max_width_scale,
+            frame.trail_thickness_x * max_width_scale,
+        );
+        for profile in tail_profiles {
             let band_gain = match profile.band {
                 TailBand::Sheath => sheath_gain,
                 TailBand::Core => core_gain,
@@ -1577,12 +1734,11 @@ fn stage_deposited_samples(state: &mut PlannerState, frame: &RenderFrame) {
                 continue;
             }
 
-            let microtiles = latent_field::deposit_swept_occupancy(
-                start_pose,
-                current_pose,
-                frame.block_aspect_ratio,
+            let microtiles = latent_field::materialize_swept_occupancy_with_scratch(
+                &sweep_geometry,
                 frame.trail_thickness * profile.width_scale,
                 frame.trail_thickness_x * profile.width_scale,
+                &mut sweep_scratch,
             );
             if microtiles.is_empty() {
                 continue;

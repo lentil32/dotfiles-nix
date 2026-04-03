@@ -524,6 +524,14 @@ impl SceneState {
         &self.motion
     }
 
+    pub(crate) fn motion_mut(&mut self) -> &mut RuntimeState {
+        &mut self.motion
+    }
+
+    pub(crate) fn take_motion(&mut self) -> RuntimeState {
+        std::mem::take(&mut self.motion)
+    }
+
     pub(crate) const fn dirty(&self) -> &DirtyEntitySet {
         &self.dirty
     }

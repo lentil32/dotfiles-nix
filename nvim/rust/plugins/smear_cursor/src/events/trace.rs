@@ -470,12 +470,12 @@ fn probe_report_summary(payload: &ProbeReportedEvent) -> String {
             chunk,
             allowed_mask,
         } => format!(
-            "background_chunk_ready(obs={} request={} start_row={} row_count={} cells={})",
+            "background_chunk_ready(obs={} request={} start_index={} cell_count={} packed_bytes={})",
             observation_id.value(),
             probe_request_id.value(),
-            chunk.start_row().value(),
-            chunk.row_count(),
-            allowed_mask.len(),
+            chunk.start_index(),
+            chunk.len(),
+            allowed_mask.packed_len(),
         ),
         ProbeReportedEvent::BackgroundFailed {
             observation_id,

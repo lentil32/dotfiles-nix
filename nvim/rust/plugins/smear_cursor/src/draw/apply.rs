@@ -6,14 +6,13 @@ use super::window_pool::{
     WindowPlacement,
 };
 use super::{EXTMARK_ID, with_render_tab};
-use crate::core::realization::{RealizationProjection, RealizationSpan, RealizationSpanChunk};
+use crate::core::realization::{RealizationProjection, RealizationSpan};
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::{OptionOpts, SetExtmarkOpts};
 use nvim_oxi::api::types::ExtmarkVirtTextPosition;
-use nvim_oxi::{Array, Object};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use nvim_oxi::{Array, Dictionary, Object};
+use std::cell::Cell;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ApplyMetrics {
@@ -46,22 +45,65 @@ pub(crate) fn current_tab_handle() -> i32 {
     api::get_current_tabpage().handle()
 }
 
-const FLUSH_REDRAW_LUAEVAL_EXPR: &str = r#"(function(_)
-  if vim.api.nvim__redraw then
-    vim.api.nvim__redraw({ cursor = true, valid = true, flush = true })
-    return true
-  end
-  return false
-end)(_A)"#;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FlushRedrawCapability {
+    #[default]
+    Unknown,
+    ApiAvailable,
+    FallbackOnly,
+}
+
+thread_local! {
+    static FLUSH_REDRAW_CAPABILITY: Cell<FlushRedrawCapability> =
+        const { Cell::new(FlushRedrawCapability::Unknown) };
+}
+
+fn set_flush_redraw_capability(capability: FlushRedrawCapability) {
+    FLUSH_REDRAW_CAPABILITY.with(|slot| slot.set(capability));
+}
+
+fn flush_redraw_capability() -> FlushRedrawCapability {
+    FLUSH_REDRAW_CAPABILITY.with(Cell::get)
+}
+
+fn flush_redraw_capability_from_exists_result(exists_result: i64) -> FlushRedrawCapability {
+    if exists_result > 0 {
+        FlushRedrawCapability::ApiAvailable
+    } else {
+        FlushRedrawCapability::FallbackOnly
+    }
+}
+
+fn flush_redraw_via_api() -> Result<()> {
+    let mut opts = Dictionary::new();
+    opts.insert("cursor", true);
+    opts.insert("valid", true);
+    opts.insert("flush", true);
+    let _: Object = api::call_function("nvim__redraw", Array::from_iter([Object::from(opts)]))?;
+    Ok(())
+}
+
+pub(crate) fn refresh_redraw_capability() -> Result<()> {
+    let exists_result: i64 =
+        api::call_function("exists", Array::from_iter([Object::from("*nvim__redraw")]))?;
+    set_flush_redraw_capability(flush_redraw_capability_from_exists_result(exists_result));
+    Ok(())
+}
 
 pub(crate) fn redraw() -> Result<()> {
-    let args = Array::from_iter([
-        Object::from(FLUSH_REDRAW_LUAEVAL_EXPR),
-        Object::from(Array::new()),
-    ]);
-    let flushed_via_api: bool = api::call_function("luaeval", args)?;
-    if flushed_via_api {
-        return Ok(());
+    let capability = match flush_redraw_capability() {
+        FlushRedrawCapability::Unknown => {
+            refresh_redraw_capability()?;
+            flush_redraw_capability()
+        }
+        known => known,
+    };
+
+    if matches!(capability, FlushRedrawCapability::ApiAvailable) {
+        match flush_redraw_via_api() {
+            Ok(()) => return Ok(()),
+            Err(_) => set_flush_redraw_capability(FlushRedrawCapability::FallbackOnly),
+        }
     }
 
     Ok(api::command("redraw!")?)
@@ -97,37 +139,12 @@ fn highlight_group(group_names: &HighlightGroupNames, reference: HighlightRef) -
     }
 }
 
-fn span_payload_hash(chunks: &[RealizationSpanChunk]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for chunk in chunks {
-        chunk.glyph().hash(&mut hasher);
-        chunk.highlight().hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-#[derive(Debug)]
-pub(crate) struct PreparedSpan<'a> {
-    span: &'a RealizationSpan,
-    payload_hash: u64,
-}
-
-impl PreparedSpan<'_> {
-    fn span(&self) -> &RealizationSpan {
-        self.span
-    }
-
-    fn payload_hash(&self) -> u64 {
-        self.payload_hash
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct PreparedApplyPlan<'a> {
     group_names: HighlightGroupNames,
     planned_ops: usize,
     clears_existing_frame: bool,
-    spans: Vec<PreparedSpan<'a>>,
+    spans: &'a [RealizationSpan],
 }
 
 impl PreparedApplyPlan<'_> {
@@ -143,8 +160,8 @@ impl PreparedApplyPlan<'_> {
         self.clears_existing_frame
     }
 
-    fn spans(&self) -> &[PreparedSpan<'_>] {
-        self.spans.as_slice()
+    fn spans(&self) -> &[RealizationSpan] {
+        self.spans
     }
 }
 
@@ -153,14 +170,7 @@ pub(crate) fn prepare_apply_plan<'a>(
     projection: &'a RealizationProjection,
 ) -> PreparedApplyPlan<'a> {
     let group_names = highlight_group_names(color_levels.max(1));
-    let spans = projection
-        .spans()
-        .iter()
-        .map(|span| PreparedSpan {
-            span,
-            payload_hash: span_payload_hash(span.chunks()),
-        })
-        .collect::<Vec<_>>();
+    let spans = projection.spans();
 
     PreparedApplyPlan {
         group_names,
@@ -219,9 +229,8 @@ fn draw_span(
     allocation_policy: AllocationPolicy,
     group_names: &HighlightGroupNames,
     metrics: &mut ApplyMetrics,
-    prepared_span: &PreparedSpan<'_>,
+    span: &RealizationSpan,
 ) -> Result<()> {
-    let span = prepared_span.span();
     if span.width() == 0 || span.chunks().is_empty() {
         return Ok(());
     }
@@ -232,7 +241,7 @@ fn draw_span(
         width: span.width(),
         zindex: span.zindex(),
     };
-    let payload_hash = prepared_span.payload_hash();
+    let payload_hash = span.payload_hash();
     let decision = with_render_tab(tab_handle, |tab_windows| -> Result<SpanApplyDecision> {
         let Some(acquired) = acquire_window_for_span(
             tab_windows,
@@ -419,8 +428,8 @@ fn record_release_summary(
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyMetrics, FLUSH_REDRAW_LUAEVAL_EXPR, mark_span_satisfied, prepare_apply_plan,
-        record_release_summary, span_payload_hash,
+        ApplyMetrics, FlushRedrawCapability, flush_redraw_capability_from_exists_result,
+        mark_span_satisfied, prepare_apply_plan, record_release_summary,
     };
     use crate::core::realization::{LogicalRaster, realize_logical_raster};
     use crate::draw::render_plan::{CellOp, ClearOp, Glyph, HighlightLevel, HighlightRef};
@@ -453,11 +462,15 @@ mod tests {
     }
 
     #[test]
-    fn flush_redraw_expression_requests_cursor_validity_and_flush() {
-        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("nvim__redraw"));
-        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("cursor = true"));
-        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("valid = true"));
-        assert!(FLUSH_REDRAW_LUAEVAL_EXPR.contains("flush = true"));
+    fn flush_redraw_capability_maps_exists_results_to_api_or_fallback() {
+        assert_eq!(
+            flush_redraw_capability_from_exists_result(1),
+            FlushRedrawCapability::ApiAvailable
+        );
+        assert_eq!(
+            flush_redraw_capability_from_exists_result(0),
+            FlushRedrawCapability::FallbackOnly
+        );
     }
 
     #[test]
@@ -490,11 +503,8 @@ mod tests {
         assert_eq!(prepared.planned_ops(), 1);
         assert!(prepared.clears_existing_frame());
         assert_eq!(prepared.spans().len(), 1);
-        assert_eq!(prepared.spans()[0].span(), span);
-        assert_eq!(
-            prepared.spans()[0].payload_hash(),
-            span_payload_hash(span.chunks()),
-        );
+        assert_eq!(&prepared.spans()[0], span);
+        assert_eq!(prepared.spans()[0].payload_hash(), span.payload_hash());
         assert_eq!(
             prepared
                 .group_names()

@@ -403,6 +403,10 @@ pub(crate) fn clear_highlight_cache() {
     palette::clear_highlight_cache();
 }
 
+pub(crate) fn initialize_runtime_capabilities() -> Result<()> {
+    apply::refresh_redraw_capability()
+}
+
 pub(crate) fn ensure_palette(palette: &PaletteSpec) -> Result<()> {
     palette::ensure_highlight_palette_for_spec(palette)
 }

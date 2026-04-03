@@ -300,7 +300,7 @@ fn resolve_mode_cursor_color_for_spec(spec: &PaletteSpec) -> u32 {
     let explicit_color =
         resolve_cursor_color_setting(setting).and_then(|resolved| match resolved {
             ResolvedCursorColor::Direct(color) => Some(color),
-            ResolvedCursorColor::FromCursorText => spec.color_at_cursor().and_then(parse_hex_color),
+            ResolvedCursorColor::FromCursorText => spec.color_at_cursor(),
         });
 
     explicit_color
@@ -625,7 +625,7 @@ mod tests {
             trail_stroke_id: StrokeId::INITIAL,
             retarget_epoch: 0,
             particles: Vec::new().into(),
-            color_at_cursor: Some("#ffffff".to_string()),
+            color_at_cursor: Some(0x00FF_FFFF),
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: Some("#112233".to_string()),
                 cursor_color_insert_mode: Some("none".to_string()),
@@ -678,7 +678,7 @@ mod tests {
     fn raw_palette_input_key_ignores_cursor_text_when_effective_cursor_color_is_direct() {
         let direct = test_frame();
         let mut changed_cursor_text = test_frame();
-        changed_cursor_text.color_at_cursor = Some("#abcdef".to_string());
+        changed_cursor_text.color_at_cursor = Some(0x00AB_CDEF);
 
         assert_eq!(
             raw_palette_input_key(&direct),
@@ -694,7 +694,7 @@ mod tests {
         frame.static_config = Arc::new(config);
 
         let mut changed_cursor_text = frame.clone();
-        changed_cursor_text.color_at_cursor = Some("#abcdef".to_string());
+        changed_cursor_text.color_at_cursor = Some(0x00AB_CDEF);
 
         assert_ne!(
             raw_palette_input_key(&frame),

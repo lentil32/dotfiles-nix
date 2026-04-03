@@ -104,6 +104,11 @@ pub(crate) fn bool_from_object(key: &str, value: Object) -> Result<bool> {
     bool_from_object_typed(key, value).map_err(into_nvim_error)
 }
 
+pub(crate) fn u8_from_object_typed(key: &str, value: Object) -> LuaParseResult<u8> {
+    let parsed = i64_from_object_typed(key, value)?;
+    u8::try_from(parsed).map_err(|_| invalid_key_error(key, "u8"))
+}
+
 pub(crate) fn string_from_object_typed(key: &str, value: Object) -> LuaParseResult<String> {
     if value.kind() != ObjectKind::String {
         return Err(invalid_key_error(key, "string"));

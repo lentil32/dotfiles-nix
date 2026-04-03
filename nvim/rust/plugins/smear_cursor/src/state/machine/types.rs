@@ -171,7 +171,7 @@ pub(super) struct TransientRuntimeState {
     pub(super) last_mode_was_cmdline: Option<bool>,
     pub(super) last_tick_ms: Option<f64>,
     pub(super) tracked_location: Option<CursorLocation>,
-    pub(super) color_at_cursor: Option<String>,
+    pub(super) color_at_cursor: Option<u32>,
 }
 
 impl Default for TransientRuntimeState {

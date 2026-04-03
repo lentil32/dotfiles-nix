@@ -5,7 +5,7 @@ use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::types::{Point, RenderFrame, RenderStepSample};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU32;
 use std::sync::{Arc, LazyLock};
@@ -149,7 +149,7 @@ enum DecodedGlyph {
     Octant(u8),
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub(crate) struct PlannerState {
     step_index: StepIndex,
     arc_len_q16: ArcLenQ16,
@@ -159,6 +159,7 @@ pub(crate) struct PlannerState {
     center_history: VecDeque<CenterPathSample>,
     previous_cells: BTreeMap<(i64, i64), DecodedCellState>,
     compiled_cache: CompiledFieldCache,
+    decode_scratch: PlannerDecodeScratch,
     // Production planner truth lives in `latent_cache`; tests keep a mirrored slice log for
     // assertions over staged metadata without forcing the runtime to retain the trail twice.
     #[cfg(test)]
@@ -172,6 +173,47 @@ impl PlannerState {
 
     pub(crate) const fn history_revision(&self) -> u64 {
         self.latent_cache.revision()
+    }
+}
+
+impl Clone for PlannerState {
+    fn clone(&self) -> Self {
+        Self {
+            step_index: self.step_index,
+            arc_len_q16: self.arc_len_q16,
+            last_trail_stroke_id: self.last_trail_stroke_id,
+            last_pose: self.last_pose,
+            latent_cache: self.latent_cache.clone(),
+            center_history: self.center_history.clone(),
+            previous_cells: self.previous_cells.clone(),
+            compiled_cache: self.compiled_cache.clone(),
+            decode_scratch: PlannerDecodeScratch::default(),
+            #[cfg(test)]
+            history: self.history.clone(),
+        }
+    }
+}
+
+impl PartialEq for PlannerState {
+    fn eq(&self, other: &Self) -> bool {
+        self.step_index == other.step_index
+            && self.arc_len_q16 == other.arc_len_q16
+            && self.last_trail_stroke_id == other.last_trail_stroke_id
+            && self.last_pose == other.last_pose
+            && self.latent_cache == other.latent_cache
+            && self.center_history == other.center_history
+            && self.previous_cells == other.previous_cells
+            && self.compiled_cache == other.compiled_cache
+            && {
+                #[cfg(test)]
+                {
+                    self.history == other.history
+                }
+                #[cfg(not(test))]
+                {
+                    true
+                }
+            }
     }
 }
 
@@ -219,6 +261,28 @@ impl PartialEq for CompiledFieldCache {
             && self.latent_revision == other.latent_revision
             && self.field == other.field
     }
+}
+
+#[derive(Debug, Default)]
+struct PlannerDecodeScratch {
+    // CONTEXT: planner decode runs on every frame while the trail is active, so keep the
+    // per-frame candidate and centerline working buffers in state rather than reallocating them.
+    shade_profiles: Vec<ShadeProfile>,
+    cell_candidates: BTreeMap<(i64, i64), Vec<CellCandidate>>,
+    reusable_candidate_lists: Vec<Vec<CellCandidate>>,
+    centerline_points: Vec<Point>,
+    centerline_cumulative: Vec<f64>,
+    centerline: Vec<CenterSample>,
+    solver: SolverScratch,
+}
+
+#[derive(Debug, Default)]
+struct SolverScratch {
+    fallback_coords: Vec<(i64, i64)>,
+    fallback_coord_index: HashMap<(i64, i64), usize>,
+    fallback_assignment: Vec<Option<DecodedCellState>>,
+    vote_buckets: HashMap<(i64, i64), Vec<StateVote>>,
+    reusable_vote_lists: Vec<Vec<StateVote>>,
 }
 
 pub(crate) struct PlanBuilder {
@@ -564,6 +628,12 @@ struct VoteStats {
     total_cost: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct StateVote {
+    state: Option<DecodedCellState>,
+    stats: VoteStats,
+}
+
 const MATRIX_CHARACTERS: [&str; 16] = [
     "", "▘", "▝", "▀", "▖", "▌", "▞", "▛", "▗", "▚", "▐", "▜", "▄", "▙", "▟", "█",
 ];
@@ -702,9 +772,10 @@ fn build_glyph_bucket_layout() -> GlyphBucketLayout {
     }
 }
 
-fn build_shade_profiles(color_levels: u32) -> Vec<ShadeProfile> {
+fn build_shade_profiles_into(color_levels: u32, shades: &mut Vec<ShadeProfile>) {
+    shades.clear();
     let capacity = usize::try_from(color_levels).unwrap_or(0);
-    let mut shades = Vec::with_capacity(capacity);
+    shades.reserve(capacity.saturating_sub(shades.capacity()));
     for raw_level in 1..=color_levels {
         let Some(level) = HighlightLevel::try_new(raw_level) else {
             continue;
@@ -714,6 +785,12 @@ fn build_shade_profiles(color_levels: u32) -> Vec<ShadeProfile> {
             sample_q12: quantized_level_to_sample_q12(level, color_levels),
         });
     }
+}
+
+#[cfg(test)]
+fn build_shade_profiles(color_levels: u32) -> Vec<ShadeProfile> {
+    let mut shades = Vec::new();
+    build_shade_profiles_into(color_levels, &mut shades);
     shades
 }
 
@@ -1061,14 +1138,16 @@ fn evaluate_non_empty_glyph_candidate(
     }
 }
 
-fn cell_candidates_for_patch(
+fn cell_candidates_for_patch_into(
+    output: &mut Vec<CellCandidate>,
     patch: MicroTile,
     age: AgeMoment,
     previous: Option<DecodedCellState>,
     shade_profiles: &[ShadeProfile],
     temporal_stability_weight: f64,
     top_k: usize,
-) -> Vec<CellCandidate> {
+) {
+    output.clear();
     let patch_basis = PatchCandidateBasis::from_patch(patch);
     let empty_residual = patch_basis.empty_residual;
 
@@ -1086,9 +1165,10 @@ fn cell_candidates_for_patch(
         || keep_non_empty == 0
         || shade_profiles.is_empty()
     {
-        return vec![empty_candidate];
+        output.push(empty_candidate);
+        return;
     }
-    let mut non_empty = Vec::<CellCandidate>::with_capacity(keep_non_empty);
+    output.reserve((1 + keep_non_empty).saturating_sub(output.capacity()));
     let non_empty_context = NonEmptyCandidateContext {
         empty_residual,
         age,
@@ -1099,7 +1179,7 @@ fn cell_candidates_for_patch(
     };
 
     evaluate_non_empty_glyph_candidate(
-        &mut non_empty,
+        output,
         GlyphProfile::block(),
         patch_basis.total_mass,
         &non_empty_context,
@@ -1109,7 +1189,7 @@ fn cell_candidates_for_patch(
     let matrix_dots: [u64; MATRIX_MASK_LIMIT] = build_subset_sums(&patch_basis.matrix_bucket_sums);
     for mask in 1_u8..=14_u8 {
         evaluate_non_empty_glyph_candidate(
-            &mut non_empty,
+            output,
             GlyphProfile::matrix(mask, layout.matrix_sample_count(mask)),
             matrix_dots[usize::from(mask)],
             &non_empty_context,
@@ -1119,20 +1199,100 @@ fn cell_candidates_for_patch(
     let octant_dots: [u64; OCTANT_MASK_LIMIT] = build_subset_sums(&patch_basis.octant_bucket_sums);
     for mask in 1_u8..=254_u8 {
         evaluate_non_empty_glyph_candidate(
-            &mut non_empty,
+            output,
             GlyphProfile::octant(mask, layout.octant_sample_count(mask)),
             octant_dots[usize::from(mask)],
             &non_empty_context,
         );
     }
 
-    let mut kept = Vec::with_capacity(1 + keep_non_empty);
-    kept.push(empty_candidate);
-    kept.extend(non_empty);
-    kept.sort_by(|lhs, rhs| candidate_cmp(*lhs, *rhs, previous));
-    kept
+    output.insert(0, empty_candidate);
+    output.sort_by(|lhs, rhs| candidate_cmp(*lhs, *rhs, previous));
 }
 
+#[cfg(test)]
+fn cell_candidates_for_patch(
+    patch: MicroTile,
+    age: AgeMoment,
+    previous: Option<DecodedCellState>,
+    shade_profiles: &[ShadeProfile],
+    temporal_stability_weight: f64,
+    top_k: usize,
+) -> Vec<CellCandidate> {
+    let mut candidates = Vec::new();
+    cell_candidates_for_patch_into(
+        &mut candidates,
+        patch,
+        age,
+        previous,
+        shade_profiles,
+        temporal_stability_weight,
+        top_k,
+    );
+    candidates
+}
+
+fn recycle_candidate_lists(
+    cell_candidates: &mut BTreeMap<(i64, i64), Vec<CellCandidate>>,
+    reusable_candidate_lists: &mut Vec<Vec<CellCandidate>>,
+) {
+    while let Some((_, mut candidates)) = cell_candidates.pop_first() {
+        candidates.clear();
+        reusable_candidate_lists.push(candidates);
+    }
+}
+
+fn populate_cell_candidates_with_scratch(
+    compiled: &BTreeMap<(i64, i64), CompiledCell>,
+    previous_cells: &BTreeMap<(i64, i64), DecodedCellState>,
+    color_levels: u32,
+    temporal_stability_weight: f64,
+    top_k: usize,
+    scratch: &mut PlannerDecodeScratch,
+) {
+    let PlannerDecodeScratch {
+        shade_profiles,
+        cell_candidates,
+        reusable_candidate_lists,
+        ..
+    } = scratch;
+    build_shade_profiles_into(color_levels, shade_profiles);
+    recycle_candidate_lists(cell_candidates, reusable_candidate_lists);
+
+    for (key, compiled_cell) in compiled {
+        let previous = previous_cells.get(key).copied();
+        let mut per_cell = reusable_candidate_lists.pop().unwrap_or_default();
+        cell_candidates_for_patch_into(
+            &mut per_cell,
+            compiled_cell.tile,
+            compiled_cell.age,
+            previous,
+            shade_profiles,
+            temporal_stability_weight,
+            top_k,
+        );
+        cell_candidates.insert(*key, per_cell);
+    }
+
+    for (key, previous) in previous_cells {
+        if cell_candidates.contains_key(key) {
+            continue;
+        }
+        let mut per_cell = reusable_candidate_lists.pop().unwrap_or_default();
+        cell_candidates_for_patch_into(
+            &mut per_cell,
+            MicroTile::default(),
+            AgeMoment::default(),
+            Some(*previous),
+            shade_profiles,
+            temporal_stability_weight,
+            top_k,
+        );
+        cell_candidates.insert(*key, per_cell);
+    }
+}
+
+#[cfg(test)]
 fn build_cell_candidates(
     compiled: &BTreeMap<(i64, i64), CompiledCell>,
     previous_cells: &BTreeMap<(i64, i64), DecodedCellState>,
@@ -1140,37 +1300,17 @@ fn build_cell_candidates(
     temporal_stability_weight: f64,
     top_k: usize,
 ) -> BTreeMap<(i64, i64), Vec<CellCandidate>> {
-    let shade_profiles = build_shade_profiles(color_levels);
-    let mut candidates = BTreeMap::<(i64, i64), Vec<CellCandidate>>::new();
-
-    for (key, compiled_cell) in compiled {
-        let previous = previous_cells.get(key).copied();
-        let per_cell = cell_candidates_for_patch(
-            compiled_cell.tile,
-            compiled_cell.age,
-            previous,
-            &shade_profiles,
-            temporal_stability_weight,
-            top_k,
-        );
-        candidates.insert(*key, per_cell);
-    }
-
-    for (key, previous) in previous_cells {
-        if candidates.contains_key(key) {
-            continue;
-        }
-        let per_cell = cell_candidates_for_patch(
-            MicroTile::default(),
-            AgeMoment::default(),
-            Some(*previous),
-            &shade_profiles,
-            temporal_stability_weight,
-            top_k,
-        );
-        candidates.insert(*key, per_cell);
-    }
-    candidates
+    let mut scratch = PlannerDecodeScratch::default();
+    populate_cell_candidates_with_scratch(
+        compiled,
+        previous_cells,
+        color_levels,
+        temporal_stability_weight,
+        top_k,
+        &mut scratch,
+    )
+    ;
+    scratch.cell_candidates
 }
 
 fn decode_locally(

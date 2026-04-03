@@ -71,7 +71,7 @@ pub(crate) fn build_render_frame(
         trail_stroke_id: state.trail_stroke_id(),
         retarget_epoch: state.retarget_epoch(),
         particles: std::sync::Arc::from(state.particles().to_vec()),
-        color_at_cursor: state.color_at_cursor().map(str::to_owned),
+        color_at_cursor: state.color_at_cursor(),
         static_config: state.render_static_config(),
     }
 }

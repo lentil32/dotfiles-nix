@@ -163,7 +163,7 @@ mod transient_state {
         let mut state = RuntimeState::default();
         state.set_target(point(4.0, 9.0), default_shape());
         state.update_tracking(&location(11, 22, 33, 44));
-        state.set_color_at_cursor(Some("#ffffff".to_string()));
+        state.set_color_at_cursor(Some(0x00FF_FFFF));
         state.set_last_tick_ms(Some(99.0));
 
         state.reset_transient_state();
@@ -184,7 +184,7 @@ mod transient_state {
     #[test]
     fn reset_transient_state_clears_cursor_color() {
         let mut state = RuntimeState::default();
-        state.set_color_at_cursor(Some("#ffffff".to_string()));
+        state.set_color_at_cursor(Some(0x00FF_FFFF));
 
         state.reset_transient_state();
 
