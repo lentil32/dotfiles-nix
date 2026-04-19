@@ -2,12 +2,18 @@
 let
   binaryCaches = [
     "https://cache.nixos.org"
+    "https://claude-code.cachix.org"
+    "https://codex-cli.cachix.org"
+    "https://gemini-cli-nix.cachix.org"
     "https://nix-community.cachix.org"
     "https://neovim-nightly.cachix.org"
     "https://wezterm.cachix.org"
   ];
   trustedPublicKeys = [
     "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+    "claude-code.cachix.org-1:YeXf2aNu7UTX8Vwrze0za1WEDS+4DuI2kVeWEE4fsRk="
+    "codex-cli.cachix.org-1:1Br3H1hHoRYG22n//cGKJOk3cQXgYobUel6O8DgSing="
+    "gemini-cli-nix.cachix.org-1:DzAIhrYktyRtR1OO0KjyYEKR5hjwsdZU2NwHlEBCcvI="
     "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
     "neovim-nightly.cachix.org-1:feIoInHRevVEplgdZvQDjhp11kYASYCE2NGY9hNrwxY="
     "wezterm.cachix.org-1:kAbhjYUC9qvblTE+s7S+kl5XM1zVa4skO+E/1IDWdH0="

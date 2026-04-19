@@ -143,6 +143,27 @@ enum CachedConcealDriftHint {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum RawScreenposProjection {
+    Projected {
+        observed_cell: ObservedCell,
+        used_cached_conceal: bool,
+    },
+    NeedsExactProjection,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum ExactProjectionSource {
+    Screenpos,
+    Conceal,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) struct ExactCursorProjection {
+    pub(super) observed_cell: ObservedCell,
+    pub(super) source: ExactProjectionSource,
+}
+
 fn replacement_display_width(replacement: &str) -> CursorResult<i64> {
     if replacement.is_empty() {
         return Ok(0);
@@ -404,17 +425,28 @@ pub(super) fn apply_conceal_delta(
     raw_cell: ScreenCell,
     conceal_delta: i64,
     surface_snapshot: Option<WindowSurfaceSnapshot>,
-) -> ScreenCell {
-    surface_snapshot
-        .and_then(WrappedScreenCellLayout::from_surface)
-        .and_then(|layout| layout.shift_left(raw_cell, conceal_delta))
-        .or_else(|| {
-            ScreenCell::new(
-                raw_cell.row(),
-                raw_cell.col().saturating_sub(conceal_delta).max(1),
-            )
-        })
-        .unwrap_or(raw_cell)
+) -> Option<ScreenCell> {
+    match surface_snapshot {
+        Some(surface_snapshot) => WrappedScreenCellLayout::from_surface(surface_snapshot)
+            .and_then(|layout| layout.shift_left(raw_cell, conceal_delta)),
+        None => ScreenCell::new(
+            raw_cell.row(),
+            raw_cell.col().saturating_sub(conceal_delta).max(1),
+        ),
+    }
+}
+
+fn exact_observed_cell_from_conceal_delta(
+    raw_cell: ScreenCell,
+    conceal_delta: Option<i64>,
+    surface_snapshot: Option<WindowSurfaceSnapshot>,
+) -> ObservedCell {
+    match conceal_delta
+        .and_then(|conceal_delta| apply_conceal_delta(raw_cell, conceal_delta, surface_snapshot))
+    {
+        Some(projected_cell) => ObservedCell::Exact(projected_cell),
+        None => ObservedCell::Unavailable,
+    }
 }
 
 fn cached_conceal_drift_hint_from_regions_and_delta(
@@ -488,25 +520,22 @@ pub(super) fn observed_cell_for_raw_screenpos(
     mode: &str,
     raw_cell: ScreenCell,
     surface_snapshot: Option<WindowSurfaceSnapshot>,
-) -> CursorResult<ObservedCell> {
+) -> CursorResult<RawScreenposProjection> {
     let window_state = capture_conceal_window_state(window)?;
     if column == 0 || !conceal_window_state_allows_mode(&window_state, mode) {
-        return Ok(ObservedCell::Exact(raw_cell));
+        return Ok(RawScreenposProjection::Projected {
+            observed_cell: ObservedCell::Exact(raw_cell),
+            used_cached_conceal: false,
+        });
     }
 
     // This is a hint-only fast path. Exact conceal resolution clears cross-read cache state before
     // re-sampling, but motion reads can reuse prior hints to avoid deferring every sample.
     let conceal_key = conceal_cache_key(window, line, window_state)?;
     let Some(regions) = cached_concealed_regions_hint_for_cursor(&conceal_key, column) else {
-        return Ok(ObservedCell::Deferred(raw_cell));
+        return Ok(RawScreenposProjection::NeedsExactProjection);
     };
     let current_col1 = buffer_column_to_col1(column);
-    if matches!(
-        cached_conceal_drift_hint_from_regions_and_delta(current_col1, regions.as_ref(), None),
-        CachedConcealDriftHint::NoDrift
-    ) {
-        return Ok(ObservedCell::Exact(raw_cell));
-    }
     let cached_delta = cached_conceal_delta_hint(
         &conceal_key,
         current_col1,
@@ -515,18 +544,50 @@ pub(super) fn observed_cell_for_raw_screenpos(
         surface_snapshot,
     )?;
 
-    Ok(
-        match cached_conceal_drift_hint_from_regions_and_delta(
-            current_col1,
-            regions.as_ref(),
-            cached_delta,
-        ) {
-            CachedConcealDriftHint::NoDrift => ObservedCell::Exact(raw_cell),
-            CachedConcealDriftHint::Drifted | CachedConcealDriftHint::Unknown => {
+    Ok(projected_observed_cell_from_cached_conceal(
+        current_col1,
+        raw_cell,
+        regions.as_ref(),
+        cached_delta,
+        surface_snapshot,
+    ))
+}
+
+fn projected_observed_cell_from_cached_conceal(
+    current_col1: i64,
+    raw_cell: ScreenCell,
+    regions: &[ConcealRegion],
+    cached_delta: Option<i64>,
+    surface_snapshot: Option<WindowSurfaceSnapshot>,
+) -> RawScreenposProjection {
+    let used_cached_conceal = regions
+        .iter()
+        .any(|region| region.start_col1 < current_col1);
+    match cached_conceal_drift_hint_from_regions_and_delta(current_col1, regions, cached_delta) {
+        CachedConcealDriftHint::NoDrift => RawScreenposProjection::Projected {
+            observed_cell: if used_cached_conceal {
+                // Cached conceal hints can confirm that the projected cell still lands on the raw
+                // screenpos cell, but they are still a deferred fast path until the exact
+                // projector re-samples the host.
                 ObservedCell::Deferred(raw_cell)
-            }
+            } else {
+                ObservedCell::Exact(raw_cell)
+            },
+            used_cached_conceal,
         },
-    )
+        CachedConcealDriftHint::Drifted => RawScreenposProjection::Projected {
+            observed_cell: match apply_conceal_delta(
+                raw_cell,
+                cached_delta.unwrap_or_default(),
+                surface_snapshot,
+            ) {
+                Some(projected_cell) => ObservedCell::Deferred(projected_cell),
+                None => return RawScreenposProjection::NeedsExactProjection,
+            },
+            used_cached_conceal: true,
+        },
+        CachedConcealDriftHint::Unknown => RawScreenposProjection::NeedsExactProjection,
+    }
 }
 
 fn conceal_delta_for_regions(
@@ -578,14 +639,20 @@ pub(super) fn resolve_buffer_cursor_position(
     mode: &str,
     raw_cell: ScreenCell,
     surface_snapshot: Option<WindowSurfaceSnapshot>,
-) -> CursorResult<ScreenCell> {
+) -> CursorResult<ExactCursorProjection> {
     if column == 0 {
-        return Ok(raw_cell);
+        return Ok(ExactCursorProjection {
+            observed_cell: ObservedCell::Exact(raw_cell),
+            source: ExactProjectionSource::Screenpos,
+        });
     }
 
     let window_state = capture_conceal_window_state(window)?;
     if !conceal_window_state_allows_mode(&window_state, mode) {
-        return Ok(raw_cell);
+        return Ok(ExactCursorProjection {
+            observed_cell: ObservedCell::Exact(raw_cell),
+            source: ExactProjectionSource::Screenpos,
+        });
     }
 
     // Fast-motion reads may reuse conceal hints across reads to avoid deferring every motion
@@ -598,7 +665,10 @@ pub(super) fn resolve_buffer_cursor_position(
     let conceal_key = conceal_cache_key(window, line, window_state)?;
     let regions = cached_concealed_regions_for_cursor(conceal_key.clone(), column)?;
     if regions.is_empty() {
-        return Ok(raw_cell);
+        return Ok(ExactCursorProjection {
+            observed_cell: ObservedCell::Exact(raw_cell),
+            source: ExactProjectionSource::Screenpos,
+        });
     }
 
     let current_col1 = buffer_column_to_col1(column);
@@ -607,17 +677,20 @@ pub(super) fn resolve_buffer_cursor_position(
     if let Some(cache_key) = conceal_delta_cache_key.as_ref() {
         match cached_conceal_delta(cache_key) {
             Ok(ConcealDeltaCacheLookup::Hit(cached)) if cached.current_col1() == current_col1 => {
-                return Ok(apply_conceal_delta(
-                    raw_cell,
-                    cached.delta(),
-                    surface_snapshot,
-                ));
+                return Ok(ExactCursorProjection {
+                    observed_cell: exact_observed_cell_from_conceal_delta(
+                        raw_cell,
+                        Some(cached.delta()),
+                        surface_snapshot,
+                    ),
+                    source: ExactProjectionSource::Conceal,
+                });
             }
             Ok(ConcealDeltaCacheLookup::Hit(_) | ConcealDeltaCacheLookup::Miss) => {}
             Err(err) => warn(&format!("conceal delta cache read failed: {err}")),
         }
     }
-    let Some(conceal_delta) = conceal_delta_for_regions(
+    let conceal_delta = conceal_delta_for_regions(
         current_col1,
         raw_cell,
         regions.as_ref(),
@@ -629,24 +702,25 @@ pub(super) fn resolve_buffer_cursor_position(
                 screen_cell_for_buffer_column(window, line, col1)
             }
         },
-    )?
-    else {
-        // If the observation-time surface snapshot is unavailable, keep the raw sample and let
-        // the next exact settle-time pass re-sync from a fresh window view instead of freezing a
-        // guessed wrapped position.
-        return Ok(raw_cell);
-    };
+    )?;
     if let Some(cache_key) = conceal_delta_cache_key
+        && let Some(conceal_delta) = conceal_delta
         && let Err(err) = store_conceal_delta(cache_key, current_col1, conceal_delta)
     {
         warn(&format!("conceal delta cache write failed: {err}"));
     }
 
-    Ok(apply_conceal_delta(
-        raw_cell,
-        conceal_delta,
-        surface_snapshot,
-    ))
+    // Exact observation may only cross the boundary with a display-space cell. If wrapped conceal
+    // math cannot produce one from the current inputs, retain the raw host probe only in
+    // diagnostics and report semantic cursor truth as unavailable.
+    Ok(ExactCursorProjection {
+        observed_cell: exact_observed_cell_from_conceal_delta(
+            raw_cell,
+            conceal_delta,
+            surface_snapshot,
+        ),
+        source: ExactProjectionSource::Conceal,
+    })
 }
 
 #[cfg(test)]

@@ -205,12 +205,107 @@ impl ProjectorRevision {
     }
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum TimerId {
     Animation,
     Ingress,
     Recovery,
     Cleanup,
+}
+
+impl TimerId {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Animation,
+        Self::Ingress,
+        Self::Recovery,
+        Self::Cleanup,
+    ];
+    const NAMES: [&str; 4] = ["animation", "ingress", "recovery", "cleanup"];
+
+    pub(crate) const COUNT: usize = Self::ALL.len();
+
+    pub(crate) const fn slot_index(self) -> usize {
+        self as usize
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        Self::NAMES[self.slot_index()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct TimerSlots<T> {
+    slots: [T; TimerId::COUNT],
+}
+
+impl<T> TimerSlots<T>
+where
+    T: Copy,
+{
+    pub(crate) const fn filled(value: T) -> Self {
+        Self {
+            slots: [value; TimerId::COUNT],
+        }
+    }
+}
+
+impl<T> TimerSlots<T> {
+    pub(crate) fn from_fn(mut build: impl FnMut(TimerId) -> T) -> Self {
+        Self {
+            slots: std::array::from_fn(|index| build(TimerId::ALL[index])),
+        }
+    }
+
+    pub(crate) fn get(&self, timer_id: TimerId) -> &T {
+        &self.slots[timer_id.slot_index()]
+    }
+
+    pub(crate) fn get_mut(&mut self, timer_id: TimerId) -> &mut T {
+        &mut self.slots[timer_id.slot_index()]
+    }
+
+    pub(crate) fn replace(&mut self, timer_id: TimerId, value: T) -> T {
+        std::mem::replace(self.get_mut(timer_id), value)
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.slots.iter_mut()
+    }
+}
+
+impl<T> TimerSlots<T>
+where
+    T: Copy,
+{
+    pub(crate) fn copied(&self, timer_id: TimerId) -> T {
+        *self.get(timer_id)
+    }
+}
+
+impl<T> TimerSlots<Option<T>> {
+    pub(crate) fn take(&mut self, timer_id: TimerId) -> Option<T> {
+        self.replace(timer_id, None)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        for slot in self.iter_mut() {
+            *slot = None;
+        }
+    }
+
+    pub(crate) fn take_all(&mut self) -> Vec<T> {
+        self.iter_mut().filter_map(Option::take).collect()
+    }
+}
+
+impl<T> Default for TimerSlots<T>
+where
+    T: Default,
+{
+    fn default() -> Self {
+        Self::from_fn(|_| T::default())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -340,5 +435,52 @@ impl DelayBudgetMs {
 
     pub(crate) const fn value(self) -> u64 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn timer_slots_follow_the_canonical_timer_id_order() {
+        let slots = TimerSlots::from_fn(TimerId::slot_index);
+
+        for timer_id in TimerId::ALL {
+            assert_eq!(slots.copied(timer_id), timer_id.slot_index());
+        }
+    }
+
+    #[test]
+    fn timer_id_slot_indices_are_dense_and_zero_based() {
+        for timer_id in TimerId::ALL {
+            assert_eq!(timer_id.slot_index(), usize::from(timer_id as u8));
+        }
+
+        assert_eq!(TimerId::COUNT, 4);
+    }
+
+    #[test]
+    fn timer_slots_option_helpers_follow_canonical_timer_order() {
+        let mut slots = TimerSlots::from_fn(|timer_id| Some(timer_id.slot_index()));
+
+        assert_eq!(
+            slots.take(TimerId::Ingress),
+            Some(TimerId::Ingress.slot_index())
+        );
+        assert_eq!(slots.take(TimerId::Ingress), None);
+        assert_eq!(
+            slots.take_all(),
+            vec![
+                TimerId::Animation.slot_index(),
+                TimerId::Recovery.slot_index(),
+                TimerId::Cleanup.slot_index(),
+            ]
+        );
+
+        slots = TimerSlots::from_fn(|timer_id| Some(timer_id.slot_index()));
+        slots.clear();
+        assert_eq!(slots.take_all(), Vec::<usize>::new());
     }
 }

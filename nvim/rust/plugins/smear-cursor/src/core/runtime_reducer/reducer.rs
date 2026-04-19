@@ -30,6 +30,7 @@ use crate::animation::within_stop_enter;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::SemanticEvent;
 use crate::position::RenderPoint;
+use crate::state::AnimationClockSample;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
 use crate::types::EPSILON;
@@ -173,8 +174,7 @@ fn draw_discontinuous_jump_frame(
             buffer_perf_class,
         },
     );
-    state.start_tail_drain(planner_tail_drain_steps(state));
-    state.record_animation_tick(spec.event_now_ms);
+    state.start_tail_drain(planner_tail_drain_steps(state), spec.event_now_ms);
     let next_animation_at_ms = Some(next_animation_deadline_from_clock(state, spec.event_now_ms));
     CursorTransitions::draw(
         mode,
@@ -216,6 +216,23 @@ fn waiting_for_settled_target(
         .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
 
+fn clock_discontinuity_transition(
+    state: &mut RuntimeState,
+    mode: &str,
+    allow_real_cursor_updates: bool,
+) -> CursorTransition {
+    // A broken or oversized wall-clock sample severs motion continuity. Snap reducer truth to the
+    // latest target, discard residual tail state, and force the shell to clear stale smear output.
+    state.start_new_trail_stroke();
+    state.settle_at_target();
+    state.clear_particles();
+    reset_animation_timing(state);
+    state.stop_animation();
+    CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+        .with_motion_class(MotionClass::DiscontinuousJump)
+        .with_render_cleanup_action(RenderCleanupAction::Schedule)
+}
+
 fn draw_drain_frame(
     state: &mut RuntimeState,
     mode: &str,
@@ -227,8 +244,12 @@ fn draw_drain_frame(
     let allow_real_cursor_updates = !state.config.hide_target_hack;
     let keeps_ornamental_effects = buffer_perf_class.keeps_ornamental_effects();
     let configured_interval = state.config.time_interval.max(1.0);
-    let elapsed_ms = state.take_animation_elapsed_ms(event_now_ms, configured_interval);
-    state.push_simulation_elapsed(elapsed_ms);
+    match state.take_animation_clock_sample(event_now_ms, configured_interval) {
+        AnimationClockSample::Advance { elapsed_ms } => state.push_simulation_elapsed(elapsed_ms),
+        AnimationClockSample::Discontinuity => {
+            return clock_discontinuity_transition(state, mode, allow_real_cursor_updates);
+        }
+    }
 
     let simulation_step_ms = state.config.simulation_step_interval_ms().max(1.0);
     let max_simulation_steps =
@@ -664,9 +685,14 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
 
         if should_advance {
             let configured_interval = state.config.time_interval.max(1.0);
-            let step_interval = state.take_animation_elapsed_ms(event.now_ms, configured_interval);
-
-            state.push_simulation_elapsed(step_interval);
+            match state.take_animation_clock_sample(event.now_ms, configured_interval) {
+                AnimationClockSample::Advance { elapsed_ms } => {
+                    state.push_simulation_elapsed(elapsed_ms);
+                }
+                AnimationClockSample::Discontinuity => {
+                    return clock_discontinuity_transition(state, mode, allow_real_cursor_updates);
+                }
+            }
             let simulation_step_ms = state.config.simulation_step_interval_ms().max(1.0);
             let max_simulation_steps =
                 usize::try_from(state.config.max_simulation_steps_per_frame).unwrap_or(usize::MAX);
@@ -740,7 +766,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             );
             if state.note_settle_probe(within_stop_enter(&state.config, metrics)) {
                 state.settle_at_target();
-                state.start_tail_drain(planner_tail_drain_steps(state));
+                state.start_tail_drain(planner_tail_drain_steps(state), event.now_ms);
                 let current_corners = state.current_corners();
                 let target_corners = state.target_corners();
                 let render_corners =

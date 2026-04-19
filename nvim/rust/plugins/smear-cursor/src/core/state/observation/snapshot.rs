@@ -58,6 +58,8 @@ pub(crate) struct ObservationBasis {
     observed_at: Millis,
     mode: String,
     surface: WindowSurfaceSnapshot,
+    // authoritative: projected display-space cursor truth retained by reducer
+    // state; raw host probe details stay in event-layer readers and diagnostics.
     cursor: CursorObservation,
     viewport: ViewportBounds,
     buffer_revision: Option<u64>,
@@ -145,6 +147,9 @@ impl ObservationBasis {
     fn debug_assert_invariants(&self) {
         let surface = self.surface();
         let cursor = self.cursor();
+        // Observation storage owns one projected display-space cursor fact. The
+        // exact/deferred split tracks freshness only; reducer state does not
+        // distinguish raw versus projected cursor coordinates.
         debug_assert!(
             SurfaceId::new(surface.id().window_handle(), surface.id().buffer_handle()).is_some(),
             "observation surfaces must retain positive window and buffer handles"

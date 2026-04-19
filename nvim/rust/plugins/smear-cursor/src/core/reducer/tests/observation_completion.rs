@@ -40,6 +40,70 @@ fn idle_apply_completion_requests_boundary_refresh_for_conceal_deferred_cursor_p
 }
 
 #[test]
+fn idle_apply_completion_preserves_exact_anchor_while_refreshing_projected_deferred_cursor() {
+    let exact_anchor = cursor(9, 9);
+    let deferred_projected_cell = cursor(12, 13);
+    let mut runtime = ready_state().runtime().clone();
+    runtime.initialize_cursor(
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
+        7,
+        &TrackedCursor::fixture(11, 22, 3, 9),
+    );
+    let observation = ObservationSnapshot::new(
+        observation_request_with_perf_class(
+            9,
+            ExternalDemandKind::ExternalCursor,
+            90,
+            BufferPerfClass::FastMotion,
+        ),
+        observation_basis_with_observed_cell(
+            crate::position::ObservedCell::Deferred(deferred_projected_cell),
+            91,
+            "n",
+        ),
+        observation_motion(),
+    );
+    let ready = ready_state()
+        .with_latest_exact_cursor_cell(Some(exact_anchor))
+        .with_runtime(runtime)
+        .with_ready_observation(observation)
+        .expect("primed state should accept a deferred projected ready observation");
+    let (applying, proposal_id) =
+        applying_state_with_realization_plan(ready, noop_realization_plan(), false, None);
+
+    let transition = reduce(
+        &applying,
+        Event::ApplyReported(ApplyReport::AppliedFully {
+            proposal_id,
+            observed_at: Millis::new(101),
+            visual_change: false,
+        }),
+    );
+
+    let request = active_request(&transition.next);
+    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
+    pretty_assert_eq!(
+        transition.next.latest_exact_cursor_cell(),
+        Some(exact_anchor)
+    );
+    pretty_assert_eq!(request.demand().kind(), ExternalDemandKind::BoundaryRefresh);
+    pretty_assert_eq!(
+        request.demand().buffer_perf_class(),
+        BufferPerfClass::FastMotion
+    );
+    assert!(transition.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::RequestObservationBase(payload)
+                if payload.request == request
+                    && payload.context.buffer_perf_class() == BufferPerfClass::FastMotion
+                    && payload.context.probe_policy().quality() == ProbeQuality::Exact
+        )
+    }));
+}
+
+#[test]
 fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
     let previous_request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let previous_observation = ObservationSnapshot::new(
@@ -311,35 +375,4 @@ fn observation_completion_moves_runtime_particles_into_render_planning() {
         transition.next.runtime().particles().as_ptr(),
         particles_ptr
     );
-}
-
-#[test]
-fn conceal_deferred_observation_completion_preserves_latest_exact_cursor_anchor() {
-    let ready = ready_state_with_observation(cursor(9, 9));
-    let observing = reduce(
-        &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
-    )
-    .next;
-    let request = active_request(&observing);
-
-    let transition = collect_observation_base(
-        &observing,
-        &request,
-        observation_basis_with_observed_cell(
-            crate::position::ObservedCell::Deferred(cursor(12, 13)),
-            101,
-            "n",
-        ),
-        observation_motion(),
-    );
-
-    pretty_assert_eq!(
-        transition.next.latest_exact_cursor_cell(),
-        Some(cursor(9, 9))
-    );
-    let Some(observation) = transition.next.observation() else {
-        panic!("expected active observation after base collection");
-    };
-    pretty_assert_eq!(observation.basis().cursor_position(), Some(cursor(12, 13)));
 }

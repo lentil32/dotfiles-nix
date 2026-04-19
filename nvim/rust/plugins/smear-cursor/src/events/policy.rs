@@ -21,8 +21,8 @@ const FAST_MOTION_EXTMARK_PRESSURE_ENTER_THRESHOLD: f64 = 2.0;
 const FAST_MOTION_EXTMARK_PRESSURE_EXIT_THRESHOLD: f64 = 1.0;
 const FAST_MOTION_CONCEAL_SCAN_PRESSURE_ENTER_THRESHOLD: f64 = 2.0;
 const FAST_MOTION_CONCEAL_SCAN_PRESSURE_EXIT_THRESHOLD: f64 = 1.0;
-const FAST_MOTION_CONCEAL_RAW_PRESSURE_ENTER_THRESHOLD: f64 = 2.0;
-const FAST_MOTION_CONCEAL_RAW_PRESSURE_EXIT_THRESHOLD: f64 = 1.0;
+const FAST_MOTION_CONCEAL_DEFERRED_PRESSURE_ENTER_THRESHOLD: f64 = 2.0;
+const FAST_MOTION_CONCEAL_DEFERRED_PRESSURE_EXIT_THRESHOLD: f64 = 1.0;
 const BUFFER_EVENT_POLICY_CACHE_CAPACITY: usize = 32;
 
 fn threshold_active<T: PartialOrd>(value: T, previous_active: bool, enter: T, exit: T) -> bool {
@@ -44,7 +44,7 @@ enum BufferPerfReason {
     SlowCallback = 1 << 1,
     CursorColorExtmarkFallback = 1 << 4,
     ConcealFullScan = 1 << 5,
-    ConcealRawScreenposFallback = 1 << 6,
+    ConcealDeferredProjection = 1 << 6,
     UnsupportedBuftype = 1 << 2,
     DisabledFiletype = 1 << 3,
 }
@@ -56,7 +56,7 @@ impl BufferPerfReason {
             Self::SlowCallback => "slow_cb",
             Self::CursorColorExtmarkFallback => "extmark",
             Self::ConcealFullScan => "conceal_scan",
-            Self::ConcealRawScreenposFallback => "conceal_raw",
+            Self::ConcealDeferredProjection => "conceal_deferred",
             Self::UnsupportedBuftype => "buftype",
             Self::DisabledFiletype => "filetype",
         }
@@ -85,7 +85,7 @@ impl BufferPerfReasons {
             BufferPerfReason::SlowCallback,
             BufferPerfReason::CursorColorExtmarkFallback,
             BufferPerfReason::ConcealFullScan,
-            BufferPerfReason::ConcealRawScreenposFallback,
+            BufferPerfReason::ConcealDeferredProjection,
             BufferPerfReason::UnsupportedBuftype,
             BufferPerfReason::DisabledFiletype,
         ]
@@ -168,8 +168,8 @@ impl BufferEventPolicy {
             Self::previous_reason_active(previous, BufferPerfReason::CursorColorExtmarkFallback);
         let previous_conceal_scan_reason_active =
             Self::previous_reason_active(previous, BufferPerfReason::ConcealFullScan);
-        let previous_conceal_raw_reason_active =
-            Self::previous_reason_active(previous, BufferPerfReason::ConcealRawScreenposFallback);
+        let previous_conceal_deferred_reason_active =
+            Self::previous_reason_active(previous, BufferPerfReason::ConcealDeferredProjection);
         let line_count_drives_policy = input.buflisted || input.buftype == "terminal";
         let line_count_fast_motion = line_count_drives_policy
             && threshold_active(
@@ -196,11 +196,11 @@ impl BufferEventPolicy {
             FAST_MOTION_CONCEAL_SCAN_PRESSURE_ENTER_THRESHOLD,
             FAST_MOTION_CONCEAL_SCAN_PRESSURE_EXIT_THRESHOLD,
         );
-        let conceal_raw_pressure = threshold_active(
-            input.signals.conceal_raw_screenpos_fallback_pressure(),
-            previous_conceal_raw_reason_active,
-            FAST_MOTION_CONCEAL_RAW_PRESSURE_ENTER_THRESHOLD,
-            FAST_MOTION_CONCEAL_RAW_PRESSURE_EXIT_THRESHOLD,
+        let conceal_deferred_pressure = threshold_active(
+            input.signals.conceal_deferred_projection_pressure(),
+            previous_conceal_deferred_reason_active,
+            FAST_MOTION_CONCEAL_DEFERRED_PRESSURE_ENTER_THRESHOLD,
+            FAST_MOTION_CONCEAL_DEFERRED_PRESSURE_EXIT_THRESHOLD,
         );
         let unsupported_buftype = unsupported_buftype(input.buftype, input.buflisted);
         let mut reasons = BufferPerfReasons::default();
@@ -216,8 +216,8 @@ impl BufferEventPolicy {
         if conceal_scan_pressure {
             reasons.insert(BufferPerfReason::ConcealFullScan);
         }
-        if conceal_raw_pressure {
-            reasons.insert(BufferPerfReason::ConcealRawScreenposFallback);
+        if conceal_deferred_pressure {
+            reasons.insert(BufferPerfReason::ConcealDeferredProjection);
         }
         if unsupported_buftype {
             reasons.insert(BufferPerfReason::UnsupportedBuftype);
@@ -235,7 +235,7 @@ impl BufferEventPolicy {
                     || slow_callback
                     || extmark_pressure
                     || conceal_scan_pressure
-                    || conceal_raw_pressure =>
+                    || conceal_deferred_pressure =>
                 {
                     BufferPerfClass::FastMotion
                 }

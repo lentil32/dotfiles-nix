@@ -1,9 +1,9 @@
 use super::super::ingress::AutocmdIngress;
-use crate::core::effect::TimerKind;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
+use crate::core::types::TimerId;
 
 fn saturating_add_count(total: &mut u64, count: usize) {
     let count = u64::try_from(count).unwrap_or(u64::MAX);
@@ -167,18 +167,18 @@ impl TimerCountTelemetry {
         }
     }
 
-    pub(super) fn record_kind(&mut self, kind: TimerKind) {
-        match kind {
-            TimerKind::Animation => {
+    pub(super) fn record_timer_id(&mut self, timer_id: TimerId) {
+        match timer_id {
+            TimerId::Animation => {
                 self.animation = self.animation.saturating_add(1);
             }
-            TimerKind::Ingress => {
+            TimerId::Ingress => {
                 self.ingress = self.ingress.saturating_add(1);
             }
-            TimerKind::Recovery => {
+            TimerId::Recovery => {
                 self.recovery = self.recovery.saturating_add(1);
             }
-            TimerKind::Cleanup => {
+            TimerId::Cleanup => {
                 self.cleanup = self.cleanup.saturating_add(1);
             }
         }
@@ -373,7 +373,7 @@ pub(in crate::events) struct ConcealProbeTelemetry {
     pub(in crate::events) region_cache: HitMissTelemetry,
     pub(in crate::events) screen_cell_cache: HitMissTelemetry,
     pub(in crate::events) full_scan_calls: u64,
-    pub(in crate::events) raw_screenpos_fallback_calls: u64,
+    pub(in crate::events) deferred_projection_calls: u64,
 }
 
 impl ConcealProbeTelemetry {
@@ -382,7 +382,7 @@ impl ConcealProbeTelemetry {
             region_cache: HitMissTelemetry::new(),
             screen_cell_cache: HitMissTelemetry::new(),
             full_scan_calls: 0,
-            raw_screenpos_fallback_calls: 0,
+            deferred_projection_calls: 0,
         }
     }
 
@@ -406,8 +406,8 @@ impl ConcealProbeTelemetry {
         self.full_scan_calls = self.full_scan_calls.saturating_add(1);
     }
 
-    pub(super) fn record_raw_screenpos_fallback(&mut self) {
-        self.raw_screenpos_fallback_calls = self.raw_screenpos_fallback_calls.saturating_add(1);
+    pub(super) fn record_deferred_projection(&mut self) {
+        self.deferred_projection_calls = self.deferred_projection_calls.saturating_add(1);
     }
 }
 
@@ -701,9 +701,9 @@ impl RuntimeBehaviorMetrics {
         self.timer_fire.record_micros(duration_micros);
     }
 
-    pub(in crate::events) fn record_host_timer_rearm(&mut self, kind: TimerKind) {
+    pub(in crate::events) fn record_host_timer_rearm(&mut self, timer_id: TimerId) {
         self.host_timer_rearms_total = self.host_timer_rearms_total.saturating_add(1);
-        self.host_timer_rearms_by_kind.record_kind(kind);
+        self.host_timer_rearms_by_kind.record_timer_id(timer_id);
     }
 
     pub(in crate::events) fn record_delayed_ingress_pending_update(&mut self) {
@@ -836,8 +836,8 @@ impl RuntimeBehaviorMetrics {
         self.conceal_probe.record_full_scan();
     }
 
-    pub(in crate::events) fn record_conceal_raw_screenpos_fallback(&mut self) {
-        self.conceal_probe.record_raw_screenpos_fallback();
+    pub(in crate::events) fn record_conceal_deferred_projection(&mut self) {
+        self.conceal_probe.record_deferred_projection();
     }
 
     pub(in crate::events) fn record_planner_local_query(

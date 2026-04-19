@@ -252,13 +252,7 @@ pub(crate) fn cursor_rectangle() -> BoxedStrategy<CursorRectFixture> {
 }
 
 pub(crate) fn timer_id() -> BoxedStrategy<TimerId> {
-    prop_oneof![
-        Just(TimerId::Animation),
-        Just(TimerId::Ingress),
-        Just(TimerId::Recovery),
-        Just(TimerId::Cleanup),
-    ]
-    .boxed()
+    proptest::sample::select(Vec::from(TimerId::ALL)).boxed()
 }
 
 pub(crate) fn timer_token() -> BoxedStrategy<TimerToken> {

@@ -2,7 +2,6 @@ use crate::core::effect::ApplyRenderCleanupEffect;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::ScheduleTimerEffect;
-use crate::core::effect::TimerKind;
 use crate::core::event::Event as CoreEvent;
 use crate::core::state::ProbeKind;
 use crate::core::types::Millis;
@@ -70,8 +69,7 @@ impl EffectOnlyAgenda {
             }
             Effect::ScheduleTimer(payload) => {
                 if let Some(EffectOnlyStep::ScheduleTimer(existing)) = self.steps.back_mut()
-                    && TimerKind::from_timer_id(existing.token.id())
-                        == TimerKind::from_timer_id(payload.token.id())
+                    && existing.token.id() == payload.token.id()
                 {
                     *existing = payload;
                     return false;

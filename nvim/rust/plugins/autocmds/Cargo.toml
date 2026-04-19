@@ -14,8 +14,8 @@ workspace = true
 nvim-oxi = { workspace = true, features = ["mlua", "libuv"] }
 nvimrs-nvim-utils = { workspace = true }
 nvimrs-nvim-oxi-utils = { workspace = true }
-hostname = "0.4"
-percent-encoding = "2.3"
+hostname = { workspace = true }
+percent-encoding = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 nvimrs-support = { workspace = true }
 

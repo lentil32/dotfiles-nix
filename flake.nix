@@ -24,8 +24,18 @@
     treefmt-nix.url = "github:numtide/treefmt-nix";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
+    claude-code-nix = {
+      url = "github:sadjow/claude-code-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
     codex-cli-nix = {
       url = "github:sadjow/codex-cli-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
+    gemini-cli-nix = {
+      url = "github:sadjow/gemini-cli-nix";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -91,7 +101,9 @@
       treefmt-nix,
       crane,
       flake-utils,
+      claude-code-nix,
       codex-cli-nix,
+      gemini-cli-nix,
       nix-homebrew,
       nur,
       homebrew-core,
@@ -136,7 +148,6 @@
         overlays = [
           rust-overlay.overlays.default
           nur.overlays.default
-          codex-cli-nix.overlays.default
           (final: prev: {
             pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
           })

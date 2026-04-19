@@ -6,7 +6,7 @@
 //!
 //! ```lua
 //! local smear = require("nvimrs_smear_cursor")
-//! -- `setup()` installs the Rust autocmd callbacks.
+//! -- `setup()` installs the plugin's host-bridge autocmd wiring.
 //! smear.setup({ enabled = true, time_interval = 8.33 })
 //! ```
 
@@ -78,10 +78,10 @@ fn nvimrs_smear_cursor() -> Dictionary {
         }),
     );
     api.insert(
-        "on_core_timer_slot",
-        Function::<(i64, u64), ()>::from_fn(|(timer_id, generation)| {
-            guard_plugin_call("on_core_timer_slot", || {
-                events::on_core_timer_slot_event(timer_id, generation);
+        "on_core_timer_fired",
+        Function::<(i64, i64), ()>::from_fn(|(host_callback_id, host_timer_id)| {
+            guard_plugin_call("on_core_timer_fired", || {
+                events::on_core_timer_fired_event(host_callback_id, host_timer_id);
                 Ok(())
             })
         }),
@@ -90,6 +90,14 @@ fn nvimrs_smear_cursor() -> Dictionary {
         "on_autocmd",
         Function::<String, ()>::from_fn(|event| {
             guard_plugin_call("on_autocmd", || events::on_autocmd_event(&event))
+        }),
+    );
+    api.insert(
+        "on_autocmd_payload",
+        Function::<Dictionary, ()>::from_fn(|payload| {
+            guard_plugin_call("on_autocmd_payload", || {
+                events::on_autocmd_payload_event(&payload)
+            })
         }),
     );
     api.insert(

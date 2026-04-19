@@ -8,6 +8,7 @@ use super::engine::mutate_engine_state;
 use super::engine::read_engine_state;
 use super::engine::reset_core_state;
 use super::timers::clear_all_core_timer_handles;
+use super::timers::clear_pending_core_timer_dispatch_retries;
 use crate::allocation_counters;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RetainedCursorColorFallback;
@@ -329,8 +330,8 @@ pub(crate) fn perf_diagnostics_report() -> String {
                     loop_diag.metrics.conceal_probe.full_scan_calls
                 ),
                 format!(
-                    "conceal_raw_screenpos_fallback_calls={}",
-                    loop_diag.metrics.conceal_probe.raw_screenpos_fallback_calls
+                    "conceal_deferred_projection_calls={}",
+                    loop_diag.metrics.conceal_probe.deferred_projection_calls
                 ),
                 format!(
                     "perf_reasons={}",
@@ -391,6 +392,7 @@ fn optional_u64_value(value: Option<u64>) -> String {
 
 fn reset_transient_event_state_with_policy() {
     clear_all_core_timer_handles();
+    clear_pending_core_timer_dispatch_retries();
     super::super::handlers::reset_scheduled_effect_queue();
     if let Err(err) = mutate_engine_state(|state| {
         state.shell.reset_transient_caches();

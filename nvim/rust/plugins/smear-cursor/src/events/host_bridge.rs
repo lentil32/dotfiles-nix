@@ -3,12 +3,17 @@ use super::HostBridgeRevision;
 use super::HostBridgeState;
 use super::runtime::mutate_engine_state;
 use super::runtime::read_engine_state;
+use super::timer_protocol::HostCallbackId;
 use nvim_oxi::Array;
 use nvim_oxi::Object;
 use nvim_oxi::api;
 use thiserror::Error;
 
 const HOST_BRIDGE_REVISION_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridge#revision";
+pub(super) const DISPATCH_AUTOCMD_FUNCTION_NAME: &str =
+    "nvimrs_smear_cursor#host_bridge#dispatch_autocmd";
+#[cfg(test)]
+const DISPATCH_TIMER_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridge#dispatch_timer";
 const START_TIMER_ONCE_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridge#start_timer_once";
 const STOP_TIMER_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridge#stop_timer";
 const INSTALL_PROBE_HELPERS_FUNCTION_NAME: &str =
@@ -19,9 +24,6 @@ const BACKGROUND_ALLOWED_MASK_FUNCTION_NAME: &str =
     "nvimrs_smear_cursor#host_bridge#background_allowed_mask";
 #[cfg(test)]
 const HOST_BRIDGE_SCRIPT: &str = include_str!("../../autoload/nvimrs_smear_cursor/host_bridge.vim");
-#[cfg(test)]
-const TIMER_HOST_BRIDGE_SCRIPT: &str =
-    include_str!("../../lua/nvimrs_smear_cursor/host_bridge.lua");
 #[cfg(test)]
 const PROBE_HELPERS_SCRIPT: &str = include_str!("../../lua/nvimrs_smear_cursor/probes.lua");
 #[cfg(test)]
@@ -61,6 +63,7 @@ pub(super) enum HostBridgeError {
     RevisionDecode { value: i64 },
     #[error("failed to start smear cursor host bridge timer: {0}")]
     StartTimerOnce(#[source] nvim_oxi::Error),
+    #[cfg_attr(test, allow(dead_code))]
     #[error("failed to stop smear cursor host bridge timer: {0}")]
     StopTimer(#[source] nvim_oxi::Error),
     #[error("failed to install smear cursor probe helpers: {0}")]
@@ -85,26 +88,20 @@ pub(super) struct InstalledHostBridge;
 impl InstalledHostBridge {
     pub(super) fn start_timer_once(
         self,
-        timer_slot: i64,
-        token_generation: u64,
+        host_callback_id: HostCallbackId,
         timeout_ms: i64,
     ) -> HostBridgeResult<i64> {
-        let token_generation = i64::try_from(token_generation).map_err(|_| {
-            HostBridgeError::StartTimerOnce(crate::other_error(format!(
-                "timer generation overflowed host bridge integer encoding: {token_generation}"
-            )))
-        })?;
         let args = Array::from_iter([
-            Object::from(timer_slot),
-            Object::from(token_generation),
+            Object::from(host_callback_id.get()),
             Object::from(timeout_ms),
         ]);
         api::call_function(START_TIMER_ONCE_FUNCTION_NAME, args)
             .map_err(|error| HostBridgeError::StartTimerOnce(error.into()))
     }
 
-    pub(super) fn stop_timer(self, timer_slot: i64) -> HostBridgeResult<()> {
-        let args = Array::from_iter([Object::from(timer_slot)]);
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn stop_timer(self, timer_id: i64) -> HostBridgeResult<()> {
+        let args = Array::from_iter([Object::from(timer_id)]);
         let _: i64 = api::call_function(STOP_TIMER_FUNCTION_NAME, args)
             .map_err(|error| HostBridgeError::StopTimer(error.into()))?;
         Ok(())
@@ -237,6 +234,8 @@ mod tests {
                 "entrypoints present",
                 &[
                     HOST_BRIDGE_REVISION_FUNCTION_NAME,
+                    DISPATCH_AUTOCMD_FUNCTION_NAME,
+                    DISPATCH_TIMER_FUNCTION_NAME,
                     START_TIMER_ONCE_FUNCTION_NAME,
                     STOP_TIMER_FUNCTION_NAME,
                     INSTALL_PROBE_HELPERS_FUNCTION_NAME,
@@ -246,22 +245,42 @@ mod tests {
                 &[],
             ),
             (
-                "timer bridge delegated to lua host bridge",
+                "autocmd bridge forwards explicit payload fields",
                 &[
-                    "require('nvimrs_smear_cursor.host_bridge')",
-                    ".start_timer_once(_A[1], _A[2], _A[3])",
-                    ".stop_timer(_A)",
+                    "dispatch_autocmd(event, buffer, match) abort",
+                    ".on_autocmd_payload(_A)",
+                    "{'event': a:event, 'buffer': a:buffer, 'match': a:match}",
                 ],
                 &[],
             ),
             (
-                "persistent lua timer callback shape",
+                "timer bridge delegated to builtin vim timers",
                 &[
-                    "uv.new_timer()",
-                    "slot.handle:start(timeout, 0, function()",
-                    "require(\"nvimrs_smear_cursor\").on_core_timer_slot(slot_id, token_generation)",
+                    "dispatch_timer(host_callback_id, timer_id) abort",
+                    "let Callback = function(",
+                    "'nvimrs_smear_cursor#host_bridge#dispatch_timer'",
+                    "[a:host_callback_id]",
+                    "return timer_start(a:timeout, Callback)",
+                    "return timer_stop(a:timer_id)",
+                    ".on_core_timer_fired(_A[1], _A[2])",
                 ],
-                &[],
+                &[
+                    "require('nvimrs_smear_cursor.host_bridge')",
+                    "uv.new_timer()",
+                    "reset_timers",
+                    "dispatch_animation_timer",
+                    "dispatch_ingress_timer",
+                    "dispatch_recovery_timer",
+                    "dispatch_cleanup_timer",
+                    "dispatch_timer(timer_name, timer_id)",
+                    "timer_callbacks",
+                    "timer_callback_name",
+                    "on_core_timer_slot",
+                    "a:timer_name",
+                    "unknown smear cursor timer slot",
+                    "token_generation",
+                    "timer_payloads",
+                ],
             ),
             (
                 "runtime-module loading shape",
@@ -271,12 +290,13 @@ mod tests {
         ];
 
         for &(case_name, required, forbidden) in cases {
-            let (script_name, script) = if case_name == "persistent lua timer callback shape" {
-                ("lua host bridge script", TIMER_HOST_BRIDGE_SCRIPT)
-            } else {
-                ("host bridge script", HOST_BRIDGE_SCRIPT)
-            };
-            assert_substring_contract(script_name, script, case_name, required, forbidden);
+            assert_substring_contract(
+                "host bridge script",
+                HOST_BRIDGE_SCRIPT,
+                case_name,
+                required,
+                forbidden,
+            );
         }
     }
 

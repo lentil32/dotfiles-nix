@@ -26,6 +26,9 @@ use crate::events::cursor::BufferMetadata;
 use crate::events::ingress::AutocmdIngress;
 use crate::events::policy::BufferEventPolicy;
 use crate::events::policy::BufferPerfTelemetry;
+use crate::events::timer_protocol::FiredHostTimer;
+use crate::events::timer_protocol::HostCallbackId;
+use crate::events::timer_protocol::HostTimerId;
 use crate::position::BufferLine;
 use crate::position::CursorObservation;
 use crate::position::ObservedCell;
@@ -38,38 +41,28 @@ use nvim_oxi::Object;
 use nvim_oxi::api;
 use pretty_assertions::assert_eq;
 
-fn shell_timer_id(value: i64) -> super::super::timers::NvimTimerId {
-    super::super::timers::NvimTimerId::try_new(value).expect("test shell timer id must be positive")
+fn host_callback_id(value: i64) -> HostCallbackId {
+    HostCallbackId::try_new(value).expect("test host callback id must be positive")
+}
+
+fn host_timer_id(value: i64) -> HostTimerId {
+    HostTimerId::try_new(value).expect("test host timer id must be positive")
 }
 
 fn handle(value: i64, timer_id: TimerId, generation: u64) -> CoreTimerHandle {
     CoreTimerHandle {
-        shell_timer_id: shell_timer_id(value),
+        host_callback_id: host_callback_id(value),
+        host_timer_id: host_timer_id(value),
         token: crate::core::types::TimerToken::new(timer_id, TimerGeneration::new(generation)),
-    }
-}
-
-const TIMER_IDS: [TimerId; 4] = [
-    TimerId::Animation,
-    TimerId::Ingress,
-    TimerId::Recovery,
-    TimerId::Cleanup,
-];
-
-const fn timer_slot_index(timer_id: TimerId) -> usize {
-    match timer_id {
-        TimerId::Animation => 0,
-        TimerId::Ingress => 1,
-        TimerId::Recovery => 2,
-        TimerId::Cleanup => 3,
     }
 }
 
 fn normalize_handles(mut handles: Vec<CoreTimerHandle>) -> Vec<CoreTimerHandle> {
     handles.sort_by_key(|handle| {
         (
-            timer_slot_index(handle.token.id()),
-            handle.shell_timer_id.get(),
+            handle.token.id().slot_index(),
+            handle.host_callback_id.get(),
+            handle.host_timer_id.get(),
             handle.token.generation().value(),
         )
     });
@@ -84,42 +77,59 @@ fn core_timer_handles_smoke_replace_lookup_and_clear_each_slot() {
     let ingress = handle(21, TimerId::Ingress, 8);
 
     assert_eq!(handles.replace(animation), None);
-    assert!(handles.has_outstanding_timer_id(TimerId::Animation));
+    assert!(handles.has_timer_id(TimerId::Animation));
     assert_eq!(handles.replace(animation_replaced), Some(animation));
+    assert_eq!(handles.take_by_host_timer_id(animation.host_timer_id), None);
     assert_eq!(
-        handles.take_by_shell_timer_id(animation.shell_timer_id),
-        None
-    );
-    assert_eq!(
-        handles.take_by_shell_timer_id(animation_replaced.shell_timer_id),
+        handles.take_by_host_timer_id(animation_replaced.host_timer_id),
         Some(animation_replaced)
     );
-    assert!(!handles.has_outstanding_timer_id(TimerId::Animation));
+    assert!(!handles.has_timer_id(TimerId::Animation));
 
     assert_eq!(handles.replace(ingress), None);
-    assert!(handles.has_outstanding_timer_id(TimerId::Ingress));
+    assert!(handles.has_timer_id(TimerId::Ingress));
 
     let cleared = normalize_handles(handles.clear_all());
     assert_eq!(cleared, vec![ingress]);
 
-    for timer_id in TIMER_IDS {
-        assert!(!handles.has_outstanding_timer_id(timer_id));
+    for timer_id in TimerId::ALL {
+        assert!(!handles.has_timer_id(timer_id));
     }
 }
 
 #[test]
-fn core_timer_handles_only_consume_matching_generation_for_persistent_slots() {
+fn core_timer_handles_only_consume_matching_callback_and_host_timer_for_persistent_slots() {
     let mut handles = CoreTimerHandles::default();
     let original = handle(11, TimerId::Animation, 3);
-    let rearmed = handle(11, TimerId::Animation, 4);
+    let rearmed = handle(12, TimerId::Animation, 4);
 
     assert_eq!(handles.replace(original), None);
     assert_eq!(handles.replace(rearmed), Some(original));
-    assert!(handles.has_shell_timer_id(rearmed.shell_timer_id));
-    assert_eq!(handles.take_fired(rearmed.shell_timer_id, 3), None);
-    assert!(handles.has_shell_timer_id(rearmed.shell_timer_id));
-    assert_eq!(handles.take_fired(rearmed.shell_timer_id, 4), Some(rearmed));
-    assert!(!handles.has_shell_timer_id(rearmed.shell_timer_id));
+    assert!(handles.has_timer_id(TimerId::Animation));
+    assert_eq!(
+        handles.take_fired(FiredHostTimer::new(
+            original.host_callback_id,
+            original.host_timer_id
+        )),
+        None
+    );
+    assert!(handles.has_timer_id(TimerId::Animation));
+    assert_eq!(
+        handles.take_fired(FiredHostTimer::new(
+            rearmed.host_callback_id,
+            original.host_timer_id
+        )),
+        None
+    );
+    assert!(handles.has_timer_id(TimerId::Animation));
+    assert_eq!(
+        handles.take_fired(FiredHostTimer::new(
+            rearmed.host_callback_id,
+            rearmed.host_timer_id
+        )),
+        Some(rearmed)
+    );
+    assert!(!handles.has_timer_id(TimerId::Animation));
 }
 
 #[test]
@@ -272,15 +282,23 @@ fn colorscheme_boundary_clears_only_color_dependent_shell_caches() {
 }
 
 #[test]
-fn transient_reset_purges_shell_caches_but_preserves_host_handles() {
+fn transient_reset_purges_shell_caches_and_core_timer_handles_but_preserves_host_bridge_verification()
+ {
     let context_key = prime_shell_boundary_state().2;
     let cleared_color_witness = shell_cache_color_witness(Generation::INITIAL, Generation::INITIAL);
+    let animation_handle = handle(11, TimerId::Animation, 3);
+    let ingress_handle = handle(21, TimerId::Ingress, 8);
 
     mutate_engine_state(|state| {
         state.shell.set_namespace_id(77);
         state
             .shell
             .note_host_bridge_verified(super::super::HostBridgeRevision::CURRENT);
+        assert_eq!(
+            state.shell.core_timer_handles.replace(animation_handle),
+            None
+        );
+        assert_eq!(state.shell.core_timer_handles.replace(ingress_handle), None);
     })
     .expect("engine state access should succeed");
 
@@ -291,6 +309,8 @@ fn transient_reset_purges_shell_caches_but_preserves_host_handles() {
         host_bridge_state,
         real_cursor_visibility,
         viewport,
+        outstanding_animation_timer,
+        outstanding_ingress_timer,
         cached_metadata,
         cached_policy,
         cached_telemetry,
@@ -305,6 +325,14 @@ fn transient_reset_purges_shell_caches_but_preserves_host_handles() {
             state.shell.host_bridge_state(),
             state.shell.real_cursor_visibility(),
             state.shell.editor_viewport_cache.cached_for_test(),
+            state
+                .shell
+                .core_timer_handles
+                .has_timer_id(TimerId::Animation),
+            state
+                .shell
+                .core_timer_handles
+                .has_timer_id(TimerId::Ingress),
             state
                 .shell
                 .buffer_metadata_cache
@@ -344,6 +372,8 @@ fn transient_reset_purges_shell_caches_but_preserves_host_handles() {
     );
     assert_eq!(real_cursor_visibility, None);
     assert_eq!(viewport, None);
+    assert!(!outstanding_animation_timer);
+    assert!(!outstanding_ingress_timer);
     assert_eq!(cached_metadata, None);
     assert_eq!(cached_policy, None);
     assert_eq!(cached_telemetry, None);
@@ -432,7 +462,7 @@ fn perf_diagnostics_report_includes_recovery_fields_within_bridge_budget() {
     assert!(report.contains("conceal_screen_cell_cache_hit="));
     assert!(report.contains("conceal_screen_cell_cache_miss="));
     assert!(report.contains("conceal_full_scan_calls="));
-    assert!(report.contains("conceal_raw_screenpos_fallback_calls="));
+    assert!(report.contains("conceal_deferred_projection_calls="));
     assert!(report.contains("perf_reasons="));
     assert!(report.contains("cleanup_thermal="));
     assert!(report.contains("pool_total_windows="));
@@ -866,7 +896,7 @@ fn record_pressure_samples_in_engine(
     buffer_handle: i64,
     extmark_count: u8,
     conceal_scan_count: u8,
-    conceal_raw_count: u8,
+    conceal_deferred_count: u8,
     observed_at_ms: f64,
 ) {
     mutate_engine_state(|state| {
@@ -882,11 +912,11 @@ fn record_pressure_samples_in_engine(
                 .buffer_perf_telemetry_cache
                 .record_conceal_full_scan(buffer_handle, observed_at_ms);
         }
-        for _ in 0..conceal_raw_count {
+        for _ in 0..conceal_deferred_count {
             state
                 .shell
                 .buffer_perf_telemetry_cache
-                .record_conceal_raw_screenpos_fallback(buffer_handle, observed_at_ms);
+                .record_conceal_deferred_projection(buffer_handle, observed_at_ms);
         }
     })
     .expect("engine state access should succeed");

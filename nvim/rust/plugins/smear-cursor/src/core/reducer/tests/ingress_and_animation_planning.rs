@@ -253,7 +253,7 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
             .with_window_origin(1, 1)
             .with_window_dimensions(120, 40),
     );
-    runtime.start_tail_drain(2);
+    runtime.start_tail_drain(2, 100.0);
     runtime.set_last_tick_ms(Some(100.0));
     let base = ready_state()
         .with_latest_exact_cursor_cell(Some(cursor(9, 9)))

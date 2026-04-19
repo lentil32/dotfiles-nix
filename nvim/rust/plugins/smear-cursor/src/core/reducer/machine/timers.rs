@@ -12,9 +12,9 @@ use super::support::reset_recovery_attempt;
 use super::support::schedule_timer_with_delay;
 use super::support::start_boundary_refresh_observation;
 use crate::core::effect::EventLoopMetricEffect;
-use crate::core::effect::TimerKind;
 use crate::core::state::CoreState;
 use crate::core::types::Millis;
+use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
 
 fn reduce_ingress_timer_signal(state: CoreState, observed_at: Millis) -> Transition {
@@ -38,7 +38,7 @@ fn reduce_ingress_timer_signal(state: CoreState, observed_at: Millis) -> Transit
             .max(1);
         let (scheduled_state, effect) = schedule_timer_with_delay(
             state,
-            TimerKind::Ingress,
+            TimerId::Ingress,
             delay_budget_from_ms(remaining_delay_ms),
             observed_at,
         );
@@ -55,9 +55,9 @@ pub(super) fn reduce_timer_signal_with_token(
     token: TimerToken,
     observed_at: Millis,
 ) -> Transition {
-    let kind = TimerKind::from_timer_id(token.id());
+    let timer_id = token.id();
     if !state.timers().is_active(token) {
-        if kind == TimerKind::Cleanup {
+        if timer_id == TimerId::Cleanup {
             return Transition::stay_owned(state);
         }
         return Transition::new(
@@ -68,8 +68,8 @@ pub(super) fn reduce_timer_signal_with_token(
 
     let next_timers = state.timers().clear_matching(token);
     let disarmed_state = state.with_timers(next_timers);
-    match kind {
-        TimerKind::Animation => {
+    match timer_id {
+        TimerId::Animation => {
             if disarmed_state.needs_initialize() {
                 Transition::stay_owned(disarmed_state)
             } else {
@@ -102,8 +102,8 @@ pub(super) fn reduce_timer_signal_with_token(
                 }
             }
         }
-        TimerKind::Ingress => reduce_ingress_timer_signal(disarmed_state, observed_at),
-        TimerKind::Recovery => {
+        TimerId::Ingress => reduce_ingress_timer_signal(disarmed_state, observed_at),
+        TimerId::Recovery => {
             if disarmed_state.lifecycle() == crate::core::types::Lifecycle::Recovering {
                 let mut disarmed_state = disarmed_state;
                 let settled = if disarmed_state.restore_retained_observation_to_ready() {
@@ -116,7 +116,7 @@ pub(super) fn reduce_timer_signal_with_token(
                 Transition::stay_owned(disarmed_state)
             }
         }
-        TimerKind::Cleanup => {
+        TimerId::Cleanup => {
             if let Some(effect) = cleanup_effect_for_timer_fire(
                 disarmed_state.render_cleanup(),
                 &disarmed_state.runtime().config,

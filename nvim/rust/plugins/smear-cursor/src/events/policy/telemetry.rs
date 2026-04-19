@@ -38,7 +38,7 @@ impl DecayingPressureSignal {
 pub(in crate::events) struct BufferPerfSignals {
     cursor_color_extmark_fallback_pressure: f64,
     conceal_full_scan_pressure: f64,
-    conceal_raw_screenpos_fallback_pressure: f64,
+    conceal_deferred_projection_pressure: f64,
 }
 
 impl BufferPerfSignals {
@@ -50,8 +50,8 @@ impl BufferPerfSignals {
         self.conceal_full_scan_pressure
     }
 
-    pub(in crate::events) const fn conceal_raw_screenpos_fallback_pressure(self) -> f64 {
-        self.conceal_raw_screenpos_fallback_pressure
+    pub(in crate::events) const fn conceal_deferred_projection_pressure(self) -> f64 {
+        self.conceal_deferred_projection_pressure
     }
 }
 
@@ -60,7 +60,7 @@ pub(in crate::events) struct BufferPerfTelemetry {
     callback_duration_estimate_ms: f64,
     cursor_color_extmark_fallback_pressure: DecayingPressureSignal,
     conceal_full_scan_pressure: DecayingPressureSignal,
-    conceal_raw_screenpos_fallback_pressure: DecayingPressureSignal,
+    conceal_deferred_projection_pressure: DecayingPressureSignal,
 }
 
 impl BufferPerfTelemetry {
@@ -86,8 +86,8 @@ impl BufferPerfTelemetry {
         self.conceal_full_scan_pressure.record_event(observed_at_ms);
     }
 
-    pub(in crate::events) fn record_conceal_raw_screenpos_fallback(&mut self, observed_at_ms: f64) {
-        self.conceal_raw_screenpos_fallback_pressure
+    pub(in crate::events) fn record_conceal_deferred_projection(&mut self, observed_at_ms: f64) {
+        self.conceal_deferred_projection_pressure
             .record_event(observed_at_ms);
     }
 
@@ -97,8 +97,8 @@ impl BufferPerfTelemetry {
                 .cursor_color_extmark_fallback_pressure
                 .value_at(observed_at_ms),
             conceal_full_scan_pressure: self.conceal_full_scan_pressure.value_at(observed_at_ms),
-            conceal_raw_screenpos_fallback_pressure: self
-                .conceal_raw_screenpos_fallback_pressure
+            conceal_deferred_projection_pressure: self
+                .conceal_deferred_projection_pressure
                 .value_at(observed_at_ms),
         }
     }
@@ -171,13 +171,13 @@ impl BufferPerfTelemetryCache {
         })
     }
 
-    pub(in crate::events) fn record_conceal_raw_screenpos_fallback(
+    pub(in crate::events) fn record_conceal_deferred_projection(
         &mut self,
         buffer_handle: i64,
         observed_at_ms: f64,
     ) -> BufferPerfTelemetry {
         self.update_telemetry_entry(buffer_handle, |telemetry| {
-            telemetry.record_conceal_raw_screenpos_fallback(observed_at_ms);
+            telemetry.record_conceal_deferred_projection(observed_at_ms);
         })
     }
 
@@ -272,7 +272,7 @@ mod tests {
     enum PressureSignalKind {
         CursorColorExtmarkFallback,
         ConcealFullScan,
-        ConcealRawScreenposFallback,
+        ConcealDeferredProjection,
     }
 
     impl PressureSignalKind {
@@ -282,8 +282,8 @@ mod tests {
                     telemetry.record_cursor_color_extmark_fallback(observed_at_ms);
                 }
                 Self::ConcealFullScan => telemetry.record_conceal_full_scan(observed_at_ms),
-                Self::ConcealRawScreenposFallback => {
-                    telemetry.record_conceal_raw_screenpos_fallback(observed_at_ms);
+                Self::ConcealDeferredProjection => {
+                    telemetry.record_conceal_deferred_projection(observed_at_ms);
                 }
             }
         }
@@ -293,7 +293,7 @@ mod tests {
         prop_oneof![
             Just(PressureSignalKind::CursorColorExtmarkFallback),
             Just(PressureSignalKind::ConcealFullScan),
-            Just(PressureSignalKind::ConcealRawScreenposFallback),
+            Just(PressureSignalKind::ConcealDeferredProjection),
         ]
         .boxed()
     }
@@ -333,7 +333,7 @@ mod tests {
     struct BufferPerfTelemetryModel {
         cursor_color_extmark_fallback_pressure: PressureSignalModel,
         conceal_full_scan_pressure: PressureSignalModel,
-        conceal_raw_screenpos_fallback_pressure: PressureSignalModel,
+        conceal_deferred_projection_pressure: PressureSignalModel,
     }
 
     impl BufferPerfTelemetryModel {
@@ -345,8 +345,8 @@ mod tests {
                 PressureSignalKind::ConcealFullScan => {
                     self.conceal_full_scan_pressure.record_event(observed_at_ms);
                 }
-                PressureSignalKind::ConcealRawScreenposFallback => self
-                    .conceal_raw_screenpos_fallback_pressure
+                PressureSignalKind::ConcealDeferredProjection => self
+                    .conceal_deferred_projection_pressure
                     .record_event(observed_at_ms),
             }
         }
@@ -359,8 +359,8 @@ mod tests {
                 conceal_full_scan_pressure: self
                     .conceal_full_scan_pressure
                     .value_at(observed_at_ms),
-                conceal_raw_screenpos_fallback_pressure: self
-                    .conceal_raw_screenpos_fallback_pressure
+                conceal_deferred_projection_pressure: self
+                    .conceal_deferred_projection_pressure
                     .value_at(observed_at_ms),
             }
         }
@@ -468,9 +468,9 @@ mod tests {
                                     .record_conceal_full_scan(buffer_handle, observed_at_ms)
                                     .signals_at(query_at_ms)
                             }
-                            PressureSignalKind::ConcealRawScreenposFallback => {
+                            PressureSignalKind::ConcealDeferredProjection => {
                                 cache
-                                    .record_conceal_raw_screenpos_fallback(
+                                    .record_conceal_deferred_projection(
                                         buffer_handle,
                                         observed_at_ms,
                                     )
@@ -533,10 +533,10 @@ mod tests {
                             <= current.conceal_full_scan_pressure()
                     );
                 }
-                PressureSignalKind::ConcealRawScreenposFallback => {
+                PressureSignalKind::ConcealDeferredProjection => {
                     prop_assert!(
-                        later.conceal_raw_screenpos_fallback_pressure()
-                            <= current.conceal_raw_screenpos_fallback_pressure()
+                        later.conceal_deferred_projection_pressure()
+                            <= current.conceal_deferred_projection_pressure()
                     );
                 }
             }

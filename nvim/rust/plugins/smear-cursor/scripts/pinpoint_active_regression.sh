@@ -105,21 +105,19 @@ run_case() {
       plugins/smear-cursor/scripts/run_perf_window_switch.sh
   ) >"${log_file}" 2>&1
 
-  local summary_line
-  local stress_line
-  summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
-  stress_line="$(grep 'PERF_STRESS_SUMMARY' "${log_file}" | tail -n 1)"
-
   local baseline
   local recovery
   local recovery_ratio
   local stress_max
   local stress_ratio
-  baseline="$(printf '%s\n' "${summary_line}" | sed -E 's/.*baseline_avg_us=([0-9.]+).*/\1/')"
-  recovery="$(printf '%s\n' "${summary_line}" | sed -E 's/.*recovery_avg_us=([0-9.]+).*/\1/')"
-  recovery_ratio="$(printf '%s\n' "${summary_line}" | sed -E 's/.*recovery_ratio=([0-9.]+).*/\1/')"
-  stress_max="$(printf '%s\n' "${stress_line}" | sed -E 's/.*max_avg_us=([0-9.]+).*/\1/')"
-  stress_ratio="$(printf '%s\n' "${stress_line}" | sed -E 's/.*max_ratio=([0-9.]+).*/\1/')"
+  IFS=$'\t' read -r baseline recovery recovery_ratio stress_max stress_ratio <<EOF
+$(smear_perf_report_query "${rust_repo_dir}" "window-switch" "${log_file}" \
+  "summary.baseline_avg_us" \
+  "summary.recovery_avg_us" \
+  "summary.recovery_ratio" \
+  "stress_summary.max_avg_us" \
+  "stress_summary.max_ratio")
+EOF
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${variant}" "${case_label}" "${baseline}" "${recovery}" "${recovery_ratio}" "${stress_max}" "${stress_ratio}" \
@@ -162,6 +160,7 @@ echo "base_ref=${base_ref}"
 echo "worktree=${worktree_dir}"
 echo
 
+smear_build_perf_report_tool "${rust_repo_dir}"
 for variant in "${variants[@]}"; do
   run_variant "${variant}" "${worktree_dir}"
 done

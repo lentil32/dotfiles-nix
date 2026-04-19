@@ -17,6 +17,7 @@ mod policy;
 pub(crate) mod probe_cache;
 mod runtime;
 mod surface;
+mod timer_protocol;
 mod timers;
 mod trace;
 
@@ -27,13 +28,16 @@ use policy::BufferEventPolicyCache;
 use policy::BufferPerfTelemetryCache;
 use probe_cache::ConcealRegion;
 use probe_cache::ProbeCacheState;
+use runtime::CoreTimerHandles;
 use runtime::EditorViewportCache;
+use timer_protocol::HostCallbackId;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use handlers::on_autocmd_event;
 pub(crate) use lifecycle::diagnostics;
+pub(crate) use lifecycle::on_autocmd_payload_event;
 pub(crate) use lifecycle::setup;
 pub(crate) use lifecycle::toggle;
 pub(crate) use lifecycle::validation_counters;
@@ -59,7 +63,7 @@ pub(crate) use runtime::record_planning_preview_copy;
 pub(crate) use runtime::record_planning_preview_invocation;
 pub(crate) use runtime::record_projection_reuse_hit;
 pub(crate) use runtime::record_projection_reuse_miss;
-pub(crate) use timers::on_core_timer_slot_event;
+pub(crate) use timers::on_core_timer_fired_event;
 pub(crate) use timers::schedule_guarded;
 
 const LOG_SOURCE_NAME: &str = "smear_cursor";
@@ -88,7 +92,7 @@ fn update_callback_duration_ewma(previous_estimate_ms: f64, duration_ms: f64) ->
 struct HostBridgeRevision(u32);
 
 impl HostBridgeRevision {
-    const CURRENT: Self = Self(9);
+    const CURRENT: Self = Self(15);
 
     const fn get(self) -> u32 {
         self.0
@@ -113,10 +117,13 @@ enum RealCursorVisibility {
 #[derive(Debug, Default)]
 struct ShellState {
     // Shell-owned state is intentionally non-authoritative: caches, reusable
-    // scratch buffers, telemetry, and host capability witnesses live here.
+    // scratch buffers, host timer ids, telemetry, and host capability
+    // witnesses live here.
     // snapshot: host capability and witness state retained across cache purges.
     namespace_id: Option<u32>,
     host_bridge_state: HostBridgeState,
+    core_timer_handles: CoreTimerHandles,
+    next_host_callback_id: u64,
     editor_viewport_cache: EditorViewportCache,
     buffer_metadata_cache: BufferMetadataCache,
     real_cursor_visibility: Option<RealCursorVisibility>,
@@ -145,6 +152,10 @@ impl ShellState {
 
     fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
         self.host_bridge_state = HostBridgeState::Verified { revision };
+    }
+
+    fn allocate_host_callback_id(&mut self) -> HostCallbackId {
+        HostCallbackId::next(&mut self.next_host_callback_id)
     }
 
     fn note_cursor_color_colorscheme_change(&mut self) {
@@ -187,6 +198,7 @@ impl ShellState {
         self.buffer_perf_policy_cache.clear();
         self.buffer_perf_telemetry_cache.clear();
         self.buffer_text_revision_cache.clear();
+        self.next_host_callback_id = 0;
         self.background_probe_request_scratch = Vec::new();
         self.conceal_regions_scratch = Vec::new();
         self.clear_real_cursor_visibility();

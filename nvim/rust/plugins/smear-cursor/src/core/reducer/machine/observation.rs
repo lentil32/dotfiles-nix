@@ -19,7 +19,6 @@ use super::support::schedule_timer_with_delay;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressObservationSurface;
-use crate::core::effect::TimerKind;
 use crate::core::event::ExternalDemandQueuedEvent;
 use crate::core::event::InitializeEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
@@ -35,6 +34,7 @@ use crate::core::state::ProbeState;
 use crate::core::state::QueuedDemand;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
+use crate::core::types::TimerId;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct ImmediateIngressObservation {
@@ -162,7 +162,7 @@ fn delayed_cursor_ingress_transition(state: CoreState, observed_at: Millis) -> O
 
     let (scheduled_state, effect) = schedule_timer_with_delay(
         next_state,
-        TimerKind::Ingress,
+        TimerId::Ingress,
         delay_budget_from_ms(delay_ms),
         observed_at,
     );

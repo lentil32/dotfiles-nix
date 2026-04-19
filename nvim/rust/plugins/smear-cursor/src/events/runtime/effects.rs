@@ -17,7 +17,6 @@ use super::to_core_millis;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::RequestProbeEffect;
-use crate::core::effect::TimerKind;
 use crate::core::event::EffectFailedEvent;
 use crate::core::event::EffectFailureSource;
 use crate::core::event::Event;
@@ -85,10 +84,7 @@ impl EffectExecutor for NeovimEffectExecutor {
             Effect::ScheduleTimer(payload) => Ok(schedule_core_timer_effect(
                 self.host_bridge,
                 payload.token,
-                resolved_timer_delay_ms(
-                    TimerKind::from_timer_id(payload.token.id()),
-                    payload.delay,
-                ),
+                resolved_timer_delay_ms(payload.token.id(), payload.delay),
                 payload.requested_at,
             )),
             Effect::RequestObservationBase(payload) => {

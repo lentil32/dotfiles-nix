@@ -195,7 +195,8 @@ pub(crate) fn stop_metrics(
             current_corners[index].display_distance(target_corners[index], block_aspect_ratio);
         max_distance = max_distance.max(distance);
 
-        let velocity = velocity_corners[index].display_distance(RenderPoint::ZERO, block_aspect_ratio);
+        let velocity =
+            velocity_corners[index].display_distance(RenderPoint::ZERO, block_aspect_ratio);
         max_velocity = max_velocity.max(velocity);
     }
 

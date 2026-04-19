@@ -1,7 +1,7 @@
 # Adaptive Buffer Perf Snapshot
 
-- Captured (UTC): 2026-04-10T10:28:45Z
-- Repo commit: `5f01957cb6fa64a93ba15e5f98c6bb8a46c98c33`
+- Captured (UTC): 2026-04-16T07:47:27Z
+- Repo commit: `d425ed25eb26f12bdbdf84a5839b87f8f81579db`
 - Working tree: `dirty`
 - Neovim: `NVIM v0.11.7`
 - Command: `SMEAR_COMPARE_REPORT_FILE=plugins/smear-cursor/perf/particle-degraded-buffer-current.md /Users/lentil32/.nixpkgs/nvim/rust/plugins/smear-cursor/scripts/compare_buffer_perf_modes.sh`
@@ -10,19 +10,19 @@
 ## Raw Results
 
 ```text
-mode  scenario      run  baseline_us  recovery_ratio  stress_max_avg_us  stress_max_ratio  stress_tail_ratio  realized_mode  perf_class  probe_policy  line_count  callback_ewma_ms  reason_bits  extmark_fallback_calls  conceal_full_scan_calls
-full  particles_on  1    1421.616     1.081           1476.650           1.039             1.035              full_full      full        exact         4000        0.1               0            0                       0
-full  particles_on  2    1427.322     1.049           1519.221           1.064             1.015              full_full      full        exact         4000        0.0               0            0                       0
-fast  particles_on  1    1387.939     1.128           1554.354           1.120             1.120              fast_fast      fast        raw_extmarks  4000        0.1               64           0                       0
-fast  particles_on  2    1518.524     1.037           1557.649           1.026             1.026              fast_fast      fast        raw_extmarks  4000        0.0               64           0                       0
+mode  scenario      run  baseline_us  recovery_ratio  stress_max_avg_us  stress_max_ratio  stress_tail_ratio  realized_mode  perf_class  probe_policy       line_count  callback_ewma_ms  reason_bits  extmark_fallback_calls  conceal_full_scan_calls
+full  particles_on  1    1582.838     0.993           1582.838           1.000             0.921              full_full      full        exact              4000        0.0               0            0                       0
+full  particles_on  2    1422.360     1.068           1571.076           1.105             1.105              full_full      full        exact              4000        0.0               0            0                       0
+fast  particles_on  1    1537.523     1.004           1537.523           1.000             0.944              fast_fast      fast        deferred_extmarks  4000        0.0               0            0                       0
+fast  particles_on  2    1436.080     1.022           1460.246           1.017             1.017              fast_fast      fast        deferred_extmarks  4000        0.1               0            0                       0
 ```
 
 ## Summary
 
 ```text
-mode  scenario      avg_baseline_us  avg_recovery_ratio  avg_stress_max_ratio  avg_stress_tail_ratio  realized_mode  perf_class  probe_policy  line_count  avg_callback_ewma_ms  reason_bits
-full  particles_on  1424.469         1.065               1.051                 1.025                  full_full      full        exact         4000        0.050                 0
-fast  particles_on  1453.231         1.083               1.073                 1.073                  fast_fast      fast        raw_extmarks  4000        0.050                 64
+mode  scenario      avg_baseline_us  avg_recovery_ratio  avg_stress_max_ratio  avg_stress_tail_ratio  realized_mode  perf_class  probe_policy       line_count  avg_callback_ewma_ms  reason_bits
+full  particles_on  1502.599         1.030               1.052                 1.013                  full_full      full        exact              4000        0.000                 0
+fast  particles_on  1486.802         1.013               1.008                 0.980                  fast_fast      fast        deferred_extmarks  4000        0.050                 0
 ```
 
 ## Probe Cost Signals

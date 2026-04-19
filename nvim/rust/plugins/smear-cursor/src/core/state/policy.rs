@@ -1,6 +1,7 @@
 use crate::core::types::Millis;
 use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
+use crate::core::types::TimerSlots;
 use crate::core::types::TimerToken;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -256,6 +257,11 @@ struct TimerSlotState {
 }
 
 impl TimerSlotState {
+    const INITIAL: Self = Self {
+        generation: TimerGeneration::INITIAL,
+        armed: false,
+    };
+
     fn arm(self, timer_id: TimerId) -> (Self, TimerToken) {
         let generation = self.generation.next();
         let token = TimerToken::new(timer_id, generation);
@@ -287,68 +293,35 @@ impl TimerSlotState {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TimerState {
-    animation: TimerSlotState,
-    ingress: TimerSlotState,
-    recovery: TimerSlotState,
-    cleanup: TimerSlotState,
+    slots: TimerSlots<TimerSlotState>,
 }
 
 impl Default for TimerState {
     fn default() -> Self {
         Self {
-            animation: TimerSlotState {
-                generation: TimerGeneration::INITIAL,
-                armed: false,
-            },
-            ingress: TimerSlotState {
-                generation: TimerGeneration::INITIAL,
-                armed: false,
-            },
-            recovery: TimerSlotState {
-                generation: TimerGeneration::INITIAL,
-                armed: false,
-            },
-            cleanup: TimerSlotState {
-                generation: TimerGeneration::INITIAL,
-                armed: false,
-            },
+            slots: TimerSlots::filled(TimerSlotState::INITIAL),
         }
     }
 }
 
 impl TimerState {
     fn slot(self, timer_id: TimerId) -> TimerSlotState {
-        match timer_id {
-            TimerId::Animation => self.animation,
-            TimerId::Ingress => self.ingress,
-            TimerId::Recovery => self.recovery,
-            TimerId::Cleanup => self.cleanup,
-        }
+        self.slots.copied(timer_id)
     }
 
-    fn with_slot(self, timer_id: TimerId, slot: TimerSlotState) -> Self {
-        match timer_id {
-            TimerId::Animation => Self {
-                animation: slot,
-                ..self
-            },
-            TimerId::Ingress => Self {
-                ingress: slot,
-                ..self
-            },
-            TimerId::Recovery => Self {
-                recovery: slot,
-                ..self
-            },
-            TimerId::Cleanup => Self {
-                cleanup: slot,
-                ..self
-            },
-        }
+    fn with_slot(mut self, timer_id: TimerId, slot: TimerSlotState) -> Self {
+        *self.slots.get_mut(timer_id) = slot;
+        self
     }
 
     pub(crate) fn active_token(self, timer_id: TimerId) -> Option<TimerToken> {
         self.slot(timer_id).active_token(timer_id)
+    }
+
+    pub(crate) fn active_tokens(self) -> impl Iterator<Item = TimerToken> {
+        TimerId::ALL
+            .into_iter()
+            .filter_map(move |timer_id| self.active_token(timer_id))
     }
 
     pub(crate) fn arm(self, timer_id: TimerId) -> (Self, TimerToken) {
@@ -381,22 +354,6 @@ mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
 
-    const TIMER_IDS: [TimerId; 4] = [
-        TimerId::Animation,
-        TimerId::Ingress,
-        TimerId::Recovery,
-        TimerId::Cleanup,
-    ];
-
-    const fn timer_slot_index(timer_id: TimerId) -> usize {
-        match timer_id {
-            TimerId::Animation => 0,
-            TimerId::Ingress => 1,
-            TimerId::Recovery => 2,
-            TimerId::Cleanup => 3,
-        }
-    }
-
     proptest! {
         #![proptest_config(stateful_config())]
 
@@ -410,7 +367,7 @@ mod tests {
             for timer_id in sequence {
                 let (next_state, token) = state.arm(timer_id);
                 state = next_state;
-                let slot = timer_slot_index(timer_id);
+                let slot = timer_id.slot_index();
 
                 prop_assert_eq!(state.active_token(timer_id), Some(token));
                 prop_assert!(state.is_active(token));
@@ -420,7 +377,7 @@ mod tests {
                     prop_assert_eq!(state.clear_matching(stale_token), state);
                 }
 
-                for other_id in TIMER_IDS {
+                for other_id in TimerId::ALL {
                     if other_id == timer_id {
                         continue;
                     }
@@ -434,8 +391,8 @@ mod tests {
                 history[slot].push(token);
             }
 
-            for timer_id in TIMER_IDS {
-                let slot = timer_slot_index(timer_id);
+            for timer_id in TimerId::ALL {
+                let slot = timer_id.slot_index();
                 let expected = history[slot].last().copied();
 
                 prop_assert_eq!(state.active_token(timer_id), expected);

@@ -91,14 +91,15 @@ run_once() {
       "${NVIM_BIN:-nvim}" --headless -u NONE -c "luafile ${driver_lua}"
   ) >"${log_file}" 2>&1
 
-  local summary_line
-  summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
   local baseline_us
   local recovery_us
   local recovery_ratio
-  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
-  recovery_us="$(smear_extract_field "${summary_line}" "recovery_avg_us")"
-  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
+  IFS=$'\t' read -r baseline_us recovery_us recovery_ratio <<EOF
+$(smear_perf_report_query "${rust_repo_dir}" "window-switch" "${log_file}" \
+  "summary.baseline_avg_us" \
+  "summary.recovery_avg_us" \
+  "summary.recovery_ratio")
+EOF
 
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "${side_label}" "${case_label}" "${repeat_index}" "${baseline_us}" "${recovery_ratio}" \
@@ -131,6 +132,7 @@ echo "base_root=${worktree_dir}"
 echo "artifacts=${artifact_dir}"
 echo
 
+smear_build_perf_report_tool "${rust_repo_dir}"
 run_side "local" "${repo_root}"
 run_side "base" "${worktree_dir}"
 

@@ -107,11 +107,22 @@ smear_stage_packaged_runtime() {
   esac
 }
 
-smear_extract_field() {
-  local line="$1"
-  local field="$2"
+smear_locate_release_executable() {
+  local target_directory="$1"
+  local bin_name="$2"
 
-  printf '%s\n' "${line}" | sed -nE "s/.*${field}=([^ ]+).*/\\1/p"
+  if [[ -x "${target_directory}/release/${bin_name}" ]]; then
+    printf '%s\n' "${target_directory}/release/${bin_name}"
+    return
+  fi
+  if [[ -x "${target_directory}/release/${bin_name}.exe" ]]; then
+    printf '%s\n' "${target_directory}/release/${bin_name}.exe"
+    return
+  fi
+
+  find "${target_directory}/release" -maxdepth 1 -type f \
+    \( -name "${bin_name}" -o -name "${bin_name}.exe" \) \
+    | head -n 1
 }
 
 smear_build_release() {
@@ -119,11 +130,46 @@ smear_build_release() {
   (
     cd "${plugin_dir}"
     if [[ -n "${SMEAR_CARGO_FEATURES:-}" ]]; then
-      cargo build --release --features "${SMEAR_CARGO_FEATURES}" >/dev/null
+      cargo build --release --lib --features "${SMEAR_CARGO_FEATURES}" >/dev/null
     else
-      cargo build --release >/dev/null
+      cargo build --release --lib >/dev/null
     fi
   )
+}
+
+smear_build_perf_report_tool() {
+  local workspace_dir="$1"
+  (
+    cd "${workspace_dir}"
+    cargo build --release -p nvimrs-smear-perf-report >/dev/null
+  )
+}
+
+smear_perf_report_binary() {
+  local workspace_dir="$1"
+  local target_directory
+
+  target_directory="$(smear_resolve_target_directory "${workspace_dir}")"
+  if [[ -z "${target_directory}" ]]; then
+    return 1
+  fi
+
+  smear_locate_release_executable "${target_directory}" "nvimrs-smear-perf-report"
+}
+
+smear_perf_report_query() {
+  local workspace_dir="$1"
+  local schema="$2"
+  local log_file="$3"
+  local report_binary
+
+  shift 3
+  report_binary="$(smear_perf_report_binary "${workspace_dir}")"
+  if [[ -z "${report_binary}" ]]; then
+    return 1
+  fi
+
+  "${report_binary}" query "${schema}" "${log_file}" "$@"
 }
 
 smear_compare_plugin_dir() {

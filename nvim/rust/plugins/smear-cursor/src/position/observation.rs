@@ -1,9 +1,19 @@
 //! Observation-time cursor facts built on the shared position vocabulary.
+//!
+//! Any [`ScreenCell`] that crosses this boundary is already projected into display
+//! space. Event-layer readers may retain raw host probes for diagnostics, trace
+//! labels, or cache seeding, but reducer-owned observation state never stores raw
+//! buffer-column cursor coordinates.
 
 use super::validated::BufferLine;
 use super::validated::ScreenCell;
 
-/// The normalized exactness of an observed cursor cell.
+/// The normalized exactness of an observed display-space cursor cell.
+///
+/// [`ObservedCell::Exact`] and [`ObservedCell::Deferred`] both carry projected
+/// display-space [`ScreenCell`] values. `Deferred` means the reader still owes a
+/// fresher exact pass; it does not mean the cell is still in raw host
+/// coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ObservedCell {
     Unavailable,
@@ -32,6 +42,10 @@ impl ObservedCell {
 }
 
 /// The observation-time cursor facts retained by reducer state.
+///
+/// The event layer is responsible for collapsing raw host details such as
+/// conceal, `screenpos()`, and cached deltas into this display-space contract
+/// before constructing [`CursorObservation`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CursorObservation {
     buffer_line: BufferLine,

@@ -572,6 +572,79 @@ mod tests {
     }
 
     #[test]
+    fn stationary_half_cell_fixture_matches_direct_materialization_regression() {
+        let fixture = MaterializeFixture {
+            start: Pose {
+                center: RenderPoint {
+                    row: -4.5,
+                    col: 0.5,
+                },
+                half_height: 0.25,
+                half_width: 0.25,
+            },
+            end: Pose {
+                center: RenderPoint {
+                    row: -4.5,
+                    col: 0.5,
+                },
+                half_height: 0.25,
+                half_width: 0.25,
+            },
+            block_aspect_ratio: 0.125,
+            band_thicknesses: vec![
+                (TailBand::Sheath, 0.59, 0.59),
+                (TailBand::Core, 0.29, 0.29),
+                (TailBand::Filament, 0.14, 0.14),
+            ],
+            max_thickness_y: 0.59,
+            max_thickness_x: 0.59,
+        };
+        let mut scratch = SweepMaterializeScratch::default();
+        prepare_swept_occupancy_geometry(
+            fixture.start,
+            fixture.end,
+            fixture.block_aspect_ratio,
+            fixture.max_thickness_y,
+            fixture.max_thickness_x,
+            &mut scratch,
+        );
+        let start_cell = (
+            fixture.start.center.row.floor() as i64,
+            fixture.start.center.col.floor() as i64,
+        );
+        let end_cell = (
+            fixture.end.center.row.floor() as i64,
+            fixture.end.center.col.floor() as i64,
+        );
+
+        for (band, thickness_y, thickness_x) in &fixture.band_thicknesses {
+            let direct = deposit_swept_occupancy(
+                fixture.start,
+                fixture.end,
+                fixture.block_aspect_ratio,
+                *thickness_y,
+                *thickness_x,
+            );
+            let shared =
+                materialize_swept_occupancy_with_scratch(*thickness_y, *thickness_x, &mut scratch);
+            let shared_tiles = materialized_tiles_map(&scratch);
+
+            pretty_assertions::assert_eq!(
+                shared_tiles,
+                direct,
+                "shared sweep geometry should preserve direct deposition for {band:?}",
+            );
+
+            let Some(bbox) = CellRect::from_microtiles(&direct) else {
+                continue;
+            };
+            pretty_assertions::assert_eq!(shared, Some(bbox));
+            assert!(bbox.contains(start_cell));
+            assert!(bbox.contains(end_cell));
+        }
+    }
+
+    #[test]
     fn materialize_scratch_reuses_projection_and_tile_buffers_between_prepares() {
         let mut scratch = SweepMaterializeScratch::default();
         prepare_swept_occupancy_geometry(

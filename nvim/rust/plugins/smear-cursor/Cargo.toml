@@ -15,11 +15,11 @@ perf-counters = []
 workspace = true
 
 [dependencies]
-nvim-oxi = { workspace = true, features = ["libuv"] }
+nvim-oxi = { workspace = true }
 nvimrs-nvim-oxi-utils = { workspace = true }
 nvimrs-nvim-utils = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-thiserror = "2.0"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

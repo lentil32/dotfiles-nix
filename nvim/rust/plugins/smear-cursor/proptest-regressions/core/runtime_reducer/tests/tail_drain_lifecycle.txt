@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 212d1042759b817e09503f67695aed49e667fc70c1df10ec9fbb961871f9f6e3 # shrinks to case = TailDrainCountdownCase { remaining_steps: 2, max_simulation_steps_per_frame: 1, frame_period_ms: 1, simulation_hz: 217, tick_gaps_ms: [37] }

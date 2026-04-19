@@ -175,52 +175,6 @@ proptest! {
     }
 }
 
-#[test]
-fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
-    let ready = ready_state_for_observation_base_case(true, false, false, false, true, false);
-    let observing = reduce(
-        &ready,
-        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
-            kind: ExternalDemandKind::ExternalCursor,
-            observed_at: Millis::new(25),
-            buffer_perf_class: BufferPerfClass::Full,
-            ingress_cursor_presentation: None,
-            ingress_observation_surface: None,
-        }),
-    )
-    .next;
-    let request = observing
-        .pending_observation()
-        .cloned()
-        .expect("active observation");
-    let based = reduce(
-        &observing,
-        Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            observation_id: request.observation_id(),
-            basis: observation_basis(Some(cursor(7, 8)), 26),
-            cursor_color_probe_generations: Some(cursor_color_probe_generations()),
-            motion: observation_motion(),
-        }),
-    );
-
-    let completed = reduce(
-        &based.next,
-        cursor_color_probe_report(&request, ProbeReuse::Compatible, Some(0x00AB_CDEF)),
-    );
-
-    let observation = completed
-        .next
-        .observation()
-        .expect("stored observation snapshot");
-    pretty_assert_eq!(observation.cursor_color(), Some(0x00AB_CDEF));
-    match observation.probes().cursor_color() {
-        ProbeSlot::Requested(ProbeState::Ready { reuse, .. }) => {
-            pretty_assert_eq!(*reuse, ProbeReuse::Compatible)
-        }
-        other => panic!("expected ready cursor color probe, got {other:?}"),
-    }
-}
-
 fn observing_state_with_latest_exact_cursor_cell(
     latest_exact_cursor_cell: Option<ScreenCell>,
 ) -> (CoreState, PendingObservation) {

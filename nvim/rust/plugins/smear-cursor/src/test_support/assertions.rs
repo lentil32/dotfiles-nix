@@ -51,10 +51,10 @@ pub(crate) fn assert_probe_policy_shape(
         )
     );
     assert_eq!(
-        policy.uses_raw_screenpos_fallback(),
+        policy.allows_deferred_cursor_projection(),
         matches!(
             cursor_position_mode,
-            CursorPositionProbeMode::RawDuringMotion
+            CursorPositionProbeMode::DeferredAllowed
         )
     );
 }

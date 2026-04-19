@@ -32,7 +32,10 @@ pub(crate) fn frame_particle_overlay_signature(frame: &RenderFrame) -> Option<u6
     // overlay refresh key only needs the retained shared aggregate identity so reuse
     // can avoid walking every packed sample on each projection.
     let mut hasher = DefaultHasher::new();
-    std::ptr::hash(std::sync::Arc::as_ptr(&frame.aggregated_particle_cells), &mut hasher);
+    std::ptr::hash(
+        std::sync::Arc::as_ptr(&frame.aggregated_particle_cells),
+        &mut hasher,
+    );
 
     Some(hasher.finish())
 }
@@ -86,7 +89,8 @@ pub(crate) fn render_frame_to_plan_with_signature(
 pub(crate) fn particle_overlay_plan(frame: &RenderFrame, viewport: ViewportBounds) -> RenderPlan {
     let target_row = frame.target.row.round() as i64;
     let target_col = frame.target.col.round() as i64;
-    let mut builder = PlanBuilder::with_capacity(viewport, 0, frame.aggregated_particle_cells().len());
+    let mut builder =
+        PlanBuilder::with_capacity(viewport, 0, frame.aggregated_particle_cells().len());
     builder.set_punch_through_cell(target_row, target_col);
 
     {

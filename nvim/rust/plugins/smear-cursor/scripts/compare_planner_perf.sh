@@ -31,6 +31,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd)"
+workspace_dir="$(cd -- "${repo_dir}/../.." && pwd)"
 driver_lua="${repo_dir}/scripts/perf_window_switch.lua"
 perf_lib="${script_dir}/lib/perf_env.sh"
 
@@ -113,6 +114,7 @@ echo "modes=${mode_csv}"
 echo "scenarios=${scenario_csv}"
 echo
 
+smear_build_perf_report_tool "${workspace_dir}"
 smear_build_release "${repo_dir}"
 if ! smear_export_runtime_paths "${repo_dir}" >/dev/null; then
   echo "failed to resolve runtime paths for ${repo_dir}" >&2
@@ -176,31 +178,44 @@ run_once() {
     env "${run_env[@]}" "${NVIM_BIN:-nvim}" --headless -u NONE -c "luafile ${driver_lua}"
   ) >"${log_file}" 2>&1
 
-  summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
-  stress_line="$(grep 'PERF_STRESS_SUMMARY' "${log_file}" | tail -n 1)"
-  diagnostics_line="$(grep 'PERF_DIAGNOSTICS phase=post_recovery ' "${log_file}" | tail -n 1)"
-  if [[ -z "${summary_line}" || -z "${stress_line}" || -z "${diagnostics_line}" ]]; then
-    echo "missing perf summary fields in ${log_file}" >&2
-    exit 1
-  fi
-
-  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
-  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
-  stress_max_avg_us="$(smear_extract_field "${stress_line}" "max_avg_us")"
-  stress_max_ratio="$(smear_extract_field "${stress_line}" "max_ratio")"
-  stress_tail_ratio="$(smear_extract_field "${stress_line}" "tail_ratio")"
-  perf_class="$(smear_extract_field "${diagnostics_line}" "perf_class")"
-  line_count="$(smear_extract_field "${diagnostics_line}" "buffer_line_count")"
-  planner_bucket_maps_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bms")"
-  planner_bucket_cells_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bcs")"
-  planner_local_query_envelope_area_cells="$(smear_extract_field "${diagnostics_line}" "planner_lqea")"
-  planner_local_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_local_query_cells")"
-  planner_compiled_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_compq")"
-  planner_candidate_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_candq")"
-  planner_compiled_cells_emitted="$(smear_extract_field "${diagnostics_line}" "planner_compiled_cells_emitted")"
-  planner_candidate_cells_built="$(smear_extract_field "${diagnostics_line}" "planner_candidate_cells_built")"
-  planner_reference_compiles="$(smear_extract_field "${diagnostics_line}" "planner_rc")"
-  planner_local_query_compiles="$(smear_extract_field "${diagnostics_line}" "planner_lqc")"
+  IFS=$'\t' read -r \
+    baseline_us \
+    recovery_ratio \
+    stress_max_avg_us \
+    stress_max_ratio \
+    stress_tail_ratio \
+    perf_class \
+    line_count \
+    planner_bucket_maps_scanned \
+    planner_bucket_cells_scanned \
+    planner_local_query_envelope_area_cells \
+    planner_local_query_cells \
+    planner_compiled_query_cells \
+    planner_candidate_query_cells \
+    planner_compiled_cells_emitted \
+    planner_candidate_cells_built \
+    planner_reference_compiles \
+    planner_local_query_compiles \
+    <<EOF
+$(smear_perf_report_query "${workspace_dir}" "window-switch" "${log_file}" \
+  "summary.baseline_avg_us" \
+  "summary.recovery_ratio" \
+  "stress_summary.max_avg_us" \
+  "stress_summary.max_ratio" \
+  "stress_summary.tail_ratio" \
+  "diagnostics.post_recovery.perf_class" \
+  "diagnostics.post_recovery.buffer_line_count" \
+  "diagnostics.post_recovery.planner_bms" \
+  "diagnostics.post_recovery.planner_bcs" \
+  "diagnostics.post_recovery.planner_lqea" \
+  "diagnostics.post_recovery.planner_local_query_cells" \
+  "diagnostics.post_recovery.planner_compq" \
+  "diagnostics.post_recovery.planner_candq" \
+  "diagnostics.post_recovery.planner_compiled_cells_emitted" \
+  "diagnostics.post_recovery.planner_candidate_cells_built" \
+  "diagnostics.post_recovery.planner_rc" \
+  "diagnostics.post_recovery.planner_lqc")
+EOF
   if [[ "${planner_reference_compiles}" != "0" && "${planner_local_query_compiles}" == "0" ]]; then
     realized_path="reference"
   elif [[ "${planner_reference_compiles}" == "0" && "${planner_local_query_compiles}" != "0" ]]; then

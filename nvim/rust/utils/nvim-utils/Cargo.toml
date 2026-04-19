@@ -10,6 +10,6 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
-pretty_assertions = "1.4"
+pretty_assertions = { workspace = true }
 proptest = { workspace = true }
-rstest = "0.23"
+rstest = { workspace = true }

@@ -825,6 +825,7 @@ fn advance_until_tail_drain(state: &mut RuntimeState) -> (u32, CursorTransition)
 
 mod bootstrap_and_frame_building;
 mod cleanup_policy;
+mod clock_discontinuity;
 mod cursor_visibility_side_effects;
 mod delayed_settling_transitions;
 mod fixed_step_stability;

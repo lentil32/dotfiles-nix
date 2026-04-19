@@ -16,7 +16,7 @@ const UNSUPPORTED_BUFTYPE_REASON_BIT: u8 = 1 << 2;
 const DISABLED_FILETYPE_REASON_BIT: u8 = 1 << 3;
 const EXTMARK_REASON_BIT: u8 = 1 << 4;
 const CONCEAL_SCAN_REASON_BIT: u8 = 1 << 5;
-const CONCEAL_RAW_REASON_BIT: u8 = 1 << 6;
+const CONCEAL_DEFERRED_REASON_BIT: u8 = 1 << 6;
 
 #[derive(Clone, Copy, Debug)]
 enum SupportedBufferCase {
@@ -77,7 +77,7 @@ impl SkipCase {
 enum PressureReason {
     Extmark,
     ConcealScan,
-    ConcealRaw,
+    ConcealDeferred,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,7 +86,7 @@ enum HysteresisReason {
     Callback,
     Extmark,
     ConcealScan,
-    ConcealRaw,
+    ConcealDeferred,
 }
 
 fn supported_buffer_case_strategy() -> BoxedStrategy<SupportedBufferCase> {
@@ -122,7 +122,7 @@ fn hysteresis_reason_strategy() -> BoxedStrategy<HysteresisReason> {
         Just(HysteresisReason::Callback),
         Just(HysteresisReason::Extmark),
         Just(HysteresisReason::ConcealScan),
-        Just(HysteresisReason::ConcealRaw),
+        Just(HysteresisReason::ConcealDeferred),
     ]
     .boxed()
 }
@@ -138,8 +138,8 @@ fn pressure_signal(kind: PressureReason, active: bool) -> BufferPerfSignals {
                 PressureReason::ConcealScan => {
                     telemetry.record_conceal_full_scan(1_000.0);
                 }
-                PressureReason::ConcealRaw => {
-                    telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
+                PressureReason::ConcealDeferred => {
+                    telemetry.record_conceal_deferred_projection(1_000.0);
                 }
             }
         }
@@ -150,7 +150,7 @@ fn pressure_signal(kind: PressureReason, active: bool) -> BufferPerfSignals {
 fn pressure_signals(
     extmark_active: bool,
     conceal_scan_active: bool,
-    conceal_raw_active: bool,
+    conceal_deferred_active: bool,
 ) -> BufferPerfSignals {
     let mut telemetry = BufferPerfTelemetry::default();
     if extmark_active {
@@ -163,9 +163,9 @@ fn pressure_signals(
             telemetry.record_conceal_full_scan(1_000.0);
         }
     }
-    if conceal_raw_active {
+    if conceal_deferred_active {
         for _ in 0..2 {
-            telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
+            telemetry.record_conceal_deferred_projection(1_000.0);
         }
     }
     telemetry.signals_at(1_000.0)
@@ -176,7 +176,7 @@ fn reason_names(
     slow_callback: bool,
     extmark: bool,
     conceal_scan: bool,
-    conceal_raw: bool,
+    conceal_deferred: bool,
     unsupported_buftype: bool,
     filetype_disabled: bool,
 ) -> Vec<&'static str> {
@@ -193,8 +193,8 @@ fn reason_names(
     if conceal_scan {
         reasons.push("conceal_scan");
     }
-    if conceal_raw {
-        reasons.push("conceal_raw");
+    if conceal_deferred {
+        reasons.push("conceal_deferred");
     }
     if unsupported_buftype {
         reasons.push("buftype");
@@ -212,7 +212,7 @@ fn expected_reason_bits(reasons: &[&'static str]) -> u8 {
             "slow_cb" => SLOW_CALLBACK_REASON_BIT,
             "extmark" => EXTMARK_REASON_BIT,
             "conceal_scan" => CONCEAL_SCAN_REASON_BIT,
-            "conceal_raw" => CONCEAL_RAW_REASON_BIT,
+            "conceal_deferred" => CONCEAL_DEFERRED_REASON_BIT,
             "buftype" => UNSUPPORTED_BUFTYPE_REASON_BIT,
             "filetype" => DISABLED_FILETYPE_REASON_BIT,
             _ => 0,
@@ -292,14 +292,14 @@ fn previous_policy(reason: HysteresisReason) -> BufferEventPolicy {
                 false,
             ),
         ),
-        HysteresisReason::ConcealRaw => BufferEventPolicy::from_test_input_with_perf_mode(
+        HysteresisReason::ConcealDeferred => BufferEventPolicy::from_test_input_with_perf_mode(
             None,
             supported_policy_input(
                 SupportedBufferCase::ListedNormal,
                 BufferPerfMode::Auto,
                 1,
                 0.0,
-                pressure_signal(PressureReason::ConcealRaw, true),
+                pressure_signal(PressureReason::ConcealDeferred, true),
                 false,
             ),
         ),
@@ -417,7 +417,7 @@ fn hysteresis_policies(reason: HysteresisReason) -> (BufferEventPolicy, BufferEv
             );
             (held, released)
         }
-        HysteresisReason::ConcealRaw => {
+        HysteresisReason::ConcealDeferred => {
             let held = BufferEventPolicy::from_test_input_with_perf_mode(
                 Some(previous),
                 supported_policy_input(
@@ -427,8 +427,8 @@ fn hysteresis_policies(reason: HysteresisReason) -> (BufferEventPolicy, BufferEv
                     0.0,
                     {
                         let mut telemetry = BufferPerfTelemetry::default();
-                        telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
-                        telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
+                        telemetry.record_conceal_deferred_projection(1_000.0);
+                        telemetry.record_conceal_deferred_projection(1_000.0);
                         telemetry.signals_at(6_000.0)
                     },
                     false,
@@ -443,8 +443,8 @@ fn hysteresis_policies(reason: HysteresisReason) -> (BufferEventPolicy, BufferEv
                     0.0,
                     {
                         let mut telemetry = BufferPerfTelemetry::default();
-                        telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
-                        telemetry.record_conceal_raw_screenpos_fallback(1_000.0);
+                        telemetry.record_conceal_deferred_projection(1_000.0);
+                        telemetry.record_conceal_deferred_projection(1_000.0);
                         telemetry.signals_at(6_100.0)
                     },
                     false,
@@ -461,7 +461,7 @@ fn hysteresis_reason_bit(reason: HysteresisReason) -> u8 {
         HysteresisReason::Callback => SLOW_CALLBACK_REASON_BIT,
         HysteresisReason::Extmark => EXTMARK_REASON_BIT,
         HysteresisReason::ConcealScan => CONCEAL_SCAN_REASON_BIT,
-        HysteresisReason::ConcealRaw => CONCEAL_RAW_REASON_BIT,
+        HysteresisReason::ConcealDeferred => CONCEAL_DEFERRED_REASON_BIT,
     }
 }
 
@@ -520,7 +520,7 @@ proptest! {
         slow_callback in any::<bool>(),
         extmark_pressure in any::<bool>(),
         conceal_scan_pressure in any::<bool>(),
-        conceal_raw_pressure in any::<bool>(),
+        conceal_deferred_pressure in any::<bool>(),
         filetype_disabled in any::<bool>(),
     ) {
         let line_count = if high_line_count { 80_000 } else { 1 };
@@ -528,7 +528,7 @@ proptest! {
         let signals = pressure_signals(
             extmark_pressure,
             conceal_scan_pressure,
-            conceal_raw_pressure,
+            conceal_deferred_pressure,
         );
         let policy = BufferEventPolicy::from_test_input_with_perf_mode(
             None,
@@ -548,7 +548,7 @@ proptest! {
             slow_callback,
             extmark_pressure,
             conceal_scan_pressure,
-            conceal_raw_pressure,
+            conceal_deferred_pressure,
             false,
             filetype_disabled,
         );
@@ -583,16 +583,16 @@ proptest! {
         raise_extmark_pressure in any::<bool>(),
         low_conceal_scan_pressure in any::<bool>(),
         raise_conceal_scan_pressure in any::<bool>(),
-        low_conceal_raw_pressure in any::<bool>(),
-        raise_conceal_raw_pressure in any::<bool>(),
+        low_conceal_deferred_pressure in any::<bool>(),
+        raise_conceal_deferred_pressure in any::<bool>(),
     ) {
         let high_line_count_active = low_line_count_active || raise_line_count;
         let high_slow_callback = low_slow_callback || raise_callback;
         let high_extmark_pressure = low_extmark_pressure || raise_extmark_pressure;
         let high_conceal_scan_pressure =
             low_conceal_scan_pressure || raise_conceal_scan_pressure;
-        let high_conceal_raw_pressure =
-            low_conceal_raw_pressure || raise_conceal_raw_pressure;
+        let high_conceal_deferred_pressure =
+            low_conceal_deferred_pressure || raise_conceal_deferred_pressure;
         let low_policy = BufferEventPolicy::from_test_input_with_perf_mode(
             None,
             supported_policy_input(
@@ -603,7 +603,7 @@ proptest! {
                 pressure_signals(
                     low_extmark_pressure,
                     low_conceal_scan_pressure,
-                    low_conceal_raw_pressure,
+                    low_conceal_deferred_pressure,
                 ),
                 false,
             ),
@@ -618,7 +618,7 @@ proptest! {
                 pressure_signals(
                     high_extmark_pressure,
                     high_conceal_scan_pressure,
-                    high_conceal_raw_pressure,
+                    high_conceal_deferred_pressure,
                 ),
                 false,
             ),
@@ -641,7 +641,7 @@ proptest! {
         slow_callback in any::<bool>(),
         extmark_pressure in any::<bool>(),
         conceal_scan_pressure in any::<bool>(),
-        conceal_raw_pressure in any::<bool>(),
+        conceal_deferred_pressure in any::<bool>(),
     ) {
         let policy = BufferEventPolicy::from_test_input_with_perf_mode(
             None,
@@ -653,7 +653,7 @@ proptest! {
                 pressure_signals(
                     extmark_pressure,
                     conceal_scan_pressure,
-                    conceal_raw_pressure,
+                    conceal_deferred_pressure,
                 ),
                 false,
             ),
@@ -663,7 +663,7 @@ proptest! {
             slow_callback,
             extmark_pressure,
             conceal_scan_pressure,
-            conceal_raw_pressure,
+            conceal_deferred_pressure,
             false,
             false,
         );
@@ -701,7 +701,7 @@ proptest! {
         slow_callback in any::<bool>(),
         extmark_pressure in any::<bool>(),
         conceal_scan_pressure in any::<bool>(),
-        conceal_raw_pressure in any::<bool>(),
+        conceal_deferred_pressure in any::<bool>(),
     ) {
         let policy = BufferEventPolicy::from_test_input_with_perf_mode(
             None,
@@ -714,7 +714,7 @@ proptest! {
                 signals: pressure_signals(
                     extmark_pressure,
                     conceal_scan_pressure,
-                    conceal_raw_pressure,
+                    conceal_deferred_pressure,
                 ),
                 filetype_disabled: skip_case.filetype_disabled(),
             },
@@ -724,7 +724,7 @@ proptest! {
             slow_callback,
             extmark_pressure,
             conceal_scan_pressure,
-            conceal_raw_pressure,
+            conceal_deferred_pressure,
             skip_case.includes_unsupported_buftype(),
             skip_case.filetype_disabled(),
         );

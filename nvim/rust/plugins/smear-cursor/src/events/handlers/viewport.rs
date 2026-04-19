@@ -129,7 +129,7 @@ pub(super) fn maybe_scroll_shift_for_core_event(
     let viewport_row_shift = match delta.vertical_rows {
         Some((previous_top_row, current_top_row)) => screen_distance(
             window,
-            i64::from(current_surface.window_size().max_row()),
+            current_surface.window_size().max_row(),
             previous_top_row,
             current_top_row,
         )?,

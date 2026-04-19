@@ -9,6 +9,12 @@ crate-local `perf-counters` cargo feature. The dedicated capture scripts that
 need those counters opt into that feature automatically when they build the
 release cdylib.
 
+Perf harnesses now emit machine-readable `PERF_JSON` records alongside the
+human-readable log lines. The shell entrypoints remain the supported interface,
+but log decoding is centralized in the workspace `nvimrs-smear-perf-report`
+tool so report generation is driven by one typed schema instead of ad hoc
+`grep` / `sed` extraction in each script.
+
 Regenerate the checked-in reports whenever the corresponding behavior changes:
 
 - Adaptive policy or probe-path changes: `adaptive-buffer-policy-current.md`

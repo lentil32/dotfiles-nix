@@ -1,8 +1,8 @@
-use crate::core::effect::TimerKind;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
+use crate::core::types::TimerId;
 use crate::events::ingress::AutocmdIngress;
 use std::cell::RefCell;
 
@@ -180,8 +180,8 @@ pub(super) fn record_timer_fire_duration(duration_micros: u64) {
     with_runtime_metrics(|metrics| metrics.record_timer_fire_duration(duration_micros));
 }
 
-pub(super) fn record_host_timer_rearm(kind: TimerKind) {
-    with_runtime_metrics(|metrics| metrics.record_host_timer_rearm(kind));
+pub(super) fn record_host_timer_rearm(timer_id: TimerId) {
+    with_runtime_metrics(|metrics| metrics.record_host_timer_rearm(timer_id));
 }
 
 pub(super) fn record_delayed_ingress_pending_update() {
@@ -299,8 +299,8 @@ pub(super) fn record_conceal_full_scan() {
     with_runtime_metrics(RuntimeBehaviorMetrics::record_conceal_full_scan);
 }
 
-pub(super) fn record_conceal_raw_screenpos_fallback() {
-    with_runtime_metrics(RuntimeBehaviorMetrics::record_conceal_raw_screenpos_fallback);
+pub(super) fn record_conceal_deferred_projection() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_conceal_deferred_projection);
 }
 
 pub(super) fn record_planner_local_query(

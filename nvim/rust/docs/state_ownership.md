@@ -71,6 +71,9 @@ It does not assign new owners; it only labels how the stored fields are used.
   authoritative.
 - `ObservationBasis`: `observed_at`, `mode`, `surface`, `cursor`, `viewport`,
   `buffer_revision`, and `cursor_text_context_state` are authoritative.
+  `cursor` is projected display-space cursor truth; raw host probe details such
+  as `screenpos()`, conceal facts, and cached deltas stay in event-layer
+  readers and diagnostics.
 - `ObservationSnapshot`: `demand` is snapshot; `basis`, `probes`, and `motion`
   are authoritative; `cursor_color_probe_generations` is a retained snapshot
   witness used to derive cursor-color reuse keys.
@@ -121,9 +124,9 @@ It does not assign new owners; it only labels how the stored fields are used.
 | --- | --- | --- |
 | Observation identity | authoritative | Identity is derived only from the observation root demand sequence: `PendingObservation.demand.seq()` while collecting and `ObservationSnapshot.demand.seq()` once active. `ObservationId` accessors compute from that root; neither the snapshot nor active probe lifecycle state stores a mirrored current-observation id. |
 | Pending ingress demand | snapshot | `PendingObservation.demand` retains the ingress request while basis collection is in flight. |
-| Pending requested probe policy | authoritative | `PendingObservation.requested_probes` is the only owner of probe policy before activation. `ObservationSnapshot::new()` consumes it to initialize active probe lifecycle state. |
+| Pending requested probe policy | authoritative | `PendingObservation.requested_probes` is the only owner of probe policy before activation. `ObservationSnapshot::new()` consumes it to initialize active probe lifecycle state. The policy chooses freshness, reuse, and fallback cost only; it does not choose between raw and projected cursor coordinate systems. |
 | Active ingress demand | snapshot | `ObservationSnapshot.demand` retains the ingress request that produced the active observation. |
-| Active observation basis | authoritative | `ObservationSnapshot.basis` owns `observed_at`, `mode`, `surface`, `cursor`, `viewport`, `buffer_revision`, and `cursor_text_context_state`. |
+| Active observation basis | authoritative | `ObservationSnapshot.basis` owns `observed_at`, `mode`, `surface`, `cursor`, `viewport`, `buffer_revision`, and `cursor_text_context_state`. `ObservationBasis.cursor` is the sole reducer-owned owner of projected display-space cursor truth; raw host probe details remain event-layer parsing and diagnostic state. |
 | Observation-scoped motion metadata | authoritative | `ObservationSnapshot.motion` owns scroll-shift metadata for the active observation. |
 | Cursor-color probe generation witness | snapshot | `ObservationSnapshot.cursor_color_probe_generations` retains the shell-side cursor-color probe generations needed to derive reuse-safe cursor-color witnesses without turning them into a second semantic owner. |
 | Cursor-color probe requestedness and lifecycle | authoritative | `ObservationSnapshot.probes.cursor_color` is the sole active-state owner. `ProbeSlot::Unrequested` vs `Requested(...)` carries requestedness, and `ProbeState` carries reuse, failure, and sample payload. |
@@ -139,7 +142,7 @@ It does not assign new owners; it only labels how the stored fields are used.
 | Derived runtime render policy cache | cache | `RuntimeState.derived_config` caches policy slices derived from `config`. `RuntimeState::static_render_config()` reconstructs the shell-facing static render config view from that cache. |
 | Plugin enable lifecycle | authoritative | `RuntimeState.plugin_state` owns enabled vs disabled plugin state. |
 | Animation lifecycle | authoritative | `RuntimeState.animation_phase` owns uninitialized, idle, settling, running, and draining state. |
-| Animation tick bookkeeping | authoritative | `RunningPhase.clock` and `DrainingPhase.clock` own `last_tick_ms`, `next_frame_at_ms`, and `simulation_accumulator_ms` while those phases are active. |
+| Animation tick bookkeeping | authoritative | `RunningPhase.clock` and `DrainingPhase.clock` own `last_tick_ms`, `next_frame_at_ms`, and `simulation_accumulator_ms` while those phases are active. `RuntimeState::take_animation_clock_sample()` classifies oversized or invalid wall-clock gaps as motion-clock discontinuities, and the allowable catch-up budget is derived from `RuntimeState.config` instead of being copied into the clock. |
 | Current simulated cursor geometry | authoritative | `RuntimeState.current_corners` owns the live simulated cursor corners. |
 | Cursor target identity | authoritative | `RuntimeState.target` owns target `position`, discrete `cell`, `shape`, `retarget_surface`, `tracked_cursor`, and `retarget_epoch`. `CursorTarget::retarget_key()` derives the reviewable equality surface, and target corners are derived on demand by `CursorTarget::corners()` instead of being stored separately. |
 | Trail identity | authoritative | `RuntimeState.trail` owns `stroke_id`, `origin_corners`, and `elapsed_ms`. |
@@ -176,6 +179,7 @@ It does not assign new owners; it only labels how the stored fields are used.
 | --- | --- | --- |
 | Render namespace handle | snapshot | `ShellState.namespace_id` retains the draw namespace handle created by `ensure_namespace_id()`. It is a shell capability witness, not a realization or reducer truth owner, and transient cache resets intentionally preserve it. |
 | Verified host bridge capability | snapshot | `ShellState.host_bridge_state` retains whether the current host bridge revision has been verified by `verify_host_bridge()`. It is an external capability witness, not a semantic owner. |
+| Outstanding host timer ids | snapshot | `ShellState.core_timer_handles` retains the currently armed Neovim host timer ids keyed by reducer `TimerId`. The reducer token remains authoritative for timer liveness and generation; host timer ids are cancellation witnesses only. `schedule_core_timer_effect()`, `dispatch_core_timer_fired()`, `clear_all_core_timer_handles()`, and panic recovery are the only ownership transitions. |
 | Shell probe reuse state | cache | `ShellState.probe_cache` owns purgeable cursor-color, cursor-text-context, conceal-region, conceal-delta, and conceal-screen-cell reuse keyed by external witnesses such as `CursorColorProbeWitness`, buffer-local text revisions, and window state. `note_cursor_color_observation_boundary()`, `note_cursor_color_colorscheme_change()`, `note_conceal_read_boundary()`, `invalidate_buffer_local_probe_caches()`, and `reset_transient_caches()` are its invalidation and purge paths. |
 | Probe request and conceal scratch buffers | cache | `ShellState.background_probe_request_scratch` and `ShellState.conceal_regions_scratch` retain reusable allocations for effect construction only. `reset_transient_caches()` drops the retained allocations, while `reclaim_background_probe_request_scratch()` and `reclaim_conceal_regions_scratch()` only recycle them between operations. |
 | Editor viewport witness | snapshot | `ShellState.editor_viewport_cache` retains the last live `EditorViewportSnapshot` read from Neovim. `EditorViewportSnapshot` is also the canonical shell-side owner of command-row math and `ViewportBounds` projection through `command_row()` and `bounds()`. `refresh_editor_viewport_cache()`, `invalidate_editor_viewport_cache()`, and `reset_transient_caches()` refresh or purge the witness without changing semantic state. |
@@ -239,3 +243,5 @@ Current invariants pin the ownership model:
 - retained projection shell materialization must match the retained logical raster
 - protocol phase variants recurse only into the phase-legal observation owner
 - exact observation samples must refresh `latest_exact_cursor_cell`, while deferred and unavailable samples preserve the retained exact-anchor cache
+- observation-owned cursor cells stay in projected display space; raw host quirks such as conceal and `screenpos()` remain event-layer concerns
+- requested probe policy may allow deferred projection, but it may not switch reducer-owned cursor truth out of projected display space

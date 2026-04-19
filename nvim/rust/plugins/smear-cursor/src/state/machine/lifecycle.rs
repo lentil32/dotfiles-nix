@@ -1,6 +1,7 @@
 use super::CursorShape;
 use super::RuntimeState;
 use super::TrackedCursor;
+use super::types::AnimationClockSample;
 use super::types::AnimationPhase;
 use super::types::DrainingPhase;
 use super::types::MotionClock;
@@ -13,6 +14,8 @@ use crate::animation::initial_velocity;
 use crate::animation::zero_velocity_corners;
 use crate::position::RenderPoint;
 use crate::types::StepOutput;
+
+const CLOCK_DISCONTINUITY_CATCH_UP_WINDOWS: f64 = 8.0;
 
 fn translate_corners(corners: &mut [RenderPoint; 4], row_delta: f64, col_delta: f64) {
     for corner in corners {
@@ -34,6 +37,14 @@ fn row_translation_to_clamp_window(corners: &[RenderPoint; 4], min_row: f64, max
         min_row - current_min_row
     } else if current_max_row > max_boundary_row {
         max_boundary_row - current_max_row
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_non_negative_ms(duration_ms: f64) -> f64 {
+    if duration_ms.is_finite() {
+        duration_ms.max(0.0)
     } else {
         0.0
     }
@@ -214,11 +225,12 @@ impl RuntimeState {
         }
     }
 
-    pub(crate) fn start_tail_drain(&mut self, remaining_steps: u32) {
+    pub(crate) fn start_tail_drain(&mut self, remaining_steps: u32, now_ms: f64) {
         self.previous_center = center(&self.current_corners);
-        self.animation_phase = DrainingPhase::new(remaining_steps)
-            .map(AnimationPhase::Draining)
-            .unwrap_or(AnimationPhase::Idle);
+        self.animation_phase =
+            DrainingPhase::new(remaining_steps, now_ms.is_finite().then_some(now_ms))
+                .map(AnimationPhase::Draining)
+                .unwrap_or(AnimationPhase::Idle);
     }
 
     #[cfg(test)]
@@ -280,28 +292,49 @@ impl RuntimeState {
         self.set_last_tick_ms(Some(now_ms));
     }
 
-    pub(crate) fn take_animation_elapsed_ms(
+    pub(crate) fn animation_clock_catch_up_budget_ms(&self) -> f64 {
+        let frame_period_ms = sanitize_non_negative_ms(self.config.time_interval).max(1.0);
+        let simulation_step_ms = self.config.simulation_step_interval_ms().max(1.0);
+        let max_simulation_steps = f64::from(self.config.max_simulation_steps_per_frame.max(1));
+        frame_period_ms.max(simulation_step_ms * max_simulation_steps)
+            * CLOCK_DISCONTINUITY_CATCH_UP_WINDOWS
+    }
+
+    pub(crate) fn take_animation_clock_sample(
         &mut self,
         now_ms: f64,
         fallback_elapsed_ms: f64,
-    ) -> f64 {
-        let clamped_fallback = if fallback_elapsed_ms.is_finite() {
-            fallback_elapsed_ms.max(0.0)
-        } else {
-            0.0
-        };
+    ) -> AnimationClockSample {
+        let fallback_elapsed_ms = sanitize_non_negative_ms(fallback_elapsed_ms);
+        let catch_up_budget_ms = self.animation_clock_catch_up_budget_ms();
         let Some(clock) = self.motion_clock_mut() else {
             debug_assert!(
                 false,
-                "animation elapsed time should only be sampled while running or draining"
+                "animation clock samples should only be taken while running or draining"
             );
-            return clamped_fallback;
+            return AnimationClockSample::Advance {
+                elapsed_ms: fallback_elapsed_ms,
+            };
         };
-        let elapsed_ms = clock
-            .last_tick_ms
-            .map_or(clamped_fallback, |previous| (now_ms - previous).max(0.0));
-        clock.last_tick_ms = Some(now_ms);
-        elapsed_ms
+        let sample = match clock.last_tick_ms {
+            None => AnimationClockSample::Advance {
+                elapsed_ms: fallback_elapsed_ms,
+            },
+            Some(previous_ms) if !previous_ms.is_finite() || !now_ms.is_finite() => {
+                AnimationClockSample::Discontinuity
+            }
+            Some(previous_ms) if now_ms < previous_ms => AnimationClockSample::Discontinuity,
+            Some(previous_ms) => {
+                let elapsed_ms = now_ms - previous_ms;
+                if elapsed_ms > catch_up_budget_ms {
+                    AnimationClockSample::Discontinuity
+                } else {
+                    AnimationClockSample::Advance { elapsed_ms }
+                }
+            }
+        };
+        clock.last_tick_ms = now_ms.is_finite().then_some(now_ms);
+        sample
     }
 
     pub(crate) fn settle_deadline_ms(&self) -> Option<f64> {
@@ -328,11 +361,8 @@ impl RuntimeState {
     }
 
     pub(crate) fn push_simulation_elapsed(&mut self, elapsed_ms: f64) {
-        let clamped = if elapsed_ms.is_finite() {
-            elapsed_ms.max(0.0)
-        } else {
-            0.0
-        };
+        let clamped_elapsed_ms = sanitize_non_negative_ms(elapsed_ms);
+        let catch_up_budget_ms = self.animation_clock_catch_up_budget_ms();
         let Some(clock) = self.motion_clock_mut() else {
             debug_assert!(
                 false,
@@ -340,7 +370,8 @@ impl RuntimeState {
             );
             return;
         };
-        clock.simulation_accumulator_ms += clamped;
+        clock.simulation_accumulator_ms =
+            (clock.simulation_accumulator_ms + clamped_elapsed_ms).min(catch_up_budget_ms);
     }
 
     pub(crate) fn consume_simulation_step(&mut self, step_ms: f64) -> bool {
@@ -417,5 +448,6 @@ impl RuntimeState {
         self.trail.elapsed_ms = [0.0; 4];
         self.velocity_corners = zero_velocity_corners();
         self.spring_velocity_corners = zero_velocity_corners();
+        self.previous_center = center(&target_corners);
     }
 }

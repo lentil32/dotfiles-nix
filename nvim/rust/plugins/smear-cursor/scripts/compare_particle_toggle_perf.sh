@@ -89,11 +89,13 @@ run_once() {
       "${NVIM_BIN:-nvim}" --headless -u NONE -c "luafile ${driver_lua}"
   ) >"${log_file}" 2>&1
 
-  summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
-  avg_us="$(smear_extract_field "${summary_line}" "avg_us")"
-  avg_particles="$(smear_extract_field "${summary_line}" "avg_particles")"
-  max_particles="$(smear_extract_field "${summary_line}" "max_particles")"
-  final_particles="$(smear_extract_field "${summary_line}" "final_particles")"
+  IFS=$'\t' read -r avg_us avg_particles max_particles final_particles <<EOF
+$(smear_perf_report_query "${rust_repo_dir}" "particle-toggle" "${log_file}" \
+  "summary.avg_us" \
+  "summary.avg_particles" \
+  "summary.max_particles" \
+  "summary.final_particles")
+EOF
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${side_label}" \
@@ -328,6 +330,7 @@ echo "base_root=${worktree_dir}"
 echo "artifacts=${artifact_dir}"
 echo
 
+smear_build_perf_report_tool "${rust_repo_dir}"
 run_side "local" "${repo_root}"
 run_side "base" "${worktree_dir}"
 

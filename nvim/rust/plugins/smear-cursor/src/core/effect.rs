@@ -21,7 +21,6 @@ use crate::core::types::Millis;
 use crate::core::types::ObservationId;
 use crate::core::types::ProbeRequestId;
 use crate::core::types::ProposalId;
-use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
 use crate::position::BufferLine;
 use crate::position::CursorObservation;
@@ -32,34 +31,6 @@ use crate::position::WindowSurfaceSnapshot;
 use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
 use std::sync::Arc;
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) enum TimerKind {
-    Animation,
-    Ingress,
-    Recovery,
-    Cleanup,
-}
-
-impl TimerKind {
-    pub(crate) const fn from_timer_id(timer_id: TimerId) -> Self {
-        match timer_id {
-            TimerId::Animation => Self::Animation,
-            TimerId::Ingress => Self::Ingress,
-            TimerId::Recovery => Self::Recovery,
-            TimerId::Cleanup => Self::Cleanup,
-        }
-    }
-
-    pub(crate) const fn timer_id(self) -> TimerId {
-        match self {
-            Self::Animation => TimerId::Animation,
-            Self::Ingress => TimerId::Ingress,
-            Self::Recovery => TimerId::Recovery,
-            Self::Cleanup => TimerId::Cleanup,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct ScheduleTimerEffect {
@@ -137,10 +108,15 @@ pub(crate) enum ProbeQuality {
     FastMotion,
 }
 
+/// Cursor-position freshness policy for observation reads.
+///
+/// Both modes return projected display-space cursor observations. The choice is
+/// only whether the reader must finish exact projection now or may return a
+/// deferred projected cell that still owes a follow-up exact refresh.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum CursorPositionProbeMode {
     Exact,
-    RawDuringMotion,
+    DeferredAllowed,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -179,6 +155,11 @@ pub(crate) struct ProbePolicy {
 }
 
 impl ProbePolicy {
+    /// Reader strategy knobs for cursor position and color probes.
+    ///
+    /// The policy controls freshness, reuse, and fallback cost only. It never
+    /// changes reducer-owned cursor coordinate space: any returned
+    /// [`CursorObservation`] stays in projected display space.
     #[cfg(test)]
     pub(crate) const fn new(quality: ProbeQuality) -> Self {
         match quality {
@@ -198,7 +179,7 @@ impl ProbePolicy {
     #[cfg(test)]
     pub(crate) const fn fast_motion() -> Self {
         Self::from_modes(
-            CursorPositionProbeMode::RawDuringMotion,
+            CursorPositionProbeMode::DeferredAllowed,
             CursorColorReuseMode::CompatibleWithinLine,
             CursorColorFallbackMode::SyntaxThenExtmarks,
         )
@@ -237,11 +218,11 @@ impl ProbePolicy {
                     cursor_color_reuse_mode,
                     CursorColorFallbackMode::SyntaxThenExtmarks,
                 ),
-                // Fast motion still uses the raw screen-position path, but fresh cursor-color
+                // Fast motion still allows deferred cursor projection, but fresh cursor-color
                 // samples must remain overlay-aware so semantic tokens and other extmarks do not
                 // smear with stale syntax-only tint.
                 BufferPerfClass::FastMotion => Self::from_modes(
-                    CursorPositionProbeMode::RawDuringMotion,
+                    CursorPositionProbeMode::DeferredAllowed,
                     cursor_color_reuse_mode,
                     CursorColorFallbackMode::SyntaxThenExtmarks,
                 ),
@@ -256,7 +237,7 @@ impl ProbePolicy {
     pub(crate) const fn quality(self) -> ProbeQuality {
         match self.cursor_position_mode {
             CursorPositionProbeMode::Exact => ProbeQuality::Exact,
-            CursorPositionProbeMode::RawDuringMotion => ProbeQuality::FastMotion,
+            CursorPositionProbeMode::DeferredAllowed => ProbeQuality::FastMotion,
         }
     }
 
@@ -292,15 +273,15 @@ impl ProbePolicy {
                 CursorColorFallbackMode::SyntaxThenExtmarks,
             ) => "exact_compatible",
             (
-                CursorPositionProbeMode::RawDuringMotion,
+                CursorPositionProbeMode::DeferredAllowed,
                 CursorColorReuseMode::ExactOnly,
                 CursorColorFallbackMode::SyntaxThenExtmarks,
-            ) => "raw_extmarks",
+            ) => "deferred_extmarks",
             (
-                CursorPositionProbeMode::RawDuringMotion,
+                CursorPositionProbeMode::DeferredAllowed,
                 CursorColorReuseMode::CompatibleWithinLine,
                 CursorColorFallbackMode::SyntaxThenExtmarks,
-            ) => "raw_compatible_extmarks",
+            ) => "deferred_compatible_extmarks",
         }
     }
 
@@ -318,10 +299,10 @@ impl ProbePolicy {
         )
     }
 
-    pub(crate) const fn uses_raw_screenpos_fallback(self) -> bool {
+    pub(crate) const fn allows_deferred_cursor_projection(self) -> bool {
         matches!(
             self.cursor_position_mode,
-            CursorPositionProbeMode::RawDuringMotion
+            CursorPositionProbeMode::DeferredAllowed
         )
     }
 }
@@ -758,7 +739,7 @@ mod tests {
         if matches!(demand_kind, ExternalDemandKind::ExternalCursor)
             && matches!(buffer_perf_class, BufferPerfClass::FastMotion)
         {
-            CursorPositionProbeMode::RawDuringMotion
+            CursorPositionProbeMode::DeferredAllowed
         } else {
             CursorPositionProbeMode::Exact
         }
@@ -785,13 +766,13 @@ mod tests {
             (CursorPositionProbeMode::Exact, CursorColorReuseMode::CompatibleWithinLine) => {
                 "exact_compatible"
             }
-            (CursorPositionProbeMode::RawDuringMotion, CursorColorReuseMode::ExactOnly) => {
-                "raw_extmarks"
+            (CursorPositionProbeMode::DeferredAllowed, CursorColorReuseMode::ExactOnly) => {
+                "deferred_extmarks"
             }
             (
-                CursorPositionProbeMode::RawDuringMotion,
+                CursorPositionProbeMode::DeferredAllowed,
                 CursorColorReuseMode::CompatibleWithinLine,
-            ) => "raw_compatible_extmarks",
+            ) => "deferred_compatible_extmarks",
         }
     }
 

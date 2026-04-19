@@ -63,8 +63,8 @@ pub(super) use telemetry::note_autocmd_event_now;
 pub(super) use telemetry::record_buffer_metadata_read;
 pub(crate) use telemetry::record_compiled_field_cache_hit;
 pub(crate) use telemetry::record_compiled_field_cache_miss;
+pub(super) use telemetry::record_conceal_deferred_projection;
 pub(super) use telemetry::record_conceal_full_scan;
-pub(super) use telemetry::record_conceal_raw_screenpos_fallback;
 pub(super) use telemetry::record_conceal_region_cache_hit;
 pub(super) use telemetry::record_conceal_region_cache_miss;
 pub(super) use telemetry::record_conceal_screen_cell_cache_hit;
@@ -111,7 +111,9 @@ pub(super) use telemetry::record_scheduled_drain_reschedule_for_thermal;
 pub(super) use telemetry::record_scheduled_queue_depth;
 pub(super) use telemetry::record_scheduled_queue_depth_for_thermal;
 pub(super) use telemetry::record_stale_token_event_count;
-pub(super) use timers::dispatch_shell_timer_fired;
+pub(super) use timers::CoreTimerHandle;
+pub(super) use timers::CoreTimerHandles;
+pub(super) use timers::dispatch_core_timer_fired;
 pub(super) use timers::now_ms;
 pub(super) use timers::to_core_millis;
 
@@ -128,10 +130,6 @@ use diagnostics::perf_diagnostics_report as test_perf_diagnostics_report;
 use diagnostics::validation_counters_report as test_validation_counters_report;
 #[cfg(test)]
 use engine::resolve_buffer_event_policy_for_metadata;
-#[cfg(test)]
-use timers::CoreTimerHandle;
-#[cfg(test)]
-use timers::CoreTimerHandles;
 
 #[cfg(test)]
 mod tests;

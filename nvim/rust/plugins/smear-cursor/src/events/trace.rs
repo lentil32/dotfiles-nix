@@ -1,7 +1,6 @@
 use crate::core::effect::Effect;
 use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::RenderCleanupExecution;
-use crate::core::effect::TimerKind;
 use crate::core::event::ApplyReport;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ProbeReportedEvent;
@@ -38,7 +37,6 @@ use crate::core::state::ScenePatch;
 use crate::core::state::ScenePatchKind;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
-use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
 use crate::position::CursorObservation;
 use crate::position::ObservedCell;
@@ -48,30 +46,8 @@ use crate::position::WindowSurfaceSnapshot;
 use crate::state::RuntimeState;
 use crate::state::TrackedCursor;
 
-pub(super) fn timer_kind_name(kind: TimerKind) -> &'static str {
-    match kind {
-        TimerKind::Animation => "animation",
-        TimerKind::Ingress => "ingress",
-        TimerKind::Recovery => "recovery",
-        TimerKind::Cleanup => "cleanup",
-    }
-}
-
-fn timer_id_name(timer_id: TimerId) -> &'static str {
-    match timer_id {
-        TimerId::Animation => "animation",
-        TimerId::Ingress => "ingress",
-        TimerId::Recovery => "recovery",
-        TimerId::Cleanup => "cleanup",
-    }
-}
-
 pub(super) fn timer_token_summary(token: TimerToken) -> String {
-    format!(
-        "{}@{}",
-        timer_id_name(token.id()),
-        token.generation().value()
-    )
+    format!("{}@{}", token.id().name(), token.generation().value())
 }
 
 fn millis_summary(millis: Millis) -> u64 {
@@ -305,16 +281,10 @@ fn render_cleanup_state_summary(
 }
 
 fn timer_state_summary(state: crate::core::state::TimerState) -> String {
-    let tokens = [
-        state.active_token(TimerId::Animation),
-        state.active_token(TimerId::Ingress),
-        state.active_token(TimerId::Recovery),
-        state.active_token(TimerId::Cleanup),
-    ]
-    .into_iter()
-    .flatten()
-    .map(timer_token_summary)
-    .collect::<Vec<_>>();
+    let tokens = state
+        .active_tokens()
+        .map(timer_token_summary)
+        .collect::<Vec<_>>();
 
     if tokens.is_empty() {
         "none".to_string()
@@ -663,13 +633,13 @@ pub(super) fn core_event_summary(event: &CoreEvent) -> String {
         ),
         CoreEvent::TimerFiredWithToken(payload) => format!(
             "kind={} token={} observed_at={}",
-            timer_id_name(payload.token.id()),
+            payload.token.id().name(),
             timer_token_summary(payload.token),
             millis_summary(payload.observed_at),
         ),
         CoreEvent::TimerLostWithToken(payload) => format!(
             "kind={} token={} observed_at={}",
-            timer_id_name(payload.token.id()),
+            payload.token.id().name(),
             timer_token_summary(payload.token),
             millis_summary(payload.observed_at),
         ),
@@ -688,7 +658,7 @@ pub(super) fn effect_summary(effect: &Effect) -> String {
     match effect {
         Effect::ScheduleTimer(payload) => format!(
             "kind={} token={} delay_ms={} requested_at={}",
-            timer_id_name(payload.token.id()),
+            payload.token.id().name(),
             timer_token_summary(payload.token),
             payload.delay.value(),
             millis_summary(payload.requested_at),

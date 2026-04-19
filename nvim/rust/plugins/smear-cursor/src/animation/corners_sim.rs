@@ -1,6 +1,13 @@
 fn update_corners(
     input: &StepInput,
-) -> ([RenderPoint; 4], [RenderPoint; 4], [RenderPoint; 4], [f64; 4], usize, usize) {
+) -> (
+    [RenderPoint; 4],
+    [RenderPoint; 4],
+    [RenderPoint; 4],
+    [f64; 4],
+    usize,
+    usize,
+) {
     let mut current_corners = input.current_corners;
     let mut center_velocity = RenderPoint {
         row: (input.spring_velocity_corners[0].row

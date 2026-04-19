@@ -108,15 +108,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-normalize_optional_field() {
-  local value="$1"
-  if [[ -z "${value}" ]]; then
-    printf 'na'
-  else
-    printf '%s' "${value}"
-  fi
-}
-
 run_once() {
   local side_label="$1"
   local side_root="$2"
@@ -207,45 +198,78 @@ run_once() {
     env "${side_overrides[@]}" "${run_env[@]}" "${NVIM_BIN:-nvim}" --headless -u NONE -c "luafile ${driver_lua}"
   ) >"${log_file}" 2>&1
 
-  summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
-  stress_line="$(grep 'PERF_STRESS_SUMMARY' "${log_file}" | tail -n 1)"
-  diagnostics_line="$(grep 'PERF_DIAGNOSTICS phase=post_recovery ' "${log_file}" | tail -n 1)"
-  validation_line="$(grep 'PERF_VALIDATION phase=post_recovery ' "${log_file}" | tail -n 1)"
-
-  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
-  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
-  stress_max_avg_us="$(smear_extract_field "${stress_line}" "max_avg_us")"
-  stress_max_ratio="$(smear_extract_field "${stress_line}" "max_ratio")"
-  stress_tail_ratio="$(smear_extract_field "${stress_line}" "tail_ratio")"
-  perf_class="$(smear_extract_field "${diagnostics_line}" "perf_class")"
-  line_count="$(smear_extract_field "${diagnostics_line}" "buffer_line_count")"
-  extmark_fallback_calls="$(smear_extract_field "${diagnostics_line}" "cursor_color_extmark_fallback_calls")"
-  conceal_full_scan_calls="$(smear_extract_field "${diagnostics_line}" "conceal_full_scan_calls")"
-  planner_bucket_maps_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bms")"
-  planner_bucket_cells_scanned="$(smear_extract_field "${diagnostics_line}" "planner_bcs")"
-  planner_local_query_envelope_area_cells="$(smear_extract_field "${diagnostics_line}" "planner_lqea")"
-  planner_local_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_local_query_cells")"
-  planner_compiled_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_compq")"
-  planner_candidate_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_candq")"
-  planner_compiled_cells_emitted="$(smear_extract_field "${diagnostics_line}" "planner_compiled_cells_emitted")"
-  planner_candidate_cells_built="$(smear_extract_field "${diagnostics_line}" "planner_candidate_cells_built")"
-  projection_reuse_hits="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "prh")")"
-  projection_reuse_misses="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "prm")")"
-  planner_cache_hits="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pch")")"
-  planner_cache_misses="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pcm")")"
-  planner_validation_compiled_cells_emitted="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pce")")"
-  planner_validation_candidate_cells_built="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pcb")")"
-  win_enter_dropped="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wed")")"
-  win_enter_continued="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wec")")"
-  win_scrolled_dropped="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wsd")")"
-  win_scrolled_continued="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wsc")")"
-  buf_enter_dropped="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "bed")")"
-  buf_enter_continued="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "bec")")"
-  pool_total_windows="$(smear_extract_field "${diagnostics_line}" "pool_total_windows")"
-  pool_cached_budget="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_cached_budget")")"
-  max_kept_windows="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "max_kept_windows")")"
-  pool_peak_requested_capacity="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_peak_requested")")"
-  pool_capacity_cap_hits="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_cap_hits")")"
+  IFS=$'\t' read -r \
+    baseline_us \
+    recovery_ratio \
+    stress_max_avg_us \
+    stress_max_ratio \
+    stress_tail_ratio \
+    perf_class \
+    line_count \
+    extmark_fallback_calls \
+    conceal_full_scan_calls \
+    planner_bucket_maps_scanned \
+    planner_bucket_cells_scanned \
+    planner_local_query_envelope_area_cells \
+    planner_local_query_cells \
+    planner_compiled_query_cells \
+    planner_candidate_query_cells \
+    planner_compiled_cells_emitted \
+    planner_candidate_cells_built \
+    projection_reuse_hits \
+    projection_reuse_misses \
+    planner_cache_hits \
+    planner_cache_misses \
+    planner_validation_compiled_cells_emitted \
+    planner_validation_candidate_cells_built \
+    pool_total_windows \
+    pool_cached_budget \
+    max_kept_windows \
+    pool_peak_requested_capacity \
+    pool_capacity_cap_hits \
+    win_enter_dropped \
+    win_enter_continued \
+    win_scrolled_dropped \
+    win_scrolled_continued \
+    buf_enter_dropped \
+    buf_enter_continued \
+    <<EOF
+$(smear_perf_report_query "${rust_repo_dir}" "window-switch" "${log_file}" \
+  "summary.baseline_avg_us" \
+  "summary.recovery_ratio" \
+  "stress_summary.max_avg_us" \
+  "stress_summary.max_ratio" \
+  "stress_summary.tail_ratio" \
+  "diagnostics.post_recovery.perf_class" \
+  "diagnostics.post_recovery.buffer_line_count" \
+  "diagnostics.post_recovery.cursor_color_extmark_fallback_calls" \
+  "diagnostics.post_recovery.conceal_full_scan_calls" \
+  "diagnostics.post_recovery.planner_bms" \
+  "diagnostics.post_recovery.planner_bcs" \
+  "diagnostics.post_recovery.planner_lqea" \
+  "diagnostics.post_recovery.planner_local_query_cells" \
+  "diagnostics.post_recovery.planner_compq" \
+  "diagnostics.post_recovery.planner_candq" \
+  "diagnostics.post_recovery.planner_compiled_cells_emitted" \
+  "diagnostics.post_recovery.planner_candidate_cells_built" \
+  "validation.post_recovery.prh=na" \
+  "validation.post_recovery.prm=na" \
+  "validation.post_recovery.pch=na" \
+  "validation.post_recovery.pcm=na" \
+  "validation.post_recovery.pce=na" \
+  "validation.post_recovery.pcb=na" \
+  "diagnostics.post_recovery.pool_total_windows" \
+  "diagnostics.post_recovery.pool_cached_budget=na" \
+  "diagnostics.post_recovery.max_kept_windows=na" \
+  "diagnostics.post_recovery.pool_peak_requested=na" \
+  "diagnostics.post_recovery.pool_cap_hits=na" \
+  "validation.post_recovery.wed=na" \
+  "validation.post_recovery.wec=na" \
+  "validation.post_recovery.wsd=na" \
+  "validation.post_recovery.wsc=na" \
+  "validation.post_recovery.bed=na" \
+  "validation.post_recovery.bec=na")
+EOF
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${side_label}" \
@@ -962,6 +986,7 @@ echo "local_overrides=${local_overrides_raw:-none}"
 echo "base_overrides=${base_overrides_raw:-none}"
 echo
 
+smear_build_perf_report_tool "${rust_repo_dir}"
 run_side "local" "${repo_root}"
 run_side "base" "${worktree_dir}"
 

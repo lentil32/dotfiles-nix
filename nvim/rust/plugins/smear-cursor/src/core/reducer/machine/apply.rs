@@ -15,7 +15,6 @@ use super::support::start_boundary_refresh_observation;
 use crate::core::effect::ApplyRenderCleanupEffect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::RenderCleanupExecution;
-use crate::core::effect::TimerKind;
 use crate::core::event::ApplyReport;
 use crate::core::event::EffectFailedEvent;
 use crate::core::event::RenderCleanupAppliedEvent;
@@ -30,6 +29,7 @@ use crate::core::state::RealizationDivergence;
 use crate::core::state::RealizationLedger;
 use crate::core::types::Millis;
 use crate::core::types::ProposalId;
+use crate::core::types::TimerId;
 
 pub(super) fn reduce_render_plan_computed(
     mut state: CoreState,
@@ -211,7 +211,7 @@ fn reduce_apply_completed(
             );
             let (scheduled_state, schedule) = schedule_timer_with_delay(
                 next_state,
-                TimerKind::Animation,
+                TimerId::Animation,
                 animation_delay,
                 observed_at,
             );

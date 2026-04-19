@@ -1,26 +1,18 @@
 {
+  inputs,
   lib,
   pkgs,
   pkgs-unstable,
   ...
 }:
 let
+  system = pkgs.stdenv.hostPlatform.system;
+  claudeCodePackage = inputs.claude-code-nix.packages.${system}.default;
+  codexPackage = inputs.codex-cli-nix.packages.${system}.default;
+  # https://github.com/sadjow/gemini-cli-nix/issues/33
+  geminiPackage = inputs.gemini-cli-nix.packages.${system}.default;
   opengrepVersion = "1.16.0";
   opengrepReleaseBaseUrl = "https://github.com/opengrep/opengrep/releases/download/v${opengrepVersion}";
-  direnvPackage = pkgs.direnv.overrideAttrs (old: {
-    nativeCheckInputs = lib.filter (pkg: pkg != pkgs.fish) old.nativeCheckInputs;
-    # `direnv` currently flakes in `test-fish` on darwin; keep the other shell checks.
-    checkPhase = ''
-      runHook preCheck
-
-      make test-go test-bash test-zsh
-
-      runHook postCheck
-    '';
-  });
-  misePackage = pkgs.mise.override {
-    direnv = direnvPackage;
-  };
 
   opengrepReleaseForSystem =
     if pkgs.stdenvNoCC.hostPlatform.system == "aarch64-darwin" then
@@ -159,7 +151,9 @@ in
     # Productivity
 
     # LLM
-    codex
+    claudeCodePackage
+    codexPackage
+    # geminiPackage
 
     # misc
     caddy
@@ -203,11 +197,9 @@ in
     };
     direnv = {
       enable = true;
-      package = direnvPackage;
       enableZshIntegration = true;
       mise = {
         enable = true;
-        package = misePackage;
       };
       nix-direnv.enable = true;
     };
@@ -228,7 +220,6 @@ in
     java.enable = true;
     mise = {
       enable = true;
-      package = misePackage;
       enableZshIntegration = true;
       globalConfig = {
         alias = {

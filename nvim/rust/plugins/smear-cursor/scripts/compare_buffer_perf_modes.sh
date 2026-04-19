@@ -31,6 +31,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd)"
+workspace_dir="$(cd -- "${repo_dir}/../.." && pwd)"
 driver_lua="${repo_dir}/scripts/perf_window_switch.lua"
 perf_lib="${script_dir}/lib/perf_env.sh"
 
@@ -97,6 +98,7 @@ echo "modes=${mode_csv}"
 echo "scenarios=${scenario_csv}"
 echo
 
+smear_build_perf_report_tool "${workspace_dir}"
 smear_build_release "${repo_dir}"
 if ! smear_export_runtime_paths "${repo_dir}" >/dev/null; then
   echo "failed to resolve runtime paths for ${repo_dir}" >&2
@@ -155,27 +157,36 @@ run_once() {
     env "${run_env[@]}" "${NVIM_BIN:-nvim}" --headless -u NONE -c "luafile ${driver_lua}"
   ) >"${log_file}" 2>&1
 
-  summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
-  stress_line="$(grep 'PERF_STRESS_SUMMARY' "${log_file}" | tail -n 1)"
-  diagnostics_line="$(grep 'PERF_DIAGNOSTICS phase=post_recovery ' "${log_file}" | tail -n 1)"
-  if [[ -z "${summary_line}" || -z "${stress_line}" || -z "${diagnostics_line}" ]]; then
-    echo "missing perf summary fields in ${log_file}" >&2
-    exit 1
-  fi
-
-  baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
-  recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
-  stress_max_avg_us="$(smear_extract_field "${stress_line}" "max_avg_us")"
-  stress_max_ratio="$(smear_extract_field "${stress_line}" "max_ratio")"
-  stress_tail_ratio="$(smear_extract_field "${stress_line}" "tail_ratio")"
-  realized_mode="$(smear_extract_field "${diagnostics_line}" "perf_effective_mode")"
-  perf_class="$(smear_extract_field "${diagnostics_line}" "perf_class")"
-  probe_policy="$(smear_extract_field "${diagnostics_line}" "probe_policy")"
-  line_count="$(smear_extract_field "${diagnostics_line}" "buffer_line_count")"
-  callback_ewma_ms="$(smear_extract_field "${diagnostics_line}" "callback_ewma_ms")"
-  reason_bits="$(smear_extract_field "${diagnostics_line}" "perf_reason_bits")"
-  extmark_fallback_calls="$(smear_extract_field "${diagnostics_line}" "cursor_color_extmark_fallback_calls")"
-  conceal_full_scan_calls="$(smear_extract_field "${diagnostics_line}" "conceal_full_scan_calls")"
+  IFS=$'\t' read -r \
+    baseline_us \
+    recovery_ratio \
+    stress_max_avg_us \
+    stress_max_ratio \
+    stress_tail_ratio \
+    realized_mode \
+    perf_class \
+    probe_policy \
+    line_count \
+    callback_ewma_ms \
+    reason_bits \
+    extmark_fallback_calls \
+    conceal_full_scan_calls \
+    <<EOF
+$(smear_perf_report_query "${workspace_dir}" "window-switch" "${log_file}" \
+  "summary.baseline_avg_us" \
+  "summary.recovery_ratio" \
+  "stress_summary.max_avg_us" \
+  "stress_summary.max_ratio" \
+  "stress_summary.tail_ratio" \
+  "diagnostics.post_recovery.perf_effective_mode" \
+  "diagnostics.post_recovery.perf_class" \
+  "diagnostics.post_recovery.probe_policy" \
+  "diagnostics.post_recovery.buffer_line_count" \
+  "diagnostics.post_recovery.callback_ewma_ms" \
+  "diagnostics.post_recovery.perf_reason_bits" \
+  "diagnostics.post_recovery.cursor_color_extmark_fallback_calls" \
+  "diagnostics.post_recovery.conceal_full_scan_calls")
+EOF
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${mode}" \

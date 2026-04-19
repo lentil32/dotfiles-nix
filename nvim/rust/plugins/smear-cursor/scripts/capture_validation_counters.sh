@@ -21,6 +21,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd -- "${script_dir}/.." && pwd)"
+workspace_dir="$(cd -- "${repo_dir}/../.." && pwd)"
 driver_lua="${repo_dir}/scripts/perf_window_switch.lua"
 perf_lib="${script_dir}/lib/perf_env.sh"
 
@@ -51,6 +52,8 @@ artifact_dir="$(mktemp -d /tmp/smear_validation_counters.XXXXXX)"
 results_tsv="${artifact_dir}/validation_counters.tsv"
 raw_results_table="${artifact_dir}/validation_counters_raw.txt"
 summary_table="${artifact_dir}/validation_counters_summary.txt"
+
+smear_build_perf_report_tool "${workspace_dir}"
 
 calc_delta() {
   local after="$1"
@@ -123,37 +126,43 @@ run_once() {
       "${NVIM_BIN:-nvim}" --headless -u NONE -c "luafile ${driver_lua}"
   ) >"${log_file}" 2>&1
 
-  baseline_line="$(grep 'PERF_PHASE name=baseline ' "${log_file}" | tail -n 1)"
-  diagnostics_line="$(grep 'PERF_DIAGNOSTICS phase=post_baseline ' "${log_file}" | tail -n 1)"
-  warmup_validation_line="$(grep 'PERF_VALIDATION phase=post_warmup ' "${log_file}" | tail -n 1)"
-  baseline_validation_line="$(grep 'PERF_VALIDATION phase=post_baseline ' "${log_file}" | tail -n 1)"
-  if [[ -z "${baseline_line}" || -z "${diagnostics_line}" || -z "${warmup_validation_line}" || -z "${baseline_validation_line}" ]]; then
-    echo "missing validation fields in ${log_file}" >&2
-    exit 1
-  fi
-
-  baseline_elapsed_ms="$(smear_extract_field "${baseline_line}" "elapsed_ms")"
-  baseline_avg_us="$(smear_extract_field "${baseline_line}" "avg_us")"
-  perf_class="$(smear_extract_field "${diagnostics_line}" "perf_class")"
-  probe_policy="$(smear_extract_field "${diagnostics_line}" "probe_policy")"
-
-  warmup_buffer_metadata_reads="$(smear_extract_field "${warmup_validation_line}" "bmr")"
-  baseline_buffer_metadata_reads="$(smear_extract_field "${baseline_validation_line}" "bmr")"
+  IFS=$'\t' read -r \
+    baseline_elapsed_ms \
+    baseline_avg_us \
+    perf_class \
+    probe_policy \
+    warmup_buffer_metadata_reads \
+    baseline_buffer_metadata_reads \
+    warmup_changedtick_reads \
+    baseline_changedtick_reads \
+    warmup_editor_bounds_reads \
+    baseline_editor_bounds_reads \
+    warmup_command_row_reads \
+    baseline_command_row_reads \
+    <<EOF
+$(smear_perf_report_query "${workspace_dir}" "window-switch" "${log_file}" \
+  "phases.baseline.elapsed_ms" \
+  "phases.baseline.avg_us" \
+  "diagnostics.post_baseline.perf_class" \
+  "diagnostics.post_baseline.probe_policy" \
+  "validation.post_warmup.bmr" \
+  "validation.post_baseline.bmr" \
+  "validation.post_warmup.cbtr" \
+  "validation.post_baseline.cbtr" \
+  "validation.post_warmup.ebr" \
+  "validation.post_baseline.ebr" \
+  "validation.post_warmup.crr" \
+  "validation.post_baseline.crr")
+EOF
   delta_buffer_metadata_reads="$(calc_delta "${baseline_buffer_metadata_reads}" "${warmup_buffer_metadata_reads}")"
   buffer_metadata_reads_per_s="$(calc_rate_per_s "${delta_buffer_metadata_reads}" "${baseline_elapsed_ms}")"
 
-  warmup_changedtick_reads="$(smear_extract_field "${warmup_validation_line}" "cbtr")"
-  baseline_changedtick_reads="$(smear_extract_field "${baseline_validation_line}" "cbtr")"
   delta_changedtick_reads="$(calc_delta "${baseline_changedtick_reads}" "${warmup_changedtick_reads}")"
   changedtick_reads_per_s="$(calc_rate_per_s "${delta_changedtick_reads}" "${baseline_elapsed_ms}")"
 
-  warmup_editor_bounds_reads="$(smear_extract_field "${warmup_validation_line}" "ebr")"
-  baseline_editor_bounds_reads="$(smear_extract_field "${baseline_validation_line}" "ebr")"
   delta_editor_bounds_reads="$(calc_delta "${baseline_editor_bounds_reads}" "${warmup_editor_bounds_reads}")"
   editor_bounds_reads_per_s="$(calc_rate_per_s "${delta_editor_bounds_reads}" "${baseline_elapsed_ms}")"
 
-  warmup_command_row_reads="$(smear_extract_field "${warmup_validation_line}" "crr")"
-  baseline_command_row_reads="$(smear_extract_field "${baseline_validation_line}" "crr")"
   delta_command_row_reads="$(calc_delta "${baseline_command_row_reads}" "${warmup_command_row_reads}")"
   command_row_reads_per_s="$(calc_rate_per_s "${delta_command_row_reads}" "${baseline_elapsed_ms}")"
 

@@ -1,4 +1,4 @@
-local EXPECTED_HOST_BRIDGE_REVISION = 9
+local EXPECTED_HOST_BRIDGE_REVISION = 15
 
 local function prepend_runtimepath(path)
   if path == nil or path == "" then
@@ -36,14 +36,41 @@ local function wait_for(description, predicate)
   error(description)
 end
 
-local function matching_call_count(observed_calls, slot_id, generation)
+local function matching_call_count(observed_calls, host_callback_id, host_timer_id)
   local count = 0
   for _, call in ipairs(observed_calls) do
-    if call.slot_id == slot_id and (generation == nil or call.generation == generation) then
+    if call.host_callback_id == host_callback_id
+      and (host_timer_id == nil or call.host_timer_id == host_timer_id)
+    then
       count = count + 1
     end
   end
   return count
+end
+
+local function assert_immediate_timer_roundtrip(observed_timer_callbacks, host_callback_id)
+  local immediate_timer_id = vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](host_callback_id, 0)
+  if type(immediate_timer_id) ~= "number" or immediate_timer_id <= 0 then
+    error("timer bridge returned an invalid timer id")
+  end
+
+  wait_for("timer bridge did not deliver the immediate callback", function()
+    return matching_call_count(observed_timer_callbacks, host_callback_id, immediate_timer_id) == 1
+  end)
+  if matching_call_count(observed_timer_callbacks, host_callback_id) ~= 1 then
+    error("timer callback fired more than once")
+  end
+
+  for _, call in ipairs(observed_timer_callbacks) do
+    if call.host_callback_id == host_callback_id then
+      if call.host_timer_id ~= immediate_timer_id then
+        error("timer callback did not round-trip the host timer id")
+      end
+      return
+    end
+  end
+
+  error("timer callback was not recorded")
 end
 
 local function main()
@@ -78,6 +105,18 @@ local function main()
     error("missing nvimrs_smear_cursor#host_bridge#stop_timer bridge")
   end
 
+  if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#dispatch_timer") ~= 1 then
+    error("missing nvimrs_smear_cursor#host_bridge#dispatch_timer bridge")
+  end
+
+  if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#dispatch_autocmd") ~= 1 then
+    error("missing nvimrs_smear_cursor#host_bridge#dispatch_autocmd bridge")
+  end
+
+  if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#reset_timers") ~= 0 then
+    error("unexpected legacy nvimrs_smear_cursor#host_bridge#reset_timers bridge")
+  end
+
   if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#install_probe_helpers") ~= 1 then
     error("missing nvimrs_smear_cursor#host_bridge#install_probe_helpers bridge")
   end
@@ -90,22 +129,59 @@ local function main()
     error("missing nvimrs_smear_cursor#host_bridge#background_allowed_mask bridge")
   end
 
-  if type(smear.on_core_timer_slot) ~= "function" then
-    error("missing nvimrs_smear_cursor.on_core_timer_slot bridge")
+  if type(smear.on_core_timer_fired) ~= "function" then
+    error("missing nvimrs_smear_cursor.on_core_timer_fired bridge")
+  end
+
+  if type(smear.on_autocmd_payload) ~= "function" then
+    error("missing nvimrs_smear_cursor.on_autocmd_payload bridge")
   end
 
   local observed_timer_callbacks = {}
-  local original_on_core_timer_slot = smear.on_core_timer_slot
-  smear.on_core_timer_slot = function(slot_id, generation)
+  local original_on_core_timer_fired = smear.on_core_timer_fired
+  smear.on_core_timer_fired = function(host_callback_id, host_timer_id)
     table.insert(observed_timer_callbacks, {
-      slot_id = slot_id,
-      generation = generation,
+      host_callback_id = host_callback_id,
+      host_timer_id = host_timer_id,
     })
-    return original_on_core_timer_slot(slot_id, generation)
+    return original_on_core_timer_fired(host_callback_id, host_timer_id)
+  end
+
+  local observed_autocmd_payloads = {}
+  local original_on_autocmd_payload = smear.on_autocmd_payload
+  smear.on_autocmd_payload = function(payload)
+    table.insert(observed_autocmd_payloads, {
+      event = payload.event,
+      buffer = payload.buffer,
+      match = payload.match,
+    })
+    return original_on_autocmd_payload(payload)
   end
 
   if package.loaded["nvimrs_smear_cursor.probes"] == nil then
     error("probe helpers were not installed during setup")
+  end
+
+  local autocmd_dispatch_result = vim.fn["nvimrs_smear_cursor#host_bridge#dispatch_autocmd"](
+    "OptionSet",
+    0,
+    ""
+  )
+  if autocmd_dispatch_result ~= 0 then
+    error("autocmd bridge returned an unexpected status")
+  end
+  if #observed_autocmd_payloads ~= 1 then
+    error("autocmd bridge did not route exactly one payload")
+  end
+  local observed_autocmd_payload = observed_autocmd_payloads[1]
+  if observed_autocmd_payload.event ~= "OptionSet" then
+    error("autocmd bridge forwarded an unexpected event name")
+  end
+  if observed_autocmd_payload.buffer ~= 0 then
+    error("autocmd bridge forwarded an unexpected buffer handle")
+  end
+  if observed_autocmd_payload.match ~= "" then
+    error("autocmd bridge forwarded an unexpected match name")
   end
 
   local cursor_color = vim.fn["nvimrs_smear_cursor#host_bridge#cursor_color_at_cursor"](false)
@@ -137,42 +213,54 @@ local function main()
     error("background mask probe returned unexpected shape")
   end
 
-  vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](97, 11, 0)
-  wait_for("timer bridge did not deliver the immediate callback", function()
-    return matching_call_count(observed_timer_callbacks, 97, 11) == 1
-  end)
-  if matching_call_count(observed_timer_callbacks, 97) ~= 1 then
-    error("immediate timer callback fired more than once")
+  for _, host_callback_id in ipairs({ 11, 17 }) do
+    assert_immediate_timer_roundtrip(observed_timer_callbacks, host_callback_id)
   end
 
-  vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](98, 21, 60)
-  vim.fn["nvimrs_smear_cursor#host_bridge#stop_timer"](98)
+  local stopped_timer_callback_id = 21
+  local stopped_timer_id =
+    vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](stopped_timer_callback_id, 60)
+  vim.fn["nvimrs_smear_cursor#host_bridge#stop_timer"](stopped_timer_id)
   vim.wait(120, function()
     return false
   end, 5)
-  if matching_call_count(observed_timer_callbacks, 98) ~= 0 then
-    error("stopped timer slot still delivered a callback")
+  if matching_call_count(observed_timer_callbacks, stopped_timer_callback_id) ~= 0 then
+    error("stopped timer still delivered a callback")
   end
 
-  vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](99, 31, 80)
-  vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](99, 32, 0)
-  wait_for("re-armed timer bridge did not deliver the replacement callback", function()
-    return matching_call_count(observed_timer_callbacks, 99, 32) == 1
+  local slow_timer_callback_id = 31
+  local fast_timer_callback_id = 32
+  local slow_timer_id = vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](slow_timer_callback_id, 80)
+  local fast_timer_id = vim.fn["nvimrs_smear_cursor#host_bridge#start_timer_once"](fast_timer_callback_id, 0)
+  if type(slow_timer_id) ~= "number" or type(fast_timer_id) ~= "number" then
+    error("timer bridge did not return numeric timer ids")
+  end
+  if slow_timer_id <= 0 or fast_timer_id <= 0 then
+    error("timer bridge returned a non-positive timer id")
+  end
+  if slow_timer_id == fast_timer_id then
+    error("timer bridge unexpectedly reused a timer id")
+  end
+  wait_for("parallel timer bridge did not deliver the immediate callback", function()
+    return matching_call_count(observed_timer_callbacks, fast_timer_callback_id, fast_timer_id) == 1
   end)
   vim.wait(120, function()
     return false
   end, 5)
-  if matching_call_count(observed_timer_callbacks, 99) ~= 1 then
-    error("re-armed timer slot fired an unexpected number of callbacks")
+  if matching_call_count(observed_timer_callbacks, slow_timer_callback_id) ~= 1 then
+    error("stateless timer bridge did not preserve both callbacks")
   end
-  if matching_call_count(observed_timer_callbacks, 99, 31) ~= 0 then
-    error("re-armed timer slot still fired the canceled generation")
+  if matching_call_count(observed_timer_callbacks, slow_timer_callback_id, slow_timer_id) ~= 1 then
+    error("stateless timer bridge did not round-trip the earlier host timer id")
+  end
+  if matching_call_count(observed_timer_callbacks, fast_timer_callback_id, fast_timer_id) ~= 1 then
+    error("stateless timer bridge did not round-trip the immediate host timer id")
   end
 
   assert_no_log_match(os.getenv("SMEAR_CURSOR_LOG_FILE"), {
     "failed to schedule core timer",
-    "Unknown function: v:lua.__nvimrs_smear_cursor_start_timer_once",
-    "core timer callback received invalid timer id",
+    "Unknown function: nvimrs_smear_cursor#host_bridge#reset_timers",
+    "core timer callback received invalid host timer payload",
     "scheduled callback panicked",
   })
 

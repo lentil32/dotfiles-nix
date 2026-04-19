@@ -183,6 +183,17 @@ impl RuntimeState {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn simulation_accumulator_ms(&self) -> f64 {
+        match &self.animation_phase {
+            AnimationPhase::Running(phase) => phase.clock.simulation_accumulator_ms,
+            AnimationPhase::Draining(phase) => phase.clock.simulation_accumulator_ms,
+            AnimationPhase::Uninitialized | AnimationPhase::Idle | AnimationPhase::Settling(_) => {
+                0.0
+            }
+        }
+    }
+
     pub(crate) fn start_new_trail_stroke(&mut self) {
         self.trail.stroke_id = self.trail.stroke_id.next();
     }
@@ -234,6 +245,33 @@ impl RuntimeState {
                 phase.settling_window.stable_since_ms <= phase.settling_window.settle_deadline_ms,
                 "settling deadline must not precede the stable-since timestamp"
             );
+        }
+        match &self.animation_phase {
+            AnimationPhase::Running(phase) => {
+                debug_assert!(
+                    phase.clock.simulation_accumulator_ms.is_finite()
+                        && phase.clock.simulation_accumulator_ms >= 0.0,
+                    "motion clocks must retain a finite non-negative simulation accumulator"
+                );
+                debug_assert!(
+                    phase.clock.simulation_accumulator_ms
+                        <= self.animation_clock_catch_up_budget_ms(),
+                    "motion clock debt must stay within the configured catch-up budget"
+                );
+            }
+            AnimationPhase::Draining(phase) => {
+                debug_assert!(
+                    phase.clock.simulation_accumulator_ms.is_finite()
+                        && phase.clock.simulation_accumulator_ms >= 0.0,
+                    "motion clocks must retain a finite non-negative simulation accumulator"
+                );
+                debug_assert!(
+                    phase.clock.simulation_accumulator_ms
+                        <= self.animation_clock_catch_up_budget_ms(),
+                    "motion clock debt must stay within the configured catch-up budget"
+                );
+            }
+            AnimationPhase::Uninitialized | AnimationPhase::Idle | AnimationPhase::Settling(_) => {}
         }
         debug_assert_eq!(
             self.target.cell,

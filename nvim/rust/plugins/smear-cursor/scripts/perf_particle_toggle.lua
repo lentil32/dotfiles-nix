@@ -1,4 +1,6 @@
 local uv = vim.uv or vim.loop
+local PERF_JSON_SCHEMA = "particle-toggle"
+local PERF_JSON_VERSION = 1
 
 local TARGET_ANCHORS = {
   { row = 5.0, col = 8.0 },
@@ -10,6 +12,15 @@ local TARGET_ANCHORS = {
 local function emit_line(line)
   io.stdout:write(line .. "\n")
   io.stdout:flush()
+end
+
+local function emit_json(kind, payload)
+  emit_line(vim.json.encode({
+    schema = PERF_JSON_SCHEMA,
+    version = PERF_JSON_VERSION,
+    kind = kind,
+    payload = payload,
+  }):gsub("^", "PERF_JSON ", 1))
 end
 
 local function getenv_string(name, default_value)
@@ -266,7 +277,9 @@ local function main()
   local input = build_step_input(particles_enabled, time_interval_ms, particle_max_num)
 
   emit_line(string.format("PERF_SCENARIO name=%s", scenario_name))
+  emit_json("scenario", { name = scenario_name })
   emit_line(string.format("PERF_LIBRARY module_path=%s", loaded_module_path))
+  emit_json("library", { module_path = loaded_module_path })
   emit_line(
     string.format(
       "PERF_CONFIG warmup_iterations=%d benchmark_iterations=%d retarget_interval=%d particles_enabled=%s time_interval_ms=%.3f particle_max_num=%d anchor_count=%d",
@@ -279,6 +292,15 @@ local function main()
       #TARGET_ANCHORS
     )
   )
+  emit_json("config", {
+    warmup_iterations = warmup_iterations,
+    benchmark_iterations = benchmark_iterations,
+    retarget_interval = retarget_interval,
+    particles_enabled = particles_enabled,
+    time_interval_ms = time_interval_ms,
+    particle_max_num = particle_max_num,
+    anchor_count = #TARGET_ANCHORS,
+  })
 
   local bench_start_iteration = warmup_iterations + 1
   input = run_iterations(smear, input, 1, warmup_iterations, retarget_interval)
@@ -304,6 +326,13 @@ local function main()
       metrics.retargets
     )
   )
+  emit_json("summary", {
+    avg_us = metrics.avg_us,
+    avg_particles = metrics.avg_particles,
+    max_particles = metrics.max_particles,
+    final_particles = metrics.final_particles,
+    retargets = metrics.retargets,
+  })
 end
 
 local ok, err = xpcall(main, debug.traceback)

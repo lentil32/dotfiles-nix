@@ -1,7 +1,10 @@
 use super::*;
 use crate::core::runtime_reducer::as_delay_ms;
 use crate::test_support::proptest::stateful_config;
+use pretty_assertions::assert_eq;
 use proptest::collection::vec;
+
+const CLOCK_DISCONTINUITY_CATCH_UP_WINDOWS: f64 = 8.0;
 
 #[derive(Clone, Debug)]
 struct TailDrainCountdownCase {
@@ -62,10 +65,28 @@ impl TailDrainModel {
         let elapsed_ms = self
             .last_tick_ms
             .map_or(frame_period_ms, |previous| (now_ms - previous).max(0.0));
+        let simulation_step_ms = config.simulation_step_interval_ms().max(1.0);
+        let catch_up_budget_ms = frame_period_ms
+            .max(simulation_step_ms * f64::from(config.max_simulation_steps_per_frame.max(1)))
+            * CLOCK_DISCONTINUITY_CATCH_UP_WINDOWS;
+
+        if self.last_tick_ms.is_some() && elapsed_ms > catch_up_budget_ms {
+            self.last_tick_ms = None;
+            self.simulation_accumulator_ms = 0.0;
+            self.next_frame_at_ms = None;
+            self.remaining_steps = 0;
+            return TailDrainExpectedTransition {
+                action: TailDrainExpectedAction::ClearAll,
+                should_schedule_next_animation: false,
+                next_animation_at_ms: None,
+                render_cleanup_action: RenderCleanupAction::Schedule,
+                remaining_steps: 0,
+            };
+        }
+
         self.last_tick_ms = Some(now_ms);
         self.simulation_accumulator_ms += elapsed_ms;
 
-        let simulation_step_ms = config.simulation_step_interval_ms().max(1.0);
         let max_simulation_steps =
             usize::try_from(config.max_simulation_steps_per_frame).unwrap_or(usize::MAX);
         let mut planner_idle_steps = 0_u32;
@@ -159,8 +180,7 @@ fn draining_runtime(case: &TailDrainCountdownCase) -> RuntimeState {
         7,
         &TrackedCursor::fixture(10, 20, 1, 1),
     );
-    state.start_tail_drain(case.remaining_steps);
-    state.set_last_tick_ms(Some(100.0));
+    state.start_tail_drain(case.remaining_steps, 100.0);
     state
 }
 
@@ -221,6 +241,36 @@ fn quiescent_external_noop_after_first_frame_schedules_cleanup() {
     );
     assert!(!state.is_animating());
     assert!(!state.is_draining());
+}
+
+#[test]
+fn tail_drain_gap_beyond_catch_up_budget_clears_tail_immediately() {
+    let case = TailDrainCountdownCase {
+        remaining_steps: 2,
+        max_simulation_steps_per_frame: 1,
+        frame_period_ms: 1,
+        simulation_hz: 217,
+        tick_gaps_ms: vec![37],
+    };
+    let mut state = draining_runtime(&case);
+
+    let transition = reduce_cursor_event(
+        &mut state,
+        "n",
+        event_at(5.0, 6.0, 137.0),
+        EventSource::AnimationTick,
+    );
+
+    assert!(matches!(render_action(&transition), RenderAction::ClearAll));
+    assert!(!transition.should_schedule_next_animation);
+    assert_eq!(transition.next_animation_at_ms, None);
+    assert_eq!(
+        render_cleanup_action(&transition),
+        RenderCleanupAction::Schedule
+    );
+    assert_eq!(state.last_tick_ms(), None);
+    assert!(!state.is_draining());
+    assert_eq!(state.drain_steps_remaining(), 0);
 }
 
 proptest! {
@@ -347,7 +397,7 @@ fn tail_drain_advances_existing_particles_without_emitting_new_ones() {
         index_tail: 0,
         rng_state: state.rng_state(),
     });
-    state.start_tail_drain(4);
+    state.start_tail_drain(4, 100.0);
     state.set_last_tick_ms(Some(100.0));
 
     let particles_before_drain_tick = state.particles().to_vec();

@@ -42,7 +42,6 @@ let
       desc = "Claude Desktop";
       cask = "claude";
     }
-    { cask = "claude-code"; }
     {
       desc = "OpenAI Codex Desktop";
       cask = "codex-app";
@@ -79,15 +78,6 @@ let
 
     # Development
     { cask = "cyberduck"; }
-    {
-      desc = "REST client";
-      cask = "insomnia";
-    }
-    { cask = "postman"; }
-    {
-      desc = "Open-source X.Org X Window System";
-      cask = "xquartz";
-    }
     {
       desc = "Python needs arm64 version";
       formulae = "libb2";

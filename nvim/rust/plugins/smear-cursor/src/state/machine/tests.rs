@@ -4,6 +4,7 @@ pub(super) use super::RuntimeState;
 pub(super) use super::RuntimeTargetRetargetKey;
 pub(super) use super::RuntimeTargetSnapshot;
 pub(super) use super::TrackedCursor;
+pub(super) use super::types::AnimationClockSample;
 pub(super) use super::types::SettlingWindow;
 pub(super) use crate::animation::center;
 pub(super) use crate::animation::initial_velocity;

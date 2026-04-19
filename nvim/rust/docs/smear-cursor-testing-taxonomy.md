@@ -68,6 +68,7 @@ The position refactor tightened several test owners that should remain single-so
 - `src/events/runtime/editor_viewport.rs` owns the single command-row formula and `ViewportBounds` projection for shell-side viewport reads.
 - `src/events/surface.rs` owns `getwininfo` parsing and invalid-host-data rejection for `WindowSurfaceSnapshot`.
 - `src/core/state/observation/tests/` together with `src/core/reducer/tests/observation_base_collection.rs` own exact, deferred, and unavailable cursor-sample behavior, including exact-anchor retention.
+- `src/events/cursor/conceal_tests.rs` owns the full conceal-delta projection matrix for Oil-shaped cursor reads; `src/events/cursor/screenpos.rs` and reducer suites keep only boundary smokes for projected selection, exact-anchor retention, and follow-up exact refresh.
 - `src/events/probe_cache/tests/` owns probe-witness reuse and invalidation boundaries for conceal and text-context facts that now depend on the shared surface and cursor vocabulary.
 - `src/state/machine/types.rs` owns `CursorTarget` retarget-key composition and the `retarget_epoch` bump/no-bump rules for cell, shape, and retarget-surface changes.
 - `src/core/runtime_reducer/tests/retargeting_while_animating.rs`, `viewport_scroll_translation.rs`, and `window_resize_reflow.rs` keep boundary smokes for animated retarget application, scroll-translation stability, resize classification, and render-facing `retarget_epoch` propagation.

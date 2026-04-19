@@ -1,4 +1,6 @@
 local uv = vim.uv or vim.loop
+local PERF_JSON_SCHEMA = "window-switch"
+local PERF_JSON_VERSION = 1
 
 -- Headless Neovim perf harness.
 -- Usage: run via scripts/run_perf_window_switch.sh and override parameters with:
@@ -447,6 +449,39 @@ local function emit_line(line)
   io.stdout:flush()
 end
 
+local function emit_json(kind, payload)
+  emit_line(vim.json.encode({
+    schema = PERF_JSON_SCHEMA,
+    version = PERF_JSON_VERSION,
+    kind = kind,
+    payload = payload,
+  }):gsub("^", "PERF_JSON ", 1))
+end
+
+local function coerce_field_value(raw_value)
+  if raw_value == "true" then
+    return true
+  end
+  if raw_value == "false" then
+    return false
+  end
+
+  local numeric_value = tonumber(raw_value)
+  if numeric_value ~= nil then
+    return numeric_value
+  end
+
+  return raw_value
+end
+
+local function json_fields(fields)
+  local result = {}
+  for key, value in pairs(fields) do
+    result[key] = coerce_field_value(value)
+  end
+  return result
+end
+
 local function parse_diagnostics_fields(raw_diagnostics)
   local fields = {}
   for token in string.gmatch(raw_diagnostics, "%S+") do
@@ -511,6 +546,17 @@ local function run_switch_phase(label, windows, iterations, drain_every)
       lua_memory_kib
     )
   )
+  emit_json("phase", {
+    name = label,
+    iterations = iterations,
+    elapsed_ms = elapsed_ms,
+    avg_us = avg_us,
+    floating_windows = floating_windows,
+    visible_floating_windows = visible_floating_windows,
+    smear_floating_windows = smear_floating_windows,
+    visible_smear_floating_windows = visible_smear_floating_windows,
+    lua_memory_kib = lua_memory_kib,
+  })
 
   return {
     elapsed_ns = elapsed_ns,
@@ -526,12 +572,22 @@ end
 local function print_diagnostics(label, smear)
   local diagnostics = read_diagnostics(smear)
   emit_line(string.format("PERF_DIAGNOSTICS phase=%s %s", label, diagnostics.raw))
+  emit_json("diagnostics", {
+    phase = label,
+    raw = diagnostics.raw,
+    fields = json_fields(diagnostics.fields),
+  })
   return diagnostics
 end
 
 local function print_validation_counters(label, smear)
   local validation = read_validation_counters(smear)
   emit_line(string.format("PERF_VALIDATION phase=%s %s", label, validation.raw))
+  emit_json("validation", {
+    phase = label,
+    raw = validation.raw,
+    fields = json_fields(validation.fields),
+  })
   return validation
 end
 
@@ -645,6 +701,20 @@ local function wait_for_recovery(
       max_kept_windows
     )
   )
+  emit_json("recovery_wait", {
+    mode = recovery_mode,
+    elapsed_ms = elapsed_ms,
+    reached_cold = reached_cold,
+    timed_out = timed_out,
+    cleanup_thermal = cleanup_thermal,
+    compaction_target_reached = compaction_target_reached,
+    queue_total_backlog = queue_total_backlog,
+    pool_total_windows = pool_total_windows,
+    pool_cached_budget = pool_cached_budget,
+    pool_peak_requested_capacity = pool_peak_requested_capacity,
+    pool_capacity_cap_hits = pool_capacity_cap_hits,
+    max_kept_windows = max_kept_windows,
+  })
 
   if recovery_mode == "cold" and require_cold_recovery and not reached_cold then
     error(
@@ -819,7 +889,12 @@ local function main()
   emit_line(
     string.format("PERF_SCENARIO name=%s preset=%s", scenario_name, scenario_preset_name)
   )
+  emit_json("scenario", {
+    name = scenario_name,
+    preset = scenario_preset_name,
+  })
   emit_line(string.format("PERF_LIBRARY module_path=%s", loaded_module_path))
+  emit_json("library", { module_path = loaded_module_path })
 
   local workload_buffers = create_workload_buffers(
     workload_line_count,
@@ -889,6 +964,42 @@ local function main()
       top_k_per_cell
     )
   )
+  emit_json("config", {
+    windows = #windows,
+    workload_line_count = workload_line_count,
+    workload_line_width = workload_line_width,
+    warmup_iterations = warmup_iterations,
+    baseline_iterations = baseline_iterations,
+    stress_iterations = stress_iterations,
+    stress_rounds = stress_rounds,
+    recovery_iterations = recovery_iterations,
+    recovery_mode = recovery_mode,
+    settle_wait_ms = settle_wait_ms,
+    cold_wait_timeout_ms = cold_wait_timeout_ms,
+    require_cold_recovery = require_cold_recovery,
+    recovery_poll_ms = recovery_poll_ms,
+    logging_level = logging_level,
+    buffer_perf_mode = buffer_perf_mode,
+    planner_compile_mode = planner_compile_mode,
+    smear_between_buffers = smear_between_buffers,
+    unique_buffers = unique_buffers,
+    particles_enabled = particles_enabled,
+    particles_over_text = particles_over_text,
+    requested_max_kept_windows = max_kept_windows == nil and "default" or max_kept_windows,
+    max_recovery_ratio = max_recovery_ratio,
+    max_stress_ratio = max_stress_ratio,
+    drain_every = drain_every,
+    delay_event_to_smear = delay_event_to_smear,
+    cursor_col0 = cursor_column,
+    extmark_span_count = extmark_span_count,
+    conceal_segment_count = conceal_segment_count,
+    conceal_segment_width = conceal_segment_width,
+    conceal_gap_width = conceal_gap_width,
+    trail_duration_ms = trail_duration_ms,
+    trail_thickness = trail_thickness,
+    trail_thickness_x = trail_thickness_x,
+    top_k_per_cell = top_k_per_cell,
+  })
 
   run_switch_phase("warmup", windows, warmup_iterations, drain_every)
   print_validation_counters("post_warmup", smear)
@@ -929,6 +1040,12 @@ local function main()
       recovery_wait.diagnostics.fields.delayed_ingress_pending or "unknown"
     )
   )
+  emit_json("recovery_state", {
+    cleanup_thermal = recovery_wait.diagnostics.fields.cleanup_thermal or "unknown",
+    compaction_target_reached = recovery_wait.diagnostics.fields.compaction_target_reached or "unknown",
+    queue_total_backlog = recovery_wait.diagnostics.fields.queue_total_backlog or "unknown",
+    delayed_ingress_pending = recovery_wait.diagnostics.fields.delayed_ingress_pending or "unknown",
+  })
   emit_line(
     string.format(
       "PERF_WINDOW_COUNTS phase=post_recovery_wait floating_windows=%d visible_floating_windows=%d smear_floating_windows=%d visible_smear_floating_windows=%d",
@@ -938,6 +1055,13 @@ local function main()
       post_wait_visible_smear_floating_windows
     )
   )
+  emit_json("window_counts", {
+    phase = "post_recovery_wait",
+    floating_windows = post_wait_floating_windows,
+    visible_floating_windows = post_wait_visible_floating_windows,
+    smear_floating_windows = post_wait_smear_floating_windows,
+    visible_smear_floating_windows = post_wait_visible_smear_floating_windows,
+  })
   print_diagnostics("post_recovery_wait", smear)
   print_validation_counters("post_recovery_wait", smear)
   local recovery = run_switch_phase("recovery", windows, recovery_iterations, drain_every)
@@ -965,6 +1089,12 @@ local function main()
       stress_tail_ratio
     )
   )
+  emit_json("stress_summary", {
+    max_avg_us = stress_max_avg_us,
+    tail_avg_us = stress_tail_avg_us,
+    max_ratio = stress_max_ratio,
+    tail_ratio = stress_tail_ratio,
+  })
 
   emit_line(
     string.format(
@@ -982,6 +1112,19 @@ local function main()
       post_wait_visible_smear_floating_windows
     )
   )
+  emit_json("summary", {
+    baseline_avg_us = baseline.avg_us,
+    recovery_avg_us = recovery.avg_us,
+    recovery_ratio = recovery_ratio,
+    recovery_wait_mode = recovery_mode,
+    recovery_wait_elapsed_ms = recovery_wait.elapsed_ms,
+    recovery_reached_cold = recovery_wait.reached_cold,
+    recovery_timed_out = recovery_wait.timed_out,
+    post_wait_floating_windows = post_wait_floating_windows,
+    post_wait_visible_floating_windows = post_wait_visible_floating_windows,
+    post_wait_smear_floating_windows = post_wait_smear_floating_windows,
+    post_wait_visible_smear_floating_windows = post_wait_visible_smear_floating_windows,
+  })
 
   if post_wait_visible_floating_windows > max_floating_windows then
     error(

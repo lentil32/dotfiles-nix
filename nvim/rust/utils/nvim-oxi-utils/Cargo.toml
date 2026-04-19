@@ -11,4 +11,4 @@ workspace = true
 nvim-oxi = { workspace = true, features = ["mlua"] }
 serde = { workspace = true }
 nvimrs-support = { workspace = true }
-thiserror = "2.0"
+thiserror = { workspace = true }

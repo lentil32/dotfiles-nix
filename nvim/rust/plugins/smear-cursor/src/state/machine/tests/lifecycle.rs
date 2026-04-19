@@ -92,7 +92,7 @@ fn start_tail_drain_transitions_follow_requested_step_count() {
         let mut state = RuntimeState::default();
         state.mark_initialized();
 
-        state.start_tail_drain(drain_steps);
+        state.start_tail_drain(drain_steps, 100.0);
 
         assert_eq!(
             (
@@ -104,6 +104,35 @@ fn start_tail_drain_transitions_follow_requested_step_count() {
             "{label}"
         );
     }
+}
+
+#[test]
+fn animation_clock_sample_reports_discontinuity_for_large_gaps() {
+    let mut state = RuntimeState::default();
+    state.config.time_interval = 16.0;
+    state.config.simulation_hz = 120.0;
+    state.config.max_simulation_steps_per_frame = 16;
+    state.start_animation();
+    state.set_last_tick_ms(Some(100.0));
+
+    let sample = state.take_animation_clock_sample(2_500.0, 16.0);
+
+    pretty_assertions::assert_eq!(sample, AnimationClockSample::Discontinuity);
+    pretty_assertions::assert_eq!(state.last_tick_ms(), Some(2_500.0));
+}
+
+#[test]
+fn push_simulation_elapsed_caps_motion_clock_debt_to_the_catch_up_budget() {
+    let mut state = RuntimeState::default();
+    state.config.time_interval = 16.0;
+    state.config.simulation_hz = 120.0;
+    state.config.max_simulation_steps_per_frame = 4;
+    state.start_animation();
+
+    let catch_up_budget_ms = state.animation_clock_catch_up_budget_ms();
+    state.push_simulation_elapsed(catch_up_budget_ms * 4.0);
+
+    pretty_assertions::assert_eq!(state.simulation_accumulator_ms(), catch_up_budget_ms);
 }
 
 #[test]

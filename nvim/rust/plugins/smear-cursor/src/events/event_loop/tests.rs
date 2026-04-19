@@ -4,8 +4,8 @@ use super::RuntimeBehaviorMetrics;
 use super::diagnostics_snapshot;
 use super::record_compiled_field_cache_hit;
 use super::record_compiled_field_cache_miss;
+use super::record_conceal_deferred_projection;
 use super::record_conceal_full_scan;
-use super::record_conceal_raw_screenpos_fallback;
 use super::record_conceal_region_cache_hit;
 use super::record_conceal_region_cache_miss;
 use super::record_conceal_screen_cell_cache_hit;
@@ -41,12 +41,13 @@ use super::record_stale_token_event_count;
 use super::record_timer_fire_duration;
 use super::record_timer_schedule_duration;
 use super::with_event_loop_state_for_test;
-use crate::core::effect::TimerKind;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
+use crate::core::types::TimerId;
 use crate::test_support::proptest::pure_config;
+use crate::test_support::proptest::timer_id;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -84,7 +85,7 @@ enum TelemetryOp {
     ConcealScreenCellCacheHit,
     ConcealScreenCellCacheMiss,
     ConcealFullScan,
-    ConcealRawScreenposFallback,
+    ConcealDeferredProjection,
     TimerScheduleDuration {
         duration_micros: u64,
     },
@@ -110,7 +111,7 @@ enum TelemetryOp {
         thermal: RenderThermalState,
     },
     HostTimerRearm {
-        kind: TimerKind,
+        timer_id: TimerId,
     },
     DelayedIngressPendingUpdateCount {
         count: usize,
@@ -242,11 +243,11 @@ impl TelemetryModel {
                 self.metrics.conceal_probe.full_scan_calls =
                     self.metrics.conceal_probe.full_scan_calls.saturating_add(1);
             }
-            TelemetryOp::ConcealRawScreenposFallback => {
-                self.metrics.conceal_probe.raw_screenpos_fallback_calls = self
+            TelemetryOp::ConcealDeferredProjection => {
+                self.metrics.conceal_probe.deferred_projection_calls = self
                     .metrics
                     .conceal_probe
-                    .raw_screenpos_fallback_calls
+                    .deferred_projection_calls
                     .saturating_add(1);
             }
             TelemetryOp::TimerScheduleDuration { duration_micros } => {
@@ -288,32 +289,32 @@ impl TelemetryModel {
                     thermal,
                 );
             }
-            TelemetryOp::HostTimerRearm { kind } => {
+            TelemetryOp::HostTimerRearm { timer_id } => {
                 self.metrics.host_timer_rearms_total =
                     self.metrics.host_timer_rearms_total.saturating_add(1);
-                match kind {
-                    TimerKind::Animation => {
+                match timer_id {
+                    TimerId::Animation => {
                         self.metrics.host_timer_rearms_by_kind.animation = self
                             .metrics
                             .host_timer_rearms_by_kind
                             .animation
                             .saturating_add(1);
                     }
-                    TimerKind::Ingress => {
+                    TimerId::Ingress => {
                         self.metrics.host_timer_rearms_by_kind.ingress = self
                             .metrics
                             .host_timer_rearms_by_kind
                             .ingress
                             .saturating_add(1);
                     }
-                    TimerKind::Recovery => {
+                    TimerId::Recovery => {
                         self.metrics.host_timer_rearms_by_kind.recovery = self
                             .metrics
                             .host_timer_rearms_by_kind
                             .recovery
                             .saturating_add(1);
                     }
-                    TimerKind::Cleanup => {
+                    TimerId::Cleanup => {
                         self.metrics.host_timer_rearms_by_kind.cleanup = self
                             .metrics
                             .host_timer_rearms_by_kind
@@ -541,15 +542,6 @@ fn thermal_state_strategy() -> impl Strategy<Value = RenderThermalState> {
     ]
 }
 
-fn timer_kind_strategy() -> impl Strategy<Value = TimerKind> {
-    prop_oneof![
-        Just(TimerKind::Animation),
-        Just(TimerKind::Ingress),
-        Just(TimerKind::Recovery),
-        Just(TimerKind::Cleanup),
-    ]
-}
-
 fn telemetry_op_strategy() -> impl Strategy<Value = TelemetryOp> {
     prop_oneof![
         (probe_kind_strategy(), 0_u64..50_000_u64).prop_map(|(kind, duration_micros)| {
@@ -572,7 +564,7 @@ fn telemetry_op_strategy() -> impl Strategy<Value = TelemetryOp> {
         Just(TelemetryOp::ConcealScreenCellCacheHit),
         Just(TelemetryOp::ConcealScreenCellCacheMiss),
         Just(TelemetryOp::ConcealFullScan),
-        Just(TelemetryOp::ConcealRawScreenposFallback),
+        Just(TelemetryOp::ConcealDeferredProjection),
         (0_u64..50_000_u64)
             .prop_map(|duration_micros| TelemetryOp::TimerScheduleDuration { duration_micros }),
         (0_u64..50_000_u64)
@@ -592,7 +584,7 @@ fn telemetry_op_strategy() -> impl Strategy<Value = TelemetryOp> {
         }),
         thermal_state_strategy()
             .prop_map(|thermal| { TelemetryOp::ScheduledDrainRescheduleForThermal { thermal } }),
-        timer_kind_strategy().prop_map(|kind| TelemetryOp::HostTimerRearm { kind }),
+        timer_id().prop_map(|timer_id| TelemetryOp::HostTimerRearm { timer_id }),
         (0_usize..8_usize)
             .prop_map(|count| TelemetryOp::DelayedIngressPendingUpdateCount { count }),
         (0_usize..8_usize).prop_map(|count| TelemetryOp::IngressCoalescedCount { count }),
@@ -651,7 +643,7 @@ fn apply_telemetry_op(op: TelemetryOp) {
         TelemetryOp::ConcealScreenCellCacheHit => record_conceal_screen_cell_cache_hit(),
         TelemetryOp::ConcealScreenCellCacheMiss => record_conceal_screen_cell_cache_miss(),
         TelemetryOp::ConcealFullScan => record_conceal_full_scan(),
-        TelemetryOp::ConcealRawScreenposFallback => record_conceal_raw_screenpos_fallback(),
+        TelemetryOp::ConcealDeferredProjection => record_conceal_deferred_projection(),
         TelemetryOp::TimerScheduleDuration { duration_micros } => {
             record_timer_schedule_duration(duration_micros);
         }
@@ -673,7 +665,7 @@ fn apply_telemetry_op(op: TelemetryOp) {
         TelemetryOp::ScheduledDrainRescheduleForThermal { thermal } => {
             record_scheduled_drain_reschedule_for_thermal(thermal);
         }
-        TelemetryOp::HostTimerRearm { kind } => record_host_timer_rearm(kind),
+        TelemetryOp::HostTimerRearm { timer_id } => record_host_timer_rearm(timer_id),
         TelemetryOp::DelayedIngressPendingUpdateCount { count } => {
             record_delayed_ingress_pending_update_count(count);
         }
@@ -740,6 +732,17 @@ proptest! {
 
         assert_diagnostics_match_model(diagnostics_snapshot(), &model);
     }
+}
+
+#[test]
+fn projection_reuse_hit_regression_respects_perf_counter_gating() {
+    reset_event_loop_state();
+    let mut model = TelemetryModel::default();
+
+    apply_telemetry_op(TelemetryOp::ProjectionReuseHit);
+    model.apply(TelemetryOp::ProjectionReuseHit);
+
+    assert_diagnostics_match_model(diagnostics_snapshot(), &model);
 }
 
 #[test]

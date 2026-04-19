@@ -4,11 +4,11 @@ use super::super::policy::BufferPerfTelemetry;
 use super::engine::mutate_engine_state;
 use super::engine::read_engine_state;
 use super::timers::now_ms;
-use crate::core::effect::TimerKind;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
+use crate::core::types::TimerId;
 
 fn record_buffer_perf_telemetry(
     buffer_handle: Option<i64>,
@@ -148,8 +148,8 @@ pub(crate) fn record_timer_fire_duration(duration_micros: u64) {
     event_loop::record_timer_fire_duration(duration_micros);
 }
 
-pub(crate) fn record_host_timer_rearm(kind: TimerKind) {
-    event_loop::record_host_timer_rearm(kind);
+pub(crate) fn record_host_timer_rearm(timer_id: TimerId) {
+    event_loop::record_host_timer_rearm(timer_id);
 }
 
 pub(crate) fn record_post_burst_convergence(started_at: Millis, converged_at: Millis) {
@@ -248,12 +248,12 @@ pub(crate) fn record_conceal_full_scan(buffer_handle: i64) {
     });
 }
 
-pub(crate) fn record_conceal_raw_screenpos_fallback(buffer_handle: i64) {
-    event_loop::record_conceal_raw_screenpos_fallback();
+pub(crate) fn record_conceal_deferred_projection(buffer_handle: i64) {
+    event_loop::record_conceal_deferred_projection();
     record_buffer_perf_telemetry(Some(buffer_handle), |shell, buffer_handle| {
         shell
             .buffer_perf_telemetry_cache
-            .record_conceal_raw_screenpos_fallback(buffer_handle, now_ms());
+            .record_conceal_deferred_projection(buffer_handle, now_ms());
     });
 }
 
@@ -451,7 +451,7 @@ mod tests {
                         .signals_at(observed_at_ms);
                     prop_assert_eq!(signals.cursor_color_extmark_fallback_pressure(), 1.0);
                     prop_assert_eq!(signals.conceal_full_scan_pressure(), 0.0);
-                    prop_assert_eq!(signals.conceal_raw_screenpos_fallback_pressure(), 0.0);
+                    prop_assert_eq!(signals.conceal_deferred_projection_pressure(), 0.0);
                 }
             }
         }

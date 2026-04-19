@@ -7,6 +7,7 @@
 use super::AUTOCMD_GROUP_NAME;
 use super::cursor::current_mode;
 use super::cursor::cursor_observation_for_mode_with_probe_policy;
+use super::host_bridge::DISPATCH_AUTOCMD_FUNCTION_NAME;
 use super::host_bridge::ensure_namespace_id;
 use super::host_bridge::installed_host_bridge;
 use super::host_bridge::verify_host_bridge;
@@ -28,16 +29,28 @@ use crate::core::effect::ProbePolicy;
 use crate::draw::clear_highlight_cache;
 use crate::draw::initialize_runtime_capabilities;
 use crate::draw::purge_render_windows;
+use crate::lua::i64_from_object;
+use crate::lua::parse_optional_with;
+use crate::lua::require_with_typed;
+use crate::lua::string_from_object;
+use crate::lua::string_from_object_typed;
 use crate::state::CursorShape;
 use crate::state::TrackedCursor;
 use nvim_oxi::Dictionary;
+use nvim_oxi::Object;
 use nvim_oxi::Result;
 use nvim_oxi::String as NvimString;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::CreateAugroupOpts;
 use nvim_oxi::api::opts::CreateAutocmdOpts;
 use nvim_oxi::api::opts::CreateCommandOpts;
-use nvim_oxi::api::types::AutocmdCallbackArgs;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RegisteredAutocmdPayload {
+    event: String,
+    buffer_handle: Option<i64>,
+    match_name: Option<String>,
+}
 
 fn jump_to_current_cursor() -> Result<()> {
     let namespace_id = ensure_namespace_id()?;
@@ -99,14 +112,51 @@ fn clear_autocmd_group() {
     }
 }
 
-fn dispatch_registered_autocmd(event: &str) -> Result<bool> {
-    crate::guard_plugin_call("on_autocmd", || super::handlers::on_autocmd_event(event))?;
-    Ok(false)
+fn raw_payload_field(payload: &Dictionary, key: &str) -> Option<Object> {
+    payload.get(&NvimString::from(key)).cloned()
 }
 
-fn dispatch_registered_autocmd_callback(args: AutocmdCallbackArgs) -> Result<bool> {
-    crate::guard_plugin_call("on_autocmd", || super::handlers::on_autocmd_callback(args))?;
-    Ok(false)
+fn parse_optional_buffer_handle(raw: Option<Object>) -> Result<Option<i64>> {
+    Ok(parse_optional_with(raw, "buffer", i64_from_object)?
+        .and_then(|buffer_handle| (buffer_handle > 0).then_some(buffer_handle)))
+}
+
+fn parse_optional_match_name(raw: Option<Object>) -> Result<Option<String>> {
+    Ok(parse_optional_with(raw, "match", string_from_object)?
+        .and_then(|match_name| (!match_name.is_empty()).then_some(match_name)))
+}
+
+fn parse_registered_autocmd_payload(payload: &Dictionary) -> Result<RegisteredAutocmdPayload> {
+    let event = require_with_typed(
+        raw_payload_field(payload, "event"),
+        "event",
+        string_from_object_typed,
+    )
+    .map_err(|source| crate::lua::to_nvim_error(&source))?;
+    if event.is_empty() {
+        return Err(crate::lua::invalid_key("event", "non-empty string"));
+    }
+
+    Ok(RegisteredAutocmdPayload {
+        event,
+        buffer_handle: parse_optional_buffer_handle(raw_payload_field(payload, "buffer"))?,
+        match_name: parse_optional_match_name(raw_payload_field(payload, "match"))?,
+    })
+}
+
+fn autocmd_dispatch_command(event: &str) -> String {
+    format!(
+        "call {DISPATCH_AUTOCMD_FUNCTION_NAME}('{event}', str2nr(expand('<abuf>')), expand('<amatch>'))",
+    )
+}
+
+pub(crate) fn on_autocmd_payload_event(payload: &Dictionary) -> Result<()> {
+    let payload = parse_registered_autocmd_payload(payload)?;
+    super::handlers::on_autocmd_payload_event(
+        &payload.event,
+        payload.buffer_handle,
+        payload.match_name.as_deref(),
+    )
 }
 
 fn setup_autocmds() -> Result<()> {
@@ -118,8 +168,9 @@ fn setup_autocmds() -> Result<()> {
     for event in registered_autocmd_event_names() {
         let opts = CreateAutocmdOpts::builder()
             .group(group)
-            // Keep the bridge in Rust so autocmd wakeups avoid reparsing a Lua command string.
-            .callback(dispatch_registered_autocmd_callback)
+            // Use the host bridge command path so failed registrations cannot leak
+            // callback-backed Lua registry refs.
+            .command(autocmd_dispatch_command(event))
             .build();
         api::create_autocmd([event], &opts)?;
     }
@@ -251,13 +302,52 @@ pub(crate) fn validation_counters() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_registered_autocmd;
+    use super::DISPATCH_AUTOCMD_FUNCTION_NAME;
+    use super::RegisteredAutocmdPayload;
+    use super::autocmd_dispatch_command;
+    use super::parse_registered_autocmd_payload;
+    use crate::events::handlers::on_autocmd_event;
+    use nvim_oxi::Dictionary;
+    use nvim_oxi::Object;
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn registered_autocmd_callback_keeps_the_handler_installed_after_unknown_events() {
-        let should_delete =
-            dispatch_registered_autocmd("DefinitelyNotReal").expect("unknown event should no-op");
-        assert_eq!(should_delete, false);
+    fn unknown_registered_autocmd_is_a_noop() {
+        on_autocmd_event("DefinitelyNotReal").expect("unknown event should no-op");
+    }
+
+    #[test]
+    fn autocmd_dispatch_command_routes_through_the_host_bridge() {
+        assert_eq!(
+            autocmd_dispatch_command("OptionSet"),
+            format!(
+                "call {DISPATCH_AUTOCMD_FUNCTION_NAME}('OptionSet', str2nr(expand('<abuf>')), expand('<amatch>'))",
+            )
+        );
+    }
+
+    #[test]
+    fn parse_registered_autocmd_payload_normalizes_empty_context_fields() {
+        let mut payload = Dictionary::new();
+        payload.insert("event", "OptionSet");
+        payload.insert("buffer", 0);
+        payload.insert("match", "");
+
+        assert_eq!(
+            parse_registered_autocmd_payload(&payload).expect("payload should parse"),
+            RegisteredAutocmdPayload {
+                event: "OptionSet".to_string(),
+                buffer_handle: None,
+                match_name: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_registered_autocmd_payload_requires_a_non_empty_event() {
+        let mut payload = Dictionary::new();
+        payload.insert("event", Object::from(""));
+
+        assert!(parse_registered_autocmd_payload(&payload).is_err());
     }
 }

@@ -1,4 +1,5 @@
 use super::CachedConcealDriftHint;
+use super::RawScreenposProjection;
 use super::WrappedScreenCellLayout;
 use super::apply_conceal_delta;
 use super::cached_conceal_drift_hint_from_regions_and_delta;
@@ -6,9 +7,12 @@ use super::conceal_delta_cache_key;
 use super::conceal_delta_for_regions;
 use super::conceal_screen_cell_cache_key;
 use super::concealcursor_allows_mode;
+use super::exact_observed_cell_from_conceal_delta;
 use super::merge_conceal_region;
+use super::projected_observed_cell_from_cached_conceal;
 use crate::events::probe_cache::ConcealRegion;
 use crate::position::BufferLine;
+use crate::position::ObservedCell;
 use crate::position::ScreenCell;
 use crate::position::SurfaceId;
 use crate::position::ViewportBounds;
@@ -17,6 +21,7 @@ use crate::test_support::conceal_key;
 use crate::test_support::conceal_region;
 use crate::test_support::proptest::cache_key_mutation_axis;
 use crate::test_support::proptest::pure_config;
+use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -400,6 +405,81 @@ fn conceal_cache_keys_follow_the_caller_supplied_surface_snapshot() {
     );
 }
 
+#[test]
+fn oil_style_concealed_prefix_projects_fast_path_into_display_space() {
+    let surface = surface_snapshot(7, 11, 80, 24, 23, 0, 0);
+    let raw_cell = screen_cell(7, 18);
+    let regions = vec![conceal_region(1, 5, 91, 0)];
+
+    assert_eq!(
+        projected_observed_cell_from_cached_conceal(10, raw_cell, &regions, Some(5), Some(surface)),
+        RawScreenposProjection::Projected {
+            observed_cell: ObservedCell::Deferred(screen_cell(7, 13)),
+            used_cached_conceal: true,
+        },
+    );
+}
+
+#[test]
+fn cached_conceal_fast_path_marks_zero_drift_reuse_as_deferred() {
+    let surface = surface_snapshot(7, 11, 80, 24, 23, 0, 0);
+    let raw_cell = screen_cell(7, 18);
+    let regions = vec![conceal_region(1, 5, 91, 5)];
+
+    assert_eq!(
+        projected_observed_cell_from_cached_conceal(10, raw_cell, &regions, Some(0), Some(surface),),
+        RawScreenposProjection::Projected {
+            observed_cell: ObservedCell::Deferred(raw_cell),
+            used_cached_conceal: true,
+        },
+    );
+}
+
+#[test]
+fn exact_conceal_projection_returns_unavailable_when_no_projected_cell_can_be_computed() {
+    let raw_cell = screen_cell(7, 18);
+    let surface = surface_snapshot(7, 11, 5, 24, 23, 0, 5);
+
+    assert_eq!(
+        exact_observed_cell_from_conceal_delta(raw_cell, None, Some(surface)),
+        ObservedCell::Unavailable,
+    );
+}
+
+#[test]
+fn exact_conceal_projection_returns_unavailable_when_wrapped_shift_cannot_apply_known_delta() {
+    let raw_cell = screen_cell(7, 18);
+    let surface = surface_snapshot(7, 11, 5, 24, 23, 0, 5);
+
+    assert_eq!(
+        exact_observed_cell_from_conceal_delta(raw_cell, Some(5), Some(surface)),
+        ObservedCell::Unavailable,
+    );
+}
+
+#[test]
+fn exact_conceal_projection_stays_in_display_space_when_delta_is_known() {
+    let raw_cell = screen_cell(7, 18);
+    let surface = surface_snapshot(7, 11, 80, 24, 23, 0, 0);
+
+    assert_eq!(
+        exact_observed_cell_from_conceal_delta(raw_cell, Some(5), Some(surface)),
+        ObservedCell::Exact(screen_cell(7, 13)),
+    );
+}
+
+#[test]
+fn cached_conceal_fast_path_requests_exact_projection_when_wrapped_shift_cannot_apply_delta() {
+    let surface = surface_snapshot(7, 11, 5, 24, 23, 0, 5);
+    let raw_cell = screen_cell(7, 18);
+    let regions = vec![conceal_region(1, 5, 91, 0)];
+
+    assert_eq!(
+        projected_observed_cell_from_cached_conceal(10, raw_cell, &regions, Some(5), Some(surface)),
+        RawScreenposProjection::NeedsExactProjection,
+    );
+}
+
 fn mutate_surface(
     snapshot: WindowSurfaceSnapshot,
     axis: usize,
@@ -503,7 +583,10 @@ proptest! {
 
         prop_assert_eq!(
             apply_conceal_delta(raw_cell, conceal_delta, None),
-            screen_cell(raw_cell.row(), raw_cell.col().saturating_sub(conceal_delta).max(1)),
+            Some(screen_cell(
+                raw_cell.row(),
+                raw_cell.col().saturating_sub(conceal_delta).max(1),
+            )),
         );
     }
 
@@ -537,10 +620,7 @@ proptest! {
             raw_row,
             layout.text_start_col.saturating_add(start_offset),
         );
-        let expected_cell = layout.shift_left(raw_cell, conceal_delta).unwrap_or(screen_cell(
-            raw_cell.row(),
-            raw_cell.col().saturating_sub(conceal_delta).max(1),
-        ));
+        let expected_cell = layout.shift_left(raw_cell, conceal_delta);
 
         prop_assert_eq!(
             apply_conceal_delta(raw_cell, conceal_delta, Some(surface_snapshot)),

@@ -23,6 +23,7 @@ use super::EngineAccessResult;
 use super::IngressReadSnapshot;
 use super::diagnostics::reset_transient_event_state;
 use super::timers::now_ms;
+use super::timers::stop_recovered_core_timer_handles;
 use crate::config::RuntimeConfig;
 use crate::core::effect::ProbePolicy;
 use crate::core::state::CoreState;
@@ -49,9 +50,9 @@ fn with_engine_state_access<R>(
             Ok(output)
         }
         Err(panic_payload) => {
-            let namespace_id = recover_engine_state(&mut state);
+            let recovery_state = recover_engine_state(&mut state);
             ENGINE_CONTEXT.with(|context| context.restore_state(state));
-            post_engine_state_recovery(namespace_id);
+            post_engine_state_recovery(recovery_state);
             resume_unwind(panic_payload);
         }
     }
@@ -320,27 +321,90 @@ pub(crate) fn reset_core_state() {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default)]
 struct ShellRecoveryState {
     namespace_id: Option<u32>,
     host_bridge_state: HostBridgeState,
+    core_timer_handles: Vec<super::CoreTimerHandle>,
 }
 
-fn recover_engine_state(state: &mut EngineState) -> Option<u32> {
+fn recover_engine_state(state: &mut EngineState) -> ShellRecoveryState {
     let recovery_state = ShellRecoveryState {
         namespace_id: state.shell.namespace_id(),
         host_bridge_state: state.shell.host_bridge_state(),
+        core_timer_handles: state.shell.core_timer_handles.clear_all(),
     };
     *state = EngineState::default();
     state.shell.host_bridge_state = recovery_state.host_bridge_state;
-    recovery_state.namespace_id
+    recovery_state
 }
 
-fn post_engine_state_recovery(namespace_id: Option<u32>) {
+fn post_engine_state_recovery(recovery_state: ShellRecoveryState) {
     set_log_level(RuntimeConfig::default().logging_level);
     warn("engine state panicked while borrowed; resetting runtime state");
-    if let Some(namespace_id) = namespace_id {
+    if let Some(namespace_id) = recovery_state.namespace_id {
         recover_all_namespaces(namespace_id);
     }
+    stop_recovered_core_timer_handles(recovery_state.core_timer_handles);
     reset_transient_event_state();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::types::TimerGeneration;
+    use crate::core::types::TimerId;
+    use crate::core::types::TimerToken;
+    use pretty_assertions::assert_eq;
+
+    fn test_core_timer_handle(
+        timer_id: TimerId,
+        generation: u64,
+        host_callback_id: i64,
+        host_timer_id: i64,
+    ) -> super::super::CoreTimerHandle {
+        super::super::CoreTimerHandle {
+            host_callback_id: super::super::super::timer_protocol::HostCallbackId::try_new(
+                host_callback_id,
+            )
+            .expect("test host callback id must be positive"),
+            host_timer_id: super::super::super::timer_protocol::HostTimerId::try_new(host_timer_id)
+                .expect("test host timer id must be positive"),
+            token: TimerToken::new(timer_id, TimerGeneration::new(generation)),
+        }
+    }
+
+    #[test]
+    fn recovery_drains_core_timer_handles_before_zeroing_engine_state() {
+        let mut state = EngineState::default();
+        let animation_handle = test_core_timer_handle(TimerId::Animation, 3, 7, 11);
+
+        state.shell.set_namespace_id(77);
+        state
+            .shell
+            .note_host_bridge_verified(super::super::super::HostBridgeRevision::CURRENT);
+        assert_eq!(
+            state.shell.core_timer_handles.replace(animation_handle),
+            None
+        );
+
+        let recovery_state = recover_engine_state(&mut state);
+
+        assert_eq!(recovery_state.namespace_id, Some(77));
+        assert_eq!(
+            recovery_state.host_bridge_state,
+            super::super::super::HostBridgeState::Verified {
+                revision: super::super::super::HostBridgeRevision::CURRENT,
+            }
+        );
+        assert_eq!(recovery_state.core_timer_handles, vec![animation_handle]);
+        assert_eq!(state.shell.namespace_id(), None);
+        assert_eq!(
+            state.shell.host_bridge_state(),
+            super::super::super::HostBridgeState::Verified {
+                revision: super::super::super::HostBridgeRevision::CURRENT,
+            }
+        );
+        assert_eq!(state.shell.core_timer_handles.clear_all(), Vec::new());
+    }
 }

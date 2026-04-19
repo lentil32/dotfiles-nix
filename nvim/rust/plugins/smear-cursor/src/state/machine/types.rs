@@ -30,6 +30,12 @@ impl PluginState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AnimationClockSample {
+    Advance { elapsed_ms: f64 },
+    Discontinuity,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct MotionClock {
     pub(super) last_tick_ms: Option<f64>,
@@ -67,9 +73,12 @@ pub(super) struct DrainingPhase {
 }
 
 impl DrainingPhase {
-    pub(super) fn new(remaining_steps: u32) -> Option<Self> {
+    pub(super) fn new(remaining_steps: u32, last_tick_ms: Option<f64>) -> Option<Self> {
         NonZeroU32::new(remaining_steps).map(|remaining_steps| Self {
-            clock: MotionClock::default(),
+            clock: MotionClock {
+                last_tick_ms,
+                ..MotionClock::default()
+            },
             remaining_steps,
         })
     }

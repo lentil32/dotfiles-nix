@@ -50,6 +50,8 @@ mod state_ownership_doc_sync {
             "`ProjectionHandle::semantic_view()` compares retained projection witness plus logical raster while ignoring reuse-key and cached realization drift.",
             "`InFlightProposal::semantic_view()` compares authoritative proposal payload through semantic patch-basis views rather than cached projection internals.",
             "`CoreState::semantic_view()` compares authoritative reducer state across protocol, runtime, scene, and realization owners while ignoring runtime scratch buffers, projection reuse caches, and cached shell materialization.",
+            "observation-owned cursor cells stay in projected display space; raw host quirks such as conceal and `screenpos()` remain event-layer concerns",
+            "requested probe policy may allow deferred projection, but it may not switch reducer-owned cursor truth out of projected display space",
         ];
 
         assert_eq!(
@@ -69,6 +71,7 @@ mod state_ownership_doc_sync {
             "`ProtocolSharedState.render_cleanup` owns cleanup thermal phase and deadlines only through `RenderCleanupState::{Hot, Cooling, Cold}`. Retention budgets are derived from the current runtime config instead of being copied into scheduler state.",
             "`ProtocolState.phase` is the only workflow owner. There is no separate workflow/slot matrix.",
             "Identity is derived only from the observation root demand sequence: `PendingObservation.demand.seq()` while collecting and `ObservationSnapshot.demand.seq()` once active. `ObservationId` accessors compute from that root; neither the snapshot nor active probe lifecycle state stores a mirrored current-observation id.",
+            "`PendingObservation.requested_probes` is the only owner of probe policy before activation. `ObservationSnapshot::new()` consumes it to initialize active probe lifecycle state. The policy chooses freshness, reuse, and fallback cost only; it does not choose between raw and projected cursor coordinate systems.",
             "Raw retained projection access stays inside `crate::core`; shell and event code cross the boundary through explicit `ProjectionHandle` views instead of borrowing `RetainedProjection` directly.",
         ];
 
@@ -153,6 +156,67 @@ mod testing_taxonomy_doc_sync {
 
         assert_eq!(
             missing_fragments(&doc, &expected_fragments),
+            Vec::<&str>::new()
+        );
+    }
+}
+
+#[cfg(test)]
+mod position_spec_doc_sync {
+    use pretty_assertions::assert_eq;
+
+    const POSITION_SPEC_DOC: &str = include_str!("../../../plans/position-spec.md");
+
+    fn normalized_position_spec_doc() -> String {
+        POSITION_SPEC_DOC
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn missing_fragments<'a>(doc: &str, expected_fragments: &'a [&'a str]) -> Vec<&'a str> {
+        expected_fragments
+            .iter()
+            .copied()
+            .filter(|fragment| !doc.contains(fragment))
+            .collect()
+    }
+
+    fn present_forbidden_fragments<'a>(
+        doc: &str,
+        forbidden_fragments: &'a [&'a str],
+    ) -> Vec<&'a str> {
+        forbidden_fragments
+            .iter()
+            .copied()
+            .filter(|fragment| doc.contains(fragment))
+            .collect()
+    }
+
+    #[test]
+    fn lists_current_projected_cursor_contract() {
+        let doc = normalized_position_spec_doc();
+        let expected_fragments = [
+            "`ObservedCell::Exact` and `ObservedCell::Deferred` both carry projected display-space `ScreenCell` values. `Deferred` means freshness is lower and an exact refresh is still owed; it does not mean the cell is still in raw host coordinates.",
+            "cached or deferred projection during fast motion, followed by exact refresh when needed",
+            "Probe policy may choose exact projection versus deferred-allowed reads, but it may not change the coordinate space of the returned observation.",
+            "exact and deferred observed cells both retain projected display-space cursor cells",
+            "probe policy chooses freshness/cost only; it does not switch between raw and projected coordinate systems",
+        ];
+
+        assert_eq!(
+            missing_fragments(&doc, &expected_fragments),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn omits_removed_raw_fallback_wording() {
+        let doc = normalized_position_spec_doc();
+        let forbidden_fragments = ["raw fallback during fast motion"];
+
+        assert_eq!(
+            present_forbidden_fragments(&doc, &forbidden_fragments),
             Vec::<&str>::new()
         );
     }

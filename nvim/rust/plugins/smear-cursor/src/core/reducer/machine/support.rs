@@ -17,7 +17,6 @@ use crate::core::effect::RequestProbeEffect;
 use crate::core::effect::RequestRenderPlanEffect;
 use crate::core::effect::RetainedCursorColorFallback;
 use crate::core::effect::ScheduleTimerEffect;
-use crate::core::effect::TimerKind;
 use crate::core::effect::tracked_observation_inputs;
 use crate::core::event::RenderCleanupAppliedAction;
 use crate::core::runtime_reducer::RenderCleanupAction;
@@ -98,7 +97,7 @@ pub(super) fn enter_recovering_with_backoff(
     let attempt = next_recovery_attempt(&state);
     let recovering = with_recovery_attempt(state.enter_recovering(), attempt);
     let delay = recovery_backoff_delay(attempt);
-    schedule_timer_with_delay(recovering, TimerKind::Recovery, delay, observed_at)
+    schedule_timer_with_delay(recovering, TimerId::Recovery, delay, observed_at)
 }
 
 pub(super) fn ingress_marks_cursor_autocmd_freshness(kind: ExternalDemandKind) -> bool {
@@ -125,11 +124,10 @@ fn scheduled_cleanup_state(state: &CoreState, observed_at: Millis) -> RenderClea
 
 pub(super) fn schedule_timer_with_delay(
     state: CoreState,
-    kind: TimerKind,
+    timer_id: TimerId,
     delay: DelayBudgetMs,
     requested_at: Millis,
 ) -> (CoreState, Effect) {
-    let timer_id = kind.timer_id();
     let (timers, token) = state.timers().arm(timer_id);
     let next_state = state.with_timers(timers);
     let effect = Effect::ScheduleTimer(ScheduleTimerEffect {
@@ -449,7 +447,7 @@ pub(super) fn arm_render_cleanup_timer(
     let delay = deadline.value().saturating_sub(requested_at.value()).max(1);
     let (scheduled_state, effect) = schedule_timer_with_delay(
         state,
-        TimerKind::Cleanup,
+        TimerId::Cleanup,
         delay_budget_from_ms(delay),
         requested_at,
     );

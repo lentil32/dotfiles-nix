@@ -4,6 +4,7 @@ mod options_patch;
 
 pub(crate) use cursor::CursorShape;
 pub(crate) use cursor::TrackedCursor;
+pub(crate) use machine::AnimationClockSample;
 pub(crate) use machine::PreparedRuntimeMotion;
 pub(crate) use machine::RuntimePreview;
 pub(crate) use machine::RuntimeSemanticView;

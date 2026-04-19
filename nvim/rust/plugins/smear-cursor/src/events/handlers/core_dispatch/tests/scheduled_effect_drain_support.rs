@@ -2,7 +2,6 @@ use super::*;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::ScheduleTimerEffect;
-use crate::core::effect::TimerKind;
 use crate::core::state::ProbeKind;
 use crate::core::state::RenderCleanupState;
 use crate::core::state::RenderThermalState;
@@ -287,8 +286,7 @@ impl ScheduledDrainModelAgenda {
             Effect::ScheduleTimer(payload) => {
                 if let Some(ScheduledDrainModelStep::ScheduleTimer(existing)) =
                     self.steps.back_mut()
-                    && TimerKind::from_timer_id(existing.token.id())
-                        == TimerKind::from_timer_id(payload.token.id())
+                    && existing.token.id() == payload.token.id()
                 {
                     *existing = payload;
                     return false;

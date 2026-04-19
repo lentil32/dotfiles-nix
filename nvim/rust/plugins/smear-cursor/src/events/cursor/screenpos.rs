@@ -1,11 +1,14 @@
 use super::CursorParseError;
 use super::CursorResult;
+use super::conceal::ExactCursorProjection;
+use super::conceal::ExactProjectionSource;
+use super::conceal::RawScreenposProjection;
 use super::conceal::observed_cell_for_raw_screenpos;
 use super::conceal::resolve_buffer_cursor_position;
 use super::cursor_parse_error;
 use crate::core::effect::ProbePolicy;
 use crate::events::logging::trace_lazy;
-use crate::events::runtime::record_conceal_raw_screenpos_fallback;
+use crate::events::runtime::record_conceal_deferred_projection;
 use crate::lua::i64_from_object_ref_with_typed;
 use crate::lua::i64_from_object_typed;
 use crate::position::BufferLine;
@@ -76,70 +79,84 @@ pub(super) struct BufferCursorRead {
     pub(super) line: usize,
     pub(super) column: usize,
     pub(super) screenpos_summary: String,
-    pub(super) raw_observed_cell: Option<ObservedCell>,
-    pub(super) resolved_cell: Option<ScreenCell>,
+    observed_cell: ObservedCell,
+    diagnostics: BufferCursorReadDiagnostics,
 }
 
-impl BufferCursorRead {
-    pub(super) fn conceal_adjusted_cell(&self) -> Option<ScreenCell> {
-        match (
-            self.raw_observed_cell.and_then(ObservedCell::screen_cell),
-            self.resolved_cell,
-        ) {
-            (Some(raw_cell), Some(resolved_cell)) if raw_cell != resolved_cell => {
-                Some(resolved_cell)
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ProjectionSource {
+    Screenpos,
+    ConcealExact,
+    ConcealCached,
+}
+
+impl ProjectionSource {
+    const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Screenpos => "screenpos_projection",
+            Self::ConcealExact => "conceal_exact_projection",
+            Self::ConcealCached => "conceal_cached_projection",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct BufferCursorReadDiagnostics {
+    raw_screenpos_cell: Option<ScreenCell>,
+    projection_source: Option<ProjectionSource>,
+}
+
+impl BufferCursorReadDiagnostics {
+    const fn raw_screenpos_cell(self) -> Option<ScreenCell> {
+        self.raw_screenpos_cell
+    }
+
+    fn projected_adjustment_cell(self, observed_cell: ObservedCell) -> Option<ScreenCell> {
+        match (self.raw_screenpos_cell, observed_cell.screen_cell()) {
+            (Some(raw_cell), Some(projected_cell)) if raw_cell != projected_cell => {
+                Some(projected_cell)
             }
             _ => None,
         }
     }
 
-    pub(super) fn selected_observed_cell(&self) -> ObservedCell {
-        self.resolved_cell
-            .map(ObservedCell::Exact)
-            .unwrap_or(ObservedCell::Unavailable)
-    }
-
-    pub(super) fn selected_observed_cell_for_probe_policy(
-        &self,
-        probe_policy: ProbePolicy,
-    ) -> ObservedCell {
-        if probe_policy.uses_raw_screenpos_fallback() {
-            self.raw_observed_cell.unwrap_or(ObservedCell::Unavailable)
-        } else {
-            self.selected_observed_cell()
+    const fn projection_source(self) -> &'static str {
+        match self.projection_source {
+            Some(source) => source.diagnostic_name(),
+            None => "none",
         }
     }
+}
 
-    pub(super) fn selected_source(&self) -> &'static str {
-        match (
-            self.raw_observed_cell.and_then(ObservedCell::screen_cell),
-            self.resolved_cell,
-        ) {
-            (Some(raw_cell), Some(resolved_cell)) if raw_cell != resolved_cell => {
-                "screenpos_conceal_adjusted"
-            }
-            (Some(_), Some(_)) => "screenpos",
-            _ => "none",
-        }
+impl BufferCursorRead {
+    pub(super) const fn observed_cell(&self) -> ObservedCell {
+        self.observed_cell
     }
 
-    pub(super) fn selected_source_for_probe_policy(
-        &self,
-        probe_policy: ProbePolicy,
-    ) -> &'static str {
-        if !probe_policy.uses_raw_screenpos_fallback() {
-            return self.selected_source();
-        }
-
-        if self.raw_observed_cell.is_some() {
-            "screenpos_fast_path"
-        } else {
-            "none"
-        }
+    pub(super) fn projected_adjustment_cell(&self) -> Option<ScreenCell> {
+        self.diagnostics
+            .projected_adjustment_cell(self.observed_cell)
     }
 
-    pub(super) fn uses_raw_screenpos_fallback(&self, probe_policy: ProbePolicy) -> bool {
-        probe_policy.uses_raw_screenpos_fallback() && self.raw_observed_cell.is_some()
+    pub(super) const fn projection_source(&self) -> &'static str {
+        self.diagnostics.projection_source()
+    }
+
+    pub(super) const fn raw_screenpos_cell(&self) -> Option<ScreenCell> {
+        self.diagnostics.raw_screenpos_cell()
+    }
+
+    pub(super) const fn uses_deferred_projection(&self) -> bool {
+        self.observed_cell.requires_exact_refresh()
+    }
+}
+
+const fn projection_source_for_exact_projection(
+    projection: ExactCursorProjection,
+) -> ProjectionSource {
+    match projection.source {
+        ExactProjectionSource::Screenpos => ProjectionSource::Screenpos,
+        ExactProjectionSource::Conceal => ProjectionSource::ConcealExact,
     }
 }
 
@@ -167,38 +184,43 @@ fn trace_screen_cursor_read(
     probe_policy: ProbePolicy,
 ) {
     trace_lazy(|| {
-        let raw_summary = buffer_read
-            .raw_observed_cell
-            .and_then(ObservedCell::screen_cell)
-            .map_or_else(
-                || "none".to_string(),
-                |cell| format!("{}:{}", cell.row(), cell.col()),
-            );
-        let conceal_adjusted_summary = buffer_read.conceal_adjusted_cell().map_or_else(
+        let raw_summary = buffer_read.raw_screenpos_cell().map_or_else(
             || "none".to_string(),
             |cell| format!("{}:{}", cell.row(), cell.col()),
         );
-        let selected = buffer_read.selected_observed_cell_for_probe_policy(probe_policy);
-        let selected_source = buffer_read.selected_source_for_probe_policy(probe_policy);
-        let selected_summary = selected.screen_cell().map_or_else(
+        let projected_adjustment_summary = buffer_read.projected_adjustment_cell().map_or_else(
+            || "none".to_string(),
+            |cell| format!("{}:{}", cell.row(), cell.col()),
+        );
+        let projected = buffer_read.observed_cell();
+        let projected_summary = projected.screen_cell().map_or_else(
             || "none".to_string(),
             |cell| format!("{}:{}", cell.row(), cell.col()),
         );
 
         format!(
-            "cursor_read win={} cursor=line:{} byte_col0={} screenpos_arg_col={} screenpos=({}) buffer_parsed={} conceal_adjusted={} selected={} selected_source={} probe_policy={}",
+            "cursor_read win={} cursor=line:{} byte_col0={} screenpos_arg_col={} screenpos=({}) raw_probe={} projected={} projected_adjustment={} projection_source={} projection_freshness={} probe_policy={}",
             window.handle(),
             buffer_read.line,
             buffer_read.column,
             buffer_read.column.saturating_add(1),
             buffer_read.screenpos_summary,
             raw_summary,
-            conceal_adjusted_summary,
-            selected_summary,
-            selected_source,
+            projected_summary,
+            projected_adjustment_summary,
+            buffer_read.projection_source(),
+            observed_cell_freshness_name(projected),
             probe_policy.diagnostic_name(),
         )
     });
+}
+
+const fn observed_cell_freshness_name(observed_cell: ObservedCell) -> &'static str {
+    match observed_cell {
+        ObservedCell::Unavailable => "unavailable",
+        ObservedCell::Exact(_) => "exact",
+        ObservedCell::Deferred(_) => "deferred",
+    }
 }
 
 pub(super) fn current_window_option<T>(window: &api::Window, option_name: &str) -> Result<T>
@@ -236,33 +258,68 @@ fn buffer_screen_cursor_position(
     // under the cursor, which is `screenpos.col`.
     let raw_cell = parse_screenpos_cell_from_dict(&screenpos)?;
     let conceal_surface = conceal_surface_snapshot(raw_cell, surface_snapshot);
-    let raw_observed_cell = match raw_cell {
-        Some(raw_cell) if probe_policy.uses_raw_screenpos_fallback() => Some(
-            observed_cell_for_raw_screenpos(window, line, column, mode, raw_cell, conceal_surface)?,
-        ),
-        Some(raw_cell) => Some(ObservedCell::Exact(raw_cell)),
-        None => None,
-    };
-    let resolved_cell = match raw_cell {
-        Some(_raw_cell) if probe_policy.uses_raw_screenpos_fallback() => {
-            raw_observed_cell.and_then(ObservedCell::screen_cell)
+    let (observed_cell, projection_source) = match raw_cell {
+        Some(raw_cell) if probe_policy.allows_deferred_cursor_projection() => {
+            match observed_cell_for_raw_screenpos(
+                window,
+                line,
+                column,
+                mode,
+                raw_cell,
+                conceal_surface,
+            )? {
+                RawScreenposProjection::Projected {
+                    observed_cell,
+                    used_cached_conceal,
+                } => (
+                    observed_cell,
+                    Some(if used_cached_conceal {
+                        ProjectionSource::ConcealCached
+                    } else {
+                        ProjectionSource::Screenpos
+                    }),
+                ),
+                RawScreenposProjection::NeedsExactProjection => {
+                    let exact_projection = resolve_buffer_cursor_position(
+                        window,
+                        line,
+                        column,
+                        mode,
+                        raw_cell,
+                        conceal_surface,
+                    )?;
+                    (
+                        exact_projection.observed_cell,
+                        Some(projection_source_for_exact_projection(exact_projection)),
+                    )
+                }
+            }
         }
-        Some(raw_cell) => Some(resolve_buffer_cursor_position(
-            window,
-            line,
-            column,
-            mode,
-            raw_cell,
-            conceal_surface,
-        )?),
-        None => None,
+        Some(raw_cell) => {
+            let exact_projection = resolve_buffer_cursor_position(
+                window,
+                line,
+                column,
+                mode,
+                raw_cell,
+                conceal_surface,
+            )?;
+            (
+                exact_projection.observed_cell,
+                Some(projection_source_for_exact_projection(exact_projection)),
+            )
+        }
+        None => (ObservedCell::Unavailable, None),
     };
     Ok(BufferCursorRead {
         line,
         column,
         screenpos_summary: screenpos_summary(&screenpos),
-        raw_observed_cell,
-        resolved_cell,
+        observed_cell,
+        diagnostics: BufferCursorReadDiagnostics {
+            raw_screenpos_cell: raw_cell,
+            projection_source,
+        },
     })
 }
 
@@ -290,19 +347,26 @@ fn screen_cursor_observation(
     let buffer_read = buffer_screen_cursor_position(window, mode, probe_policy, surface_snapshot)?;
     // `screenpos()` is the stable callback-safe base here. The `gg` trace showed
     // `screenrow()`/`screencol()` reporting stale or command-line cells on scheduled edges, so we
-    // keep the timing-sensitive live probe out of production selection. Fast motion can stay on
-    // the raw `screenpos()` sample, while exact edges pay for conceal correction to re-sync.
+    // keep the timing-sensitive live probe out of production selection. The
+    // event-layer reader owns raw host details such as conceal correction and
+    // cache reuse, then returns a `CursorObservation` through the shared
+    // display-space contract. Fast motion now differs only in whether cached or
+    // deferred projection is allowed before falling back to the exact
+    // projector; reducer-owned cursor truth is always constructed from the
+    // projected observation returned by the reader.
     trace_screen_cursor_read(window, &buffer_read, probe_policy);
-    if buffer_read.uses_raw_screenpos_fallback(probe_policy) {
-        record_conceal_raw_screenpos_fallback(i64::from(window.get_buf()?.handle()));
+    if buffer_read.uses_deferred_projection() {
+        record_conceal_deferred_projection(i64::from(window.get_buf()?.handle()));
     }
     let buffer_line = BufferLine::new(i64::try_from(buffer_read.line).unwrap_or(i64::MAX)).ok_or(
         CursorParseError::InvalidBufferLine {
             line: buffer_read.line,
         },
     )?;
-    let observed_cell = buffer_read.selected_observed_cell_for_probe_policy(probe_policy);
-    Ok(CursorObservation::new(buffer_line, observed_cell))
+    Ok(CursorObservation::new(
+        buffer_line,
+        buffer_read.observed_cell(),
+    ))
 }
 
 fn command_type_string() -> CursorResult<String> {
@@ -395,14 +459,13 @@ pub(crate) fn smear_outside_cmd_row(corners: &[RenderPoint; 4]) -> Result<bool> 
 #[cfg(test)]
 mod tests {
     use super::BufferCursorRead;
+    use super::BufferCursorReadDiagnostics;
+    use super::ProjectionSource;
     use super::conceal_surface_snapshot;
     use super::parse_screenpos_cell;
     use super::should_use_real_cmdline_cursor;
-    use crate::core::effect::ProbePolicy;
-    use crate::core::effect::ProbeQuality;
     use crate::position::BufferLine;
     use crate::position::ObservedCell;
-    use crate::position::RenderPoint;
     use crate::position::ScreenCell;
     use crate::position::SurfaceId;
     use crate::position::ViewportBounds;
@@ -445,36 +508,6 @@ mod tests {
         .boxed()
     }
 
-    #[derive(Clone, Copy, Debug)]
-    enum BufferReadCase {
-        Hidden,
-        Unadjusted,
-        ConcealAdjusted,
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    enum RawObservedCellKind {
-        Exact,
-        Deferred,
-    }
-
-    fn buffer_read_case_strategy() -> BoxedStrategy<BufferReadCase> {
-        prop_oneof![
-            Just(BufferReadCase::Hidden),
-            Just(BufferReadCase::Unadjusted),
-            Just(BufferReadCase::ConcealAdjusted),
-        ]
-        .boxed()
-    }
-
-    fn raw_observed_cell_kind_strategy() -> BoxedStrategy<RawObservedCellKind> {
-        prop_oneof![
-            Just(RawObservedCellKind::Exact),
-            Just(RawObservedCellKind::Deferred),
-        ]
-        .boxed()
-    }
-
     fn screen_cell(row: i64, col: i64) -> ScreenCell {
         ScreenCell::new(row, col).expect("one-based screen cell")
     }
@@ -511,141 +544,6 @@ mod tests {
         }
 
         #[test]
-        fn prop_buffer_cursor_read_exact_policy_prefers_resolved_positions_and_sources(
-            case in buffer_read_case_strategy(),
-            raw_row in 1_i64..256,
-            raw_col in 1_i64..256,
-            resolved_row in 1_i64..256,
-            resolved_col in 1_i64..256,
-            raw_observed_cell_kind in raw_observed_cell_kind_strategy(),
-        ) {
-            let raw_cell = match case {
-                BufferReadCase::Hidden => None,
-                BufferReadCase::Unadjusted | BufferReadCase::ConcealAdjusted => Some(screen_cell(raw_row, raw_col)),
-            };
-            let resolved_cell = match case {
-                BufferReadCase::Hidden => None,
-                BufferReadCase::Unadjusted => raw_cell,
-                BufferReadCase::ConcealAdjusted => Some(screen_cell(
-                    resolved_row,
-                    if raw_row == resolved_row && raw_col == resolved_col {
-                        resolved_col.saturating_add(1)
-                    } else {
-                        resolved_col
-                    },
-                )),
-            };
-            let expected_adjusted = match case {
-                BufferReadCase::ConcealAdjusted => Some(
-                    resolved_cell.expect("conceal-adjusted reads keep a resolved position"),
-                ),
-                BufferReadCase::Hidden | BufferReadCase::Unadjusted => None,
-            };
-            let expected_source = match case {
-                BufferReadCase::Hidden => "none",
-                BufferReadCase::Unadjusted => "screenpos",
-                BufferReadCase::ConcealAdjusted => "screenpos_conceal_adjusted",
-            };
-            let raw_observed_cell = raw_cell.map(|cell| match raw_observed_cell_kind {
-                RawObservedCellKind::Exact => ObservedCell::Exact(cell),
-                RawObservedCellKind::Deferred => ObservedCell::Deferred(cell),
-            });
-            let read = BufferCursorRead {
-                line: 2,
-                column: 37,
-                screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
-                raw_observed_cell,
-                resolved_cell,
-            };
-            let exact_policy = ProbePolicy::new(ProbeQuality::Exact);
-            let expected_observed_cell =
-                resolved_cell.map_or(ObservedCell::Unavailable, ObservedCell::Exact);
-
-            prop_assert_eq!(
-                read.selected_observed_cell_for_probe_policy(exact_policy),
-                expected_observed_cell,
-            );
-            prop_assert_eq!(
-                read.selected_source_for_probe_policy(exact_policy),
-                expected_source,
-            );
-            prop_assert!(!read.uses_raw_screenpos_fallback(exact_policy));
-
-            prop_assert_eq!(read.selected_observed_cell(), expected_observed_cell);
-            prop_assert_eq!(
-                read.selected_observed_cell_for_probe_policy(exact_policy)
-                    .screen_cell()
-                    .map(RenderPoint::from),
-                resolved_cell.map(RenderPoint::from),
-            );
-            prop_assert_eq!(read.conceal_adjusted_cell(), expected_adjusted);
-            prop_assert_eq!(read.selected_source(), expected_source);
-        }
-
-        #[test]
-        fn prop_buffer_cursor_read_fast_motion_keeps_raw_screenpos_only_when_available(
-            case in buffer_read_case_strategy(),
-            raw_row in 1_i64..256,
-            raw_col in 1_i64..256,
-            resolved_row in 1_i64..256,
-            resolved_col in 1_i64..256,
-            raw_observed_cell_kind in raw_observed_cell_kind_strategy(),
-        ) {
-            let raw_cell = match case {
-                BufferReadCase::Hidden => None,
-                BufferReadCase::Unadjusted | BufferReadCase::ConcealAdjusted => Some(screen_cell(raw_row, raw_col)),
-            };
-            let resolved_cell = match case {
-                BufferReadCase::Hidden => None,
-                BufferReadCase::Unadjusted => raw_cell,
-                BufferReadCase::ConcealAdjusted => Some(screen_cell(
-                    resolved_row,
-                    if raw_row == resolved_row && raw_col == resolved_col {
-                        resolved_col.saturating_add(1)
-                    } else {
-                        resolved_col
-                    },
-                )),
-            };
-            let raw_observed_cell = raw_cell.map(|cell| match raw_observed_cell_kind {
-                RawObservedCellKind::Exact => ObservedCell::Exact(cell),
-                RawObservedCellKind::Deferred => ObservedCell::Deferred(cell),
-            });
-            let read = BufferCursorRead {
-                line: 2,
-                column: 37,
-                screenpos_summary: "row=2 col=38 endcol=38 curscol=38".to_string(),
-                raw_observed_cell,
-                resolved_cell,
-            };
-            let fast_motion_policy = ProbePolicy::new(ProbeQuality::FastMotion);
-            let expected_observed_cell = raw_observed_cell.unwrap_or(ObservedCell::Unavailable);
-
-            prop_assert_eq!(
-                read.selected_observed_cell_for_probe_policy(fast_motion_policy),
-                expected_observed_cell,
-            );
-            prop_assert_eq!(
-                read.selected_source_for_probe_policy(fast_motion_policy),
-                if raw_observed_cell.is_some() {
-                    "screenpos_fast_path"
-                } else {
-                    "none"
-                },
-            );
-            prop_assert_eq!(
-                read.selected_observed_cell_for_probe_policy(fast_motion_policy)
-                    .screen_cell()
-                    .map(RenderPoint::from),
-                expected_observed_cell.screen_cell().map(RenderPoint::from),
-            );
-            prop_assert_eq!(
-                read.uses_raw_screenpos_fallback(fast_motion_policy),
-                raw_observed_cell.is_some(),
-            );
-        }
-
-        #[test]
         fn prop_should_use_real_cmdline_cursor_depends_only_on_cmdtype_emptiness(
             cmdtype in cmdtype_strategy(),
         ) {
@@ -677,34 +575,64 @@ mod tests {
     }
 
     #[test]
-    fn fast_motion_policy_preserves_a_deferred_raw_cell_across_conceal_adjustment() {
+    fn fast_motion_reads_keep_the_projected_deferred_cell_across_conceal_adjustment() {
         let raw_cell = screen_cell(7, 18);
-        let resolved_cell = screen_cell(7, 15);
+        let projected_cell = screen_cell(7, 15);
         let read = BufferCursorRead {
             line: 7,
             column: 17,
             screenpos_summary: "row=7 col=18 endcol=18 curscol=18".to_string(),
-            raw_observed_cell: Some(ObservedCell::Deferred(raw_cell)),
-            resolved_cell: Some(resolved_cell),
+            observed_cell: ObservedCell::Deferred(projected_cell),
+            diagnostics: BufferCursorReadDiagnostics {
+                raw_screenpos_cell: Some(raw_cell),
+                projection_source: Some(ProjectionSource::ConcealCached),
+            },
         };
-        let exact_policy = ProbePolicy::new(ProbeQuality::Exact);
-        let fast_motion_policy = ProbePolicy::new(ProbeQuality::FastMotion);
 
-        assert_eq!(
-            read.selected_observed_cell_for_probe_policy(exact_policy),
-            ObservedCell::Exact(resolved_cell),
-        );
-        assert_eq!(
-            read.selected_source_for_probe_policy(exact_policy),
-            "screenpos_conceal_adjusted",
-        );
-        assert_eq!(
-            read.selected_observed_cell_for_probe_policy(fast_motion_policy),
-            ObservedCell::Deferred(raw_cell),
-        );
-        assert_eq!(
-            read.selected_source_for_probe_policy(fast_motion_policy),
-            "screenpos_fast_path",
-        );
+        assert_eq!(read.observed_cell(), ObservedCell::Deferred(projected_cell),);
+        assert_eq!(read.projected_adjustment_cell(), Some(projected_cell));
+        assert_eq!(read.projection_source(), "conceal_cached_projection");
+        assert!(read.uses_deferred_projection());
+    }
+
+    #[test]
+    fn fast_motion_reads_keep_same_cell_deferred_when_cached_conceal_confirms_no_drift() {
+        let raw_cell = screen_cell(9, 24);
+        let read = BufferCursorRead {
+            line: 9,
+            column: 23,
+            screenpos_summary: "row=9 col=24 endcol=24 curscol=24".to_string(),
+            observed_cell: ObservedCell::Deferred(raw_cell),
+            diagnostics: BufferCursorReadDiagnostics {
+                raw_screenpos_cell: Some(raw_cell),
+                projection_source: Some(ProjectionSource::ConcealCached),
+            },
+        };
+
+        assert_eq!(read.observed_cell(), ObservedCell::Deferred(raw_cell));
+        assert_eq!(read.projected_adjustment_cell(), None);
+        assert_eq!(read.projection_source(), "conceal_cached_projection");
+        assert!(read.uses_deferred_projection());
+    }
+
+    #[test]
+    fn exact_conceal_unavailable_projection_still_reports_the_exact_projection_source() {
+        let raw_cell = screen_cell(11, 31);
+        let read = BufferCursorRead {
+            line: 11,
+            column: 30,
+            screenpos_summary: "row=11 col=31 endcol=31 curscol=31".to_string(),
+            observed_cell: ObservedCell::Unavailable,
+            diagnostics: BufferCursorReadDiagnostics {
+                raw_screenpos_cell: Some(raw_cell),
+                projection_source: Some(ProjectionSource::ConcealExact),
+            },
+        };
+
+        assert_eq!(read.observed_cell(), ObservedCell::Unavailable);
+        assert_eq!(read.projected_adjustment_cell(), None);
+        assert_eq!(read.projection_source(), "conceal_exact_projection");
+        assert_eq!(read.raw_screenpos_cell(), Some(raw_cell));
+        assert!(!read.uses_deferred_projection());
     }
 }

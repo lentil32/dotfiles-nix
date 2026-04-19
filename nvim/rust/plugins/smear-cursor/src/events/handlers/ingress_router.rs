@@ -41,7 +41,6 @@ use crate::state::TrackedCursor;
 use crate::types::EPSILON;
 use nvim_oxi::Result;
 use nvim_oxi::api;
-use nvim_oxi::api::types::AutocmdCallbackArgs;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum IngressDispatchOutcome {
@@ -72,6 +71,12 @@ enum CursorAutocmdFastPathResult {
 enum CursorAutocmdFastPathOutcome {
     Dropped,
     Continue,
+}
+
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+struct AutocmdDispatchContext<'a> {
+    buffer_handle: Option<i64>,
+    match_name: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -474,16 +479,16 @@ fn invalidate_buffer_metadata(buffer_handle: i64) -> Result<()> {
     Ok(())
 }
 
-fn invalidate_buffer_metadata_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
-    if !should_invalidate_buffer_metadata_for_option(args.r#match.as_str()) {
+fn invalidate_buffer_metadata_for_option_set(match_name: &str, buffer_handle: i64) -> Result<()> {
+    if !should_invalidate_buffer_metadata_for_option(match_name) {
         return Ok(());
     }
 
-    invalidate_buffer_metadata(i64::from(args.buffer.handle()))
+    invalidate_buffer_metadata(buffer_handle)
 }
 
-fn refresh_editor_viewport_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
-    if !should_refresh_editor_viewport_for_option(args.r#match.as_str()) {
+fn refresh_editor_viewport_for_option_set(match_name: &str) -> Result<()> {
+    if !should_refresh_editor_viewport_for_option(match_name) {
         return Ok(());
     }
 
@@ -519,12 +524,15 @@ fn invalidate_conceal_probe_caches(buffer_handle: i64) -> Result<()> {
     Ok(())
 }
 
-fn invalidate_conceal_probe_caches_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
-    if !should_invalidate_conceal_probe_cache_for_option(args.r#match.as_str()) {
+fn invalidate_conceal_probe_caches_for_option_set(
+    match_name: &str,
+    buffer_handle: i64,
+) -> Result<()> {
+    if !should_invalidate_conceal_probe_cache_for_option(match_name) {
         return Ok(());
     }
 
-    invalidate_conceal_probe_caches(i64::from(args.buffer.handle()))
+    invalidate_conceal_probe_caches(buffer_handle)
 }
 
 fn invalidate_buffer_local_caches(buffer_handle: i64) -> Result<()> {
@@ -537,7 +545,7 @@ fn invalidate_buffer_local_caches(buffer_handle: i64) -> Result<()> {
 
 fn on_autocmd_ingress(
     ingress: AutocmdIngress,
-    args: Option<&AutocmdCallbackArgs>,
+    context: AutocmdDispatchContext<'_>,
 ) -> Result<IngressDispatchOutcome> {
     if ingress.is_colorscheme() {
         return on_colorscheme_impl();
@@ -545,22 +553,23 @@ fn on_autocmd_ingress(
 
     match ingress {
         AutocmdIngress::BufWipeout => {
-            if let Some(args) = args {
-                invalidate_buffer_local_caches(i64::from(args.buffer.handle()))?;
+            if let Some(buffer_handle) = context.buffer_handle {
+                invalidate_buffer_local_caches(buffer_handle)?;
             }
             Ok(IngressDispatchOutcome::Dropped)
         }
         AutocmdIngress::OptionSet => {
-            if let Some(args) = args {
-                invalidate_buffer_metadata_for_option_set(args)?;
-                invalidate_conceal_probe_caches_for_option_set(args)?;
-                refresh_editor_viewport_for_option_set(args)?;
+            if let Some(match_name) = context.match_name {
+                if let Some(buffer_handle) = context.buffer_handle {
+                    invalidate_buffer_metadata_for_option_set(match_name, buffer_handle)?;
+                    invalidate_conceal_probe_caches_for_option_set(match_name, buffer_handle)?;
+                }
+                refresh_editor_viewport_for_option_set(match_name)?;
             }
             Ok(IngressDispatchOutcome::Dropped)
         }
         AutocmdIngress::TextChanged | AutocmdIngress::TextChangedInsert => {
-            if let Some(args) = args {
-                let buffer_handle = i64::from(args.buffer.handle());
+            if let Some(buffer_handle) = context.buffer_handle {
                 advance_buffer_text_revision(buffer_handle)?;
                 invalidate_buffer_metadata(buffer_handle)?;
                 invalidate_buffer_local_probe_caches(buffer_handle)?;
@@ -576,10 +585,10 @@ fn on_autocmd_ingress(
     }
 }
 
-fn dispatch_ingress(ingress: Ingress, args: Option<&AutocmdCallbackArgs>) -> Result<()> {
+fn dispatch_ingress(ingress: Ingress, context: AutocmdDispatchContext<'_>) -> Result<()> {
     record_ingress_received();
     let outcome = match ingress {
-        Ingress::Autocmd(autocmd_ingress) => on_autocmd_ingress(autocmd_ingress, args),
+        Ingress::Autocmd(autocmd_ingress) => on_autocmd_ingress(autocmd_ingress, context),
     };
     match outcome {
         Ok(dispatch_outcome) => {
@@ -601,13 +610,23 @@ fn dispatch_ingress(ingress: Ingress, args: Option<&AutocmdCallbackArgs>) -> Res
 }
 
 pub(crate) fn on_autocmd_event(event: &str) -> Result<()> {
-    dispatch_ingress(Ingress::Autocmd(parse_autocmd_ingress(event)), None)
+    dispatch_ingress(
+        Ingress::Autocmd(parse_autocmd_ingress(event)),
+        AutocmdDispatchContext::default(),
+    )
 }
 
-pub(in crate::events) fn on_autocmd_callback(args: AutocmdCallbackArgs) -> Result<()> {
+pub(in crate::events) fn on_autocmd_payload_event(
+    event: &str,
+    buffer_handle: Option<i64>,
+    match_name: Option<&str>,
+) -> Result<()> {
     dispatch_ingress(
-        Ingress::Autocmd(parse_autocmd_ingress(args.event.as_str())),
-        Some(&args),
+        Ingress::Autocmd(parse_autocmd_ingress(event)),
+        AutocmdDispatchContext {
+            buffer_handle,
+            match_name,
+        },
     )
 }
 
