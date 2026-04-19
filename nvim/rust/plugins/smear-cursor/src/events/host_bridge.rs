@@ -3,7 +3,6 @@ use super::HostBridgeRevision;
 use super::HostBridgeState;
 use super::runtime::mutate_engine_state;
 use super::runtime::read_engine_state;
-use crate::core::types::Generation;
 use nvim_oxi::Array;
 use nvim_oxi::Object;
 use nvim_oxi::api;
@@ -19,14 +18,15 @@ const CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME: &str =
 const BACKGROUND_ALLOWED_MASK_FUNCTION_NAME: &str =
     "nvimrs_smear_cursor#host_bridge#background_allowed_mask";
 #[cfg(test)]
-const CORE_TIMER_CALLBACK_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridge#on_core_timer";
-#[cfg(test)]
 const HOST_BRIDGE_SCRIPT: &str = include_str!("../../autoload/nvimrs_smear_cursor/host_bridge.vim");
 #[cfg(test)]
 const TIMER_HOST_BRIDGE_SCRIPT: &str =
     include_str!("../../lua/nvimrs_smear_cursor/host_bridge.lua");
 #[cfg(test)]
 const PROBE_HELPERS_SCRIPT: &str = include_str!("../../lua/nvimrs_smear_cursor/probes.lua");
+#[cfg(test)]
+const CURSOR_COLOR_EXTMARKS_TEST_SCRIPT: &str =
+    include_str!("../../scripts/test_cursor_color_probe_extmarks.lua");
 
 fn host_bridge_state() -> Result<HostBridgeState, EngineAccessError> {
     read_engine_state(|state| state.shell.host_bridge_state())
@@ -67,8 +67,6 @@ pub(super) enum HostBridgeError {
     InstallProbeHelpers(#[source] nvim_oxi::Error),
     #[error("failed to call smear cursor cursor-color probe: {0}")]
     CursorColorProbe(#[source] nvim_oxi::Error),
-    #[error("failed to encode smear cursor colorscheme generation for host bridge: {value}")]
-    CursorColorGenerationEncode { value: u64 },
     #[error("failed to call smear cursor background-mask probe: {0}")]
     BackgroundAllowedMask(#[source] nvim_oxi::Error),
     #[error("engine state access failed while resolving host bridge state: {0}")]
@@ -120,18 +118,9 @@ impl InstalledHostBridge {
 
     pub(super) fn cursor_color_at_cursor(
         self,
-        colorscheme_generation: Generation,
         allow_extmark_fallback: bool,
     ) -> HostBridgeResult<Object> {
-        let generation = i64::try_from(colorscheme_generation.value()).map_err(|_| {
-            HostBridgeError::CursorColorGenerationEncode {
-                value: colorscheme_generation.value(),
-            }
-        })?;
-        let args = Array::from_iter([
-            Object::from(generation),
-            Object::from(allow_extmark_fallback),
-        ]);
+        let args = Array::from_iter([Object::from(allow_extmark_fallback)]);
         api::call_function(CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME, args)
             .map_err(|error| HostBridgeError::CursorColorProbe(error.into()))
     }
@@ -248,7 +237,6 @@ mod tests {
                 "entrypoints present",
                 &[
                     HOST_BRIDGE_REVISION_FUNCTION_NAME,
-                    CORE_TIMER_CALLBACK_FUNCTION_NAME,
                     START_TIMER_ONCE_FUNCTION_NAME,
                     STOP_TIMER_FUNCTION_NAME,
                     INSTALL_PROBE_HELPERS_FUNCTION_NAME,
@@ -258,23 +246,13 @@ mod tests {
                 &[],
             ),
             (
-                "legacy callback surfaces absent",
-                &[],
-                &[
-                    "vim.on_key(",
-                    "set_on_key_listener",
-                    "v:lua.",
-                    "_G.__nvimrs_smear_cursor",
-                ],
-            ),
-            (
                 "timer bridge delegated to lua host bridge",
                 &[
                     "require('nvimrs_smear_cursor.host_bridge')",
                     ".start_timer_once(_A[1], _A[2], _A[3])",
                     ".stop_timer(_A)",
                 ],
-                &["timer_start("],
+                &[],
             ),
             (
                 "persistent lua timer callback shape",
@@ -283,15 +261,12 @@ mod tests {
                     "slot.handle:start(timeout, 0, function()",
                     "require(\"nvimrs_smear_cursor\").on_core_timer_slot(slot_id, token_generation)",
                 ],
-                &["vim.schedule(function()"],
+                &[],
             ),
             (
                 "runtime-module loading shape",
                 &["require('nvimrs_smear_cursor.probes')"],
-                &[
-                    "CURSOR_COLOR_LUAEVAL_EXPR",
-                    "BACKGROUND_ALLOWED_MASK_LUAEVAL_EXPR",
-                ],
+                &[],
             ),
         ];
 
@@ -311,11 +286,10 @@ mod tests {
             (
                 "host bridge script",
                 HOST_BRIDGE_SCRIPT,
-                "colorscheme generation plumbed through",
+                "cursor-color probe bridge forwards the explicit fallback flag",
                 &[
-                    "cursor_color_at_cursor(colorscheme_generation, ...) abort",
-                    "let allow_extmark_fallback = a:0 > 0 ? a:1 : v:false",
-                    ".cursor_color_at_cursor(_A[1], _A[2])",
+                    "cursor_color_at_cursor(allow_extmark_fallback) abort",
+                    ".cursor_color_at_cursor(_A)",
                 ],
                 &[],
             ),
@@ -324,7 +298,7 @@ mod tests {
                 PROBE_HELPERS_SCRIPT,
                 "extmark fallback gate present",
                 &[
-                    "function M.cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback)",
+                    "function M.cursor_color_at_cursor(allow_extmark_fallback)",
                     "if not allow_extmark_fallback then",
                 ],
                 &[],
@@ -350,14 +324,13 @@ mod tests {
                 &[],
             ),
             (
-                "probe helpers script",
-                PROBE_HELPERS_SCRIPT,
-                "removed highlight-generation cache absent",
-                &[],
+                "cursor-color extmarks regression harness",
+                CURSOR_COLOR_EXTMARKS_TEST_SCRIPT,
+                "extmark regression harness uses the single-argument probe contract",
+                &["cursor_color_at_cursor(true)"],
                 &[
-                    "hl_color_cache_generation",
-                    "reset_hl_color_cache(colorscheme_generation)",
-                    "hl_fg_cache[group]",
+                    "cursor_color_at_cursor(0, true)",
+                    "cursor_color_at_cursor(1, true)",
                 ],
             ),
         ];

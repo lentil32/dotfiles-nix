@@ -1,17 +1,21 @@
+//! Canonical shell-side owner of editor viewport reads and command-row math.
+
 use super::telemetry::record_command_row_read;
 use super::telemetry::record_editor_bounds_read;
+use crate::position::ViewportBounds;
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::OptionOpts;
 
+/// A live editor viewport snapshot used to derive command-row and bounds facts.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct EditorViewport {
+pub(crate) struct EditorViewportSnapshot {
     lines: i64,
     cmdheight: i64,
     columns: i64,
 }
 
-impl EditorViewport {
+impl EditorViewportSnapshot {
     fn read_live(read_kind: EditorViewportReadKind) -> Result<Self> {
         read_kind.record();
         let opts = OptionOpts::builder().build();
@@ -41,6 +45,10 @@ impl EditorViewport {
             .max(1)
     }
 
+    pub(crate) fn bounds(self) -> Option<ViewportBounds> {
+        ViewportBounds::new(self.max_row(), self.max_col())
+    }
+
     #[cfg(test)]
     pub(crate) const fn from_dimensions(lines: i64, cmdheight: i64, columns: i64) -> Self {
         Self {
@@ -68,20 +76,20 @@ impl EditorViewportReadKind {
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub(in crate::events) struct EditorViewportCache {
-    cached: Option<EditorViewport>,
+    cached: Option<EditorViewportSnapshot>,
 }
 
 impl EditorViewportCache {
-    pub(in crate::events) fn read_for_bounds(&mut self) -> Result<EditorViewport> {
+    pub(in crate::events) fn read_for_bounds(&mut self) -> Result<EditorViewportSnapshot> {
         self.read(EditorViewportReadKind::EditorBounds)
     }
 
-    pub(in crate::events) fn read_for_command_row(&mut self) -> Result<EditorViewport> {
+    pub(in crate::events) fn read_for_command_row(&mut self) -> Result<EditorViewportSnapshot> {
         self.read(EditorViewportReadKind::CommandRow)
     }
 
     pub(in crate::events) fn refresh(&mut self) -> Result<()> {
-        self.cached = Some(EditorViewport::read_live(
+        self.cached = Some(EditorViewportSnapshot::read_live(
             EditorViewportReadKind::EditorBounds,
         )?);
         Ok(())
@@ -91,55 +99,64 @@ impl EditorViewportCache {
         self.cached = None;
     }
 
-    fn read(&mut self, read_kind: EditorViewportReadKind) -> Result<EditorViewport> {
+    fn read(&mut self, read_kind: EditorViewportReadKind) -> Result<EditorViewportSnapshot> {
         if let Some(cached) = self.cached {
             return Ok(cached);
         }
 
-        let viewport = EditorViewport::read_live(read_kind)?;
+        let viewport = EditorViewportSnapshot::read_live(read_kind)?;
         self.cached = Some(viewport);
         Ok(viewport)
     }
 
     #[cfg(test)]
-    pub(in crate::events) fn store_for_test(&mut self, viewport: EditorViewport) {
+    pub(in crate::events) fn store_for_test(&mut self, viewport: EditorViewportSnapshot) {
         self.cached = Some(viewport);
     }
 
     #[cfg(test)]
-    pub(in crate::events) fn cached_for_test(&self) -> Option<EditorViewport> {
+    pub(in crate::events) fn cached_for_test(&self) -> Option<EditorViewportSnapshot> {
         self.cached
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EditorViewport;
     use super::EditorViewportCache;
+    use super::EditorViewportSnapshot;
+    use crate::position::ViewportBounds;
     use pretty_assertions::assert_eq;
 
     #[test]
     fn viewport_math_matches_visible_command_row_contract() {
-        let viewport = EditorViewport::from_dimensions(42, 0, 120);
+        let viewport = EditorViewportSnapshot::from_dimensions(42, 0, 120);
 
         assert_eq!(viewport.command_row(), 42);
         assert_eq!(viewport.max_row(), 42);
         assert_eq!(viewport.max_col(), 120);
+        assert_eq!(
+            viewport.bounds(),
+            Some(ViewportBounds::new(42, 120).expect("positive viewport bounds"))
+        );
     }
 
     #[test]
     fn viewport_math_clamps_invalid_dimensions() {
-        let viewport = EditorViewport::from_dimensions(0, 3, 0);
+        let viewport = EditorViewportSnapshot::from_dimensions(0, 3, 0);
 
         assert_eq!(viewport.command_row(), 1);
         assert_eq!(viewport.max_row(), 1);
         assert_eq!(viewport.max_col(), 1);
+        assert_eq!(
+            viewport.bounds(),
+            Some(ViewportBounds::new(1, 1).expect("positive viewport bounds"))
+        );
     }
 
     #[test]
     fn cache_invalidation_clears_only_the_cached_viewport() {
         let mut cache = EditorViewportCache::default();
-        let viewport = EditorViewport::from_dimensions(24, 1, 80);
+        let viewport = EditorViewportSnapshot::from_dimensions(24, 1, 80);
         cache.store_for_test(viewport);
 
         assert_eq!(cache.cached_for_test(), Some(viewport));

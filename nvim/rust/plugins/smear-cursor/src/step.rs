@@ -15,9 +15,9 @@ use crate::lua::parse_indexed_objects_typed;
 use crate::lua::require_object_typed;
 use crate::lua::require_with_typed;
 use crate::lua::to_nvim_error;
+use crate::position::RenderPoint;
 use crate::types::DEFAULT_RNG_STATE;
 use crate::types::Particle;
-use crate::types::Point;
 use crate::types::StepInput;
 use nvim_oxi::Array;
 use nvim_oxi::Dictionary;
@@ -85,28 +85,28 @@ fn require_non_negative_f64(value: Option<Object>, key: &str) -> StepResult<f64>
     Ok(parsed)
 }
 
-fn parse_point_from_value(key: &str, value: Option<Object>) -> StepResult<Point> {
+fn parse_point_from_value(key: &str, value: Option<Object>) -> StepResult<RenderPoint> {
     parse_point_from_object(
         key,
         require_object_typed(value, key).map_err(StepInputError::from)?,
     )
 }
 
-fn parse_point_from_object(key: &str, value: Object) -> StepResult<Point> {
+fn parse_point_from_object(key: &str, value: Object) -> StepResult<RenderPoint> {
     let [row, col]: [Object; 2] = parse_indexed_objects_typed(key, value, Some(2))
         .map_err(StepInputError::from)?
         .try_into()
         .map_err(|_| invalid_step_value(key, "array[2]"))?;
     let row = f64_from_object_typed(key, row).map_err(StepInputError::from)?;
     let col = f64_from_object_typed(key, col).map_err(StepInputError::from)?;
-    Ok(Point { row, col })
+    Ok(RenderPoint { row, col })
 }
 
-fn parse_corners_from_object(key: &str, value: Object) -> StepResult<[Point; 4]> {
+fn parse_corners_from_object(key: &str, value: Object) -> StepResult<[RenderPoint; 4]> {
     let corners = parse_indexed_objects_typed(key, value, Some(4))
         .map_err(|_| invalid_step_value(key, "array[4][2]"))?;
 
-    let mut parsed = [Point::ZERO; 4];
+    let mut parsed = [RenderPoint::ZERO; 4];
     for (index, corner) in corners.into_iter().enumerate() {
         parsed[index] = parse_point_from_object(key, corner)?;
     }
@@ -272,7 +272,7 @@ impl RawStepInput {
             Some(value) if !value.is_nil() => {
                 parse_corners_from_object("spring_velocity_corners", value)?
             }
-            _ => [Point::ZERO; 4],
+            _ => [RenderPoint::ZERO; 4],
         };
         let trail_elapsed_ms = match self.trail_elapsed_ms {
             Some(value) if !value.is_nil() => {
@@ -392,14 +392,14 @@ fn parse_step_input_owned(args: Dictionary) -> StepResult<StepInput> {
     parse_step_input_object(Object::from(args))
 }
 
-fn point_to_object(point: Point) -> Object {
+fn point_to_object(point: RenderPoint) -> Object {
     Object::from(Array::from_iter([
         Object::from(point.row),
         Object::from(point.col),
     ]))
 }
 
-fn corners_to_object(corners: &[Point; 4]) -> Object {
+fn corners_to_object(corners: &[RenderPoint; 4]) -> Object {
     Object::from(Array::from_iter(
         corners.iter().copied().map(point_to_object),
     ))

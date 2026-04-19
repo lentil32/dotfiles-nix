@@ -8,8 +8,8 @@ mod ingress_snapshot;
 mod telemetry;
 mod timers;
 
-pub(crate) use editor_viewport::EditorViewport;
 pub(super) use editor_viewport::EditorViewportCache;
+pub(crate) use editor_viewport::EditorViewportSnapshot;
 pub(crate) use ingress_snapshot::IngressReadSnapshot;
 #[cfg(test)]
 pub(crate) use ingress_snapshot::IngressReadSnapshotTestInput;

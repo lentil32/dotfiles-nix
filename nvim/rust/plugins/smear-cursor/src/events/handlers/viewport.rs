@@ -1,17 +1,11 @@
-use super::super::cursor::line_value;
 use super::super::cursor::smear_outside_cmd_row;
 use crate::core::effect::ObservationRuntimeContext;
 use crate::core::runtime_reducer::ScrollShift;
-use crate::lua::i64_from_object_ref_with_typed;
-use crate::state::CursorLocation;
-use nvim_oxi::Array;
-use nvim_oxi::Dictionary;
-use nvim_oxi::Object;
+use crate::events::surface::current_window_surface_snapshot;
+use crate::position::WindowSurfaceSnapshot;
 use nvim_oxi::Result;
-use nvim_oxi::String as NvimString;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::WinTextHeightOpts;
-use nvim_oxi::conversion::FromObject;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct SurfaceTranslationDelta {
@@ -21,125 +15,20 @@ struct SurfaceTranslationDelta {
     window_col_delta: i64,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-struct WindowSurfaceMetrics {
-    left_col: i64,
-    text_offset: i64,
-    window_row: i64,
-    window_col: i64,
-    window_width: i64,
-    window_height: i64,
+fn snapshot_matches_buffer(snapshot: WindowSurfaceSnapshot, buffer: &api::Buffer) -> bool {
+    snapshot.id().buffer_handle() == i64::from(buffer.handle())
 }
 
-fn dictionary_i64_field(dict: &Dictionary, field: &str) -> Option<i64> {
-    let field_key = NvimString::from(field);
-    let value = dict.get(&field_key)?;
-    i64_from_object_ref_with_typed(value, || format!("getwininfo.{field}")).ok()
-}
-
-fn current_window_surface_metrics(window: &api::Window) -> Option<WindowSurfaceMetrics> {
-    let args = Array::from_iter([Object::from(window.handle())]);
-    let [entry]: [Object; 1] =
-        Vec::<Object>::from_object(api::call_function("getwininfo", args).ok()?)
-            .ok()?
-            .try_into()
-            .ok()?;
-    let dict = Dictionary::from_object(entry).ok()?;
-    Some(WindowSurfaceMetrics {
-        left_col: dictionary_i64_field(&dict, "leftcol")?,
-        text_offset: dictionary_i64_field(&dict, "textoff")?,
-        window_row: dictionary_i64_field(&dict, "winrow")?,
-        window_col: dictionary_i64_field(&dict, "wincol")?,
-        window_width: dictionary_i64_field(&dict, "width")?,
-        window_height: dictionary_i64_field(&dict, "height")?,
-    })
-}
-
-fn cursor_location_from_live_window_state(
+pub(crate) fn surface_for_ingress_fast_path_with_handles(
     window: &api::Window,
     buffer: &api::Buffer,
-    top_row: i64,
-    line: i64,
-    metrics: WindowSurfaceMetrics,
-) -> CursorLocation {
-    CursorLocation::new(
-        i64::from(window.handle()),
-        i64::from(buffer.handle()),
-        top_row,
-        line,
-    )
-    .with_viewport_columns(metrics.left_col, metrics.text_offset)
-    .with_window_origin(metrics.window_row, metrics.window_col)
-    .with_window_dimensions(metrics.window_width, metrics.window_height)
-}
-
-pub(crate) fn cursor_location_for_ingress_fast_path_with_handles(
-    window: &api::Window,
-    buffer: &api::Buffer,
-) -> Option<CursorLocation> {
+) -> Option<WindowSurfaceSnapshot> {
     if !window.is_valid() || !buffer.is_valid() {
         return None;
     }
 
-    let top_row = line_value("w0").ok()?;
-    let line = line_value(".").ok()?;
-    let metrics = current_window_surface_metrics(window)?;
-    Some(cursor_location_from_live_window_state(
-        window, buffer, top_row, line, metrics,
-    ))
-}
-
-pub(crate) fn cursor_location_for_core_render(
-    window: Option<&api::Window>,
-    buffer: Option<&api::Buffer>,
-    tracked_location: Option<CursorLocation>,
-    ingress_cursor_location: Option<CursorLocation>,
-) -> CursorLocation {
-    if let Some(cursor_location) = ingress_cursor_location {
-        return cursor_location;
-    }
-
-    if let (Some(window), Some(buffer)) = (window, buffer) {
-        let default_top_row = tracked_location
-            .as_ref()
-            .map_or(0_i64, |location| location.top_row);
-        let default_line = tracked_location
-            .as_ref()
-            .map_or(0_i64, |location| location.line);
-        let (
-            default_left_col,
-            default_text_offset,
-            default_window_row,
-            default_window_col,
-            default_window_width,
-            default_window_height,
-        ) = tracked_location.as_ref().map_or(
-            (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64),
-            |location| {
-                (
-                    location.left_col,
-                    location.text_offset,
-                    location.window_row,
-                    location.window_col,
-                    location.window_width,
-                    location.window_height,
-                )
-            },
-        );
-        let top_row = line_value("w0").unwrap_or(default_top_row);
-        let line = line_value(".").unwrap_or(default_line);
-        let metrics = current_window_surface_metrics(window).unwrap_or(WindowSurfaceMetrics {
-            left_col: default_left_col,
-            text_offset: default_text_offset,
-            window_row: default_window_row,
-            window_col: default_window_col,
-            window_width: default_window_width,
-            window_height: default_window_height,
-        });
-        return cursor_location_from_live_window_state(window, buffer, top_row, line, metrics);
-    }
-
-    tracked_location.unwrap_or(CursorLocation::new(0, 0, 0, 0))
+    let surface_snapshot = current_window_surface_snapshot(window).ok()?;
+    snapshot_matches_buffer(surface_snapshot, buffer).then_some(surface_snapshot)
 }
 
 fn line_index_1_to_0(row: i64) -> usize {
@@ -147,7 +36,12 @@ fn line_index_1_to_0(row: i64) -> usize {
     usize::try_from(clamped).unwrap_or_default()
 }
 
-fn screen_distance(window: &api::Window, row_start: i64, row_end: i64) -> Result<f64> {
+fn screen_distance(
+    window: &api::Window,
+    viewport_height: i64,
+    row_start: i64,
+    row_end: i64,
+) -> Result<f64> {
     let mut start = row_start;
     let mut end = row_end;
     let mut reversed = false;
@@ -156,9 +50,8 @@ fn screen_distance(window: &api::Window, row_start: i64, row_end: i64) -> Result
         reversed = true;
     }
 
-    let window_height = i64::from(window.get_height()?);
-    let distance = if end.saturating_sub(start) >= window_height {
-        window_height.saturating_sub(1)
+    let distance = if end.saturating_sub(start) >= viewport_height {
+        viewport_height.saturating_sub(1)
     } else {
         let opts = WinTextHeightOpts::builder()
             .start_row(line_index_1_to_0(start))
@@ -177,24 +70,28 @@ fn screen_distance(window: &api::Window, row_start: i64, row_end: i64) -> Result
 }
 
 fn surface_translation_delta(
-    previous_location: &CursorLocation,
-    current_location: &CursorLocation,
+    previous_surface: WindowSurfaceSnapshot,
+    current_surface: WindowSurfaceSnapshot,
 ) -> Option<SurfaceTranslationDelta> {
-    if previous_location.window_handle != current_location.window_handle
-        || previous_location.buffer_handle != current_location.buffer_handle
-    {
+    if previous_surface.id() != current_surface.id() {
         return None;
     }
-    if previous_location.window_dimensions_changed(current_location) {
+    if previous_surface.window_size() != current_surface.window_size() {
         return None;
     }
 
-    let vertical_rows = (previous_location.top_row != current_location.top_row)
-        .then_some((previous_location.top_row, current_location.top_row));
-    let horizontal_cols = (current_location.left_col - previous_location.left_col)
-        - (current_location.text_offset - previous_location.text_offset);
-    let window_row_delta = current_location.window_row - previous_location.window_row;
-    let window_col_delta = current_location.window_col - previous_location.window_col;
+    let vertical_rows = (previous_surface.top_buffer_line() != current_surface.top_buffer_line())
+        .then_some((
+            previous_surface.top_buffer_line().value(),
+            current_surface.top_buffer_line().value(),
+        ));
+    let horizontal_cols = i64::from(current_surface.left_col0())
+        - i64::from(previous_surface.left_col0())
+        - (i64::from(current_surface.text_offset0()) - i64::from(previous_surface.text_offset0()));
+    let window_row_delta =
+        current_surface.window_origin().row() - previous_surface.window_origin().row();
+    let window_col_delta =
+        current_surface.window_origin().col() - previous_surface.window_origin().col();
     if vertical_rows.is_none()
         && horizontal_cols == 0
         && window_row_delta == 0
@@ -214,25 +111,28 @@ fn surface_translation_delta(
 pub(super) fn maybe_scroll_shift_for_core_event(
     window: &api::Window,
     context: &ObservationRuntimeContext,
-    current_location: &CursorLocation,
+    current_surface: &WindowSurfaceSnapshot,
 ) -> Result<Option<ScrollShift>> {
     if !context.scroll_buffer_space() {
         return Ok(None);
     }
-    let Some(previous_location) = context.tracked_location() else {
+    let Some(previous_surface) = context.tracked_surface() else {
         return Ok(None);
     };
     if !smear_outside_cmd_row(&context.current_corners())? {
         return Ok(None);
     }
-    let Some(delta) = surface_translation_delta(&previous_location, current_location) else {
+    let Some(delta) = surface_translation_delta(previous_surface, *current_surface) else {
         return Ok(None);
     };
 
     let viewport_row_shift = match delta.vertical_rows {
-        Some((previous_top_row, current_top_row)) => {
-            screen_distance(window, previous_top_row, current_top_row)?
-        }
+        Some((previous_top_row, current_top_row)) => screen_distance(
+            window,
+            i64::from(current_surface.window_size().max_row()),
+            previous_top_row,
+            current_top_row,
+        )?,
         None => 0.0,
     };
     let row_shift = viewport_row_shift - delta.window_row_delta as f64;
@@ -240,13 +140,8 @@ pub(super) fn maybe_scroll_shift_for_core_event(
     if row_shift == 0.0 && col_shift == 0.0 {
         return Ok(None);
     }
-    let window_row = if current_location.window_row > 0 {
-        current_location.window_row as f64
-    } else {
-        let (window_row_zero, _) = window.get_position()?;
-        window_row_zero as f64 + 1.0
-    };
-    let window_height = f64::from(window.get_height()?);
+    let window_row = current_surface.window_origin().row() as f64;
+    let window_height = current_surface.window_size().max_row() as f64;
     let min_row = window_row;
     let max_row = min_row + window_height - 1.0;
 
@@ -261,19 +156,24 @@ pub(super) fn maybe_scroll_shift_for_core_event(
 #[cfg(test)]
 mod tests {
     use super::SurfaceTranslationDelta;
-    use super::cursor_location_for_core_render;
     use super::surface_translation_delta;
-    use crate::state::CursorLocation;
+    use crate::state::TrackedCursor;
     use pretty_assertions::assert_eq;
+
+    fn complete_surface_location(location: TrackedCursor) -> TrackedCursor {
+        location.with_window_dimensions(80, 20)
+    }
 
     fn assert_surface_translation_case(
         label: &str,
-        previous: CursorLocation,
-        current: CursorLocation,
+        previous: TrackedCursor,
+        current: TrackedCursor,
         expected: SurfaceTranslationDelta,
     ) {
+        let previous_surface = previous.surface();
+        let current_surface = current.surface();
         assert_eq!(
-            surface_translation_delta(&previous, &current),
+            surface_translation_delta(previous_surface, current_surface),
             Some(expected),
             "{label}"
         );
@@ -284,8 +184,16 @@ mod tests {
         for (label, previous, current, expected) in [
             (
                 "same-line vertical scroll",
-                CursorLocation::new(10, 20, 4, 12).with_viewport_columns(3, 1),
-                CursorLocation::new(10, 20, 6, 12).with_viewport_columns(3, 1),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 4, 12)
+                        .with_viewport_columns(3, 1)
+                        .with_window_origin(3, 4),
+                ),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 6, 12)
+                        .with_viewport_columns(3, 1)
+                        .with_window_origin(3, 4),
+                ),
                 SurfaceTranslationDelta {
                     vertical_rows: Some((4, 6)),
                     horizontal_cols: 0,
@@ -295,8 +203,16 @@ mod tests {
             ),
             (
                 "same-line horizontal scroll",
-                CursorLocation::new(10, 20, 4, 12).with_viewport_columns(2, 1),
-                CursorLocation::new(10, 20, 4, 12).with_viewport_columns(5, 1),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 4, 12)
+                        .with_viewport_columns(2, 1)
+                        .with_window_origin(3, 4),
+                ),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 4, 12)
+                        .with_viewport_columns(5, 1)
+                        .with_window_origin(3, 4),
+                ),
                 SurfaceTranslationDelta {
                     vertical_rows: None,
                     horizontal_cols: 3,
@@ -306,8 +222,16 @@ mod tests {
             ),
             (
                 "text offset change",
-                CursorLocation::new(10, 20, 4, 12).with_viewport_columns(5, 2),
-                CursorLocation::new(10, 20, 4, 12).with_viewport_columns(5, 4),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 4, 12)
+                        .with_viewport_columns(5, 2)
+                        .with_window_origin(3, 4),
+                ),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 4, 12)
+                        .with_viewport_columns(5, 4)
+                        .with_window_origin(3, 4),
+                ),
                 SurfaceTranslationDelta {
                     vertical_rows: None,
                     horizontal_cols: -2,
@@ -317,12 +241,16 @@ mod tests {
             ),
             (
                 "window origin shift without viewport motion",
-                CursorLocation::new(10, 20, 4, 12)
-                    .with_viewport_columns(2, 1)
-                    .with_window_origin(3, 4),
-                CursorLocation::new(10, 20, 4, 12)
-                    .with_viewport_columns(2, 1)
-                    .with_window_origin(5, 7),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 4, 12)
+                        .with_viewport_columns(2, 1)
+                        .with_window_origin(3, 4),
+                ),
+                complete_surface_location(
+                    TrackedCursor::fixture(10, 20, 4, 12)
+                        .with_viewport_columns(2, 1)
+                        .with_window_origin(5, 7),
+                ),
                 SurfaceTranslationDelta {
                     vertical_rows: None,
                     horizontal_cols: 0,
@@ -337,57 +265,37 @@ mod tests {
 
     #[test]
     fn surface_translation_delta_ignores_window_dimension_changes() {
-        let previous = CursorLocation::new(10, 20, 4, 12)
+        let previous = TrackedCursor::fixture(10, 20, 4, 12)
             .with_viewport_columns(2, 1)
             .with_window_origin(3, 4)
             .with_window_dimensions(80, 20);
-        let current = CursorLocation::new(10, 20, 4, 12)
+        let current = TrackedCursor::fixture(10, 20, 4, 12)
             .with_viewport_columns(2, 1)
             .with_window_origin(3, 4)
             .with_window_dimensions(72, 20);
 
-        assert_eq!(surface_translation_delta(&previous, &current), None);
-    }
-
-    #[test]
-    fn surface_translation_delta_ignores_cursor_motion_without_surface_motion() {
-        let previous = CursorLocation::new(10, 20, 4, 12).with_viewport_columns(2, 1);
-        let current = CursorLocation::new(10, 20, 4, 13).with_viewport_columns(2, 1);
-
-        assert_eq!(surface_translation_delta(&previous, &current), None);
-    }
-
-    #[test]
-    fn cursor_location_for_core_render_falls_back_to_tracked_location_without_live_handles() {
-        let tracked = CursorLocation::new(10, 20, 4, 12)
-            .with_viewport_columns(2, 1)
-            .with_window_origin(3, 4)
-            .with_window_dimensions(80, 20);
-        let expected = CursorLocation::new(10, 20, 4, 12)
-            .with_viewport_columns(2, 1)
-            .with_window_origin(3, 4)
-            .with_window_dimensions(80, 20);
-
         assert_eq!(
-            cursor_location_for_core_render(None, None, Some(tracked), None),
-            expected
+            surface_translation_delta(previous.surface(), current.surface(),),
+            None,
         );
     }
 
     #[test]
-    fn cursor_location_for_core_render_prefers_ingress_snapshot_over_tracked_location() {
-        let tracked = CursorLocation::new(10, 20, 4, 12)
-            .with_viewport_columns(2, 1)
-            .with_window_origin(3, 4)
-            .with_window_dimensions(80, 20);
-        let ingress = CursorLocation::new(10, 20, 6, 14)
-            .with_viewport_columns(5, 2)
-            .with_window_origin(8, 9)
-            .with_window_dimensions(72, 18);
+    fn surface_translation_delta_ignores_cursor_motion_without_surface_motion() {
+        let previous = complete_surface_location(
+            TrackedCursor::fixture(10, 20, 4, 12)
+                .with_viewport_columns(2, 1)
+                .with_window_origin(3, 4),
+        );
+        let current = complete_surface_location(
+            TrackedCursor::fixture(10, 20, 4, 13)
+                .with_viewport_columns(2, 1)
+                .with_window_origin(3, 4),
+        );
 
         assert_eq!(
-            cursor_location_for_core_render(None, None, Some(tracked), Some(ingress.clone())),
-            ingress
+            surface_translation_delta(previous.surface(), current.surface(),),
+            None,
         );
     }
 }

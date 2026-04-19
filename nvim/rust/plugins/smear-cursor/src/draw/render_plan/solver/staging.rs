@@ -60,14 +60,14 @@ pub(in super::super) fn sanitize_top_k(frame: &RenderFrame) -> usize {
 }
 
 pub(in super::super) fn aspect_metric_distance(
-    start: Point,
-    end: Point,
+    start: RenderPoint,
+    end: RenderPoint,
     block_aspect_ratio: f64,
 ) -> f64 {
     start.display_distance(end, block_aspect_ratio)
 }
 
-fn arc_len_q16_delta(start: Point, end: Point, block_aspect_ratio: f64) -> ArcLenQ16 {
+fn arc_len_q16_delta(start: RenderPoint, end: RenderPoint, block_aspect_ratio: f64) -> ArcLenQ16 {
     ArcLenQ16::new(latent_field::q16_from_non_negative(aspect_metric_distance(
         start,
         end,

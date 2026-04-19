@@ -2,8 +2,9 @@ use crate::core::types::ArcLenQ16;
 use crate::core::types::StepIndex;
 use crate::core::types::StrokeId;
 use crate::draw::BRAILLE_CODE_MIN;
+use crate::position::RenderPoint;
+use crate::position::ViewportBounds;
 use crate::types::CursorCellShape;
-use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
 use std::collections::BTreeMap;
@@ -245,12 +246,6 @@ impl PartialEq for PlannerState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Viewport {
-    pub(crate) max_row: i64,
-    pub(crate) max_col: i64,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct PlannerOutput {
     pub(crate) plan: RenderPlan,
@@ -331,7 +326,7 @@ pub(crate) struct PlannerDecodeScratch {
     pub(crate) shade_profiles: Vec<ShadeProfile>,
     pub(crate) cell_candidates: BTreeMap<(i64, i64), Vec<CellCandidate>>,
     pub(crate) reusable_candidate_lists: Vec<Vec<CellCandidate>>,
-    pub(crate) centerline_points: Vec<Point>,
+    pub(crate) centerline_points: Vec<RenderPoint>,
     pub(crate) centerline_cumulative: Vec<f64>,
     pub(crate) centerline: Vec<CenterSample>,
     pub(crate) solver: SolverScratch,
@@ -349,7 +344,7 @@ pub(crate) struct SolverScratch {
 }
 
 pub(crate) struct PlanBuilder {
-    pub(crate) viewport: Viewport,
+    pub(crate) viewport: ViewportBounds,
     pub(crate) cell_ops: Vec<CellOp>,
     pub(crate) particle_ops: Vec<ParticleOp>,
     pub(crate) punch_through_cell: Option<(i64, i64)>,
@@ -357,7 +352,7 @@ pub(crate) struct PlanBuilder {
 
 impl PlanBuilder {
     pub(crate) fn with_capacity(
-        viewport: Viewport,
+        viewport: ViewportBounds,
         estimated_cells: usize,
         estimated_particles: usize,
     ) -> Self {
@@ -370,7 +365,7 @@ impl PlanBuilder {
     }
 
     pub(crate) fn in_bounds(&self, row: i64, col: i64) -> bool {
-        row >= 1 && row <= self.viewport.max_row && col >= 1 && col <= self.viewport.max_col
+        row >= 1 && row <= self.viewport.max_row() && col >= 1 && col <= self.viewport.max_col()
     }
 
     pub(crate) fn set_punch_through_cell(&mut self, row: i64, col: i64) {
@@ -457,12 +452,12 @@ pub(crate) struct PlanResources<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CenterPathSample {
     pub(crate) step_index: StepIndex,
-    pub(crate) pos: Point,
+    pub(crate) pos: RenderPoint,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CenterSample {
-    pub(crate) pos: Point,
+    pub(crate) pos: RenderPoint,
     pub(crate) tangent_row: f64,
     pub(crate) tangent_col: f64,
 }
@@ -681,10 +676,10 @@ pub(crate) fn pose_for_frame(frame: &RenderFrame) -> super::super::latent_field:
 }
 
 pub(crate) fn pose_for_corners(
-    corners: &[Point; 4],
-    target_corners: &[Point; 4],
+    corners: &[RenderPoint; 4],
+    target_corners: &[RenderPoint; 4],
 ) -> super::super::latent_field::Pose {
-    let center = crate::types::corners_center(corners);
+    let center = crate::position::corners_center(corners);
     let width = (target_corners[1].col - target_corners[0].col)
         .abs()
         .max(1.0 / 8.0);

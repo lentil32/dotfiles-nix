@@ -1,12 +1,14 @@
-use super::CursorLocation;
 use super::CursorShape;
 use super::RuntimeState;
+use super::RuntimeTargetRetargetKey;
 use super::StrokeId;
-use super::cursor_location_strategy;
+use super::TrackedCursor;
 use super::cursor_shape_strategy;
 use super::finite_point;
-use super::surface_changed;
-use crate::types::Point;
+use super::replace_target_preserving_tracking;
+use super::replace_target_with_tracking;
+use super::tracked_cursor_strategy;
+use crate::position::RenderPoint;
 use proptest::prelude::*;
 
 #[derive(Clone, Debug)]
@@ -16,32 +18,32 @@ pub(super) enum LifecycleSequenceOperation {
     StopAnimation,
     ClearInitialization,
     InitializeCursor {
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
         seed: u32,
-        location: CursorLocation,
+        location: TrackedCursor,
     },
     SetTarget {
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
     },
     JumpPreservingMotion {
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: CursorLocation,
+        location: TrackedCursor,
     },
     JumpAndStopAnimation {
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: CursorLocation,
+        location: TrackedCursor,
     },
     SyncToCurrentCursor {
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: CursorLocation,
+        location: TrackedCursor,
     },
     UpdateTracking {
-        location: CursorLocation,
+        location: TrackedCursor,
     },
 }
 
@@ -55,7 +57,7 @@ pub(super) fn lifecycle_sequence_operation_strategy() -> BoxedStrategy<Lifecycle
             finite_point(),
             cursor_shape_strategy(),
             any::<u32>(),
-            cursor_location_strategy()
+            tracked_cursor_strategy()
         )
             .prop_map(|(position, shape, seed, location)| {
                 LifecycleSequenceOperation::InitializeCursor {
@@ -71,7 +73,7 @@ pub(super) fn lifecycle_sequence_operation_strategy() -> BoxedStrategy<Lifecycle
         (
             finite_point(),
             cursor_shape_strategy(),
-            cursor_location_strategy()
+            tracked_cursor_strategy()
         )
             .prop_map(|(position, shape, location)| {
                 LifecycleSequenceOperation::JumpPreservingMotion {
@@ -83,7 +85,7 @@ pub(super) fn lifecycle_sequence_operation_strategy() -> BoxedStrategy<Lifecycle
         (
             finite_point(),
             cursor_shape_strategy(),
-            cursor_location_strategy()
+            tracked_cursor_strategy()
         )
             .prop_map(|(position, shape, location)| {
                 LifecycleSequenceOperation::JumpAndStopAnimation {
@@ -95,7 +97,7 @@ pub(super) fn lifecycle_sequence_operation_strategy() -> BoxedStrategy<Lifecycle
         (
             finite_point(),
             cursor_shape_strategy(),
-            cursor_location_strategy()
+            tracked_cursor_strategy()
         )
             .prop_map(|(position, shape, location)| {
                 LifecycleSequenceOperation::SyncToCurrentCursor {
@@ -104,7 +106,7 @@ pub(super) fn lifecycle_sequence_operation_strategy() -> BoxedStrategy<Lifecycle
                     location,
                 }
             }),
-        cursor_location_strategy()
+        tracked_cursor_strategy()
             .prop_map(|location| LifecycleSequenceOperation::UpdateTracking { location }),
     ]
     .boxed()
@@ -150,34 +152,48 @@ pub(super) fn expected_retarget_epoch(
     operation: &LifecycleSequenceOperation,
 ) -> u64 {
     let baseline_epoch = state.retarget_epoch();
-    let expected_epoch_delta = match operation {
+    let baseline_key = state.retarget_key();
+    let expected_key = match operation {
         LifecycleSequenceOperation::MarkInitialized
         | LifecycleSequenceOperation::StartAnimation
         | LifecycleSequenceOperation::StopAnimation
-        | LifecycleSequenceOperation::ClearInitialization => 0,
+        | LifecycleSequenceOperation::ClearInitialization => baseline_key,
         LifecycleSequenceOperation::InitializeCursor {
-            position, location, ..
+            position,
+            shape,
+            location,
+            ..
         }
         | LifecycleSequenceOperation::JumpPreservingMotion {
-            position, location, ..
+            position,
+            shape,
+            location,
+            ..
         }
         | LifecycleSequenceOperation::JumpAndStopAnimation {
-            position, location, ..
+            position,
+            shape,
+            location,
+            ..
         }
         | LifecycleSequenceOperation::SyncToCurrentCursor {
-            position, location, ..
-        } => {
-            u64::from(state.target_position() != *position)
-                + u64::from(surface_changed(state.tracked_location_ref(), location))
+            position,
+            shape,
+            location,
+            ..
+        } => RuntimeTargetRetargetKey::from_snapshot(*position, *shape, Some(location)),
+        LifecycleSequenceOperation::SetTarget { position, shape } => {
+            RuntimeTargetRetargetKey::from_snapshot(*position, *shape, state.tracked_cursor_ref())
         }
-        LifecycleSequenceOperation::SetTarget { position, shape } => u64::from(
-            state.target_position() != *position
-                || state.target_corners() != shape.corners(*position),
-        ),
         LifecycleSequenceOperation::UpdateTracking { location } => {
-            u64::from(surface_changed(state.tracked_location_ref(), location))
+            RuntimeTargetRetargetKey::from_snapshot(
+                state.target_position(),
+                state.target_shape(),
+                Some(location),
+            )
         }
     };
+    let expected_epoch_delta = u64::from(baseline_key != expected_key);
 
     baseline_epoch.wrapping_add(expected_epoch_delta)
 }
@@ -218,7 +234,7 @@ pub(super) fn apply_lifecycle_sequence_operation(
             location,
         } => state.initialize_cursor(*position, *shape, *seed, location),
         LifecycleSequenceOperation::SetTarget { position, shape } => {
-            state.set_target(*position, *shape);
+            replace_target_preserving_tracking(state, *position, *shape);
         }
         LifecycleSequenceOperation::JumpPreservingMotion {
             position,
@@ -236,7 +252,12 @@ pub(super) fn apply_lifecycle_sequence_operation(
             location,
         } => state.sync_to_current_cursor(*position, *shape, location),
         LifecycleSequenceOperation::UpdateTracking { location } => {
-            state.update_tracking(location);
+            replace_target_with_tracking(
+                state,
+                state.target_position(),
+                state.target_shape(),
+                location,
+            );
         }
     }
 }

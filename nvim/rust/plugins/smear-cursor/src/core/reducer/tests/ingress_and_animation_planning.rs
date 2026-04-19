@@ -29,7 +29,6 @@ fn cursor_autocmd_demands_refresh_ingress_policy_state() {
         Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
             kind: ExternalDemandKind::ModeChanged,
             observed_at: Millis::new(77),
-            requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
             ingress_observation_surface: None,
@@ -52,7 +51,6 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
         Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(78),
-            requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: Some(IngressCursorPresentationRequest::new(
                 true,
@@ -92,14 +90,18 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
 fn immediate_cursor_observation_request_carries_ingress_surface_snapshot() {
     let state = ready_state();
     let ingress_surface = IngressObservationSurface::new(
-        11,
-        22,
-        Some(
-            CursorLocation::new(11, 22, 3, 9)
-                .with_viewport_columns(4, 1)
-                .with_window_origin(5, 6)
-                .with_window_dimensions(80, 20),
+        crate::position::WindowSurfaceSnapshot::new(
+            crate::position::SurfaceId::new(11, 22).expect("positive handles"),
+            crate::position::BufferLine::new(3).expect("positive top buffer line"),
+            4,
+            1,
+            crate::position::ScreenCell::new(5, 6).expect("one-based window origin"),
+            crate::position::ViewportBounds::new(20, 80).expect("positive window size"),
         ),
+        Some(crate::position::CursorObservation::new(
+            crate::position::BufferLine::new(9).expect("positive buffer line"),
+            crate::position::ObservedCell::Unavailable,
+        )),
         "n".to_string(),
     );
 
@@ -108,7 +110,6 @@ fn immediate_cursor_observation_request_carries_ingress_surface_snapshot() {
         Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(78),
-            requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
             ingress_observation_surface: Some(ingress_surface.clone()),
@@ -129,6 +130,56 @@ fn immediate_cursor_observation_request_carries_ingress_surface_snapshot() {
     );
 }
 
+#[test]
+fn immediate_cursor_observation_request_preserves_exact_ingress_cursor_sample() {
+    let state = ready_state();
+    let ingress_cursor = crate::position::CursorObservation::new(
+        crate::position::BufferLine::new(9).expect("positive buffer line"),
+        crate::position::ObservedCell::Exact(
+            crate::position::ScreenCell::new(12, 17).expect("one-based screen cell"),
+        ),
+    );
+    let ingress_surface = IngressObservationSurface::new(
+        crate::position::WindowSurfaceSnapshot::new(
+            crate::position::SurfaceId::new(11, 22).expect("positive handles"),
+            crate::position::BufferLine::new(3).expect("positive top buffer line"),
+            4,
+            1,
+            crate::position::ScreenCell::new(5, 6).expect("one-based window origin"),
+            crate::position::ViewportBounds::new(20, 80).expect("positive window size"),
+        ),
+        Some(ingress_cursor),
+        "n".to_string(),
+    );
+
+    let transition = reduce(
+        &state,
+        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+            kind: ExternalDemandKind::ExternalCursor,
+            observed_at: Millis::new(78),
+            buffer_perf_class: BufferPerfClass::Full,
+            ingress_cursor_presentation: None,
+            ingress_observation_surface: Some(ingress_surface),
+        }),
+    );
+
+    let Some(Effect::RequestObservationBase(payload)) = transition
+        .effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::RequestObservationBase(_)))
+    else {
+        panic!("expected immediate observation-base request");
+    };
+
+    pretty_assert_eq!(
+        payload
+            .context
+            .ingress_observation_surface()
+            .and_then(IngressObservationSurface::cursor),
+        Some(ingress_cursor)
+    );
+}
+
 proptest! {
     #![proptest_config(pure_config())]
 
@@ -144,7 +195,6 @@ proptest! {
             Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
                 kind: ExternalDemandKind::ExternalCursor,
                 observed_at: Millis::new(78),
-                requested_target: None,
                 buffer_perf_class: BufferPerfClass::Full,
                 ingress_cursor_presentation: Some(IngressCursorPresentationRequest::new(
                     true,
@@ -196,15 +246,17 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     );
     let mut runtime = ready_state().runtime().clone();
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 3, 4),
+        &TrackedCursor::fixture(11, 22, 3, 4)
+            .with_window_origin(1, 1)
+            .with_window_dimensions(120, 40),
     );
     runtime.start_tail_drain(2);
     runtime.set_last_tick_ms(Some(100.0));
     let base = ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_cell(Some(cursor(9, 9)))
         .with_runtime(runtime)
         .with_ready_observation(observation)
         .expect("primed state should accept a ready observation");
@@ -280,7 +332,6 @@ fn animation_timer_requests_boundary_refresh_for_compatible_cursor_color_when_mo
     );
     pretty_assert_eq!(request.demand().kind(), ExternalDemandKind::BoundaryRefresh);
     pretty_assert_eq!(request.demand().buffer_perf_class(), BufferPerfClass::Full);
-    pretty_assert_eq!(request.demand().requested_target(), Some(cursor(9, 9)));
 }
 
 #[test]
@@ -288,17 +339,16 @@ fn animation_timer_preserves_perf_class_across_boundary_refresh() {
     let mut runtime = ready_state().runtime().clone();
     runtime.config.cursor_color = Some("none".to_string());
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 3, 9),
+        &TrackedCursor::fixture(11, 22, 3, 9),
     );
     let request = PendingObservation::new(
         ExternalDemand::new(
             IngressSeq::new(9),
             ExternalDemandKind::ExternalCursor,
             Millis::new(90),
-            None,
             BufferPerfClass::FastMotion,
         ),
         ProbeRequestSet::only(ProbeKind::CursorColor),
@@ -318,7 +368,7 @@ fn animation_timer_preserves_perf_class_across_boundary_refresh() {
         "cursor color probe should be requested",
     );
     let base = ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_cell(Some(cursor(9, 9)))
         .with_runtime(runtime)
         .with_ready_observation(observation)
         .expect("primed state should accept a ready observation");
@@ -377,45 +427,6 @@ fn animation_timer_requests_boundary_refresh_for_conceal_deferred_cursor_positio
     pretty_assert_eq!(
         request.demand().buffer_perf_class(),
         BufferPerfClass::FastMotion
-    );
-    pretty_assert_eq!(request.demand().requested_target(), Some(cursor(9, 9)));
-}
-
-#[test]
-fn conceal_deferred_boundary_refresh_uses_latest_exact_cursor_anchor() {
-    let mut runtime = ready_state().runtime().clone();
-    runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
-        7,
-        &CursorLocation::new(11, 22, 3, 9),
-    );
-    let request = observation_request_with_perf_class(
-        9,
-        ExternalDemandKind::ExternalCursor,
-        90,
-        BufferPerfClass::FastMotion,
-    );
-    let observation = ObservationSnapshot::new(
-        request,
-        observation_basis(Some(cursor(12, 13)), 91),
-        observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
-    );
-    let base = ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
-        .with_runtime(runtime)
-        .with_ready_observation(observation)
-        .expect("primed state should accept a ready observation");
-    let (state, token) = timer_armed_state(base);
-
-    let transition = reduce(&state, animation_tick_event(token, 116));
-
-    let [Effect::RequestObservationBase(payload)] = transition.effects.as_slice() else {
-        panic!("expected boundary refresh observation after deferred conceal correction");
-    };
-    pretty_assert_eq!(
-        payload.request.demand().requested_target(),
-        Some(cursor(9, 9))
     );
 }
 

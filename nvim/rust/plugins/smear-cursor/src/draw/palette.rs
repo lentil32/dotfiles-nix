@@ -594,12 +594,12 @@ pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()
 mod tests {
     use super::*;
     use crate::core::types::StrokeId;
+    use crate::position::RenderPoint;
     use crate::test_support::proptest::ModeCase;
     use crate::test_support::proptest::cache_key_mutation_axis;
     use crate::test_support::proptest::mode_case;
     use crate::test_support::proptest::pure_config;
     use crate::types::ModeClass;
-    use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::StaticRenderConfig;
     use pretty_assertions::assert_eq;
@@ -613,11 +613,11 @@ mod tests {
     fn test_frame() -> RenderFrame {
         RenderFrame {
             mode: ModeClass::NormalLike,
-            corners: [Point::ZERO; 4],
+            corners: [RenderPoint::ZERO; 4],
             step_samples: Vec::new().into(),
             planner_idle_steps: 0,
-            target: Point::ZERO,
-            target_corners: [Point::ZERO; 4],
+            target: RenderPoint::ZERO,
+            target_corners: [RenderPoint::ZERO; 4],
             vertical_bar: false,
             trail_stroke_id: StrokeId::INITIAL,
             retarget_epoch: 0,

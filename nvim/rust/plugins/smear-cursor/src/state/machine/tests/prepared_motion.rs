@@ -6,7 +6,7 @@ fn prepared_motion_round_trips_runtime_dynamics_without_overwriting_config() {
     let tracked = location(11, 22, 33, 44);
     let mut source = RuntimeState::default();
     source.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
-    source.set_target(point(8.0, 9.0), default_shape());
+    replace_target_preserving_tracking(&mut source, point(8.0, 9.0), default_shape());
     source.start_animation_towards_target();
     source.set_color_at_cursor(Some(0x00AB_CDEF));
     source.record_observed_mode(/*current_is_cmdline*/ true);
@@ -161,7 +161,7 @@ fn planning_preview_mutation_does_not_write_back_into_source_runtime() {
     let tracked = location(11, 22, 33, 44);
     let mut source = RuntimeState::default();
     source.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
-    source.set_target(point(8.0, 9.0), default_shape());
+    replace_target_preserving_tracking(&mut source, point(8.0, 9.0), default_shape());
     source.start_animation_towards_target();
     source.set_color_at_cursor(Some(0x00AB_CDEF));
     source.record_observed_mode(/*current_is_cmdline*/ true);
@@ -171,7 +171,7 @@ fn planning_preview_mutation_does_not_write_back_into_source_runtime() {
     let mut preview = RuntimePreview::new(&mut source);
     let preview_runtime = preview.runtime_mut();
     preview_runtime.set_enabled(false);
-    preview_runtime.set_target(point(21.0, 34.0), default_shape());
+    replace_target_preserving_tracking(preview_runtime, point(21.0, 34.0), default_shape());
     preview_runtime.set_color_at_cursor(Some(0x0012_3456));
     preview_runtime.record_observed_mode(/*current_is_cmdline*/ false);
     preview_runtime.start_animation_towards_target();

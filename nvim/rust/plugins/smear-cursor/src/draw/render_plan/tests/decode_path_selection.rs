@@ -8,7 +8,7 @@ fn diagonal_centerline(origin: Coord) -> Vec<CenterSample> {
     let tangent = 1.0 / 2.0_f64.sqrt();
     (0_i64..3_i64)
         .map(|offset| CenterSample {
-            pos: Point {
+            pos: RenderPoint {
                 row: (origin.0 + offset) as f64 + 1.0,
                 col: (origin.1 + offset) as f64 + 1.5,
             },

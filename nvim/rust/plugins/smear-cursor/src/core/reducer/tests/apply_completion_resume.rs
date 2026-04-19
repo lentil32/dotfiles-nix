@@ -9,7 +9,7 @@ fn completed_apply_with_pending_mode_change() -> (CoreState, Transition) {
     );
     let staged = reduce(
         &staged,
-        external_demand_event(ExternalDemandKind::ModeChanged, 71, None),
+        external_demand_event(ExternalDemandKind::ModeChanged, 71),
     )
     .next;
 

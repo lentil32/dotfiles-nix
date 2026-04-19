@@ -1,8 +1,8 @@
 fn update_corners(
     input: &StepInput,
-) -> ([Point; 4], [Point; 4], [Point; 4], [f64; 4], usize, usize) {
+) -> ([RenderPoint; 4], [RenderPoint; 4], [RenderPoint; 4], [f64; 4], usize, usize) {
     let mut current_corners = input.current_corners;
-    let mut center_velocity = Point {
+    let mut center_velocity = RenderPoint {
         row: (input.spring_velocity_corners[0].row
             + input.spring_velocity_corners[1].row
             + input.spring_velocity_corners[2].row
@@ -14,7 +14,7 @@ fn update_corners(
             + input.spring_velocity_corners[3].col)
             / 4.0,
     };
-    let mut velocity_corners = [Point::ZERO; 4];
+    let mut velocity_corners = [RenderPoint::ZERO; 4];
     let mut trail_elapsed_ms = input.trail_elapsed_ms;
     let previous_corners = input.current_corners;
     let target_corners = scaled_corners_for_trail(
@@ -35,7 +35,7 @@ fn update_corners(
     };
     let origin_center = center(&input.trail_origin_corners);
     let target_center = center(&input.target_corners);
-    let aspect = crate::types::display_metric_row_scale(input.block_aspect_ratio);
+    let aspect = crate::position::display_metric_row_scale(input.block_aspect_ratio);
     let travel_distance = origin_center.display_distance(target_center, input.block_aspect_ratio);
     let effective_trail_min_distance =
         cursor_height_for_trail_threshold(input.vertical_bar, input.horizontal_bar)
@@ -45,7 +45,7 @@ fn update_corners(
     // threshold is a project-specific divergence knob when non-zero.
     if travel_distance <= effective_trail_min_distance {
         current_corners = target_corners;
-        center_velocity = Point::ZERO;
+        center_velocity = RenderPoint::ZERO;
         trail_elapsed_ms = [input.trail_duration_ms.max(1.0); 4];
     } else {
         let dt = input.time_interval.max(0.0);
@@ -68,21 +68,21 @@ fn update_corners(
             input.damping_ratio,
         );
 
-        let next_center = Point {
+        let next_center = RenderPoint {
             row: next_row_display / aspect,
             col: next_col,
         };
-        center_velocity = Point {
+        center_velocity = RenderPoint {
             row: next_row_velocity_display / aspect,
             col: next_col_velocity,
         };
 
-        let center_offset = Point {
+        let center_offset = RenderPoint {
             row: next_center.row - target_center.row,
             col: next_center.col - target_center.col,
         };
         for index in 0..4 {
-            current_corners[index] = Point {
+            current_corners[index] = RenderPoint {
                 row: target_corners[index].row + center_offset.row,
                 col: target_corners[index].col + center_offset.col,
             };
@@ -91,7 +91,7 @@ fn update_corners(
         }
     }
 
-    let mut spring_velocity_corners = [Point::ZERO; 4];
+    let mut spring_velocity_corners = [RenderPoint::ZERO; 4];
     spring_velocity_corners.fill(center_velocity);
 
     for index in 0..4 {
@@ -131,7 +131,7 @@ fn update_corners(
     }
 
     for index in 0..4 {
-        velocity_corners[index] = Point {
+        velocity_corners[index] = RenderPoint {
             row: current_corners[index].row - previous_corners[index].row,
             col: current_corners[index].col - previous_corners[index].col,
         };

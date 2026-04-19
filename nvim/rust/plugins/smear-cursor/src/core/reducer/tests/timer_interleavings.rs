@@ -1,17 +1,9 @@
 use super::*;
 
-fn queued_cursor_demand(
-    state: &CoreState,
-    observed_at: u64,
-    requested_target: CursorPosition,
-) -> CoreState {
+fn queued_cursor_demand(state: &CoreState, observed_at: u64) -> CoreState {
     reduce(
         state,
-        external_demand_event(
-            ExternalDemandKind::ExternalCursor,
-            observed_at,
-            Some(requested_target),
-        ),
+        external_demand_event(ExternalDemandKind::ExternalCursor, observed_at),
     )
     .next
 }
@@ -42,13 +34,10 @@ fn animation_tick_during_observing_request_is_noop_even_with_queued_ingress() {
         &ready_state_with_observation(cursor(7, 8)),
         ExternalDemandKind::ExternalCursor,
         25,
-        Some(cursor(7, 9)),
     );
     let request = active_request(&observing_request);
-    let interleaved = assert_animation_tick_is_noop(
-        queued_cursor_demand(&observing_request, 26, cursor(9, 10)),
-        27,
-    );
+    let interleaved =
+        assert_animation_tick_is_noop(queued_cursor_demand(&observing_request, 26), 27);
 
     let completed = collect_observation_base(
         &interleaved,
@@ -68,10 +57,8 @@ fn animation_tick_during_observing_request_is_noop_even_with_queued_ingress() {
 fn animation_tick_during_observing_active_is_noop_even_with_queued_ingress() {
     let scenario = ObservationScenario::new(cursor_color_probe_ready_state());
     let request = scenario.request;
-    let interleaved = assert_animation_tick_is_noop(
-        queued_cursor_demand(&scenario.based.next, 27, cursor(9, 10)),
-        28,
-    );
+    let interleaved =
+        assert_animation_tick_is_noop(queued_cursor_demand(&scenario.based.next, 27), 28);
 
     let completed = reduce(
         &interleaved,
@@ -93,8 +80,7 @@ fn animation_tick_during_planning_is_noop_even_with_queued_ingress() {
         panic!("expected render plan request after initial animation tick");
     };
     let payload = payload.clone();
-    let interleaved =
-        assert_animation_tick_is_noop(queued_cursor_demand(&planning.next, 51, cursor(9, 10)), 52);
+    let interleaved = assert_animation_tick_is_noop(queued_cursor_demand(&planning.next, 51), 52);
 
     let completed = reduce(
         &interleaved,
@@ -134,8 +120,7 @@ fn animation_tick_during_applying_is_noop_even_with_queued_ingress() {
         false,
         None,
     );
-    let interleaved =
-        assert_animation_tick_is_noop(queued_cursor_demand(&applying, 90, cursor(5, 10)), 91);
+    let interleaved = assert_animation_tick_is_noop(queued_cursor_demand(&applying, 90), 91);
 
     let completed = reduce(
         &interleaved,
@@ -148,10 +133,7 @@ fn animation_tick_during_applying_is_noop_even_with_queued_ingress() {
     let replacement_request = active_request(&completed.next);
 
     pretty_assert_eq!(completed.next.lifecycle(), Lifecycle::Observing);
-    pretty_assert_eq!(
-        replacement_request.demand().requested_target(),
-        Some(cursor(5, 10))
-    );
+    pretty_assert_eq!(replacement_request.demand().observed_at(), Millis::new(90));
     assert!(completed.effects.iter().any(|effect| {
         matches!(
             effect,
@@ -162,11 +144,7 @@ fn animation_tick_during_applying_is_noop_even_with_queued_ingress() {
 
 #[test]
 fn animation_tick_during_recovering_is_noop_even_with_queued_ingress() {
-    let recovering = queued_cursor_demand(
-        &recovering_state_with_observation(cursor(2, 2)),
-        120,
-        cursor(3, 3),
-    );
+    let recovering = queued_cursor_demand(&recovering_state_with_observation(cursor(2, 2)), 120);
     let (timers, recovery_token) = recovering.timers().arm(TimerId::Recovery);
     let interleaved = assert_animation_tick_is_noop(recovering.with_timers(timers), 121);
 
@@ -174,8 +152,5 @@ fn animation_tick_during_recovering_is_noop_even_with_queued_ingress() {
     let replacement_request = active_request(&resumed.next);
 
     pretty_assert_eq!(resumed.next.lifecycle(), Lifecycle::Observing);
-    pretty_assert_eq!(
-        replacement_request.demand().requested_target(),
-        Some(cursor(3, 3))
-    );
+    pretty_assert_eq!(replacement_request.demand().observed_at(), Millis::new(120));
 }

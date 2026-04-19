@@ -48,7 +48,7 @@ local function test_prefers_highest_priority_capture()
       metadata = { priority = 50 },
     },
   }, function()
-    return probes.cursor_color_at_cursor(0, false)
+    return probes.cursor_color_at_cursor(false)
   end)
 
   assert_probe_result(result, {
@@ -69,7 +69,7 @@ local function test_falls_back_to_base_capture_group()
       metadata = { priority = 100 },
     },
   }, function()
-    return probes.cursor_color_at_cursor(1, false)
+    return probes.cursor_color_at_cursor(true)
   end)
 
   assert_probe_result(result, {
@@ -96,7 +96,7 @@ local function test_prefers_treesitter_overlay_over_syntax()
         metadata = { priority = 100 },
       },
     }, function()
-      return probes.cursor_color_at_cursor(0, false)
+      return probes.cursor_color_at_cursor(false)
     end)
   end)
 

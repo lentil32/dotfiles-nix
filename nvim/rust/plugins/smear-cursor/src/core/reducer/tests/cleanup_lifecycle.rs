@@ -385,7 +385,7 @@ fn fresh_ingress_promotes_cooling_cleanup_state_back_to_hot() {
 
     let reheated = reduce(
         &cooling,
-        external_demand_event(ExternalDemandKind::BufferEntered, 150, None),
+        external_demand_event(ExternalDemandKind::BufferEntered, 150),
     );
 
     pretty_assert_eq!(

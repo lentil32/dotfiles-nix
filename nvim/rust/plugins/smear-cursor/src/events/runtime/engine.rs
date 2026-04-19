@@ -18,7 +18,7 @@ use super::super::probe_cache::ConcealScreenCellCacheKey;
 use super::super::probe_cache::ConcealScreenCellCacheLookup;
 use super::super::probe_cache::CursorTextContextCacheKey;
 use super::super::probe_cache::CursorTextContextCacheLookup;
-use super::EditorViewport;
+use super::EditorViewportSnapshot;
 use super::EngineAccessResult;
 use super::IngressReadSnapshot;
 use super::diagnostics::reset_transient_event_state;
@@ -80,12 +80,12 @@ pub(crate) fn ingress_read_snapshot_with_current_buffer(
     IngressReadSnapshot::capture_with_current_buffer(current_buffer)
 }
 
-pub(crate) fn editor_viewport_for_bounds() -> Result<EditorViewport> {
+pub(crate) fn editor_viewport_for_bounds() -> Result<EditorViewportSnapshot> {
     mutate_engine_state(|state| state.shell.editor_viewport_cache.read_for_bounds())
         .map_err(nvim_oxi::Error::from)?
 }
 
-pub(crate) fn editor_viewport_for_command_row() -> Result<EditorViewport> {
+pub(crate) fn editor_viewport_for_command_row() -> Result<EditorViewportSnapshot> {
     mutate_engine_state(|state| state.shell.editor_viewport_cache.read_for_command_row())
         .map_err(nvim_oxi::Error::from)?
 }

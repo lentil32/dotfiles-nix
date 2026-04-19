@@ -1,9 +1,10 @@
 use super::*;
 use crate::core::types::StepIndex;
 use crate::core::types::StrokeId;
+use crate::position::RenderPoint;
+use crate::position::ViewportBounds;
 use crate::types::BASE_TIME_INTERVAL;
 use crate::types::ModeClass;
-use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
 use crate::types::StaticRenderConfig;
@@ -13,19 +14,19 @@ use std::sync::Arc;
 
 fn base_frame() -> RenderFrame {
     let corners = [
-        Point {
+        RenderPoint {
             row: 10.0,
             col: 10.0,
         },
-        Point {
+        RenderPoint {
             row: 10.0,
             col: 11.0,
         },
-        Point {
+        RenderPoint {
             row: 11.0,
             col: 11.0,
         },
-        Point {
+        RenderPoint {
             row: 11.0,
             col: 10.0,
         },
@@ -35,7 +36,7 @@ fn base_frame() -> RenderFrame {
         corners,
         step_samples: vec![sample_for_corners(corners)].into(),
         planner_idle_steps: 0,
-        target: Point {
+        target: RenderPoint {
             row: 10.0,
             col: 10.0,
         },
@@ -76,24 +77,24 @@ fn base_frame() -> RenderFrame {
     }
 }
 
-fn sample_for_corners(corners: [Point; 4]) -> RenderStepSample {
+fn sample_for_corners(corners: [RenderPoint; 4]) -> RenderStepSample {
     RenderStepSample::new(corners, BASE_TIME_INTERVAL)
 }
 
-fn unit_square_corners_at(row: i16, col: i16) -> [Point; 4] {
+fn unit_square_corners_at(row: i16, col: i16) -> [RenderPoint; 4] {
     let row = f64::from(row);
     let col = f64::from(col);
     [
-        Point { row, col },
-        Point {
+        RenderPoint { row, col },
+        RenderPoint {
             row,
             col: col + 1.0,
         },
-        Point {
+        RenderPoint {
             row: row + 1.0,
             col: col + 1.0,
         },
-        Point {
+        RenderPoint {
             row: row + 1.0,
             col,
         },
@@ -106,7 +107,7 @@ fn single_sample_frame(row: i16, col: i16) -> RenderFrame {
     frame.corners = corners;
     frame.target_corners = corners;
     frame.step_samples = vec![sample_for_corners(corners)].into();
-    frame.target = Point {
+    frame.target = RenderPoint {
         row: f64::from(row),
         col: f64::from(col),
     };
@@ -126,7 +127,7 @@ fn frames_from_origins(origins: &[(i16, i16)]) -> Vec<RenderFrame> {
         .collect()
 }
 
-fn set_frame_corners(frame: &mut RenderFrame, corners: [Point; 4]) {
+fn set_frame_corners(frame: &mut RenderFrame, corners: [RenderPoint; 4]) {
     frame.corners = corners;
     frame.target_corners = corners;
     frame.step_samples = vec![sample_for_corners(corners)].into();
@@ -398,7 +399,7 @@ fn dense_slice_with_candidate_fanout(cell_count: usize, candidate_count: usize) 
 fn render_frame_to_plan_reference(
     frame: &RenderFrame,
     state: PlannerState,
-    viewport: Viewport,
+    viewport: ViewportBounds,
 ) -> PlannerOutput {
     let compiled_frame = compile_render_frame(frame, state.clone());
     let reference_compiled = compile_render_frame_reference(frame, state);
@@ -423,11 +424,8 @@ fn query_envelope_area_cells(bounds: SliceSearchBounds) -> u64 {
     row_span.saturating_mul(col_span)
 }
 
-fn test_viewport() -> Viewport {
-    Viewport {
-        max_row: 200,
-        max_col: 200,
-    }
+fn test_viewport() -> ViewportBounds {
+    ViewportBounds::new(200, 200).expect("positive viewport bounds")
 }
 
 mod cursor_punch_through_and_trail_strokes;

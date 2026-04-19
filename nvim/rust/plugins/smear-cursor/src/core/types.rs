@@ -342,39 +342,3 @@ impl DelayBudgetMs {
         self.0
     }
 }
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct CursorRow(pub(crate) u32);
-
-impl CursorRow {
-    pub(crate) const fn value(self) -> u32 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct CursorCol(pub(crate) u32);
-
-impl CursorCol {
-    pub(crate) const fn value(self) -> u32 {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct CursorPosition {
-    pub(crate) row: CursorRow,
-    pub(crate) col: CursorCol,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct ViewportSnapshot {
-    pub(crate) max_row: CursorRow,
-    pub(crate) max_col: CursorCol,
-}
-
-impl ViewportSnapshot {
-    pub(crate) const fn new(max_row: CursorRow, max_col: CursorCol) -> Self {
-        Self { max_row, max_col }
-    }
-}

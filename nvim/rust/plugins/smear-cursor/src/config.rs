@@ -4,6 +4,7 @@ pub(crate) use derived::DerivedConfigCache;
 
 use crate::core::state::BufferPerfClass;
 use crate::types::BASE_TIME_INTERVAL;
+use crate::types::CursorCellShape;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
 use nvimrs_nvim_utils::mode::is_replace_like_mode;
 use std::collections::HashSet;
@@ -128,27 +129,20 @@ impl RuntimeConfig {
         (1000.0 / fps).max(1.0)
     }
 
-    pub(crate) fn fps_for_interval_ms(time_interval: f64) -> f64 {
-        1000.0 / time_interval.max(1.0)
-    }
-
-    // User-facing compatibility alias. Runtime storage stays canonical on
-    // `time_interval`, so this reconstructs `fps` at the boundary instead of
-    // storing a second timing field.
-    pub(crate) fn fps(&self) -> f64 {
-        Self::fps_for_interval_ms(self.time_interval)
-    }
-
-    pub(crate) fn cursor_is_vertical_bar(&self, mode: &str) -> bool {
-        if is_insert_like_mode(mode) {
-            self.vertical_bar_cursor_insert_mode
+    pub(crate) fn cursor_cell_shape(&self, mode: &str) -> CursorCellShape {
+        if is_replace_like_mode(mode) && self.horizontal_bar_cursor_replace_mode {
+            CursorCellShape::HorizontalBar
+        } else if is_insert_like_mode(mode) {
+            if self.vertical_bar_cursor_insert_mode {
+                CursorCellShape::VerticalBar
+            } else {
+                CursorCellShape::Block
+            }
+        } else if self.vertical_bar_cursor {
+            CursorCellShape::VerticalBar
         } else {
-            self.vertical_bar_cursor
+            CursorCellShape::Block
         }
-    }
-
-    pub(crate) fn cursor_is_horizontal_bar(&self, mode: &str) -> bool {
-        is_replace_like_mode(mode) && self.horizontal_bar_cursor_replace_mode
     }
 
     pub(crate) fn requires_cursor_color_sampling_for_mode(&self, mode: &str) -> bool {
@@ -277,53 +271,18 @@ mod tests {
     use crate::test_support::proptest::mode_family;
     use crate::test_support::proptest::pure_config;
     use crate::test_support::proptest::representative_mode;
+    use crate::types::CursorCellShape;
     use proptest::prelude::*;
 
     proptest! {
         #![proptest_config(pure_config())]
 
         #[test]
-        fn prop_cursor_is_vertical_bar_depends_only_on_insert_mode_family(
+        fn prop_cursor_cell_shape_uses_mode_specific_precedence(
             mode_family in mode_family(),
             vertical_bar_cursor in any::<bool>(),
             vertical_bar_cursor_insert_mode in any::<bool>(),
             horizontal_bar_cursor_replace_mode in any::<bool>(),
-            cursor_color in prop_oneof![
-                Just(None),
-                Just(Some("#112233".to_string())),
-                Just(Some("none".to_string())),
-            ],
-            cursor_color_insert_mode in prop_oneof![
-                Just(None),
-                Just(Some("#445566".to_string())),
-                Just(Some("none".to_string())),
-            ],
-        ) {
-            let config = RuntimeConfig {
-                vertical_bar_cursor,
-                vertical_bar_cursor_insert_mode,
-                horizontal_bar_cursor_replace_mode,
-                cursor_color,
-                cursor_color_insert_mode,
-                ..RuntimeConfig::default()
-            };
-            let mode = representative_mode(mode_family);
-
-            let expected = if mode_family == ModeFamily::Insert {
-                vertical_bar_cursor_insert_mode
-            } else {
-                vertical_bar_cursor
-            };
-
-            prop_assert_eq!(config.cursor_is_vertical_bar(mode), expected);
-        }
-
-        #[test]
-        fn prop_cursor_is_horizontal_bar_depends_only_on_replace_mode_family(
-            mode_family in mode_family(),
-            horizontal_bar_cursor_replace_mode in any::<bool>(),
-            vertical_bar_cursor in any::<bool>(),
-            vertical_bar_cursor_insert_mode in any::<bool>(),
         ) {
             let config = RuntimeConfig {
                 vertical_bar_cursor,
@@ -333,9 +292,26 @@ mod tests {
             };
             let mode = representative_mode(mode_family);
 
-            let expected = mode_family == ModeFamily::Replace && horizontal_bar_cursor_replace_mode;
+            let expected = match mode_family {
+                ModeFamily::Replace if horizontal_bar_cursor_replace_mode => {
+                    CursorCellShape::HorizontalBar
+                }
+                ModeFamily::Replace if vertical_bar_cursor => CursorCellShape::VerticalBar,
+                ModeFamily::Insert if vertical_bar_cursor_insert_mode => {
+                    CursorCellShape::VerticalBar
+                }
+                ModeFamily::Normal
+                | ModeFamily::Terminal
+                | ModeFamily::Cmdline
+                | ModeFamily::Other
+                    if vertical_bar_cursor =>
+                {
+                    CursorCellShape::VerticalBar
+                }
+                _ => CursorCellShape::Block,
+            };
 
-            prop_assert_eq!(config.cursor_is_horizontal_bar(mode), expected);
+            prop_assert_eq!(config.cursor_cell_shape(mode), expected);
         }
 
         #[test]
@@ -386,10 +362,9 @@ mod tests {
     }
 
     #[test]
-    fn default_animation_fps_lowers_draw_cadence_without_changing_simulation_rate() {
+    fn default_time_interval_matches_the_named_animation_fps() {
         let config = RuntimeConfig::default();
 
-        assert_eq!(config.fps(), DEFAULT_ANIMATION_FPS);
         assert_eq!(
             config.time_interval,
             RuntimeConfig::interval_ms_for_fps(DEFAULT_ANIMATION_FPS)

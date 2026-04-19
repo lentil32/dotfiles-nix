@@ -23,18 +23,28 @@ use super::classify_semantic_event;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::ExternalDemand;
 use crate::core::state::ExternalDemandKind;
-use crate::core::types::CursorCol;
-use crate::core::types::CursorPosition;
-use crate::core::types::CursorRow;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
-use crate::core::types::ViewportSnapshot;
-use crate::state::CursorLocation;
-use crate::types::ScreenCell;
+use crate::position::BufferLine;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::ScreenCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
+use pretty_assertions::assert_eq;
 
 mod background_probe;
 mod probe_state;
 mod semantic;
+
+fn screen_cell(row: i64, col: i64) -> ScreenCell {
+    ScreenCell::new(row, col).expect("positive cursor position")
+}
+
+fn viewport_bounds(max_row: i64, max_col: i64) -> ViewportBounds {
+    ViewportBounds::new(max_row, max_col).expect("positive viewport bounds")
+}
 
 fn observation_request(probes: ProbeRequestSet) -> PendingObservation {
     PendingObservation::new(
@@ -42,24 +52,90 @@ fn observation_request(probes: ProbeRequestSet) -> PendingObservation {
             IngressSeq::new(1),
             ExternalDemandKind::ExternalCursor,
             Millis::new(10),
-            None,
             BufferPerfClass::Full,
         ),
         probes,
     )
 }
 
-fn observation_basis(viewport: ViewportSnapshot) -> ObservationBasis {
+fn observation_basis(viewport: ViewportBounds) -> ObservationBasis {
     ObservationBasis::new(
         Millis::new(10),
         "n".to_string(),
-        Some(CursorPosition {
-            row: CursorRow(4),
-            col: CursorCol(5),
-        }),
-        CursorLocation::new(1, 1, 1, 1),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(1, 1).expect("positive handles"),
+            BufferLine::new(1).expect("positive top buffer line"),
+            0,
+            0,
+            ScreenCell::new(1, 1).expect("one-based window origin"),
+            viewport,
+        ),
+        CursorObservation::new(
+            BufferLine::new(1).expect("positive buffer line"),
+            ObservedCell::Exact(ScreenCell::new(4, 5).expect("positive cursor position")),
+        ),
         viewport,
     )
+}
+
+fn observation_with_observed_cell(observed_cell: ObservedCell) -> ObservationSnapshot {
+    let viewport = viewport_bounds(40, 120);
+    ObservationSnapshot::new(
+        observation_request(ProbeRequestSet::default()),
+        ObservationBasis::new(
+            Millis::new(10),
+            "n".to_string(),
+            WindowSurfaceSnapshot::new(
+                SurfaceId::new(1, 1).expect("positive handles"),
+                BufferLine::new(1).expect("positive top buffer line"),
+                0,
+                0,
+                ScreenCell::new(1, 1).expect("one-based window origin"),
+                viewport,
+            ),
+            CursorObservation::new(
+                BufferLine::new(4).expect("positive buffer line"),
+                observed_cell,
+            ),
+            viewport,
+        ),
+        ObservationMotion::default(),
+    )
+}
+
+#[test]
+fn observation_snapshot_exactness_follows_observed_cell_variants() {
+    let exact_cell = screen_cell(4, 5);
+    let deferred_cell = screen_cell(7, 9);
+    let cases = [
+        (
+            observation_with_observed_cell(ObservedCell::Exact(exact_cell)),
+            Some(exact_cell),
+            Some(exact_cell),
+            false,
+        ),
+        (
+            observation_with_observed_cell(ObservedCell::Deferred(deferred_cell)),
+            Some(deferred_cell),
+            None,
+            true,
+        ),
+        (
+            observation_with_observed_cell(ObservedCell::Unavailable),
+            None,
+            None,
+            false,
+        ),
+    ];
+
+    for (observation, cursor_position, exact_cursor_position, refresh_required) in cases {
+        assert_eq!(observation.basis().cursor_position(), cursor_position);
+        assert_eq!(observation.exact_cursor_position(), exact_cursor_position);
+        assert_eq!(
+            observation.requires_exact_cursor_position_refresh(),
+            refresh_required
+        );
+    }
 }
 
 fn with_background_probe_plan(
@@ -107,24 +183,34 @@ fn text_context(
 }
 
 fn assert_text_mutation_classification(
-    previous_position: CursorPosition,
+    previous_position: ScreenCell,
     previous_line: i64,
     previous_rows: &[&str],
-    current_position: CursorPosition,
+    current_position: ScreenCell,
     current_line: i64,
     current_rows: &[&str],
     current_tracked_rows: Option<&[&str]>,
 ) {
     let request = observation_request(ProbeRequestSet::default());
-    let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+    let viewport = ViewportBounds::new(40, 120).expect("positive viewport bounds");
     let previous =
         ObservationSnapshot::new(
             request.clone(),
             ObservationBasis::new(
                 Millis::new(10),
                 "n".to_string(),
-                Some(previous_position),
-                CursorLocation::new(1, 1, 1, previous_line),
+                WindowSurfaceSnapshot::new(
+                    SurfaceId::new(1, 1).expect("positive handles"),
+                    BufferLine::new(1).expect("positive top buffer line"),
+                    0,
+                    0,
+                    ScreenCell::new(1, 1).expect("one-based window origin"),
+                    viewport,
+                ),
+                CursorObservation::new(
+                    BufferLine::new(previous_line).expect("positive buffer line"),
+                    ObservedCell::Exact(previous_position),
+                ),
                 viewport,
             )
             .with_cursor_text_context_state(CursorTextContextState::Sampled(
@@ -138,8 +224,18 @@ fn assert_text_mutation_classification(
             ObservationBasis::new(
                 Millis::new(11),
                 "n".to_string(),
-                Some(current_position),
-                CursorLocation::new(1, 1, 1, current_line),
+                WindowSurfaceSnapshot::new(
+                    SurfaceId::new(1, 1).expect("positive handles"),
+                    BufferLine::new(1).expect("positive top buffer line"),
+                    0,
+                    0,
+                    ScreenCell::new(1, 1).expect("one-based window origin"),
+                    viewport,
+                ),
+                CursorObservation::new(
+                    BufferLine::new(current_line).expect("positive buffer line"),
+                    ObservedCell::Exact(current_position),
+                ),
                 viewport,
             )
             .with_cursor_text_context_state(CursorTextContextState::Sampled(

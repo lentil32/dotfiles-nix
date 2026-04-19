@@ -23,16 +23,10 @@ pub(crate) struct CtermCursorColorsPatch {
     pub(crate) color_levels: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum FrameTimingPatch {
-    TimeInterval(f64),
-    Fps(f64),
-}
-
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct RuntimeSwitchesPatch {
     pub(crate) enabled: Option<bool>,
-    pub(crate) frame_timing: Option<FrameTimingPatch>,
+    pub(crate) time_interval: Option<f64>,
     pub(crate) simulation_hz: Option<f64>,
     pub(crate) max_simulation_steps_per_frame: Option<u32>,
     pub(crate) delay_event_to_smear: Option<f64>,
@@ -254,11 +248,8 @@ impl RuntimeSwitchesPatch {
         }
 
         let config = &mut state.config;
-        if let Some(frame_timing) = self.frame_timing.take() {
-            config.time_interval = match frame_timing {
-                FrameTimingPatch::TimeInterval(value) => value,
-                FrameTimingPatch::Fps(value) => RuntimeConfig::interval_ms_for_fps(value),
-            };
+        if let Some(time_interval) = self.time_interval.take() {
+            config.time_interval = time_interval;
         }
         apply_config_fields!(
             config,

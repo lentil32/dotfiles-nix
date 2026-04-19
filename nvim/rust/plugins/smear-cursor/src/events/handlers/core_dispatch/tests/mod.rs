@@ -29,16 +29,18 @@ use crate::core::state::ObservationMotion;
 use crate::core::state::PendingObservation;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
-use crate::core::types::CursorCol;
-use crate::core::types::CursorPosition;
-use crate::core::types::CursorRow;
 use crate::core::types::Lifecycle;
 use crate::core::types::Millis;
-use crate::core::types::ViewportSnapshot;
 use crate::events::runtime::core_state;
 use crate::events::runtime::set_core_state;
 use crate::mutex::lock_with_poison_recovery;
-use crate::state::CursorLocation;
+use crate::position::BufferLine;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::ScreenCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 use crate::test_support::cursor;
 use crate::test_support::sparse_probe_cells;
 use nvim_oxi::Result;
@@ -78,13 +80,23 @@ fn ready_state() -> CoreState {
     CoreState::default().with_runtime(runtime).into_primed()
 }
 
-fn observation_basis(position: Option<CursorPosition>, observed_at: u64) -> ObservationBasis {
+fn observation_basis(position: Option<ScreenCell>, observed_at: u64) -> ObservationBasis {
     ObservationBasis::new(
         Millis::new(observed_at),
         "n".to_string(),
-        position,
-        CursorLocation::new(11, 22, 3, 4),
-        ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(11, 22).expect("positive handles"),
+            BufferLine::new(3).expect("positive top buffer line"),
+            0,
+            0,
+            ScreenCell::new(1, 1).expect("one-based window origin"),
+            ViewportBounds::new(40, 120).expect("positive window size"),
+        ),
+        CursorObservation::new(
+            BufferLine::new(4).expect("positive buffer line"),
+            position.map_or(ObservedCell::Unavailable, ObservedCell::Exact),
+        ),
+        ViewportBounds::new(40, 120).expect("positive viewport bounds"),
     )
     .with_buffer_revision(Some(0))
 }
@@ -105,7 +117,7 @@ fn compatible_probe_report(request: &PendingObservation) -> CoreEvent {
     })
 }
 
-fn background_probe_report(request: &PendingObservation, _viewport: ViewportSnapshot) -> CoreEvent {
+fn background_probe_report(request: &PendingObservation, _viewport: ViewportBounds) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundReady {
         observation_id: request.observation_id(),
         reuse: ProbeReuse::Exact,
@@ -116,7 +128,7 @@ fn background_probe_report(request: &PendingObservation, _viewport: ViewportSnap
 fn background_chunk_probe_report(
     request: &PendingObservation,
     chunk: &BackgroundProbeChunk,
-    _viewport: ViewportSnapshot,
+    _viewport: ViewportBounds,
 ) -> CoreEvent {
     let allowed_mask = vec![false; chunk.len()];
     CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
@@ -196,7 +208,6 @@ fn external_cursor_demand(observed_at: u64) -> CoreEvent {
     CoreEvent::ExternalDemandQueued(ExternalDemandQueuedEvent {
         kind: ExternalDemandKind::ExternalCursor,
         observed_at: Millis::new(observed_at),
-        requested_target: None,
         buffer_perf_class: BufferPerfClass::Full,
         ingress_cursor_presentation: None,
         ingress_observation_surface: None,
@@ -232,7 +243,7 @@ fn ready_state_with_cursor_and_background_probes() -> CoreState {
 }
 
 fn install_background_probe_plan(basis: &ObservationBasis) {
-    let mut next = current_core_state().with_latest_exact_cursor_position(Some(cursor(7, 8)));
+    let mut next = current_core_state().with_latest_exact_cursor_cell(Some(cursor(7, 8)));
     let Some(active_observation) = next.observation_mut() else {
         panic!("active observation state");
     };

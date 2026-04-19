@@ -91,7 +91,7 @@ fn validate_cursor_color_probe_witness(
     {
         // Compatible reuse is intentionally line-scoped. Column drift can reuse
         // the carried sample, but a row change must request a refresh.
-        return if expected.row == current.row {
+        return if expected.row() == current.row() {
             ProbeReuse::Compatible
         } else {
             ProbeReuse::RefreshRequired
@@ -149,7 +149,7 @@ fn current_cursor_color_probe_validation(
         current_buffer_handle,
         current_text_revision,
         mode.to_owned(),
-        current_position.position,
+        current_position.screen_cell(),
         current_colorscheme_generation,
         current_cache_generation,
     );
@@ -246,11 +246,7 @@ pub(super) fn collect_cursor_color_report(
         return cursor_color_ready_event(payload, ProbeReuse::RefreshRequired, None);
     }
 
-    match sampled_cursor_color_at_current_position(
-        expected_witness.buffer_handle(),
-        expected_witness.colorscheme_generation(),
-        probe_policy,
-    ) {
+    match sampled_cursor_color_at_current_position(expected_witness.buffer_handle(), probe_policy) {
         Ok(sample) => {
             let sample: Option<CursorColorSample> = sample.map(CursorColorSample::new);
             if let Err(err) = store_cursor_color_sample(cache_witness.clone(), sample) {

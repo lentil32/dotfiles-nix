@@ -1,6 +1,7 @@
 use super::geometry::render_side_effects_for_action;
 use crate::core::state::SemanticEvent;
-use crate::state::CursorLocation;
+use crate::position::ScreenCell;
+use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
 use crate::types::RenderFrame;
 
@@ -18,7 +19,7 @@ pub(crate) struct CursorEventContext {
     pub(crate) col: f64,
     pub(crate) now_ms: f64,
     pub(crate) seed: u32,
-    pub(crate) cursor_location: CursorLocation,
+    pub(crate) tracked_cursor: TrackedCursor,
     pub(crate) scroll_shift: Option<ScrollShift>,
     pub(crate) semantic_event: SemanticEvent,
 }
@@ -35,6 +36,12 @@ pub(crate) struct ScrollShift {
 pub(crate) enum EventSource {
     External,
     AnimationTick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MotionTarget {
+    Available(ScreenCell),
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq)]

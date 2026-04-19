@@ -4,20 +4,20 @@ use super::types::CursorTarget;
 use super::types::RuntimeParticleArtifactsCache;
 use super::types::TrailState;
 use super::types::TransientRuntimeState;
+use crate::position::RenderPoint;
 use crate::types::Particle;
-use crate::types::Point;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PreparedRuntimeMotion {
     animation_phase: AnimationPhase,
-    current_corners: [Point; 4],
+    current_corners: [RenderPoint; 4],
     target: CursorTarget,
     trail: TrailState,
-    velocity_corners: [Point; 4],
-    spring_velocity_corners: [Point; 4],
+    velocity_corners: [RenderPoint; 4],
+    spring_velocity_corners: [RenderPoint; 4],
     particles: Vec<Particle>,
     particle_artifacts: RuntimeParticleArtifactsCache,
-    previous_center: Point,
+    previous_center: RenderPoint,
     rng_state: u32,
     transient: TransientRuntimeState,
 }

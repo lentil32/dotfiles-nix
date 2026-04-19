@@ -20,36 +20,36 @@ fn make_input() -> StepInput {
         head_response_ms: 110.0,
         damping_ratio: 1.0,
         current_corners: [
-            Point { row: 1.0, col: 1.0 },
-            Point { row: 1.0, col: 2.0 },
-            Point { row: 2.0, col: 2.0 },
-            Point { row: 2.0, col: 1.0 },
+            RenderPoint { row: 1.0, col: 1.0 },
+            RenderPoint { row: 1.0, col: 2.0 },
+            RenderPoint { row: 2.0, col: 2.0 },
+            RenderPoint { row: 2.0, col: 1.0 },
         ],
         trail_origin_corners: [
-            Point { row: 1.0, col: 1.0 },
-            Point { row: 1.0, col: 2.0 },
-            Point { row: 2.0, col: 2.0 },
-            Point { row: 2.0, col: 1.0 },
+            RenderPoint { row: 1.0, col: 1.0 },
+            RenderPoint { row: 1.0, col: 2.0 },
+            RenderPoint { row: 2.0, col: 2.0 },
+            RenderPoint { row: 2.0, col: 1.0 },
         ],
         target_corners: [
-            Point {
+            RenderPoint {
                 row: 1.0,
                 col: 10.0,
             },
-            Point {
+            RenderPoint {
                 row: 1.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 2.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 2.0,
                 col: 10.0,
             },
         ],
-        spring_velocity_corners: [Point::ZERO; 4],
+        spring_velocity_corners: [RenderPoint::ZERO; 4],
         trail_elapsed_ms: [0.0; 4],
         max_length: 25.0,
         max_length_insert_mode: 1.0,
@@ -58,7 +58,7 @@ fn make_input() -> StepInput {
         trail_thickness: 1.0,
         trail_thickness_x: 1.0,
         particles: Vec::new(),
-        previous_center: Point { row: 1.5, col: 1.5 },
+        previous_center: RenderPoint { row: 1.5, col: 1.5 },
         particle_damping: 0.2,
         particles_enabled: true,
         particle_gravity: 20.0,
@@ -79,18 +79,18 @@ fn make_input() -> StepInput {
     }
 }
 
-fn center_col(corners: &[Point; 4]) -> f64 {
+fn center_col(corners: &[RenderPoint; 4]) -> f64 {
     center(corners).col
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct StepTrace {
-    current_corners: [Point; 4],
-    velocity_corners: [Point; 4],
-    spring_velocity_corners: [Point; 4],
+    current_corners: [RenderPoint; 4],
+    velocity_corners: [RenderPoint; 4],
+    spring_velocity_corners: [RenderPoint; 4],
     trail_elapsed_ms: [f64; 4],
     particles: Vec<Particle>,
-    previous_center: Point,
+    previous_center: RenderPoint,
     index_head: usize,
     index_tail: usize,
     rng_state: u32,
@@ -137,8 +137,8 @@ fn cursor_shape_flags() -> BoxedStrategy<(bool, bool)> {
 
 #[derive(Clone, Copy, Debug)]
 struct PoseInputSpec {
-    start: Point,
-    target: Point,
+    start: RenderPoint,
+    target: RenderPoint,
     vertical_bar: bool,
     horizontal_bar: bool,
     damping_ratio: f64,
@@ -188,11 +188,11 @@ fn cursor_height_factor(vertical_bar: bool, horizontal_bar: bool) -> f64 {
     }
 }
 
-fn corners_height(corners: &[Point; 4]) -> f64 {
+fn corners_height(corners: &[RenderPoint; 4]) -> f64 {
     corners[3].row - corners[0].row
 }
 
-fn corners_width(corners: &[Point; 4]) -> f64 {
+fn corners_width(corners: &[RenderPoint; 4]) -> f64 {
     corners[1].col - corners[0].col
 }
 
@@ -213,11 +213,11 @@ mod simulation_step_behavior {
             head_response_ms in 45.0_f64..180.0_f64,
             block_aspect_ratio in 0.5_f64..4.0_f64,
         ) {
-            let start = Point {
+            let start = RenderPoint {
                 row: start_row as f64,
                 col: start_col as f64,
             };
-            let target = Point {
+            let target = RenderPoint {
                 row: (start_row + delta_row) as f64,
                 col: (start_col + delta_col) as f64,
             };
@@ -238,7 +238,7 @@ mod simulation_step_behavior {
             let output = simulate_step(input);
             let next_distance = center(&output.current_corners)
                 .display_distance(center(&target_corners), block_aspect_ratio);
-            let reference_offset = Point {
+            let reference_offset = RenderPoint {
                 row: output.current_corners[0].row - target_corners[0].row,
                 col: output.current_corners[0].col - target_corners[0].col,
             };
@@ -248,7 +248,7 @@ mod simulation_step_behavior {
             prop_assert!(output.index_tail < 4, "tail index out of bounds: {}", output.index_tail);
 
             for (index, corner) in output.current_corners.into_iter().enumerate() {
-                let offset = Point {
+                let offset = RenderPoint {
                     row: corner.row - target_corners[index].row,
                     col: corner.col - target_corners[index].col,
                 };
@@ -272,11 +272,11 @@ mod simulation_step_behavior {
             rng_state in any::<u32>(),
             steps in 1_usize..181_usize,
         ) {
-            let start = Point {
+            let start = RenderPoint {
                 row: start_row as f64,
                 col: start_col as f64,
             };
-            let target = Point {
+            let target = RenderPoint {
                 row: (start_row + delta_row) as f64,
                 col: (start_col + delta_col) as f64,
             };
@@ -306,11 +306,11 @@ mod simulation_step_behavior {
             damping_ratio in 1.05_f64..2.5_f64,
             head_response_ms in 45.0_f64..180.0_f64,
         ) {
-            let start = Point {
+            let start = RenderPoint {
                 row: row as f64,
                 col: start_col as f64,
             };
-            let target = Point {
+            let target = RenderPoint {
                 row: row as f64,
                 col: (start_col + travel_cols) as f64,
             };
@@ -359,11 +359,11 @@ mod simulation_step_behavior {
             damping_ratio in 0.2_f64..0.85_f64,
             head_response_ms in 45.0_f64..180.0_f64,
         ) {
-            let start = Point {
+            let start = RenderPoint {
                 row: row as f64,
                 col: start_col as f64,
             };
-            let target = Point {
+            let target = RenderPoint {
                 row: row as f64,
                 col: (start_col + travel_cols) as f64,
             };
@@ -410,8 +410,8 @@ mod simulation_step_behavior {
     #[test]
     fn overdamped_horizontal_motion_regression_stays_monotone_for_checked_in_seed() {
         let mut input = make_pose_input(PoseInputSpec {
-            start: Point { row: 2.0, col: 1.0 },
-            target: Point { row: 2.0, col: 8.0 },
+            start: RenderPoint { row: 2.0, col: 1.0 },
+            target: RenderPoint { row: 2.0, col: 8.0 },
             vertical_bar: false,
             horizontal_bar: false,
             damping_ratio: 2.49469574985472,
@@ -504,7 +504,7 @@ mod stop_threshold_logic {
                 vertical_bar,
                 horizontal_bar,
             );
-            let velocity_corners = [Point {
+            let velocity_corners = [RenderPoint {
                 row: display_velocity / block_aspect_ratio,
                 col: 0.0,
             }; 4];

@@ -12,7 +12,7 @@ fn first_cursor_demand_arms_the_ingress_timer_before_observing() {
 
     let first = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
     );
 
     let ingress_token = first
@@ -45,7 +45,7 @@ fn delayed_cursor_timer_fire_starts_the_queued_observation() {
     let ready = delayed_ready_state();
     let delayed = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
     )
     .next;
     let ingress_token = delayed
@@ -75,7 +75,7 @@ fn newer_delayed_cursor_demand_replaces_the_pending_queue_without_rearming_the_t
     let ready = delayed_ready_state();
     let first = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
     );
     let first_token = first
         .next
@@ -85,7 +85,7 @@ fn newer_delayed_cursor_demand_replaces_the_pending_queue_without_rearming_the_t
 
     let second = reduce(
         &first.next,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 21),
     );
 
     let second_token = second
@@ -101,7 +101,6 @@ fn newer_delayed_cursor_demand_replaces_the_pending_queue_without_rearming_the_t
                 IngressSeq::new(2),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(21),
-                None,
                 BufferPerfClass::Full,
             )
         ))
@@ -124,7 +123,7 @@ fn delayed_cursor_burst_updates_pending_deadline_without_stale_timer_token_churn
     let ready = delayed_ready_state();
     let first = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
     );
     let first_token = first
         .next
@@ -134,11 +133,11 @@ fn delayed_cursor_burst_updates_pending_deadline_without_stale_timer_token_churn
 
     let second = reduce(
         &first.next,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 21),
     );
     let third = reduce(
         &second.next,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 22, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 22),
     );
 
     let third_token = third
@@ -154,7 +153,6 @@ fn delayed_cursor_burst_updates_pending_deadline_without_stale_timer_token_churn
                 IngressSeq::new(3),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(22),
-                None,
                 BufferPerfClass::Full,
             )
         ))
@@ -196,11 +194,11 @@ fn early_delayed_cursor_timer_fire_rearms_once_for_the_remaining_deadline() {
     let ready = delayed_ready_state();
     let first = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
     );
     let delayed = reduce(
         &first.next,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 21),
     );
     let first_token = delayed
         .next
@@ -241,7 +239,7 @@ fn starting_observation_clears_the_pending_delayed_cursor_deadline() {
     let ready = delayed_ready_state();
     let delayed = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
     )
     .next;
     let ingress_token = delayed

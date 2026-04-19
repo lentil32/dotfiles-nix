@@ -10,8 +10,8 @@ use super::types::TrailState;
 use super::types::TransientRuntimeState;
 use crate::config::RuntimeConfig;
 use crate::core::types::ConfigRevision;
+use crate::position::RenderPoint;
 use crate::types::Particle;
-use crate::types::Point;
 
 // Single-preview copy of authoritative runtime inputs. Keeping this baseline local
 // to `RuntimePreview` avoids adding retained preview fields to `RuntimeState`.
@@ -22,12 +22,12 @@ struct RuntimePreviewBaseline {
     projection_policy: ProjectionPolicySnapshot,
     plugin_state: PluginState,
     animation_phase: AnimationPhase,
-    current_corners: [Point; 4],
+    current_corners: [RenderPoint; 4],
     target: CursorTarget,
     trail: TrailState,
-    velocity_corners: [Point; 4],
-    spring_velocity_corners: [Point; 4],
-    previous_center: Point,
+    velocity_corners: [RenderPoint; 4],
+    spring_velocity_corners: [RenderPoint; 4],
+    previous_center: RenderPoint,
     rng_state: u32,
     transient: TransientRuntimeState,
 }

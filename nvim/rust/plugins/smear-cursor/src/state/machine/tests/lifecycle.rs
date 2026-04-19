@@ -37,7 +37,7 @@ fn start_animation_towards_target_seeds_velocity_and_enters_animating_phase() {
     let mut state = RuntimeState::default();
     state.config.anticipation = 0.42;
     state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &location(1, 2, 3, 4));
-    state.set_target(point(8.0, 9.0), default_shape());
+    replace_target_preserving_tracking(&mut state, point(8.0, 9.0), default_shape());
 
     let expected_velocity = initial_velocity(
         &state.current_corners(),
@@ -109,8 +109,13 @@ fn start_tail_drain_transitions_follow_requested_step_count() {
 #[test]
 fn reset_transient_state_restores_default_transient_fields() {
     let mut state = RuntimeState::default();
-    state.set_target(point(4.0, 9.0), default_shape());
-    state.update_tracking(&location(11, 22, 33, 44));
+    replace_target_preserving_tracking(&mut state, point(4.0, 9.0), default_shape());
+    replace_target_with_tracking(
+        &mut state,
+        point(4.0, 9.0),
+        default_shape(),
+        &location(11, 22, 33, 44),
+    );
     state.set_color_at_cursor(Some(0x00FF_FFFF));
     state.start_animation();
     state.set_last_tick_ms(Some(99.0));

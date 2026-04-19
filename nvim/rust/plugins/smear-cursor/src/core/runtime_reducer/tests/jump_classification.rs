@@ -179,7 +179,7 @@ fn replace_mode_horizontal_bar_retargets_stay_continuous_for_same_row_motion() {
     assert!(state.is_animating());
     assert_eq!(
         state.target_position(),
-        Point {
+        RenderPoint {
             row: 5.0,
             col: 10.0
         }
@@ -223,7 +223,7 @@ fn scaled_head_retargets_use_the_live_visual_anchor() {
     assert!(state.is_animating());
     assert_eq!(
         state.target_position(),
-        Point {
+        RenderPoint {
             row: 5.0,
             col: 10.0
         }

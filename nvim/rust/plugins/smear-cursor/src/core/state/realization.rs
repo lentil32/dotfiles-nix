@@ -580,8 +580,6 @@ mod tests {
     use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
     use crate::core::state::ScenePatchKind;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::Millis;
     use crate::core::types::ObservationId;
@@ -589,8 +587,8 @@ mod tests {
     use crate::core::types::ProjectorRevision;
     use crate::core::types::ProposalId;
     use crate::core::types::RenderRevision;
-    use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::CellOp;
+    use crate::position::ViewportBounds;
     use crate::test_support::proptest::pure_config;
     use crate::types::CursorCellShape;
     use proptest::prelude::*;
@@ -607,7 +605,7 @@ mod tests {
             ProjectionWitness::new(
                 RenderRevision::INITIAL,
                 ObservationId::from_ingress_seq(IngressSeq::new(ingress_seq)),
-                ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
+                ViewportBounds::new(20, 40).expect("positive viewport bounds"),
                 ProjectorRevision::CURRENT,
             ),
             ProjectionReuseKey::new(
@@ -658,11 +656,11 @@ mod tests {
         RealizationDraw::new(
             crate::core::realization::PaletteSpec::from_frame(&crate::types::RenderFrame {
                 mode: crate::types::ModeClass::NormalLike,
-                corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
+                corners: [crate::position::RenderPoint { row: 1.0, col: 1.0 }; 4],
                 step_samples: Vec::new().into(),
                 planner_idle_steps: 0,
-                target: crate::types::Point { row: 1.0, col: 1.0 },
-                target_corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
+                target: crate::position::RenderPoint { row: 1.0, col: 1.0 },
+                target_corners: [crate::position::RenderPoint { row: 1.0, col: 1.0 }; 4],
                 vertical_bar: false,
                 trail_stroke_id: crate::core::types::StrokeId::new(1),
                 retarget_epoch: 1,

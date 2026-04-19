@@ -40,7 +40,9 @@ mod state_ownership_doc_sync {
             "`RealizationLedger::debug_assert_invariants()`",
             "`ProtocolState::debug_assert_invariants()`",
             "`CoreState::debug_assert_invariants()`",
-            "`apply_runtime_options()` normalizes the user-facing `fps` alias into `RuntimeConfig.time_interval`",
+            "runtime target cell and retarget-surface facts must stay derived from the retained target position and tracked cursor",
+            "exact observation samples must refresh `latest_exact_cursor_cell`, while deferred and unavailable samples preserve the retained exact-anchor cache",
+            "`apply_runtime_options()` validates and normalizes `time_interval` before `RuntimeState.config` is mutated, so frame timing has one accepted boundary key and one retained owner.",
             "`RenderCleanupState::scheduled()` clamps cleanup delays before the scheduler stores them in `ProtocolSharedState.render_cleanup`.",
             "`TimerState::{arm, active_token, clear_matching}` keep timer generation and armed/disarmed ownership in one reducer slot per timer id; stale tokens are rejected instead of becoming a second owner.",
             "`CoreState::{enter_observing_request, activate_observation, replace_active_observation_with_pending, enter_ready, complete_active_observation, restore_retained_observation_to_ready, enter_planning, enter_applying, take_pending_proposal, restore_retained_observation}` are the protocol construction boundaries that reject cross-phase observation or proposal payload injection instead of persisting an invalid workflow shape.",
@@ -60,8 +62,9 @@ mod state_ownership_doc_sync {
     fn lists_current_runtime_and_protocol_single_owner_facts() {
         let doc = normalized_state_ownership_doc();
         let expected_fragments = [
-            "`RuntimeState.config` owns user-configured motion behavior, including render-cleanup retention policy such as `max_kept_windows`. Frame timing is stored canonically as `time_interval`; `fps` remains only a boundary alias that normalizes into that field.",
+            "`RuntimeState.config` owns user-configured motion behavior, including render-cleanup retention policy such as `max_kept_windows`. Frame timing is stored canonically as `time_interval`, which is also the only accepted runtime option key for that fact.",
             "`RuntimeState.config_revision` is the only freshness owner for config-derived runtime views. `DerivedConfigCache` intentionally stores no mirror revision.",
+            "`RuntimeState.target` owns target `position`, discrete `cell`, `shape`, `retarget_surface`, `tracked_cursor`, and `retarget_epoch`. `CursorTarget::retarget_key()` derives the reviewable equality surface, and target corners are derived on demand by `CursorTarget::corners()` instead of being stored separately.",
             "`ProtocolSharedState.timers` owns timer-slot generations and armed/disarmed lifecycle state. `TimerToken`s are derived views of the currently armed slots, not a second stored owner.",
             "`ProtocolSharedState.render_cleanup` owns cleanup thermal phase and deadlines only through `RenderCleanupState::{Hot, Cooling, Cold}`. Retention budgets are derived from the current runtime config instead of being copied into scheduler state.",
             "`ProtocolState.phase` is the only workflow owner. There is no separate workflow/slot matrix.",
@@ -83,7 +86,8 @@ mod state_ownership_doc_sync {
             "`ProjectionHandle` shares one immutable `RetainedProjection` between projection cache and realization ledger instead of cloning snapshot payloads. Cross-module consumers project it through explicit views such as `semantic_view()` or `shell_projection()` rather than generic deref access.",
             "`RealizationLedger::Consistent.acknowledged` owns the shell-trusted projection handle.",
             "`ShellState.probe_cache` owns purgeable cursor-color, cursor-text-context, conceal-region, conceal-delta, and conceal-screen-cell reuse keyed by external witnesses such as `CursorColorProbeWitness`, buffer-local text revisions, and window state.",
-            "`ShellState.editor_viewport_cache` retains the last live `EditorViewport` read from Neovim.",
+            "`ShellState.editor_viewport_cache` retains the last live `EditorViewportSnapshot` read from Neovim.",
+            "`EditorViewportSnapshot` is also the canonical shell-side owner of command-row math and `ViewportBounds` projection through `command_row()` and `bounds()`.",
             "`ShellState.buffer_perf_telemetry_cache` records callback EWMA and probe-pressure signals used to explain or derive future buffer performance policy.",
         ];
 
@@ -106,6 +110,49 @@ mod state_ownership_doc_sync {
 
         assert_eq!(
             present_forbidden_fragments(&doc, &forbidden_fragments),
+            Vec::<&str>::new()
+        );
+    }
+}
+
+#[cfg(test)]
+mod testing_taxonomy_doc_sync {
+    use pretty_assertions::assert_eq;
+
+    const TESTING_TAXONOMY_DOC: &str =
+        include_str!("../../../docs/smear-cursor-testing-taxonomy.md");
+
+    fn normalized_testing_taxonomy_doc() -> String {
+        TESTING_TAXONOMY_DOC
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn missing_fragments<'a>(doc: &str, expected_fragments: &'a [&'a str]) -> Vec<&'a str> {
+        expected_fragments
+            .iter()
+            .copied()
+            .filter(|fragment| !doc.contains(fragment))
+            .collect()
+    }
+
+    #[test]
+    fn lists_current_position_refactor_test_owners() {
+        let doc = normalized_testing_taxonomy_doc();
+        let expected_fragments = [
+            "`src/position/tests.rs` owns shared position primitives such as `ScreenCell`, `ViewportBounds`, `RenderPoint`, and `ObservedCell`, including positivity, one-based indexing, and canonical conversions.",
+            "`src/events/runtime/editor_viewport.rs` owns the single command-row formula and `ViewportBounds` projection for shell-side viewport reads.",
+            "`src/events/surface.rs` owns `getwininfo` parsing and invalid-host-data rejection for `WindowSurfaceSnapshot`.",
+            "`src/core/state/observation/tests/` together with `src/core/reducer/tests/observation_base_collection.rs` own exact, deferred, and unavailable cursor-sample behavior, including exact-anchor retention.",
+            "`src/events/probe_cache/tests/` owns probe-witness reuse and invalidation boundaries for conceal and text-context facts that now depend on the shared surface and cursor vocabulary.",
+            "`src/state/machine/types.rs` owns `CursorTarget` retarget-key composition and the `retarget_epoch` bump/no-bump rules for cell, shape, and retarget-surface changes.",
+            "`src/core/runtime_reducer/tests/retargeting_while_animating.rs`, `viewport_scroll_translation.rs`, and `window_resize_reflow.rs` keep boundary smokes for animated retarget application, scroll-translation stability, resize classification, and render-facing `retarget_epoch` propagation.",
+            "Snapshot tests stay limited to user-visible trace or diagnostic output when renamed runtime fields reshape formatted output.",
+        ];
+
+        assert_eq!(
+            missing_fragments(&doc, &expected_fragments),
             Vec::<&str>::new()
         );
     }

@@ -1,13 +1,15 @@
 use super::EventSource;
 use super::select_core_event_source;
+use crate::core::runtime_reducer::MotionTarget;
 use crate::core::state::SemanticEvent;
-use crate::state::CursorLocation;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
-use crate::types::Point;
+use crate::state::TrackedCursor;
 
-fn location(window_handle: i64, buffer_handle: i64) -> CursorLocation {
-    CursorLocation::new(window_handle, buffer_handle, 1, 1)
+fn location(window_handle: i64, buffer_handle: i64) -> TrackedCursor {
+    TrackedCursor::fixture(window_handle, buffer_handle, 1, 1)
 }
 
 #[test]
@@ -15,8 +17,8 @@ fn cmdline_mode_always_routes_to_external_source() {
     let mut state = RuntimeState::default();
     let tracked = location(10, 20);
     state.initialize_cursor(
-        Point { row: 5.0, col: 6.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 5.0, col: 6.0 },
+        CursorShape::block(),
         7,
         &tracked,
     );
@@ -26,10 +28,7 @@ fn cmdline_mode_always_routes_to_external_source() {
         "c",
         &state,
         SemanticEvent::FrameCommitted,
-        Some(Point {
-            row: 5.0,
-            col: 12.0,
-        }),
+        MotionTarget::Available(ScreenCell::new(5, 12).expect("positive motion target")),
         &tracked,
     );
     assert_eq!(source, EventSource::External);

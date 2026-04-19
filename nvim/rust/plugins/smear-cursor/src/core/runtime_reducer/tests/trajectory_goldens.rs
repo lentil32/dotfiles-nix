@@ -170,7 +170,7 @@ fn horizontal_scroll_while_animating() {
                 col: 18.0,
                 now_ms: 100.0,
                 seed: 71,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_viewport_columns(2, 0),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12).with_viewport_columns(2, 0),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -182,7 +182,7 @@ fn horizontal_scroll_while_animating() {
                 col: 24.0,
                 now_ms: 108.0,
                 seed: 72,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_viewport_columns(2, 0),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12).with_viewport_columns(2, 0),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -194,7 +194,7 @@ fn horizontal_scroll_while_animating() {
                 col: 24.0,
                 now_ms: 116.0,
                 seed: 73,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_viewport_columns(2, 0),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12).with_viewport_columns(2, 0),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -206,7 +206,7 @@ fn horizontal_scroll_while_animating() {
                 col: 21.0,
                 now_ms: 124.0,
                 seed: 74,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_viewport_columns(5, 0),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12).with_viewport_columns(5, 0),
                 scroll_shift: Some(ScrollShift {
                     row_shift: 0.0,
                     col_shift: 3.0,
@@ -223,7 +223,7 @@ fn horizontal_scroll_while_animating() {
                 col: 21.0,
                 now_ms: 132.0,
                 seed: 75,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_viewport_columns(5, 0),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12).with_viewport_columns(5, 0),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -252,7 +252,7 @@ fn window_origin_shift_while_animating() {
                 col: 18.0,
                 now_ms: 100.0,
                 seed: 81,
-                cursor_location: CursorLocation::new(10, 20, 4, 12)
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
                     .with_viewport_columns(2, 0)
                     .with_window_origin(3, 4),
                 scroll_shift: None,
@@ -266,7 +266,7 @@ fn window_origin_shift_while_animating() {
                 col: 24.0,
                 now_ms: 108.0,
                 seed: 82,
-                cursor_location: CursorLocation::new(10, 20, 4, 12)
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
                     .with_viewport_columns(2, 0)
                     .with_window_origin(3, 4),
                 scroll_shift: None,
@@ -280,7 +280,7 @@ fn window_origin_shift_while_animating() {
                 col: 24.0,
                 now_ms: 116.0,
                 seed: 83,
-                cursor_location: CursorLocation::new(10, 20, 4, 12)
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
                     .with_viewport_columns(2, 0)
                     .with_window_origin(3, 4),
                 scroll_shift: None,
@@ -294,7 +294,7 @@ fn window_origin_shift_while_animating() {
                 col: 27.0,
                 now_ms: 124.0,
                 seed: 84,
-                cursor_location: CursorLocation::new(10, 20, 4, 12)
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
                     .with_viewport_columns(2, 0)
                     .with_window_origin(5, 7),
                 scroll_shift: Some(ScrollShift {
@@ -313,7 +313,7 @@ fn window_origin_shift_while_animating() {
                 col: 27.0,
                 now_ms: 132.0,
                 seed: 85,
-                cursor_location: CursorLocation::new(10, 20, 4, 12)
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
                     .with_viewport_columns(2, 0)
                     .with_window_origin(5, 7),
                 scroll_shift: None,
@@ -344,7 +344,8 @@ fn window_resize_while_animating() {
                 col: 18.0,
                 now_ms: 100.0,
                 seed: 91,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_window_dimensions(80, 24),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
+                    .with_window_dimensions(80, 24),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -356,7 +357,8 @@ fn window_resize_while_animating() {
                 col: 24.0,
                 now_ms: 108.0,
                 seed: 92,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_window_dimensions(80, 24),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
+                    .with_window_dimensions(80, 24),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -368,7 +370,8 @@ fn window_resize_while_animating() {
                 col: 24.0,
                 now_ms: 116.0,
                 seed: 93,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_window_dimensions(80, 24),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
+                    .with_window_dimensions(80, 24),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -380,7 +383,8 @@ fn window_resize_while_animating() {
                 col: 24.0,
                 now_ms: 124.0,
                 seed: 94,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_window_dimensions(72, 24),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
+                    .with_window_dimensions(72, 24),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::ViewportOrWindowMoved,
             },
@@ -392,7 +396,8 @@ fn window_resize_while_animating() {
                 col: 24.0,
                 now_ms: 132.0,
                 seed: 95,
-                cursor_location: CursorLocation::new(10, 20, 4, 12).with_window_dimensions(72, 24),
+                tracked_cursor: TrackedCursor::fixture(10, 20, 4, 12)
+                    .with_window_dimensions(72, 24),
                 scroll_shift: None,
                 semantic_event: SemanticEvent::FrameCommitted,
             },
@@ -419,7 +424,7 @@ fn scroll_retarget_keeps_target_in_post_scroll_screen_coordinates() {
         RenderActionSummary::Draw(frame) => Some(frame.target),
         RenderActionSummary::ClearAll | RenderActionSummary::Noop => None,
     };
-    let expected_target = PointSummary::from_point(Point {
+    let expected_target = PointSummary::from_point(RenderPoint {
         row: 24.0,
         col: 12.0,
     });

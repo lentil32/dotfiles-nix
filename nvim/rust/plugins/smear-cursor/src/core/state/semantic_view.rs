@@ -14,11 +14,11 @@ use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderSideEffects;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::ProjectionSemanticView;
-use crate::core::types::CursorPosition;
 use crate::core::types::Generation;
 use crate::core::types::MotionRevision;
 use crate::core::types::ProposalId;
 use crate::core::types::SemanticRevision;
+use crate::position::ScreenCell;
 use crate::state::RuntimeSemanticView;
 
 // Cache-free projection of projection-owned reducer state. Equality intentionally
@@ -92,7 +92,7 @@ pub(crate) struct CoreStateSemanticView<'a> {
     pending_plan_proposal_id: Option<ProposalId>,
     pending_proposal: Option<InFlightProposalSemanticView<'a>>,
     entropy: super::EntropyState,
-    latest_exact_cursor_position: Option<CursorPosition>,
+    latest_exact_cursor_cell: Option<ScreenCell>,
     runtime: RuntimeSemanticView<'a>,
     scene: SceneSemanticView<'a>,
     realization: RealizationLedgerSemanticView<'a>,
@@ -159,7 +159,7 @@ impl CoreState {
             pending_plan_proposal_id: self.pending_plan_proposal_id(),
             pending_proposal: self.pending_proposal().map(InFlightProposal::semantic_view),
             entropy: self.entropy(),
-            latest_exact_cursor_position: self.latest_exact_cursor_position(),
+            latest_exact_cursor_cell: self.latest_exact_cursor_cell(),
             runtime: self.runtime().semantic_view(),
             scene: SceneSemanticView {
                 semantic_revision: self.semantic_state().revision(),
@@ -202,21 +202,24 @@ mod tests {
     use crate::core::state::ProjectionWitness;
     use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorPosition;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::Millis;
     use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::ProposalId;
     use crate::core::types::RenderRevision;
-    use crate::core::types::ViewportSnapshot;
-    use crate::state::CursorLocation;
+    use crate::position::BufferLine;
+    use crate::position::CursorObservation;
+    use crate::position::ObservedCell;
+    use crate::position::RenderPoint;
+    use crate::position::ScreenCell;
+    use crate::position::SurfaceId;
+    use crate::position::ViewportBounds;
+    use crate::position::WindowSurfaceSnapshot;
     use crate::state::CursorShape;
     use crate::state::RuntimeState;
+    use crate::state::TrackedCursor;
     use crate::types::Particle;
-    use crate::types::Point;
     use crate::types::StepOutput;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
@@ -226,7 +229,7 @@ mod tests {
             ProjectionWitness::new(
                 RenderRevision::INITIAL,
                 crate::core::types::ObservationId::from_ingress_seq(IngressSeq::new(7)),
-                ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
+                ViewportBounds::new(20, 40).expect("positive viewport bounds"),
                 ProjectorRevision::CURRENT,
             ),
             ProjectionReuseKey::new(
@@ -245,10 +248,10 @@ mod tests {
     fn particle_runtime() -> RuntimeState {
         let mut runtime = RuntimeState::default();
         runtime.config.particles_over_text = false;
-        let tracked_location = CursorLocation::new(10, 20, 1, 1);
-        let shape = CursorShape::new(false, false);
-        let position = Point { row: 3.0, col: 4.0 };
-        runtime.initialize_cursor(position, shape, 7, &tracked_location);
+        let tracked_cursor = TrackedCursor::fixture(10, 20, 1, 1);
+        let shape = CursorShape::block();
+        let position = RenderPoint { row: 3.0, col: 4.0 };
+        runtime.initialize_cursor(position, shape, 7, &tracked_cursor);
         runtime.apply_step_output(StepOutput {
             current_corners: runtime.current_corners(),
             velocity_corners: runtime.velocity_corners(),
@@ -256,7 +259,7 @@ mod tests {
             trail_elapsed_ms: runtime.trail_elapsed_ms(),
             particles: vec![Particle {
                 position,
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime: 1.0,
             }],
             previous_center: runtime.previous_center(),
@@ -273,7 +276,6 @@ mod tests {
                 IngressSeq::new(seq),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(10),
-                None,
                 BufferPerfClass::Full,
             ),
             ProbeRequestSet::default(),
@@ -287,12 +289,19 @@ mod tests {
             ObservationBasis::new(
                 Millis::new(11),
                 "n".to_string(),
-                Some(CursorPosition {
-                    row: CursorRow(4),
-                    col: CursorCol(5),
-                }),
-                CursorLocation::new(1, 1, 1, 1),
-                ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
+                WindowSurfaceSnapshot::new(
+                    SurfaceId::new(1, 1).expect("positive handles"),
+                    BufferLine::new(1).expect("positive top buffer line"),
+                    0,
+                    0,
+                    ScreenCell::new(1, 1).expect("one-based window origin"),
+                    ViewportBounds::new(20, 40).expect("positive window size"),
+                ),
+                CursorObservation::new(
+                    BufferLine::new(1).expect("positive buffer line"),
+                    ObservedCell::Exact(ScreenCell::new(4, 5).expect("positive cursor position")),
+                ),
+                ViewportBounds::new(20, 40).expect("positive viewport bounds"),
             ),
             ObservationMotion::default(),
         )

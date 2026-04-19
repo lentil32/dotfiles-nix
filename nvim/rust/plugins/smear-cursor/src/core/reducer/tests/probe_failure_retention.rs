@@ -10,7 +10,6 @@ fn failed_probe_report_is_retained_without_collapsing_to_missing() {
         Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(25),
-            requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
             ingress_observation_surface: None,

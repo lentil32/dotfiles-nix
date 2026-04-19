@@ -8,7 +8,7 @@ fn diagonal_centerline(origin_row: i64, origin_col: i64, len: usize) -> Vec<Cent
         .map(|offset| {
             let offset = i64::try_from(offset).expect("centerline length fits in i64");
             CenterSample {
-                pos: Point {
+                pos: RenderPoint {
                     row: (origin_row + offset) as f64 + 0.5,
                     col: (origin_col + offset) as f64 + 0.5,
                 },
@@ -324,7 +324,7 @@ proptest! {
         let frame = with_trail_thickness(&with_block_aspect_ratio(&base_frame(), 1.0), 4.0);
         let centerline = vec![
             CenterSample {
-                pos: Point {
+                pos: RenderPoint {
                     row: origin_row as f64 + 3.5,
                     col: origin_col as f64 + 1.0,
                 },
@@ -332,7 +332,7 @@ proptest! {
                 tangent_col: 1.0,
             },
             CenterSample {
-                pos: Point {
+                pos: RenderPoint {
                     row: origin_row as f64 + 3.5,
                     col: origin_col as f64 + 2.0,
                 },

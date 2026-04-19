@@ -8,6 +8,7 @@ use crate::core::realization::project_particle_overlay_cells;
 use crate::core::realization::project_render_plan;
 use crate::core::runtime_reducer::CursorEventContext;
 use crate::core::runtime_reducer::EventSource;
+use crate::core::runtime_reducer::MotionTarget;
 use crate::core::runtime_reducer::RenderAction;
 use crate::core::runtime_reducer::RenderDecision;
 use crate::core::runtime_reducer::TargetCellPresentation;
@@ -45,12 +46,13 @@ use crate::core::types::ProjectionPolicyRevision;
 use crate::core::types::ProjectorRevision;
 use crate::core::types::ProposalId;
 use crate::core::types::RenderRevision;
-use crate::core::types::ViewportSnapshot;
 use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
-use crate::draw::render_plan::Viewport;
 use crate::draw::render_plan::{self};
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
+use crate::position::ViewportBounds;
+use crate::state::TrackedCursor;
 use crate::types::DEFAULT_RNG_STATE;
-use crate::types::Point;
 use crate::types::RenderFrame;
 use std::cell::OnceCell;
 #[cfg(test)]
@@ -61,13 +63,6 @@ use std::hash::Hasher;
 
 #[cfg(test)]
 use crate::core::state::SemanticEntityId;
-
-fn point_from_cursor_position(position: crate::core::types::CursorPosition) -> Point {
-    Point {
-        row: f64::from(position.row.0),
-        col: f64::from(position.col.0),
-    }
-}
 
 struct PlannedRuntimeTransition {
     transition: crate::core::runtime_reducer::CursorTransition,
@@ -80,13 +75,6 @@ fn deterministic_event_seed(observation: &ObservationSnapshot) -> u32 {
     if mixed == 0 { DEFAULT_RNG_STATE } else { mixed }
 }
 
-fn projection_viewport(viewport: ViewportSnapshot) -> Viewport {
-    Viewport {
-        max_row: i64::from(viewport.max_row.value()),
-        max_col: i64::from(viewport.max_col.value()),
-    }
-}
-
 fn render_planning_observation(observation: &ObservationSnapshot) -> RenderPlanningObservation {
     RenderPlanningObservation::new(
         observation.observation_id(),
@@ -97,7 +85,7 @@ fn render_planning_observation(observation: &ObservationSnapshot) -> RenderPlann
 
 fn retained_projection_for_reuse(
     scene: &SceneState,
-    viewport: ViewportSnapshot,
+    viewport: ViewportBounds,
     projection_policy_revision: ProjectionPolicyRevision,
 ) -> Option<&RetainedProjection> {
     let retained_projection = scene.retained_projection()?;
@@ -246,8 +234,8 @@ fn frame_requires_background_probe(frame: &RenderFrame) -> bool {
 struct PreparedProjection<'a> {
     render_revision: RenderRevision,
     observation_id: ObservationId,
-    viewport_snapshot: ViewportSnapshot,
-    viewport: Viewport,
+    viewport_snapshot: ViewportBounds,
+    viewport: ViewportBounds,
     frame: RenderFrame,
     trail_signature: OnceCell<Option<u64>>,
     particle_overlay_signature: OnceCell<Option<u64>>,
@@ -316,7 +304,7 @@ fn prepare_projection<'a>(
         render_revision,
         observation_id: observation.observation_id(),
         viewport_snapshot: observation.viewport(),
-        viewport: projection_viewport(observation.viewport()),
+        viewport: observation.viewport(),
         frame,
         trail_signature: OnceCell::new(),
         particle_overlay_signature: OnceCell::new(),
@@ -605,7 +593,7 @@ fn realization_plan_for_render_decision(
 
 fn plan_runtime_transition_for_runtime(
     runtime: &mut crate::state::RuntimeState,
-    latest_exact_cursor_position: Option<crate::core::types::CursorPosition>,
+    latest_exact_cursor_cell: Option<ScreenCell>,
     previous_observation: Option<&ObservationSnapshot>,
     observation: &ObservationSnapshot,
     observed_at: Millis,
@@ -613,25 +601,28 @@ fn plan_runtime_transition_for_runtime(
     runtime.set_color_at_cursor(observation.cursor_color());
 
     let mode = observation.basis().mode();
-    let cursor_location = observation.basis().cursor_location();
-    let requested_target = latest_exact_cursor_position.map(point_from_cursor_position);
-    let observed_target = observation
-        .basis()
-        .cursor_position()
-        .map(point_from_cursor_position);
+    let surface = observation.basis().surface();
+    let cursor = observation.basis().cursor();
+    let tracked_cursor = TrackedCursor::new(surface, cursor.buffer_line());
+    let motion_target = match observation.basis().cursor().cell() {
+        crate::position::ObservedCell::Exact(cell) => MotionTarget::Available(cell),
+        crate::position::ObservedCell::Deferred(cell) => MotionTarget::Available(cell),
+        crate::position::ObservedCell::Unavailable => {
+            latest_exact_cursor_cell.map_or(MotionTarget::Unavailable, MotionTarget::Available)
+        }
+    };
     let fallback_target = runtime.target_position();
     // The exact cursor slot is a boundary-refresh anchor and fallback, not the primary motion
     // target. When an observation carries a newer cursor sample whose exactness is deferred
     // (for example while conceal correction is still pending), motion must follow that observed
     // position or repeated hjkl ingress appears frozen at the stale exact anchor.
-    let motion_target = observed_target.or(requested_target);
     let semantic_event = classify_semantic_event(previous_observation, observation);
     let source = select_event_source(
         mode,
         runtime,
         semantic_event,
         motion_target,
-        &cursor_location,
+        &tracked_cursor,
     );
     let event_now_ms = match source {
         EventSource::External => observation.basis().observed_at().value() as f64,
@@ -642,14 +633,17 @@ fn plan_runtime_transition_for_runtime(
             observed_at.value() as f64
         }
     };
-    let event_target = motion_target.unwrap_or(fallback_target);
+    let event_target = match motion_target {
+        MotionTarget::Available(target_cell) => RenderPoint::from(target_cell),
+        MotionTarget::Unavailable => fallback_target,
+    };
 
     let event = CursorEventContext {
         row: event_target.row,
         col: event_target.col,
         now_ms: event_now_ms,
         seed: deterministic_event_seed(observation),
-        cursor_location,
+        tracked_cursor,
         scroll_shift: observation.scroll_shift(),
         semantic_event,
     };
@@ -665,7 +659,7 @@ fn plan_runtime_transition_for_runtime(
 
 fn prepare_observation_plan_with_runtime(
     mut runtime: crate::state::RuntimeState,
-    latest_exact_cursor_position: Option<crate::core::types::CursorPosition>,
+    latest_exact_cursor_cell: Option<ScreenCell>,
     previous_observation: Option<&ObservationSnapshot>,
     observation: &ObservationSnapshot,
     observed_at: Millis,
@@ -673,7 +667,7 @@ fn prepare_observation_plan_with_runtime(
     let mut preview_runtime = crate::state::RuntimePreview::new(&mut runtime);
     let planned_transition = plan_runtime_transition_for_runtime(
         preview_runtime.runtime_mut(),
-        latest_exact_cursor_position,
+        latest_exact_cursor_cell,
         previous_observation,
         observation,
         observed_at,
@@ -699,7 +693,7 @@ pub(super) fn prepare_observation_plan(
 ) -> (CoreState, PreparedObservationPlan) {
     let (runtime, prepared_plan) = prepare_observation_plan_with_runtime(
         state.take_runtime(),
-        state.latest_exact_cursor_position(),
+        state.latest_exact_cursor_cell(),
         previous_observation,
         observation,
         observed_at,
@@ -709,7 +703,7 @@ pub(super) fn prepare_observation_plan(
 
 pub(super) fn background_probe_plan(
     prepared_plan: &PreparedObservationPlan,
-    viewport: ViewportSnapshot,
+    viewport: ViewportBounds,
 ) -> Option<BackgroundProbePlan> {
     match &prepared_plan.transition().render_decision.render_action {
         RenderAction::Draw(frame) => Some(BackgroundProbePlan::from_render_frame(
@@ -785,14 +779,14 @@ pub(super) fn plan_ready_state(
     previous_observation: Option<&ObservationSnapshot>,
     observed_at: Millis,
 ) -> Transition {
-    let latest_exact_cursor_position = state.latest_exact_cursor_position();
+    let latest_exact_cursor_cell = state.latest_exact_cursor_cell();
     let planned_transition = {
         let Some((runtime, observation)) = state.runtime_mut_with_observation() else {
             return Transition::stay_owned(state);
         };
         plan_runtime_transition_for_runtime(
             runtime,
-            latest_exact_cursor_position,
+            latest_exact_cursor_cell,
             previous_observation,
             observation,
             observed_at,
@@ -906,7 +900,6 @@ mod tests {
     use crate::core::state::BackgroundProbeChunkMask;
     use crate::core::state::BackgroundProbePlan;
     use crate::core::state::BufferPerfClass;
-    use crate::core::state::CursorPositionSync;
     use crate::core::state::CursorTrailSemantic;
     use crate::core::state::ExternalDemand;
     use crate::core::state::ExternalDemandKind;
@@ -926,9 +919,6 @@ mod tests {
     use crate::core::state::ScenePatchKind;
     use crate::core::state::SceneState;
     use crate::core::state::SemanticEntityId;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorPosition;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::Millis;
     use crate::core::types::MotionRevision;
@@ -937,40 +927,70 @@ mod tests {
     use crate::core::types::RenderRevision;
     use crate::core::types::SemanticRevision;
     use crate::core::types::StrokeId;
-    use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
-    use crate::state::CursorLocation;
+    use crate::position::CursorObservation;
+    use crate::position::ObservedCell;
+    use crate::position::RenderPoint;
+    use crate::position::ScreenCell;
+    use crate::position::ViewportBounds;
     use crate::state::CursorShape;
     use crate::state::RuntimeState;
+    use crate::state::TrackedCursor;
     use crate::test_support::proptest::pure_config;
     use crate::types::CursorCellShape;
     use crate::types::ModeClass;
     use crate::types::Particle;
-    use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
-    use crate::types::ScreenCell;
     use crate::types::StaticRenderConfig;
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
+    fn screen_cell(row: i64, col: i64) -> ScreenCell {
+        ScreenCell::new(row, col).expect("positive cursor position")
+    }
+
+    fn viewport_bounds(max_row: i64, max_col: i64) -> ViewportBounds {
+        ViewportBounds::new(max_row, max_col).expect("positive viewport bounds")
+    }
+
+    fn observation_basis(
+        seq: u64,
+        observed_cell: ObservedCell,
+        location: TrackedCursor,
+    ) -> ObservationBasis {
+        ObservationBasis::new(
+            Millis::new(seq),
+            "n".to_string(),
+            location.surface(),
+            CursorObservation::new(location.buffer_line(), observed_cell),
+            viewport_bounds(40, 120),
+        )
+    }
+
+    fn valid_surface_location() -> TrackedCursor {
+        TrackedCursor::fixture(1, 1, 1, 1)
+            .with_window_origin(1, 1)
+            .with_window_dimensions(120, 40)
+    }
+
     fn base_frame() -> RenderFrame {
         let corners = [
-            Point {
+            RenderPoint {
                 row: 12.0,
                 col: 10.0,
             },
-            Point {
+            RenderPoint {
                 row: 12.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 13.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 13.0,
                 col: 10.0,
             },
@@ -980,24 +1000,24 @@ mod tests {
             corners,
             step_samples: vec![RenderStepSample::new(corners, 1.0)].into(),
             planner_idle_steps: 0,
-            target: Point {
+            target: RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
             target_corners: [
-                Point {
+                RenderPoint {
                     row: 10.0,
                     col: 10.0,
                 },
-                Point {
+                RenderPoint {
                     row: 10.0,
                     col: 11.0,
                 },
-                Point {
+                RenderPoint {
                     row: 11.0,
                     col: 11.0,
                 },
-                Point {
+                RenderPoint {
                     row: 11.0,
                     col: 10.0,
                 },
@@ -1055,20 +1075,14 @@ mod tests {
                 IngressSeq::new(seq),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(seq),
-                None,
                 BufferPerfClass::Full,
             ),
             ProbeRequestSet::default(),
         );
-        let basis = ObservationBasis::new(
-            Millis::new(seq),
-            "n".to_string(),
-            Some(CursorPosition {
-                row: CursorRow(10),
-                col: CursorCol(10),
-            }),
-            CursorLocation::new(1, 1, 1, 1),
-            ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        let basis = observation_basis(
+            seq,
+            ObservedCell::Exact(screen_cell(10, 10)),
+            valid_surface_location(),
         );
         ObservationSnapshot::new(request, basis, ObservationMotion::default())
     }
@@ -1077,13 +1091,13 @@ mod tests {
     fn prepare_observation_plan_reclaims_preview_scratch_when_runtime_is_unchanged() {
         let mut runtime = RuntimeState::default();
         runtime.initialize_cursor(
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
-            CursorShape::new(false, false),
+            CursorShape::block(),
             7,
-            &CursorLocation::new(1, 1, 1, 1),
+            &valid_surface_location(),
         );
         runtime.record_observed_mode(/*current_is_cmdline*/ false);
         runtime.reclaim_preview_particles_scratch(Vec::with_capacity(8));
@@ -1128,17 +1142,17 @@ mod tests {
     }
 
     #[test]
-    fn conceal_deferred_motion_prefers_observed_cursor_over_stale_exact_anchor() {
+    fn exact_observation_retargets_to_the_new_exact_cell() {
         let mut runtime = RuntimeState::default();
         runtime.config.delay_event_to_smear = 24.0;
         runtime.initialize_cursor(
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
-            CursorShape::new(false, false),
+            CursorShape::block(),
             7,
-            &CursorLocation::new(1, 1, 1, 1),
+            &valid_surface_location(),
         );
         runtime.record_observed_mode(/*current_is_cmdline*/ false);
 
@@ -1147,33 +1161,23 @@ mod tests {
                 IngressSeq::new(2),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(2),
-                None,
                 BufferPerfClass::Full,
             ),
             ProbeRequestSet::default(),
         );
         let observation = ObservationSnapshot::new(
             request,
-            ObservationBasis::new(
-                Millis::new(2),
-                "n".to_string(),
-                Some(CursorPosition {
-                    row: CursorRow(9),
-                    col: CursorCol(10),
-                }),
-                CursorLocation::new(1, 1, 1, 1),
-                ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+            observation_basis(
+                2,
+                ObservedCell::Exact(screen_cell(9, 10)),
+                valid_surface_location(),
             ),
-            ObservationMotion::default()
-                .with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+            ObservationMotion::default(),
         );
 
         let planned = super::plan_runtime_transition_for_runtime(
             &mut runtime,
-            Some(CursorPosition {
-                row: CursorRow(10),
-                col: CursorCol(10),
-            }),
+            Some(screen_cell(10, 10)),
             None,
             &observation,
             Millis::new(16),
@@ -1181,7 +1185,60 @@ mod tests {
 
         assert_eq!(
             runtime.target_position(),
-            Point {
+            RenderPoint {
+                row: 9.0,
+                col: 10.0
+            }
+        );
+        assert!(runtime.is_settling() || runtime.is_animating());
+        assert!(planned.transition.should_schedule_next_animation);
+    }
+
+    #[test]
+    fn conceal_deferred_motion_prefers_observed_cursor_over_stale_exact_anchor() {
+        let mut runtime = RuntimeState::default();
+        runtime.config.delay_event_to_smear = 24.0;
+        runtime.initialize_cursor(
+            RenderPoint {
+                row: 10.0,
+                col: 10.0,
+            },
+            CursorShape::block(),
+            7,
+            &valid_surface_location(),
+        );
+        runtime.record_observed_mode(/*current_is_cmdline*/ false);
+
+        let request = PendingObservation::new(
+            ExternalDemand::new(
+                IngressSeq::new(2),
+                ExternalDemandKind::ExternalCursor,
+                Millis::new(2),
+                BufferPerfClass::Full,
+            ),
+            ProbeRequestSet::default(),
+        );
+        let observation = ObservationSnapshot::new(
+            request,
+            observation_basis(
+                2,
+                ObservedCell::Deferred(screen_cell(9, 10)),
+                valid_surface_location(),
+            ),
+            ObservationMotion::default(),
+        );
+
+        let planned = super::plan_runtime_transition_for_runtime(
+            &mut runtime,
+            Some(screen_cell(10, 10)),
+            None,
+            &observation,
+            Millis::new(16),
+        );
+
+        assert_eq!(
+            runtime.target_position(),
+            RenderPoint {
                 row: 9.0,
                 col: 10.0
             }
@@ -1193,10 +1250,10 @@ mod tests {
     #[test]
     fn conceal_deferred_retarget_while_animating_uses_observed_cursor_over_stale_exact_anchor() {
         let mut runtime = RuntimeState::default();
-        let shape = CursorShape::new(false, false);
-        let location = CursorLocation::new(1, 1, 1, 1);
+        let shape = CursorShape::block();
+        let location = valid_surface_location();
         runtime.initialize_cursor(
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
@@ -1205,12 +1262,15 @@ mod tests {
             &location,
         );
         runtime.record_observed_mode(/*current_is_cmdline*/ false);
-        runtime.set_target(
-            Point {
-                row: 9.0,
-                col: 10.0,
-            },
-            shape,
+        runtime.retarget_preserving_current_pose(
+            crate::state::RuntimeTargetSnapshot::preserving_tracking(
+                RenderPoint {
+                    row: 9.0,
+                    col: 10.0,
+                },
+                shape,
+                runtime.tracked_cursor_ref(),
+            ),
         );
         runtime.start_animation_towards_target();
         runtime.record_animation_tick(100.0);
@@ -1220,33 +1280,19 @@ mod tests {
                 IngressSeq::new(3),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(3),
-                None,
                 BufferPerfClass::Full,
             ),
             ProbeRequestSet::default(),
         );
         let observation = ObservationSnapshot::new(
             request,
-            ObservationBasis::new(
-                Millis::new(3),
-                "n".to_string(),
-                Some(CursorPosition {
-                    row: CursorRow(8),
-                    col: CursorCol(10),
-                }),
-                location,
-                ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
-            ),
-            ObservationMotion::default()
-                .with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+            observation_basis(3, ObservedCell::Deferred(screen_cell(8, 10)), location),
+            ObservationMotion::default(),
         );
 
         let planned = super::plan_runtime_transition_for_runtime(
             &mut runtime,
-            Some(CursorPosition {
-                row: CursorRow(9),
-                col: CursorCol(10),
-            }),
+            Some(screen_cell(9, 10)),
             None,
             &observation,
             Millis::new(116),
@@ -1254,7 +1300,7 @@ mod tests {
 
         assert_eq!(
             runtime.target_position(),
-            Point {
+            RenderPoint {
                 row: 8.0,
                 col: 10.0
             }
@@ -1267,6 +1313,205 @@ mod tests {
         assert!(planned.transition.should_schedule_next_animation);
     }
 
+    #[test]
+    fn unavailable_observation_falls_back_to_latest_exact_anchor() {
+        let mut runtime = RuntimeState::default();
+        runtime.config.delay_event_to_smear = 24.0;
+        runtime.initialize_cursor(
+            RenderPoint {
+                row: 10.0,
+                col: 10.0,
+            },
+            CursorShape::block(),
+            7,
+            &valid_surface_location(),
+        );
+        runtime.record_observed_mode(/*current_is_cmdline*/ false);
+
+        let request = PendingObservation::new(
+            ExternalDemand::new(
+                IngressSeq::new(4),
+                ExternalDemandKind::ExternalCursor,
+                Millis::new(4),
+                BufferPerfClass::Full,
+            ),
+            ProbeRequestSet::default(),
+        );
+        let observation = ObservationSnapshot::new(
+            request,
+            observation_basis(4, ObservedCell::Unavailable, valid_surface_location()),
+            ObservationMotion::default(),
+        );
+
+        let planned = super::plan_runtime_transition_for_runtime(
+            &mut runtime,
+            Some(screen_cell(8, 10)),
+            None,
+            &observation,
+            Millis::new(16),
+        );
+
+        assert_eq!(
+            runtime.target_position(),
+            RenderPoint {
+                row: 8.0,
+                col: 10.0
+            }
+        );
+        assert!(runtime.is_settling() || runtime.is_animating());
+        assert!(planned.transition.should_schedule_next_animation);
+    }
+
+    #[test]
+    fn unavailable_observation_without_anchor_refreshes_runtime_tracking() {
+        let mut runtime = RuntimeState::default();
+        runtime.config.delay_event_to_smear = 24.0;
+        runtime.initialize_cursor(
+            RenderPoint {
+                row: 10.0,
+                col: 10.0,
+            },
+            CursorShape::block(),
+            7,
+            &valid_surface_location(),
+        );
+        runtime.record_observed_mode(/*current_is_cmdline*/ false);
+        let baseline_epoch = runtime.retarget_epoch();
+        let moved_location = TrackedCursor::fixture(1, 1, 1, 3)
+            .with_window_origin(1, 1)
+            .with_window_dimensions(120, 40);
+
+        let request = PendingObservation::new(
+            ExternalDemand::new(
+                IngressSeq::new(6),
+                ExternalDemandKind::ExternalCursor,
+                Millis::new(6),
+                BufferPerfClass::Full,
+            ),
+            ProbeRequestSet::default(),
+        );
+        let observation = ObservationSnapshot::new(
+            request,
+            observation_basis(6, ObservedCell::Unavailable, moved_location.clone()),
+            ObservationMotion::default(),
+        );
+
+        super::plan_runtime_transition_for_runtime(
+            &mut runtime,
+            None,
+            None,
+            &observation,
+            Millis::new(16),
+        );
+
+        assert_eq!(
+            runtime.target_position(),
+            RenderPoint {
+                row: 10.0,
+                col: 10.0
+            }
+        );
+        assert_eq!(runtime.tracked_cursor(), Some(moved_location));
+        assert_eq!(runtime.retarget_epoch(), baseline_epoch);
+    }
+
+    #[test]
+    fn observed_cell_variants_preserve_runtime_target_selection_semantics() {
+        #[derive(Clone, Copy)]
+        struct Case {
+            observed_cell: ObservedCell,
+            latest_exact_cursor_cell: Option<ScreenCell>,
+            expected_target_cell: ScreenCell,
+        }
+
+        let cases = [
+            (
+                "exact_observation_uses_the_new_exact_cell",
+                Case {
+                    observed_cell: ObservedCell::Exact(screen_cell(9, 10)),
+                    latest_exact_cursor_cell: Some(screen_cell(10, 10)),
+                    expected_target_cell: screen_cell(9, 10),
+                },
+            ),
+            (
+                "deferred_observation_uses_the_new_deferred_cell",
+                Case {
+                    observed_cell: ObservedCell::Deferred(screen_cell(8, 10)),
+                    latest_exact_cursor_cell: Some(screen_cell(10, 10)),
+                    expected_target_cell: screen_cell(8, 10),
+                },
+            ),
+            (
+                "unavailable_observation_uses_the_latest_exact_anchor",
+                Case {
+                    observed_cell: ObservedCell::Unavailable,
+                    latest_exact_cursor_cell: Some(screen_cell(7, 10)),
+                    expected_target_cell: screen_cell(7, 10),
+                },
+            ),
+            (
+                "unavailable_observation_without_anchor_keeps_the_runtime_target",
+                Case {
+                    observed_cell: ObservedCell::Unavailable,
+                    latest_exact_cursor_cell: None,
+                    expected_target_cell: screen_cell(10, 10),
+                },
+            ),
+        ];
+
+        for (
+            case_name,
+            Case {
+                observed_cell,
+                latest_exact_cursor_cell,
+                expected_target_cell,
+            },
+        ) in cases
+        {
+            let mut runtime = RuntimeState::default();
+            runtime.config.delay_event_to_smear = 24.0;
+            runtime.initialize_cursor(
+                RenderPoint {
+                    row: 10.0,
+                    col: 10.0,
+                },
+                CursorShape::block(),
+                7,
+                &valid_surface_location(),
+            );
+            runtime.record_observed_mode(/*current_is_cmdline*/ false);
+
+            let request = PendingObservation::new(
+                ExternalDemand::new(
+                    IngressSeq::new(5),
+                    ExternalDemandKind::ExternalCursor,
+                    Millis::new(5),
+                    BufferPerfClass::Full,
+                ),
+                ProbeRequestSet::default(),
+            );
+            let observation = ObservationSnapshot::new(
+                request,
+                observation_basis(5, observed_cell, valid_surface_location()),
+                ObservationMotion::default(),
+            );
+
+            super::plan_runtime_transition_for_runtime(
+                &mut runtime,
+                latest_exact_cursor_cell,
+                None,
+                &observation,
+                Millis::new(16),
+            );
+
+            assert_eq!(
+                ScreenCell::from_rounded_point(runtime.target_position()),
+                Some(expected_target_cell),
+                "{case_name}"
+            );
+        }
+    }
+
     fn observation_with_background_probe(
         seq: u64,
         allowed_cells: &[ScreenCell],
@@ -1276,20 +1521,14 @@ mod tests {
                 IngressSeq::new(seq),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(seq),
-                None,
                 BufferPerfClass::Full,
             ),
             ProbeRequestSet::only(ProbeKind::Background),
         );
-        let basis = ObservationBasis::new(
-            Millis::new(seq),
-            "n".to_string(),
-            Some(CursorPosition {
-                row: CursorRow(10),
-                col: CursorCol(10),
-            }),
-            CursorLocation::new(1, 1, 1, 1),
-            ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        let basis = observation_basis(
+            seq,
+            ObservedCell::Exact(screen_cell(10, 10)),
+            valid_surface_location(),
         );
         let mut snapshot = ObservationSnapshot::new(request, basis, ObservationMotion::default());
         *snapshot.probes_mut().background_mut() =
@@ -1395,11 +1634,11 @@ mod tests {
         static_config.particles_over_text = false;
         frame.static_config = Arc::new(static_config);
         frame.set_particles(std::sync::Arc::new(vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 16.2,
                 col: 18.4,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 0.75,
         }]));
         frame
@@ -1426,11 +1665,11 @@ mod tests {
 
     fn frame_with_particle_overlay_drift(mut frame: RenderFrame) -> RenderFrame {
         frame.set_particles(Arc::new(vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 10.75,
                 col: 11.25,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 0.8,
         }]));
         frame
@@ -1648,20 +1887,20 @@ mod tests {
         cached_frame.step_samples = Vec::new().into();
         cached_frame.planner_idle_steps = 0;
         cached_frame.set_particles(Arc::new(vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 10.25,
                 col: 10.25,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 1.0,
         }]));
         let mut query_frame = cached_frame.clone();
         query_frame.set_particles(Arc::new(vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 10.75,
                 col: 11.25,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 0.8,
         }]));
 

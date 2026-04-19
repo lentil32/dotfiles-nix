@@ -11,7 +11,7 @@ fn normalize_direction_display(
     col_delta: f64,
     block_aspect_ratio: f64,
 ) -> (f64, f64) {
-    let safe_aspect = crate::types::display_metric_row_scale(block_aspect_ratio);
+    let safe_aspect = crate::position::display_metric_row_scale(block_aspect_ratio);
     let row = row_delta * safe_aspect;
     let col = col_delta;
     let length = (row * row + col * col).sqrt();
@@ -220,7 +220,7 @@ pub(super) fn populate_resampled_centerline_with_scratch(
         let segment_end = centerline_cumulative[segment + 1];
         let segment_len = (segment_end - segment_start).max(f64::EPSILON);
         let t = ((target_arc - segment_start) / segment_len).clamp(0.0, 1.0);
-        let pos = Point {
+        let pos = RenderPoint {
             row: start.row + (end.row - start.row) * t,
             col: start.col + (end.col - start.col) * t,
         };
@@ -255,7 +255,7 @@ pub(super) fn ribbon_slice_search_bounds(
     curvature: f64,
 ) -> SliceSearchBounds {
     let band_half_width = solve_slice_band_half_width(frame, tail_u, curvature);
-    let safe_aspect = crate::types::display_metric_row_scale(frame.block_aspect_ratio);
+    let safe_aspect = crate::position::display_metric_row_scale(frame.block_aspect_ratio);
     let normal_row = -sample.tangent_col;
     let normal_col = sample.tangent_row;
     let row_display_bound =
@@ -389,7 +389,7 @@ fn measured_slice_support_width_cells(
         return None;
     }
 
-    let safe_aspect = crate::types::display_metric_row_scale(frame.block_aspect_ratio);
+    let safe_aspect = crate::position::display_metric_row_scale(frame.block_aspect_ratio);
     let sample_half_span_q16 = to_q16(
         0.5 * (normal_row.abs() * safe_aspect / MICRO_H as f64 + normal_col.abs() / MICRO_W as f64),
     );
@@ -502,7 +502,7 @@ pub(super) fn build_ribbon_slices_with_compiled_and_scratch(
     let candidate_index =
         latent_field::BorrowedCellRows::build(cell_candidates, candidate_row_index);
     let mut slices = Vec::<RibbonSlice>::new();
-    let safe_aspect = crate::types::display_metric_row_scale(frame.block_aspect_ratio);
+    let safe_aspect = crate::position::display_metric_row_scale(frame.block_aspect_ratio);
 
     for (sample_index, sample) in centerline.iter().copied().enumerate() {
         let tail_u = centerline_tail_u(sample_index, centerline.len());

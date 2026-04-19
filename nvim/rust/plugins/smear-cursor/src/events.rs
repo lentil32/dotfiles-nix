@@ -16,6 +16,7 @@ mod options;
 mod policy;
 pub(crate) mod probe_cache;
 mod runtime;
+mod surface;
 mod timers;
 mod trace;
 
@@ -31,8 +32,6 @@ use runtime::EditorViewportCache;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use cursor::ConcealScreenCellView;
 pub(crate) use handlers::on_autocmd_event;
 pub(crate) use lifecycle::diagnostics;
 pub(crate) use lifecycle::setup;
@@ -60,7 +59,6 @@ pub(crate) use runtime::record_planning_preview_copy;
 pub(crate) use runtime::record_planning_preview_invocation;
 pub(crate) use runtime::record_projection_reuse_hit;
 pub(crate) use runtime::record_projection_reuse_miss;
-pub(crate) use timers::on_core_timer_event;
 pub(crate) use timers::on_core_timer_slot_event;
 pub(crate) use timers::schedule_guarded;
 
@@ -90,7 +88,7 @@ fn update_callback_duration_ewma(previous_estimate_ms: f64, duration_ms: f64) ->
 struct HostBridgeRevision(u32);
 
 impl HostBridgeRevision {
-    const CURRENT: Self = Self(8);
+    const CURRENT: Self = Self(9);
 
     const fn get(self) -> u32 {
         self.0
@@ -160,6 +158,8 @@ impl ShellState {
 
     fn invalidate_buffer_metadata(&mut self, buffer_handle: i64) {
         self.buffer_metadata_cache.invalidate_buffer(buffer_handle);
+        // Buffer event policy is derived from buffer-local metadata, so this
+        // metadata boundary remains the single owner of policy invalidation.
         self.buffer_perf_policy_cache
             .invalidate_buffer(buffer_handle);
     }
@@ -174,8 +174,6 @@ impl ShellState {
 
     fn invalidate_buffer_local_caches(&mut self, buffer_handle: i64) {
         self.invalidate_buffer_metadata(buffer_handle);
-        self.buffer_perf_policy_cache
-            .invalidate_buffer(buffer_handle);
         self.buffer_perf_telemetry_cache
             .invalidate_buffer(buffer_handle);
         self.invalidate_buffer_local_probe_caches(buffer_handle);

@@ -23,11 +23,14 @@ use crate::core::types::ProbeRequestId;
 use crate::core::types::ProposalId;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
-use crate::core::types::ViewportSnapshot;
-use crate::state::CursorLocation;
+use crate::position::BufferLine;
+use crate::position::CursorObservation;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
+use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
-use crate::types::Point;
-use crate::types::ScreenCell;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -73,37 +76,38 @@ pub(crate) struct RequestObservationBaseEffect {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct IngressObservationSurface {
-    window_handle: i64,
-    buffer_handle: i64,
-    cursor_location: Option<CursorLocation>,
+    surface: WindowSurfaceSnapshot,
+    cursor: Option<CursorObservation>,
     mode: String,
 }
 
 impl IngressObservationSurface {
     pub(crate) fn new(
-        window_handle: i64,
-        buffer_handle: i64,
-        cursor_location: Option<CursorLocation>,
+        surface: WindowSurfaceSnapshot,
+        cursor: Option<CursorObservation>,
         mode: String,
     ) -> Self {
         Self {
-            window_handle,
-            buffer_handle,
-            cursor_location,
+            surface,
+            cursor,
             mode,
         }
     }
 
+    pub(crate) const fn surface(&self) -> WindowSurfaceSnapshot {
+        self.surface
+    }
+
     pub(crate) const fn window_handle(&self) -> i64 {
-        self.window_handle
+        self.surface.id().window_handle()
     }
 
     pub(crate) const fn buffer_handle(&self) -> i64 {
-        self.buffer_handle
+        self.surface.id().buffer_handle()
     }
 
-    pub(crate) fn cursor_location(&self) -> Option<CursorLocation> {
-        self.cursor_location.clone()
+    pub(crate) const fn cursor(&self) -> Option<CursorObservation> {
+        self.cursor
     }
 
     pub(crate) fn mode(&self) -> &str {
@@ -150,6 +154,21 @@ pub(crate) enum CursorColorReuseMode {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum CursorColorFallbackMode {
     SyntaxThenExtmarks,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RetainedCursorColorFallback {
+    Unavailable,
+    CompatibleSample,
+}
+
+impl RetainedCursorColorFallback {
+    const fn reuse_mode(self) -> CursorColorReuseMode {
+        match self {
+            Self::Unavailable => CursorColorReuseMode::ExactOnly,
+            Self::CompatibleSample => CursorColorReuseMode::CompatibleWithinLine,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -200,14 +219,15 @@ impl ProbePolicy {
     pub(crate) const fn for_demand(
         demand_kind: ExternalDemandKind,
         buffer_perf_class: BufferPerfClass,
-        has_cursor_color_fallback_sample: bool,
+        retained_cursor_color_fallback: RetainedCursorColorFallback,
     ) -> Self {
         // A carried fallback sample is only safe for the same-line compatible
         // reuse path. Boundary refreshes still force an exact probe policy.
-        let cursor_color_reuse_mode = if has_cursor_color_fallback_sample {
-            CursorColorReuseMode::CompatibleWithinLine
-        } else {
-            CursorColorReuseMode::ExactOnly
+        let cursor_color_reuse_mode = match demand_kind {
+            ExternalDemandKind::ExternalCursor => retained_cursor_color_fallback.reuse_mode(),
+            ExternalDemandKind::ModeChanged
+            | ExternalDemandKind::BufferEntered
+            | ExternalDemandKind::BoundaryRefresh => CursorColorReuseMode::ExactOnly,
         };
 
         match demand_kind {
@@ -306,13 +326,51 @@ impl ProbePolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct TrackedBufferPosition {
+    buffer_handle: i64,
+    buffer_line: BufferLine,
+}
+
+impl TrackedBufferPosition {
+    pub(crate) fn new(buffer_handle: i64, buffer_line: BufferLine) -> Option<Self> {
+        (buffer_handle > 0).then_some(Self {
+            buffer_handle,
+            buffer_line,
+        })
+    }
+
+    pub(crate) const fn buffer_handle(self) -> i64 {
+        self.buffer_handle
+    }
+
+    pub(crate) const fn buffer_line(self) -> BufferLine {
+        self.buffer_line
+    }
+}
+
+pub(crate) fn tracked_observation_inputs(
+    tracked_cursor: Option<&TrackedCursor>,
+) -> (Option<WindowSurfaceSnapshot>, Option<TrackedBufferPosition>) {
+    let Some(tracked_cursor) = tracked_cursor else {
+        return (None, None);
+    };
+
+    let tracked_surface = Some(tracked_cursor.surface());
+    let tracked_buffer_position =
+        TrackedBufferPosition::new(tracked_cursor.buffer_handle(), tracked_cursor.buffer_line());
+
+    (tracked_surface, tracked_buffer_position)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObservationRuntimeContextArgs {
     pub(crate) cursor_position_policy: CursorPositionReadPolicy,
     pub(crate) scroll_buffer_space: bool,
-    pub(crate) tracked_location: Option<CursorLocation>,
+    pub(crate) tracked_surface: Option<WindowSurfaceSnapshot>,
+    pub(crate) tracked_buffer_position: Option<TrackedBufferPosition>,
     pub(crate) cursor_text_context_boundary: Option<CursorTextContextBoundary>,
-    pub(crate) current_corners: [Point; 4],
+    pub(crate) current_corners: [RenderPoint; 4],
     pub(crate) ingress_observation_surface: Option<IngressObservationSurface>,
     pub(crate) buffer_perf_class: BufferPerfClass,
     pub(crate) probe_policy: ProbePolicy,
@@ -322,9 +380,10 @@ pub(crate) struct ObservationRuntimeContextArgs {
 pub(crate) struct ObservationRuntimeContext {
     cursor_position_policy: CursorPositionReadPolicy,
     scroll_buffer_space: bool,
-    tracked_location: Option<CursorLocation>,
+    tracked_surface: Option<WindowSurfaceSnapshot>,
+    tracked_buffer_position: Option<TrackedBufferPosition>,
     cursor_text_context_boundary: Option<CursorTextContextBoundary>,
-    current_corners: [Point; 4],
+    current_corners: [RenderPoint; 4],
     ingress_observation_surface: Option<IngressObservationSurface>,
     buffer_perf_class: BufferPerfClass,
     probe_policy: ProbePolicy,
@@ -335,7 +394,8 @@ impl ObservationRuntimeContext {
         let ObservationRuntimeContextArgs {
             cursor_position_policy,
             scroll_buffer_space,
-            tracked_location,
+            tracked_surface,
+            tracked_buffer_position,
             cursor_text_context_boundary,
             current_corners,
             ingress_observation_surface,
@@ -345,7 +405,8 @@ impl ObservationRuntimeContext {
         Self {
             cursor_position_policy,
             scroll_buffer_space,
-            tracked_location,
+            tracked_surface,
+            tracked_buffer_position,
             cursor_text_context_boundary,
             current_corners,
             ingress_observation_surface,
@@ -362,15 +423,19 @@ impl ObservationRuntimeContext {
         self.scroll_buffer_space
     }
 
-    pub(crate) fn tracked_location(&self) -> Option<CursorLocation> {
-        self.tracked_location.clone()
+    pub(crate) const fn tracked_surface(&self) -> Option<WindowSurfaceSnapshot> {
+        self.tracked_surface
+    }
+
+    pub(crate) const fn tracked_buffer_position(&self) -> Option<TrackedBufferPosition> {
+        self.tracked_buffer_position
     }
 
     pub(crate) const fn cursor_text_context_boundary(&self) -> Option<CursorTextContextBoundary> {
         self.cursor_text_context_boundary
     }
 
-    pub(crate) const fn current_corners(&self) -> [Point; 4] {
+    pub(crate) const fn current_corners(&self) -> [RenderPoint; 4] {
         self.current_corners
     }
 
@@ -447,14 +512,14 @@ pub(crate) struct ApplyProposalEffect {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct RenderPlanningObservation {
     observation_id: ObservationId,
-    viewport: ViewportSnapshot,
+    viewport: ViewportBounds,
     background_probe: Option<BackgroundProbeBatch>,
 }
 
 impl RenderPlanningObservation {
     pub(crate) const fn new(
         observation_id: ObservationId,
-        viewport: ViewportSnapshot,
+        viewport: ViewportBounds,
         background_probe: Option<BackgroundProbeBatch>,
     ) -> Self {
         Self {
@@ -468,7 +533,7 @@ impl RenderPlanningObservation {
         self.observation_id
     }
 
-    pub(crate) const fn viewport(&self) -> ViewportSnapshot {
+    pub(crate) const fn viewport(&self) -> ViewportBounds {
         self.viewport
     }
 
@@ -630,8 +695,17 @@ mod tests {
     use super::CursorPositionProbeMode;
     use super::ProbePolicy;
     use super::ProbeQuality;
+    use super::RetainedCursorColorFallback;
+    use super::TrackedBufferPosition;
+    use super::tracked_observation_inputs;
     use crate::core::state::BufferPerfClass;
     use crate::core::state::ExternalDemandKind;
+    use crate::position::BufferLine;
+    use crate::position::ScreenCell;
+    use crate::position::SurfaceId;
+    use crate::position::ViewportBounds;
+    use crate::position::WindowSurfaceSnapshot;
+    use crate::state::TrackedCursor;
     use crate::test_support::assertions::assert_probe_policy_shape;
     use crate::test_support::proptest::pure_config;
     use pretty_assertions::assert_eq;
@@ -652,6 +726,14 @@ mod tests {
             Just(BufferPerfClass::Full),
             Just(BufferPerfClass::FastMotion),
             Just(BufferPerfClass::Skip),
+        ]
+        .boxed()
+    }
+
+    fn retained_cursor_color_fallback() -> BoxedStrategy<RetainedCursorColorFallback> {
+        prop_oneof![
+            Just(RetainedCursorColorFallback::Unavailable),
+            Just(RetainedCursorColorFallback::CompatibleSample),
         ]
         .boxed()
     }
@@ -684,14 +766,13 @@ mod tests {
 
     const fn expected_reuse_mode(
         demand_kind: ExternalDemandKind,
-        has_cursor_color_fallback_sample: bool,
+        retained_cursor_color_fallback: RetainedCursorColorFallback,
     ) -> CursorColorReuseMode {
-        if matches!(demand_kind, ExternalDemandKind::ExternalCursor)
-            && has_cursor_color_fallback_sample
-        {
-            CursorColorReuseMode::CompatibleWithinLine
-        } else {
-            CursorColorReuseMode::ExactOnly
+        match demand_kind {
+            ExternalDemandKind::ExternalCursor => retained_cursor_color_fallback.reuse_mode(),
+            ExternalDemandKind::ModeChanged
+            | ExternalDemandKind::BufferEntered
+            | ExternalDemandKind::BoundaryRefresh => CursorColorReuseMode::ExactOnly,
         }
     }
 
@@ -714,6 +795,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tracked_observation_inputs_preserve_complete_surface_and_buffer_position() {
+        let tracked_cursor = TrackedCursor::fixture(11, 17, 23, 29)
+            .with_viewport_columns(5, 2)
+            .with_window_origin(7, 13)
+            .with_window_dimensions(80, 24);
+
+        assert_eq!(
+            tracked_observation_inputs(Some(&tracked_cursor)),
+            (
+                Some(WindowSurfaceSnapshot::new(
+                    SurfaceId::new(11, 17).expect("positive handles"),
+                    BufferLine::new(23).expect("positive top buffer line"),
+                    5,
+                    2,
+                    ScreenCell::new(7, 13).expect("one-based window origin"),
+                    ViewportBounds::new(24, 80).expect("positive window size"),
+                )),
+                Some(
+                    TrackedBufferPosition::new(
+                        17,
+                        BufferLine::new(29).expect("positive buffer line"),
+                    )
+                    .expect("positive buffer handle"),
+                ),
+            ),
+        );
+    }
+
+    #[test]
+    fn tracked_observation_inputs_return_none_for_absent_tracking() {
+        assert_eq!(tracked_observation_inputs(None), (None, None));
+    }
+
     proptest! {
         #![proptest_config(pure_config())]
 
@@ -721,18 +836,18 @@ mod tests {
         fn prop_probe_policy_matches_demand_perf_class_and_retained_color_inputs(
             demand_kind in demand_kind(),
             buffer_perf_class in buffer_perf_class(),
-            has_cursor_color_fallback_sample in any::<bool>(),
+            retained_cursor_color_fallback in retained_cursor_color_fallback(),
         ) {
             let policy = ProbePolicy::for_demand(
                 demand_kind,
                 buffer_perf_class,
-                has_cursor_color_fallback_sample,
+                retained_cursor_color_fallback,
             );
 
             let expected_quality = expected_quality(demand_kind, buffer_perf_class);
             let expected_position_mode = expected_position_mode(demand_kind, buffer_perf_class);
             let expected_reuse_mode =
-                expected_reuse_mode(demand_kind, has_cursor_color_fallback_sample);
+                expected_reuse_mode(demand_kind, retained_cursor_color_fallback);
 
             assert_probe_policy_shape(
                 policy,

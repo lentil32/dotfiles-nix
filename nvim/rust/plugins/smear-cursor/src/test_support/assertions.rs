@@ -5,7 +5,7 @@ use crate::core::effect::CursorColorReuseMode;
 use crate::core::effect::CursorPositionProbeMode;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::ProbeQuality;
-use crate::types::ScreenCell;
+use crate::position::ScreenCell;
 use pretty_assertions::assert_eq;
 
 pub(crate) fn assert_tracking_consistent<T>(bookkeeping: &T, lifecycle_truth: &T)

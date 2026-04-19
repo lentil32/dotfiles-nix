@@ -1,11 +1,12 @@
 use crate::config::RuntimeConfig;
 use crate::core::runtime_reducer::MotionClass;
+use crate::core::runtime_reducer::MotionTarget;
 use crate::core::state::SemanticEvent;
-use crate::state::CursorLocation;
+use crate::position::RenderPoint;
+use crate::position::display_metric_row_scale;
 use crate::state::RuntimeState;
+use crate::state::TrackedCursor;
 use crate::types::EPSILON;
-use crate::types::Point;
-use crate::types::display_metric_row_scale;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
 use nvimrs_nvim_utils::mode::is_replace_like_mode;
@@ -29,7 +30,7 @@ fn classify_motion_class(
 ) -> MotionClass {
     let current_target = state.target_position();
     let display_distance = current_target.display_distance(
-        Point {
+        RenderPoint {
             row: target_row,
             col: target_col,
         },
@@ -102,16 +103,16 @@ pub(super) fn classify_target_transition(
     }
 }
 
-fn same_window_and_buffer(left: &CursorLocation, right: &CursorLocation) -> bool {
-    left.window_handle == right.window_handle && left.buffer_handle == right.buffer_handle
+fn same_window_and_buffer(left: &TrackedCursor, right: &TrackedCursor) -> bool {
+    left.same_window_and_buffer(right)
 }
 
 pub(crate) fn select_event_source(
     mode: &str,
     state: &RuntimeState,
     semantic_event: SemanticEvent,
-    requested_target: Option<Point>,
-    cursor_location: &CursorLocation,
+    motion_target: MotionTarget,
+    tracked_cursor: &TrackedCursor,
 ) -> super::EventSource {
     if is_cmdline_mode(mode) {
         return super::EventSource::External;
@@ -124,8 +125,14 @@ pub(crate) fn select_event_source(
     ) {
         return super::EventSource::External;
     }
-    let Some(target) = requested_target else {
-        return super::EventSource::AnimationTick;
+    let target = match motion_target {
+        MotionTarget::Available(target_cell) => RenderPoint::from(target_cell),
+        MotionTarget::Unavailable => match state.tracked_cursor_ref() {
+            Some(current) if current == tracked_cursor => {
+                return super::EventSource::AnimationTick;
+            }
+            Some(_) | None => return super::EventSource::External,
+        },
     };
     if !state.is_initialized() {
         return super::EventSource::External;
@@ -133,15 +140,15 @@ pub(crate) fn select_event_source(
     let target_changed = state.target_position().distance_squared(target) > EPSILON;
     if target_changed {
         let same_surface = state
-            .tracked_location_ref()
-            .is_some_and(|location| same_window_and_buffer(location, cursor_location));
+            .tracked_cursor_ref()
+            .is_some_and(|current| same_window_and_buffer(current, tracked_cursor));
         if (state.is_animating() || state.is_settling()) && same_surface {
             return super::EventSource::AnimationTick;
         }
         return super::EventSource::External;
     }
-    match state.tracked_location_ref() {
-        Some(location) if location == cursor_location => super::EventSource::AnimationTick,
+    match state.tracked_cursor_ref() {
+        Some(current) if current == tracked_cursor => super::EventSource::AnimationTick,
         Some(_) | None => super::EventSource::External,
     }
 }
@@ -168,21 +175,54 @@ pub(super) fn external_mode_requires_immediate_movement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::runtime_reducer::EventSource;
     use crate::state::CursorShape;
+    use crate::state::TrackedCursor;
     use crate::test_support::proptest::positive_aspect_ratio;
     use crate::test_support::proptest::pure_config;
+    use pretty_assertions::assert_eq;
     use proptest::prelude::*;
+
+    fn tracked_cursor(window_handle: i64, buffer_handle: i64, line: i64) -> TrackedCursor {
+        TrackedCursor::fixture(window_handle, buffer_handle, 1, line)
+    }
 
     fn initialized_state(block_aspect_ratio: f64) -> RuntimeState {
         let mut state = RuntimeState::default();
         state.config.block_aspect_ratio = block_aspect_ratio;
         state.initialize_cursor(
-            Point { row: 5.0, col: 5.0 },
-            CursorShape::new(false, false),
+            RenderPoint { row: 5.0, col: 5.0 },
+            CursorShape::block(),
             7,
-            &CursorLocation::new(10, 20, 1, 1),
+            &tracked_cursor(10, 20, 1),
         );
         state
+    }
+
+    #[test]
+    fn unavailable_target_with_changed_tracking_uses_external_source() {
+        let state = initialized_state(1.0);
+
+        assert_eq!(
+            select_event_source(
+                "n",
+                &state,
+                SemanticEvent::CursorMovedWithoutTextMutation,
+                MotionTarget::Unavailable,
+                &tracked_cursor(10, 20, 2),
+            ),
+            EventSource::External
+        );
+        assert_eq!(
+            select_event_source(
+                "n",
+                &state,
+                SemanticEvent::FrameCommitted,
+                MotionTarget::Unavailable,
+                &tracked_cursor(10, 20, 1),
+            ),
+            EventSource::AnimationTick
+        );
     }
 
     fn configure_jump_thresholds(
@@ -198,8 +238,8 @@ mod tests {
         block_aspect_ratio: f64,
         display_delta_row: f64,
         delta_col: f64,
-    ) -> Point {
-        Point {
+    ) -> RenderPoint {
+        RenderPoint {
             row: 5.0 + (display_delta_row / block_aspect_ratio),
             col: 5.0 + delta_col,
         }

@@ -6,8 +6,7 @@
 
 use super::AUTOCMD_GROUP_NAME;
 use super::cursor::current_mode;
-use super::cursor::cursor_position_for_mode;
-use super::handlers::cursor_location_for_core_render;
+use super::cursor::cursor_observation_for_mode_with_probe_policy;
 use super::host_bridge::ensure_namespace_id;
 use super::host_bridge::installed_host_bridge;
 use super::host_bridge::verify_host_bridge;
@@ -24,11 +23,13 @@ use super::runtime::mutate_engine_state;
 use super::runtime::read_engine_state;
 use super::runtime::refresh_editor_viewport_cache;
 use super::runtime::reset_transient_event_state;
+use super::surface::current_window_surface_snapshot;
+use crate::core::effect::ProbePolicy;
 use crate::draw::clear_highlight_cache;
 use crate::draw::initialize_runtime_capabilities;
 use crate::draw::purge_render_windows;
 use crate::state::CursorShape;
-use crate::types::Point;
+use crate::state::TrackedCursor;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Result;
 use nvim_oxi::String as NvimString;
@@ -47,26 +48,38 @@ fn jump_to_current_cursor() -> Result<()> {
         return Ok(());
     }
 
-    let buffer = api::get_current_buf();
-    if !buffer.is_valid() {
+    if !api::get_current_buf().is_valid() {
         return Ok(());
     }
 
     let smear_to_cmd = read_engine_state(|state| state.core_state().runtime().config.smear_to_cmd)?;
-    let Some((row, col)) = cursor_position_for_mode(&window, mode.as_ref(), smear_to_cmd)? else {
+    let surface_snapshot = current_window_surface_snapshot(&window).ok();
+    let observation = cursor_observation_for_mode_with_probe_policy(
+        &window,
+        mode.as_ref(),
+        smear_to_cmd,
+        ProbePolicy::exact(),
+        surface_snapshot.as_ref(),
+    )?;
+    let Some(position) = observation
+        .screen_cell()
+        .map(crate::position::RenderPoint::from)
+    else {
         return Ok(());
     };
 
-    let location = cursor_location_for_core_render(Some(&window), Some(&buffer), None, None);
+    let Some(surface_snapshot) = surface_snapshot else {
+        warn("current surface snapshot unavailable during jump-to-current-cursor");
+        return Ok(());
+    };
+    let tracked_cursor = TrackedCursor::new(surface_snapshot, observation.buffer_line());
 
     let hide_target_hack = mutate_engine_state(|state| {
         state.shell.set_namespace_id(namespace_id);
         let runtime = state.core_state_mut().runtime_mut();
-        let cursor_shape = CursorShape::new(
-            runtime.config.cursor_is_vertical_bar(mode.as_ref()),
-            runtime.config.cursor_is_horizontal_bar(mode.as_ref()),
-        );
-        runtime.sync_to_current_cursor(Point { row, col }, cursor_shape, &location);
+        let cursor_shape =
+            CursorShape::from_cell_shape(runtime.config.cursor_cell_shape(mode.as_ref()));
+        runtime.sync_to_current_cursor(position, cursor_shape, &tracked_cursor);
         runtime.config.hide_target_hack
     })?;
 

@@ -1,11 +1,11 @@
 use super::ScrollShift;
 use super::as_delay_ms;
 use crate::core::state::BufferPerfClass;
+use crate::position::RenderPoint;
 use crate::state::RuntimeState;
 use crate::types::ModeClass;
 use crate::types::Particle;
 use crate::types::ParticleScreenCellsMode;
-use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
 use crate::types::StepInput;
@@ -64,10 +64,10 @@ fn build_step_input(
 
 pub(crate) struct RenderFrameRequest<'a> {
     pub(crate) mode: &'a str,
-    pub(crate) render_corners: [Point; 4],
+    pub(crate) render_corners: [RenderPoint; 4],
     pub(crate) step_samples: Vec<RenderStepSample>,
     pub(crate) planner_idle_steps: u32,
-    pub(crate) target: Point,
+    pub(crate) target: RenderPoint,
     pub(crate) vertical_bar: bool,
     pub(crate) buffer_perf_class: BufferPerfClass,
 }

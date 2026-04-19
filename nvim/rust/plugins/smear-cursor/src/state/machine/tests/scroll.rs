@@ -4,11 +4,11 @@ use crate::test_support::proptest::approx_eq_f64;
 use proptest::collection::vec;
 
 fn maybe_scaled_corners(
-    corners: [Point; 4],
+    corners: [RenderPoint; 4],
     scale_y: f64,
     scale_x: f64,
     scaled: bool,
-) -> [Point; 4] {
+) -> [RenderPoint; 4] {
     if scaled {
         scaled_corners_for_trail(&corners, scale_y, scale_x)
     } else {
@@ -24,7 +24,7 @@ proptest! {
         head_position in (2_i64..192_i64, 2_i64..192_i64),
         trail_position in (2_i64..192_i64, 2_i64..192_i64),
         shape in cursor_shape_strategy(),
-        tracked in cursor_location_strategy(),
+        tracked in tracked_cursor_strategy(),
         scale_head in any::<bool>(),
         scale_trail in any::<bool>(),
         head_scale_y in 0.5_f64..2.5_f64,

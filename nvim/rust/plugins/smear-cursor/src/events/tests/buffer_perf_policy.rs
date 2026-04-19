@@ -6,8 +6,8 @@ use super::super::policy::BufferPerfTelemetry;
 use super::super::policy::IngressCursorPresentationContext;
 use super::super::policy::IngressCursorPresentationPolicy;
 use crate::config::BufferPerfMode;
+use crate::position::ScreenCell;
 use crate::test_support::proptest::pure_config;
-use crate::types::ScreenCell;
 use proptest::prelude::*;
 
 const LINES_REASON_BIT: u8 = 1 << 0;

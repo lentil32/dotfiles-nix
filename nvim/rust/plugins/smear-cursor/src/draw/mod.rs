@@ -1,7 +1,7 @@
 use crate::core::realization::PaletteSpec;
 use crate::core::state::ShellProjection;
+use crate::position::ScreenCell;
 use crate::types::CursorCellShape;
-use crate::types::ScreenCell;
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::OptionOpts;
@@ -420,7 +420,7 @@ pub(crate) fn redraw() -> Result<()> {
     apply::redraw()
 }
 
-pub(crate) fn editor_bounds() -> Result<render_plan::Viewport> {
+pub(crate) fn editor_bounds() -> Result<crate::position::ViewportBounds> {
     apply::editor_bounds()
 }
 
@@ -821,10 +821,10 @@ mod tests {
     use crate::core::types::StrokeId;
     use crate::draw::window_pool::WindowBufferHandle;
     use crate::draw::window_pool::WindowPlacement;
+    use crate::position::RenderPoint;
     use crate::types::BASE_TIME_INTERVAL;
     use crate::types::CursorCellShape;
     use crate::types::ModeClass;
-    use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
     use crate::types::StaticRenderConfig;
@@ -922,19 +922,19 @@ mod tests {
 
     fn base_frame() -> RenderFrame {
         let corners = [
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 10.0,
             },
@@ -944,7 +944,7 @@ mod tests {
             corners,
             step_samples: vec![RenderStepSample::new(corners, BASE_TIME_INTERVAL)].into(),
             planner_idle_steps: 0,
-            target: Point {
+            target: RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
@@ -1108,7 +1108,7 @@ mod tests {
                 window_id: -19,
                 buffer_id: -119,
                 placement: Some(super::PrepaintPlacement {
-                    cell: crate::types::ScreenCell::new(3, 4)
+                    cell: crate::position::ScreenCell::new(3, 4)
                         .expect("test prepaint cell should be in bounds"),
                     zindex: 120,
                 }),
@@ -1232,7 +1232,7 @@ mod tests {
                 window_id: -19,
                 buffer_id: -119,
                 placement: Some(super::PrepaintPlacement {
-                    cell: crate::types::ScreenCell::new(3, 4)
+                    cell: crate::position::ScreenCell::new(3, 4)
                         .expect("test prepaint cell should be in bounds"),
                     zindex: 120,
                 }),

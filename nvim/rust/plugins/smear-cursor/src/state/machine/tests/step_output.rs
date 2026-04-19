@@ -3,8 +3,7 @@ use super::*;
 #[test]
 fn apply_step_output_replaces_the_mutable_simulation_snapshot() {
     let mut state = RuntimeState::default();
-    state.target.position = point(15.0, 16.0);
-    state.target.shape = default_shape();
+    replace_target_preserving_tracking(&mut state, point(15.0, 16.0), default_shape());
     state.trail.origin_corners = [point(13.0, 14.0); 4];
     state.set_color_at_cursor(Some(0x00AB_CDEF));
     let output = sample_step_output();

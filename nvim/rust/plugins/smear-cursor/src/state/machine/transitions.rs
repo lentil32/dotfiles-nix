@@ -1,10 +1,11 @@
-use super::CursorLocation;
 use super::CursorShape;
 use super::RuntimeState;
+use super::RuntimeTargetSnapshot;
+use super::TrackedCursor;
 use super::types::CursorTransitionPolicy;
 use crate::animation::center;
 use crate::animation::zero_velocity_corners;
-use crate::types::Point;
+use crate::position::RenderPoint;
 
 impl RuntimeState {
     fn reset_trail_timeline_from_current(&mut self) {
@@ -12,27 +13,51 @@ impl RuntimeState {
         self.trail.elapsed_ms = [0.0; 4];
     }
 
-    fn sync_cursor_geometry(&mut self, position: Point, shape: CursorShape) {
-        if self.target.position != position || self.target.shape != shape {
-            self.target.retarget_epoch = self.target.retarget_epoch.wrapping_add(1);
+    pub(crate) fn retarget_preserving_current_pose(&mut self, snapshot: RuntimeTargetSnapshot) {
+        if self.target.apply_snapshot(snapshot) {
+            self.reset_trail_timeline_from_current();
         }
+    }
+
+    pub(crate) fn retarget_tracked_preserving_current_pose(
+        &mut self,
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: &TrackedCursor,
+    ) {
+        self.retarget_preserving_current_pose(RuntimeTargetSnapshot::tracked(
+            position,
+            shape,
+            tracked_cursor,
+        ));
+    }
+
+    fn sync_cursor_geometry(
+        &mut self,
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: &TrackedCursor,
+    ) {
+        self.target.apply_snapshot(RuntimeTargetSnapshot::tracked(
+            position,
+            shape,
+            tracked_cursor,
+        ));
         let corners = shape.corners(position);
         self.current_corners = corners;
         self.trail.origin_corners = corners;
         self.trail.elapsed_ms = [0.0; 4];
-        self.target.position = position;
-        self.target.shape = shape;
         self.previous_center = center(&self.current_corners);
     }
 
     fn apply_cursor_transition(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
         policy: CursorTransitionPolicy,
     ) {
-        self.sync_cursor_geometry(position, shape);
+        self.sync_cursor_geometry(position, shape, tracked_cursor);
 
         // Ordering is policy-specific and intentionally explicit: callers rely on these
         // lifecycle transitions for cursor visibility and animation state behavior.
@@ -47,14 +72,12 @@ impl RuntimeState {
                 self.clear_pending_target();
                 self.stop_animation();
                 self.reset_animation_timing();
-                self.update_tracking(location);
             }
             CursorTransitionPolicy::JumpPreservingMotion => {
                 self.start_new_trail_stroke();
                 self.spring_velocity_corners = zero_velocity_corners();
                 self.mark_initialized();
                 self.clear_pending_target();
-                self.update_tracking(location);
             }
             CursorTransitionPolicy::JumpAndStopAnimation => {
                 self.start_new_trail_stroke();
@@ -63,7 +86,6 @@ impl RuntimeState {
                 self.clear_pending_target();
                 self.stop_animation();
                 self.reset_animation_timing();
-                self.update_tracking(location);
             }
             CursorTransitionPolicy::SyncToCurrentCursor => {
                 self.start_new_trail_stroke();
@@ -73,75 +95,64 @@ impl RuntimeState {
                 self.clear_pending_target();
                 self.stop_animation();
                 self.mark_initialized();
-                self.update_tracking(location);
                 self.reset_animation_timing();
             }
         }
     }
 
-    pub(crate) fn set_target(&mut self, position: Point, shape: CursorShape) {
-        let target_changed = self.target.position != position || self.target.shape != shape;
-        if target_changed {
-            self.target.retarget_epoch = self.target.retarget_epoch.wrapping_add(1);
-            self.reset_trail_timeline_from_current();
-        }
-        self.target.position = position;
-        self.target.shape = shape;
-    }
-
     pub(crate) fn initialize_cursor(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
         seed: u32,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
     ) {
         self.apply_cursor_transition(
             position,
             shape,
-            location,
+            tracked_cursor,
             CursorTransitionPolicy::Initialize { seed },
         );
     }
 
     pub(crate) fn jump_preserving_motion(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
     ) {
         self.apply_cursor_transition(
             position,
             shape,
-            location,
+            tracked_cursor,
             CursorTransitionPolicy::JumpPreservingMotion,
         );
     }
 
     pub(crate) fn jump_and_stop_animation(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
     ) {
         self.apply_cursor_transition(
             position,
             shape,
-            location,
+            tracked_cursor,
             CursorTransitionPolicy::JumpAndStopAnimation,
         );
     }
 
     pub(crate) fn sync_to_current_cursor(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
     ) {
         self.apply_cursor_transition(
             position,
             shape,
-            location,
+            tracked_cursor,
             CursorTransitionPolicy::SyncToCurrentCursor,
         );
     }

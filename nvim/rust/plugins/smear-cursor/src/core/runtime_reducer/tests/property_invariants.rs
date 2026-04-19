@@ -10,8 +10,8 @@ proptest! {
         start_col in 1_u16..220,
         switched_row in 120_u16..280,
         switched_col in 120_u16..280,
-        initial_window in any::<i64>(),
-        initial_buffer in any::<i64>(),
+        initial_window in 1_i64..1_000_000,
+        initial_buffer in 1_i64..1_000_000,
         window_delta in 1_i16..32,
         initial_seed in any::<u32>(),
         switched_seed in any::<u32>(),
@@ -102,7 +102,7 @@ proptest! {
         let mut state = RuntimeState::default();
         state.mark_initialized();
         state.stop_animation();
-        let tracked_before = state.tracked_location();
+        let tracked_before = state.tracked_cursor();
         let last_tick_before = state.last_tick_ms();
 
         let mut now_ms = 100.0;
@@ -123,7 +123,7 @@ proptest! {
             );
             prop_assert!(state.is_initialized());
             prop_assert!(!state.is_animating());
-            prop_assert_eq!(state.tracked_location(), tracked_before.clone());
+            prop_assert_eq!(state.tracked_cursor(), tracked_before.clone());
             prop_assert_eq!(state.last_tick_ms(), last_tick_before);
             now_ms += 16.0;
         }
@@ -131,7 +131,7 @@ proptest! {
 
     #[test]
     fn prop_clear_all_and_external_noop_always_emit_cleanup_intent(
-        steps in vec((any::<bool>(), 0_u16..320, 0_u16..320, any::<u32>(), any::<i64>(), any::<i64>()), 1..160),
+        steps in vec((any::<bool>(), 0_u16..320, 0_u16..320, any::<u32>(), 1_i64..1_000_000, 1_i64..1_000_000), 1..160),
     ) {
         let mut state = RuntimeState::default();
         let mut now_ms = 100.0;

@@ -1,14 +1,14 @@
-use super::CursorLocation;
 use super::CursorShape;
 use super::RuntimeOptionsEffects;
 use super::RuntimeOptionsPatch;
+use super::TrackedCursor;
 use crate::config::DerivedConfigCache;
 use crate::config::RuntimeConfig;
 use crate::core::types::ConfigRevision;
 use crate::core::types::ProjectionPolicyRevision;
+use crate::position::RenderPoint;
 use crate::types::DEFAULT_RNG_STATE;
 use crate::types::Particle;
-use crate::types::Point;
 
 mod accessors;
 mod lifecycle;
@@ -29,6 +29,8 @@ use self::types::TransientRuntimeState;
 pub(crate) use prepared_motion::PreparedRuntimeMotion;
 pub(crate) use preview::RuntimePreview;
 pub(crate) use semantic::RuntimeSemanticView;
+pub(crate) use types::RuntimeTargetRetargetKey;
+pub(crate) use types::RuntimeTargetSnapshot;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct ProjectionPolicySnapshot {
@@ -58,21 +60,19 @@ impl ProjectionPolicySnapshot {
 
 #[derive(Debug)]
 pub(crate) struct RuntimeState {
-    // phase 5 moves the legacy motion/planning model into core-owned
-    // runtime state so reducers no longer depend on a shell-local render bridge.
     // authoritative: reducer-owned runtime policy, freshness, and motion facts.
     pub(crate) config: RuntimeConfig,
     config_revision: ConfigRevision,
     projection_policy: ProjectionPolicySnapshot,
     plugin_state: PluginState,
     animation_phase: AnimationPhase,
-    current_corners: [Point; 4],
+    current_corners: [RenderPoint; 4],
     target: CursorTarget,
     trail: TrailState,
-    velocity_corners: [Point; 4],
-    spring_velocity_corners: [Point; 4],
+    velocity_corners: [RenderPoint; 4],
+    spring_velocity_corners: [RenderPoint; 4],
     particles: Vec<Particle>,
-    previous_center: Point,
+    previous_center: RenderPoint,
     rng_state: u32,
     transient: TransientRuntimeState,
     // cache: rebuildable config slices and particle artifacts.
@@ -93,14 +93,14 @@ impl Default for RuntimeState {
             projection_policy,
             plugin_state: PluginState::Enabled,
             animation_phase: AnimationPhase::Uninitialized,
-            current_corners: [Point::ZERO; 4],
+            current_corners: [RenderPoint::ZERO; 4],
             target: CursorTarget::default(),
             trail: TrailState::default(),
-            velocity_corners: [Point::ZERO; 4],
-            spring_velocity_corners: [Point::ZERO; 4],
+            velocity_corners: [RenderPoint::ZERO; 4],
+            spring_velocity_corners: [RenderPoint::ZERO; 4],
             particles: Vec::new(),
             caches: RuntimeCaches::default(),
-            previous_center: Point::ZERO,
+            previous_center: RenderPoint::ZERO,
             rng_state: DEFAULT_RNG_STATE,
             transient: TransientRuntimeState::default(),
         }

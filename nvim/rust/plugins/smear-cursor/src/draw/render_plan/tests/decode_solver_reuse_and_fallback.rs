@@ -60,7 +60,7 @@ fn presence_candidates(
     ])
 }
 
-fn horizontal_centerline(points: impl IntoIterator<Item = Point>) -> Vec<CenterSample> {
+fn horizontal_centerline(points: impl IntoIterator<Item = RenderPoint>) -> Vec<CenterSample> {
     points
         .into_iter()
         .map(|pos| CenterSample {
@@ -209,7 +209,7 @@ proptest! {
                     )
                     .collect::<BTreeMap<_, _>>();
                 let centerline = horizontal_centerline(compiled.keys().copied().map(|(row, col)| {
-                    Point {
+                    RenderPoint {
                         row: row as f64 + 0.5,
                         col: col as f64 + 0.5,
                     }
@@ -361,11 +361,11 @@ proptest! {
         let baseline = decode_locally(&candidates);
         let baseline_coords = baseline.keys().copied().collect::<BTreeSet<_>>();
         let centerline = horizontal_centerline([
-            Point {
+            RenderPoint {
                 row: row as f64 + 0.5,
                 col: left_col as f64 + left_width as f64 / 2.0,
             },
-            Point {
+            RenderPoint {
                 row: row as f64 + 0.5,
                 col: right_col as f64 + right_width as f64 / 2.0,
             },

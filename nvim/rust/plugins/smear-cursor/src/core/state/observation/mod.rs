@@ -43,7 +43,6 @@ pub(crate) use probe::ProbeSlot;
 pub(crate) use probe::ProbeState;
 pub(crate) use semantic::SemanticEvent;
 pub(crate) use semantic::classify_semantic_event;
-pub(crate) use snapshot::CursorPositionSync;
 pub(crate) use snapshot::ObservationBasis;
 pub(crate) use snapshot::ObservationMotion;
 pub(crate) use snapshot::ObservationSnapshot;

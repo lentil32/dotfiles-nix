@@ -12,7 +12,7 @@ fn full_width_tile() -> latent_field::MicroTile {
 fn straight_vertical_centerline(len: usize) -> Vec<CenterSample> {
     (0..len)
         .map(|index| CenterSample {
-            pos: Point {
+            pos: RenderPoint {
                 row: 10.5 + index as f64,
                 col: 10.5,
             },

@@ -1,4 +1,4 @@
-local EXPECTED_HOST_BRIDGE_REVISION = 8
+local EXPECTED_HOST_BRIDGE_REVISION = 9
 
 local function prepend_runtimepath(path)
   if path == nil or path == "" then
@@ -59,7 +59,7 @@ local function main()
     enabled = true,
     logging_level = 0,
     delay_event_to_smear = 0,
-    fps = 120,
+    time_interval = 1000.0 / 120.0,
   })
   vim.wait(50, function()
     return false
@@ -68,10 +68,6 @@ local function main()
   local revision = vim.fn["nvimrs_smear_cursor#host_bridge#revision"]()
   if revision ~= EXPECTED_HOST_BRIDGE_REVISION then
     error("unexpected host bridge revision: " .. tostring(revision))
-  end
-
-  if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#on_core_timer") ~= 1 then
-    error("missing nvimrs_smear_cursor#host_bridge#on_core_timer bridge")
   end
 
   if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#start_timer_once") ~= 1 then
@@ -94,14 +90,6 @@ local function main()
     error("missing nvimrs_smear_cursor#host_bridge#background_allowed_mask bridge")
   end
 
-  if vim.fn.exists("*nvimrs_smear_cursor#host_bridge#set_on_key_listener") ~= 0 then
-    error("legacy nvimrs_smear_cursor#host_bridge#set_on_key_listener bridge still installed")
-  end
-
-  if vim.fn.luaeval("_G.__nvimrs_smear_cursor_on_core_timer ~= nil") then
-    error("legacy Lua timer callback global unexpectedly installed")
-  end
-
   if type(smear.on_core_timer_slot) ~= "function" then
     error("missing nvimrs_smear_cursor.on_core_timer_slot bridge")
   end
@@ -120,22 +108,19 @@ local function main()
     error("probe helpers were not installed during setup")
   end
 
-  local cursor_color =
-    vim.fn["nvimrs_smear_cursor#host_bridge#cursor_color_at_cursor"](0, false)
+  local cursor_color = vim.fn["nvimrs_smear_cursor#host_bridge#cursor_color_at_cursor"](false)
   if cursor_color ~= nil and cursor_color ~= vim.NIL then
     local cursor_color_type = type(cursor_color)
-    if cursor_color_type == "number" then
-      -- Legacy scalar payload shape.
-    elseif cursor_color_type == "table" then
-      local color = cursor_color.color
-      if color ~= nil and type(color) ~= "number" then
-        error("cursor color probe returned non-numeric color field")
-      end
-      if type(cursor_color.used_extmark_fallback) ~= "boolean" then
-        error("cursor color probe returned non-boolean used_extmark_fallback field")
-      end
-    else
+    if cursor_color_type ~= "table" then
       error("cursor color probe returned unexpected type: " .. cursor_color_type)
+    end
+
+    local color = cursor_color.color
+    if color ~= nil and type(color) ~= "number" then
+      error("cursor color probe returned non-numeric color field")
+    end
+    if type(cursor_color.used_extmark_fallback) ~= "boolean" then
+      error("cursor color probe returned non-boolean used_extmark_fallback field")
     end
   end
 

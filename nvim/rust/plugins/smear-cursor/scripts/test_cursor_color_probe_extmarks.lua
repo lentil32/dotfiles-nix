@@ -66,7 +66,7 @@ local function test_prefers_highest_priority_extmark()
     { 1, 0, 0, { end_col = 1, hl_group = "SmearExtmarkLow", priority = 20 } },
     { 2, 0, 0, { end_col = 1, hl_group = "SmearExtmarkHigh", priority = 90 } },
   }, function()
-    return probes.cursor_color_at_cursor(0, true)
+    return probes.cursor_color_at_cursor(true)
   end)
 
   assert_probe_result(result, {
@@ -97,7 +97,7 @@ local function test_uses_topmost_visible_group_from_stacked_extmark()
       },
     },
   }, function()
-    return probes.cursor_color_at_cursor(1, true)
+    return probes.cursor_color_at_cursor(true)
   end)
 
   assert_probe_result(result, {
@@ -120,7 +120,7 @@ local function test_prefers_extmark_overlay_over_syntax()
     return with_mocked_extmarks({
       { 4, 0, 0, { end_col = 1, hl_group = "SmearExtmarkOverlay", priority = 20 } },
     }, function()
-      return probes.cursor_color_at_cursor(0, true)
+      return probes.cursor_color_at_cursor(true)
     end)
   end)
 
@@ -138,9 +138,9 @@ local function test_reads_updated_highlight_without_colorscheme_reload()
   local results = with_mocked_extmarks({
     { 5, 0, 0, { end_col = 1, hl_group = "SmearExtmarkMutable", priority = 30 } },
   }, function()
-    local initial = probes.cursor_color_at_cursor(0, true)
+    local initial = probes.cursor_color_at_cursor(true)
     vim.api.nvim_set_hl(0, "SmearExtmarkMutable", { fg = "#445566" })
-    local updated = probes.cursor_color_at_cursor(0, true)
+    local updated = probes.cursor_color_at_cursor(true)
     return {
       initial = initial,
       updated = updated,
@@ -164,9 +164,9 @@ local function test_reads_group_defined_after_initial_probe()
   local results = with_mocked_extmarks({
     { 6, 0, 0, { end_col = 1, hl_group = "SmearExtmarkLateDefined", priority = 30 } },
   }, function()
-    local initial = probes.cursor_color_at_cursor(1, true)
+    local initial = probes.cursor_color_at_cursor(true)
     vim.api.nvim_set_hl(0, "SmearExtmarkLateDefined", { fg = "#778899" })
-    local updated = probes.cursor_color_at_cursor(1, true)
+    local updated = probes.cursor_color_at_cursor(true)
     return {
       initial = initial,
       updated = updated,
@@ -198,10 +198,10 @@ local function test_resolves_winhighlight_per_window()
   })
 
   local left_result = probe_in_window(windows.left, function()
-    return probes.cursor_color_at_cursor(0, true)
+    return probes.cursor_color_at_cursor(true)
   end)
   local right_result = probe_in_window(windows.right, function()
-    return probes.cursor_color_at_cursor(0, true)
+    return probes.cursor_color_at_cursor(true)
   end)
 
   assert_probe_result(left_result, {
@@ -230,10 +230,10 @@ local function test_resolves_window_highlight_namespaces_per_window()
   })
 
   local left_result = probe_in_window(windows.left, function()
-    return probes.cursor_color_at_cursor(0, true)
+    return probes.cursor_color_at_cursor(true)
   end)
   local right_result = probe_in_window(windows.right, function()
-    return probes.cursor_color_at_cursor(0, true)
+    return probes.cursor_color_at_cursor(true)
   end)
 
   assert_probe_result(left_result, {

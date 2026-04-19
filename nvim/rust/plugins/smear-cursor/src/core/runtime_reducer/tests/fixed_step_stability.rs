@@ -6,7 +6,7 @@ use proptest::collection::vec;
 struct StabilitySummary {
     settle_at_ms: f64,
     peak_distance: f64,
-    final_center: Point,
+    final_center: RenderPoint,
 }
 
 fn run_fps_stability_scenario(render_fps: f64) -> StabilitySummary {
@@ -34,7 +34,7 @@ fn run_fps_stability_scenario(render_fps: f64) -> StabilitySummary {
     );
 
     let frame_dt = RuntimeConfig::interval_ms_for_fps(render_fps);
-    let target = Point {
+    let target = RenderPoint {
         row: 5.0,
         col: 56.0,
     };

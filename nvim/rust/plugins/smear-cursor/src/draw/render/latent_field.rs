@@ -1,4 +1,4 @@
-use crate::types::Point;
+use crate::position::RenderPoint;
 #[cfg(test)]
 use std::collections::BTreeMap;
 
@@ -82,7 +82,7 @@ pub(super) struct MaterializedTile {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Pose {
-    pub(super) center: Point,
+    pub(super) center: RenderPoint,
     pub(super) half_height: f64,
     pub(super) half_width: f64,
 }
@@ -196,8 +196,8 @@ mod tests {
     use crate::core::types::ArcLenQ16;
     use crate::core::types::StepIndex;
     use crate::core::types::StrokeId;
+    use crate::position::RenderPoint;
     use crate::test_support::proptest::pure_config;
-    use crate::types::Point;
     use pretty_assertions::assert_eq;
     use proptest::collection::vec;
     use proptest::prelude::*;
@@ -252,7 +252,7 @@ mod tests {
     fn aligned_pose() -> BoxedStrategy<Pose> {
         (-12_i64..=12_i64, -12_i64..=12_i64, 2_u8..=8_u8, 2_u8..=8_u8)
             .prop_map(|(row, col, half_height_steps, half_width_steps)| Pose {
-                center: Point {
+                center: RenderPoint {
                     row: row as f64 + 0.5,
                     col: col as f64 + 0.5,
                 },

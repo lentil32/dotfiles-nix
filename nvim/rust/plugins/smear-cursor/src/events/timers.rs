@@ -69,10 +69,6 @@ pub(super) fn stop_timer(timer_id: NvimTimerId) -> Result<()> {
     Ok(InstalledHostBridge.stop_timer(timer_id.get())?)
 }
 
-pub(crate) fn on_core_timer_event(timer_id: i64) {
-    on_core_timer_slot_event(timer_id, 0);
-}
-
 pub(crate) fn on_core_timer_slot_event(timer_id: i64, generation: u64) {
     let timer_id = NvimTimerId::try_new(timer_id);
     schedule_guarded("core timer dispatch", move || {

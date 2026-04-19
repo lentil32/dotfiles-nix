@@ -372,7 +372,7 @@ local function better_overlay_candidate(left, right)
   return left
 end
 
-function M.cursor_color_at_cursor(colorscheme_generation, allow_extmark_fallback)
+function M.cursor_color_at_cursor(allow_extmark_fallback)
   local hl_context = current_highlight_context()
   local line = vim.fn.line(".")
   local col = vim.fn.col(".")

@@ -1,4 +1,5 @@
 use super::base::CurrentEditorSnapshot;
+use crate::core::effect::TrackedBufferPosition;
 use crate::core::state::CursorTextContext;
 use crate::core::state::CursorTextContextBoundary;
 use crate::core::state::CursorTextContextState;
@@ -7,7 +8,6 @@ use crate::events::probe_cache::CursorTextContextCacheKey;
 use crate::events::probe_cache::CursorTextContextCacheLookup;
 use crate::events::runtime::cached_cursor_text_context;
 use crate::events::runtime::store_cursor_text_context;
-use crate::state::CursorLocation;
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use std::sync::Arc;
@@ -34,10 +34,10 @@ fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Arc<[Obs
 
 fn tracked_cursor_text_context_line(
     buffer_handle: i64,
-    tracked_location: Option<&CursorLocation>,
+    tracked_buffer_position: Option<TrackedBufferPosition>,
 ) -> Option<i64> {
-    tracked_location.and_then(|location| {
-        (location.buffer_handle == buffer_handle && location.line >= 1).then_some(location.line)
+    tracked_buffer_position.and_then(|position| {
+        (position.buffer_handle() == buffer_handle).then_some(position.buffer_line().value())
     })
 }
 
@@ -52,7 +52,7 @@ fn should_skip_cursor_text_context_sampling(
 pub(super) fn current_cursor_text_context(
     editor: &CurrentEditorSnapshot,
     cursor_line: i64,
-    tracked_location: Option<&CursorLocation>,
+    tracked_buffer_position: Option<TrackedBufferPosition>,
     retained_boundary: Option<CursorTextContextBoundary>,
 ) -> Result<CursorTextContextState> {
     if cursor_line < 1 {
@@ -66,7 +66,7 @@ pub(super) fn current_cursor_text_context(
     let buffer_handle = i64::from(buffer.handle());
     let text_revision = editor.current_text_revision()?.value();
     let boundary = Some(CursorTextContextBoundary::new(buffer_handle, text_revision));
-    let tracked_line = tracked_cursor_text_context_line(buffer_handle, tracked_location);
+    let tracked_line = tracked_cursor_text_context_line(buffer_handle, tracked_buffer_position);
     let cache_key =
         CursorTextContextCacheKey::new(buffer_handle, text_revision, cursor_line, tracked_line);
     match cached_cursor_text_context(&cache_key) {

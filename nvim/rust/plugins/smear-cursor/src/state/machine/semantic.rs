@@ -7,8 +7,8 @@ use super::types::TrailState;
 use super::types::TransientRuntimeState;
 use crate::config::RuntimeConfig;
 use crate::core::types::ConfigRevision;
+use crate::position::RenderPoint;
 use crate::types::Particle;
-use crate::types::Point;
 
 // Cache-free projection of authoritative runtime state. Equality on this view
 // intentionally ignores purgeable scratch buffers and rebuildable caches.
@@ -19,13 +19,13 @@ pub(crate) struct RuntimeSemanticView<'a> {
     projection_policy: ProjectionPolicySnapshot,
     plugin_state: PluginState,
     animation_phase: &'a AnimationPhase,
-    current_corners: &'a [Point; 4],
+    current_corners: &'a [RenderPoint; 4],
     target: &'a CursorTarget,
     trail: &'a TrailState,
-    velocity_corners: &'a [Point; 4],
-    spring_velocity_corners: &'a [Point; 4],
+    velocity_corners: &'a [RenderPoint; 4],
+    spring_velocity_corners: &'a [RenderPoint; 4],
     particles: &'a [Particle],
-    previous_center: Point,
+    previous_center: RenderPoint,
     rng_state: u32,
     transient: &'a TransientRuntimeState,
 }

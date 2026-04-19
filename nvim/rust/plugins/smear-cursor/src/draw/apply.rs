@@ -3,7 +3,6 @@ use super::log_draw_error;
 use super::palette::HighlightGroupNames;
 use super::palette::highlight_group_names;
 use super::render_plan::HighlightRef;
-use super::render_plan::Viewport;
 use super::window_pool::AcquireError;
 use super::window_pool::AcquireKind;
 use super::window_pool::AcquiredWindow;
@@ -15,6 +14,7 @@ use super::with_render_tab;
 use crate::core::realization::RealizationProjection;
 use crate::core::realization::RealizationSpan;
 use crate::events::editor_viewport_for_bounds;
+use crate::position::ViewportBounds;
 use nvim_oxi::Array;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
@@ -47,11 +47,10 @@ impl ApplyMetrics {
     }
 }
 
-pub(crate) fn editor_bounds() -> Result<Viewport> {
+pub(crate) fn editor_bounds() -> Result<ViewportBounds> {
     let viewport = editor_viewport_for_bounds()?;
-    Ok(Viewport {
-        max_row: viewport.max_row(),
-        max_col: viewport.max_col(),
+    viewport.bounds().ok_or_else(|| {
+        api::Error::Other("editor viewport snapshot produced invalid viewport bounds".into()).into()
     })
 }
 

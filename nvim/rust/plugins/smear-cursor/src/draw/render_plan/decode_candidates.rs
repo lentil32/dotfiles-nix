@@ -330,7 +330,7 @@ mod candidate_generation_complexity {
         patch
     }
 
-    fn legacy_glyph_dot(patch: MicroTile, glyph: GlyphProfile) -> u64 {
+    fn reference_glyph_dot(patch: MicroTile, glyph: GlyphProfile) -> u64 {
         match glyph.glyph {
             DecodedGlyph::Block => patch
                 .samples_q12
@@ -371,7 +371,7 @@ mod candidate_generation_complexity {
         }
     }
 
-    fn legacy_cell_candidates_for_patch(
+    fn reference_cell_candidates_for_patch(
         patch: MicroTile,
         age: AgeMoment,
         previous: Option<DecodedCellState>,
@@ -426,7 +426,7 @@ mod candidate_generation_complexity {
         }
 
         for glyph in glyphs {
-            let dot = legacy_glyph_dot(patch, glyph);
+            let dot = reference_glyph_dot(patch, glyph);
             evaluate_non_empty_glyph_candidate(&mut non_empty, glyph, dot, &non_empty_context);
         }
 
@@ -438,7 +438,7 @@ mod candidate_generation_complexity {
     }
 
     #[test]
-    fn patch_candidate_basis_matches_legacy_mask_dots_for_all_families() {
+    fn patch_candidate_basis_matches_reference_mask_dots_for_all_families() {
         let patch = varied_patch();
         let patch_basis = PatchCandidateBasis::from_patch(patch);
         let matrix_dots: [u64; MATRIX_MASK_LIMIT] =
@@ -449,14 +449,14 @@ mod candidate_generation_complexity {
 
         assert_eq!(
             patch_basis.total_mass,
-            legacy_glyph_dot(patch, GlyphProfile::block())
+            reference_glyph_dot(patch, GlyphProfile::block())
         );
 
         for mask in 1_u8..=14_u8 {
             let glyph = GlyphProfile::matrix(mask, layout.matrix_sample_count(mask));
             assert_eq!(
                 matrix_dots[usize::from(mask)],
-                legacy_glyph_dot(patch, glyph)
+                reference_glyph_dot(patch, glyph)
             );
         }
 
@@ -464,13 +464,13 @@ mod candidate_generation_complexity {
             let glyph = GlyphProfile::octant(mask, layout.octant_sample_count(mask));
             assert_eq!(
                 octant_dots[usize::from(mask)],
-                legacy_glyph_dot(patch, glyph)
+                reference_glyph_dot(patch, glyph)
             );
         }
     }
 
     #[test]
-    fn cell_candidates_for_patch_matches_legacy_profile_scan_with_previous_state() {
+    fn cell_candidates_for_patch_matches_reference_profile_scan_with_previous_state() {
         let patch = varied_patch();
         let age = AgeMoment {
             total_mass_q12: 4095,
@@ -483,9 +483,9 @@ mod candidate_generation_complexity {
         let shade_profiles = build_shade_profiles(16);
 
         let current = cell_candidates_for_patch(patch, age, previous, &shade_profiles, 0.35, 5);
-        let legacy =
-            legacy_cell_candidates_for_patch(patch, age, previous, &shade_profiles, 0.35, 5);
+        let reference =
+            reference_cell_candidates_for_patch(patch, age, previous, &shade_profiles, 0.35, 5);
 
-        assert_eq!(current, legacy);
+        assert_eq!(current, reference);
     }
 }

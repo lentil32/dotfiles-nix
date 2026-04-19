@@ -9,11 +9,14 @@ use super::probe::ProbeSet;
 use super::probe::ProbeSlot;
 use crate::core::runtime_reducer::ScrollShift;
 use crate::core::state::ExternalDemand;
-use crate::core::types::CursorPosition;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
-use crate::core::types::ViewportSnapshot;
-use crate::state::CursorLocation;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::ScreenCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct PendingObservation {
@@ -54,9 +57,9 @@ pub(crate) struct ObservationBasis {
     // authoritative: collected observation facts and reuse witnesses.
     observed_at: Millis,
     mode: String,
-    cursor_position: Option<CursorPosition>,
-    cursor_location: CursorLocation,
-    viewport: ViewportSnapshot,
+    surface: WindowSurfaceSnapshot,
+    cursor: CursorObservation,
+    viewport: ViewportBounds,
     buffer_revision: Option<u64>,
     cursor_text_context_state: CursorTextContextState,
 }
@@ -65,15 +68,15 @@ impl ObservationBasis {
     pub(crate) fn new(
         observed_at: Millis,
         mode: String,
-        cursor_position: Option<CursorPosition>,
-        cursor_location: CursorLocation,
-        viewport: ViewportSnapshot,
+        surface: WindowSurfaceSnapshot,
+        cursor: CursorObservation,
+        viewport: ViewportBounds,
     ) -> Self {
         Self {
             observed_at,
             mode,
-            cursor_position,
-            cursor_location,
+            surface,
+            cursor,
             viewport,
             buffer_revision: None,
             cursor_text_context_state: CursorTextContextState::Unavailable,
@@ -88,15 +91,27 @@ impl ObservationBasis {
         &self.mode
     }
 
-    pub(crate) const fn cursor_position(&self) -> Option<CursorPosition> {
-        self.cursor_position
+    pub(crate) const fn surface(&self) -> WindowSurfaceSnapshot {
+        self.surface
     }
 
-    pub(crate) fn cursor_location(&self) -> CursorLocation {
-        self.cursor_location.clone()
+    pub(crate) const fn cursor(&self) -> CursorObservation {
+        self.cursor
     }
 
-    pub(crate) const fn viewport(&self) -> ViewportSnapshot {
+    pub(crate) const fn cursor_position(&self) -> Option<ScreenCell> {
+        self.cursor.screen_cell()
+    }
+
+    pub(crate) const fn exact_cursor_position(&self) -> Option<ScreenCell> {
+        self.cursor.exact_screen_cell()
+    }
+
+    pub(crate) const fn requires_exact_cursor_position_refresh(&self) -> bool {
+        self.cursor.requires_exact_refresh()
+    }
+
+    pub(crate) const fn viewport(&self) -> ViewportBounds {
         self.viewport
     }
 
@@ -127,7 +142,31 @@ impl ObservationBasis {
     }
 
     #[cfg(debug_assertions)]
-    fn debug_assert_invariants(&self) {}
+    fn debug_assert_invariants(&self) {
+        let surface = self.surface();
+        let cursor = self.cursor();
+        debug_assert!(
+            SurfaceId::new(surface.id().window_handle(), surface.id().buffer_handle()).is_some(),
+            "observation surfaces must retain positive window and buffer handles"
+        );
+        match cursor.cell() {
+            ObservedCell::Unavailable => {
+                debug_assert_eq!(self.cursor_position(), None);
+                debug_assert_eq!(self.exact_cursor_position(), None);
+                debug_assert!(!self.requires_exact_cursor_position_refresh());
+            }
+            ObservedCell::Exact(cell) => {
+                debug_assert_eq!(self.cursor_position(), Some(cell));
+                debug_assert_eq!(self.exact_cursor_position(), Some(cell));
+                debug_assert!(!self.requires_exact_cursor_position_refresh());
+            }
+            ObservedCell::Deferred(cell) => {
+                debug_assert_eq!(self.cursor_position(), Some(cell));
+                debug_assert_eq!(self.exact_cursor_position(), None);
+                debug_assert!(self.requires_exact_cursor_position_refresh());
+            }
+        }
+    }
 
     #[cfg(not(debug_assertions))]
     fn debug_assert_invariants(&self) {}
@@ -138,10 +177,10 @@ pub(crate) fn derive_cursor_color_probe_witness(
     generations: CursorColorProbeGenerations,
 ) -> Option<CursorColorProbeWitness> {
     let buffer_revision = basis.buffer_revision()?;
-    let cursor_location = basis.cursor_location();
+    let surface_id = basis.surface().id();
     Some(CursorColorProbeWitness::new(
-        cursor_location.window_handle,
-        cursor_location.buffer_handle,
+        surface_id.window_handle(),
+        surface_id.buffer_handle(),
         buffer_revision,
         basis.mode().to_owned(),
         basis.cursor_position(),
@@ -153,55 +192,16 @@ pub(crate) fn derive_cursor_color_probe_witness(
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ObservationMotion {
     scroll_shift: Option<ScrollShift>,
-    cursor_position_sync: CursorPositionSync,
 }
 
 impl ObservationMotion {
     pub(crate) const fn new(scroll_shift: Option<ScrollShift>) -> Self {
-        Self {
-            scroll_shift,
-            cursor_position_sync: CursorPositionSync::Exact,
-        }
+        Self { scroll_shift }
     }
 
     pub(crate) const fn scroll_shift(&self) -> Option<ScrollShift> {
         self.scroll_shift
     }
-
-    pub(crate) const fn requires_exact_cursor_position_refresh(&self) -> bool {
-        matches!(
-            self.cursor_position_sync,
-            CursorPositionSync::ConcealDeferred
-        )
-    }
-
-    pub(crate) const fn exact_cursor_position(
-        &self,
-        cursor_position: Option<CursorPosition>,
-    ) -> Option<CursorPosition> {
-        if self.requires_exact_cursor_position_refresh() {
-            None
-        } else {
-            cursor_position
-        }
-    }
-
-    pub(crate) const fn with_cursor_position_sync(
-        self,
-        cursor_position_sync: CursorPositionSync,
-    ) -> Self {
-        Self {
-            cursor_position_sync,
-            ..self
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub(crate) enum CursorPositionSync {
-    #[default]
-    Exact,
-    ConcealDeferred,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -278,6 +278,22 @@ impl ObservationSnapshot {
     #[cfg(debug_assertions)]
     pub(crate) fn debug_assert_invariants(&self) {
         self.basis.debug_assert_invariants();
+        let cursor = self.basis.cursor();
+        match cursor.cell() {
+            ObservedCell::Unavailable => {
+                debug_assert_eq!(self.exact_cursor_position(), None);
+                debug_assert!(!self.requires_exact_cursor_position_refresh());
+            }
+            ObservedCell::Exact(cell) => {
+                debug_assert_eq!(self.exact_cursor_position(), Some(cell));
+                debug_assert!(!self.requires_exact_cursor_position_refresh());
+            }
+            ObservedCell::Deferred(cell) => {
+                debug_assert_eq!(self.basis.cursor_position(), Some(cell));
+                debug_assert_eq!(self.exact_cursor_position(), None);
+                debug_assert!(self.requires_exact_cursor_position_refresh());
+            }
+        }
 
         if let BackgroundProbeState::Ready { batch, .. } = self.probes.background() {
             debug_assert!(
@@ -306,9 +322,8 @@ impl ObservationSnapshot {
         self.motion().scroll_shift()
     }
 
-    pub(crate) const fn exact_cursor_position(&self) -> Option<CursorPosition> {
-        self.motion
-            .exact_cursor_position(self.basis.cursor_position())
+    pub(crate) const fn exact_cursor_position(&self) -> Option<ScreenCell> {
+        self.basis.exact_cursor_position()
     }
 
     pub(crate) const fn requires_exact_cursor_color_refresh(&self) -> bool {
@@ -319,6 +334,6 @@ impl ObservationSnapshot {
     }
 
     pub(crate) const fn requires_exact_cursor_position_refresh(&self) -> bool {
-        self.motion.requires_exact_cursor_position_refresh()
+        self.basis.requires_exact_cursor_position_refresh()
     }
 }

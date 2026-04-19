@@ -82,7 +82,6 @@ fn activating_an_observation_moves_probe_policy_out_of_the_pending_slot() {
             IngressSeq::new(3),
             ExternalDemandKind::ExternalCursor,
             Millis::new(20),
-            None,
             BufferPerfClass::Full,
         ),
         ProbeRequestSet::only(ProbeKind::CursorColor),

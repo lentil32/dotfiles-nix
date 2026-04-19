@@ -1,5 +1,5 @@
-use crate::core::types::CursorPosition;
 use crate::core::types::Generation;
+use crate::position::ScreenCell;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -68,7 +68,7 @@ pub(crate) struct CursorColorProbeWitness {
     buffer_handle: i64,
     changedtick: u64,
     mode: String,
-    cursor_position: Option<CursorPosition>,
+    cursor_position: Option<ScreenCell>,
     colorscheme_generation: Generation,
     cache_generation: Generation,
 }
@@ -105,7 +105,7 @@ impl CursorColorProbeWitness {
         buffer_handle: i64,
         changedtick: u64,
         mode: String,
-        cursor_position: Option<CursorPosition>,
+        cursor_position: Option<ScreenCell>,
         colorscheme_generation: Generation,
         cache_generation: Generation,
     ) -> Self {
@@ -136,7 +136,7 @@ impl CursorColorProbeWitness {
         &self.mode
     }
 
-    pub(crate) const fn cursor_position(&self) -> Option<CursorPosition> {
+    pub(crate) const fn cursor_position(&self) -> Option<ScreenCell> {
         self.cursor_position
     }
 

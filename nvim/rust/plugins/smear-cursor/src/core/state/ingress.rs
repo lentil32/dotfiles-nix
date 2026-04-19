@@ -1,5 +1,4 @@
 use super::BufferPerfClass;
-use crate::core::types::CursorPosition;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
 use crate::core::types::ProposalId;
@@ -24,7 +23,6 @@ pub(crate) struct ExternalDemand {
     seq: IngressSeq,
     kind: ExternalDemandKind,
     observed_at: Millis,
-    requested_target: Option<CursorPosition>,
     buffer_perf_class: BufferPerfClass,
 }
 
@@ -33,14 +31,12 @@ impl ExternalDemand {
         seq: IngressSeq,
         kind: ExternalDemandKind,
         observed_at: Millis,
-        requested_target: Option<CursorPosition>,
         buffer_perf_class: BufferPerfClass,
     ) -> Self {
         Self {
             seq,
             kind,
             observed_at,
-            requested_target,
             buffer_perf_class,
         }
     }
@@ -55,10 +51,6 @@ impl ExternalDemand {
 
     pub(crate) const fn observed_at(&self) -> Millis {
         self.observed_at
-    }
-
-    pub(crate) const fn requested_target(&self) -> Option<CursorPosition> {
-        self.requested_target
     }
 
     pub(crate) const fn buffer_perf_class(&self) -> BufferPerfClass {

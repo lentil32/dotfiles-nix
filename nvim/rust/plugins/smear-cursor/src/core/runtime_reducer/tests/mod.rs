@@ -17,11 +17,13 @@ use super::next_cleanup_check_delay_ms;
 use super::reduce_cursor_event;
 use crate::config::RuntimeConfig;
 use crate::core::state::SemanticEvent;
-use crate::state::CursorLocation;
+use crate::position::RenderPoint;
+use crate::position::corners_center;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
+use crate::state::RuntimeTargetSnapshot;
+use crate::state::TrackedCursor;
 use crate::types::Particle;
-use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
 use crate::types::StepOutput;
@@ -57,13 +59,17 @@ fn event(row: f64, col: f64) -> CursorEventContext {
     event_at(row, col, 100.0)
 }
 
+fn tracked_cursor(window_handle: i64, buffer_handle: i64) -> TrackedCursor {
+    TrackedCursor::fixture(window_handle, buffer_handle, 1, 1)
+}
+
 fn event_at(row: f64, col: f64, now_ms: f64) -> CursorEventContext {
     CursorEventContext {
         row,
         col,
         now_ms,
         seed: 7,
-        cursor_location: CursorLocation::new(10, 20, 1, 1),
+        tracked_cursor: tracked_cursor(10, 20),
         scroll_shift: None,
         semantic_event: SemanticEvent::FrameCommitted,
     }
@@ -82,10 +88,20 @@ fn event_with_location(
         col,
         now_ms,
         seed,
-        cursor_location: CursorLocation::new(window_handle, buffer_handle, 1, 1),
+        tracked_cursor: tracked_cursor(window_handle, buffer_handle),
         scroll_shift: None,
         semantic_event: SemanticEvent::FrameCommitted,
     }
+}
+
+fn replace_target_preserving_tracking(
+    state: &mut RuntimeState,
+    position: RenderPoint,
+    shape: CursorShape,
+) {
+    let snapshot =
+        RuntimeTargetSnapshot::preserving_tracking(position, shape, state.tracked_cursor_ref());
+    state.retarget_preserving_current_pose(snapshot);
 }
 
 #[derive(Clone)]
@@ -108,7 +124,7 @@ fn event_with_location_and_scroll(
         col,
         now_ms,
         seed,
-        cursor_location: CursorLocation::new(window_handle, buffer_handle, 1, 1),
+        tracked_cursor: tracked_cursor(window_handle, buffer_handle),
         scroll_shift,
         semantic_event: SemanticEvent::FrameCommitted,
     }
@@ -195,14 +211,7 @@ fn animation_tick_with_scroll_step(
     }
 }
 
-fn corners_center(corners: &[Point; 4]) -> Point {
-    Point {
-        row: (corners[0].row + corners[1].row + corners[2].row + corners[3].row) / 4.0,
-        col: (corners[0].col + corners[1].col + corners[2].col + corners[3].col) / 4.0,
-    }
-}
-
-fn trajectory_center(state: &RuntimeState) -> Point {
+fn trajectory_center(state: &RuntimeState) -> RenderPoint {
     corners_center(&state.current_corners())
 }
 
@@ -258,7 +267,7 @@ struct PointSummary {
 }
 
 impl PointSummary {
-    fn from_point(point: Point) -> Self {
+    fn from_point(point: RenderPoint) -> Self {
         Self {
             row: RoundedScalar::from_f64(point.row),
             col: RoundedScalar::from_f64(point.col),
@@ -317,12 +326,12 @@ struct LocationSummary {
 }
 
 impl LocationSummary {
-    fn from_location(location: &CursorLocation) -> Self {
+    fn from_tracked_cursor(tracked_cursor: &TrackedCursor) -> Self {
         Self {
-            window_handle: location.window_handle,
-            buffer_handle: location.buffer_handle,
-            top_row: location.top_row,
-            line: location.line,
+            window_handle: tracked_cursor.window_handle(),
+            buffer_handle: tracked_cursor.buffer_handle(),
+            top_row: tracked_cursor.surface().top_buffer_line().value(),
+            line: tracked_cursor.buffer_line().value(),
         }
     }
 
@@ -345,12 +354,12 @@ impl EventSummary {
     fn from_event(event: &CursorEventContext) -> Self {
         Self {
             now_ms: RoundedScalar::from_f64(event.now_ms),
-            position: PointSummary::from_point(Point {
+            position: PointSummary::from_point(RenderPoint {
                 row: event.row,
                 col: event.col,
             }),
             seed: event.seed,
-            location: LocationSummary::from_location(&event.cursor_location),
+            location: LocationSummary::from_tracked_cursor(&event.tracked_cursor),
             scroll_shift: event
                 .scroll_shift
                 .map(ScrollShiftSummary::from_scroll_shift),
@@ -457,7 +466,7 @@ impl TransitionSummary {
 struct RuntimeStateSummary {
     center: PointSummary,
     target: PointSummary,
-    tracked_location: Option<LocationSummary>,
+    tracked_cursor: Option<LocationSummary>,
     is_animating: bool,
     is_settling: bool,
     is_draining: bool,
@@ -470,9 +479,9 @@ impl RuntimeStateSummary {
         Self {
             center: PointSummary::from_point(trajectory_center(state)),
             target: PointSummary::from_point(state.target_position()),
-            tracked_location: state
-                .tracked_location_ref()
-                .map(LocationSummary::from_location),
+            tracked_cursor: state
+                .tracked_cursor_ref()
+                .map(LocationSummary::from_tracked_cursor),
             is_animating: state.is_animating(),
             is_settling: state.is_settling(),
             is_draining: state.is_draining(),
@@ -697,7 +706,7 @@ impl TrajectoryTranscript {
             format!("stroke={}", self.final_state.trail_stroke_id),
             format!("epoch={}", self.final_state.retarget_epoch),
         ];
-        if let Some(location) = &self.final_state.tracked_location {
+        if let Some(location) = &self.final_state.tracked_cursor {
             final_line.push(format!("surf={}", location.render_surface()));
         }
         lines.push(final_line.join(" "));
@@ -777,17 +786,18 @@ fn animating_runtime_towards_target(configure: impl FnOnce(&mut RuntimeState)) -
     let mut state = RuntimeState::default();
     configure(&mut state);
     state.initialize_cursor(
-        Point { row: 5.0, col: 6.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 5.0, col: 6.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(10, 20, 1, 1),
+        &tracked_cursor(10, 20),
     );
-    state.set_target(
-        Point {
+    replace_target_preserving_tracking(
+        &mut state,
+        RenderPoint {
             row: 5.0,
             col: 12.0,
         },
-        CursorShape::new(false, false),
+        CursorShape::block(),
     );
     state.start_animation_towards_target();
     state.set_last_tick_ms(Some(100.0));

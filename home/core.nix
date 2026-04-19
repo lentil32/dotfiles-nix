@@ -124,7 +124,6 @@ in
     mysql84
     mermaid-cli
     opam
-    turbo
     typescript
 
     # Rust overlay

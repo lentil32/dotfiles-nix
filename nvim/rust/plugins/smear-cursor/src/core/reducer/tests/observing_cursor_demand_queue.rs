@@ -6,7 +6,7 @@ fn first_cursor_demand_enters_observing_and_requests_observation_base() {
 
     let first = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
     );
 
     pretty_assert_eq!(first.next.lifecycle(), Lifecycle::Observing);
@@ -31,12 +31,11 @@ fn first_cursor_demand_enters_observing_and_requests_observation_base() {
 #[test]
 fn second_cursor_demand_records_ingress_coalesced_without_restarting_observation() {
     let ready = ready_state();
-    let observing =
-        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 20, None);
+    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 20);
 
     let second = reduce(
         &observing,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 21),
     );
 
     pretty_assert_eq!(second.next.lifecycle(), Lifecycle::Observing);
@@ -51,16 +50,15 @@ fn second_cursor_demand_records_ingress_coalesced_without_restarting_observation
 #[test]
 fn newest_queued_cursor_replaces_the_older_pending_cursor_demand() {
     let ready = ready_state();
-    let observing =
-        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 20, None);
+    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 20);
     let coalesced = reduce(
         &observing,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 21, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 21),
     );
 
     let third = reduce(
         &coalesced.next,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 22, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 22),
     );
 
     let queued_cursor = third
@@ -74,7 +72,6 @@ fn newest_queued_cursor_replaces_the_older_pending_cursor_demand() {
             IngressSeq::new(3),
             ExternalDemandKind::ExternalCursor,
             Millis::new(22),
-            None,
             BufferPerfClass::Full,
         ))
     );

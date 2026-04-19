@@ -17,6 +17,7 @@ use crate::events::runtime::take_background_probe_request_scratch;
 use crate::lua::LuaParseError;
 use crate::lua::parse_indexed_objects_typed;
 use crate::lua::u8_from_object_typed;
+use crate::position::ViewportBounds;
 use nvim_oxi::Array;
 use nvim_oxi::Object;
 use thiserror::Error;
@@ -70,21 +71,16 @@ fn with_background_probe_request_scratch<R>(
 }
 
 fn batch_background_allowed_mask(
-    viewport: crate::core::types::ViewportSnapshot,
+    viewport: ViewportBounds,
     chunk: &BackgroundProbeChunk,
 ) -> std::result::Result<BackgroundProbeChunkMask, BackgroundProbeMaskError> {
     if chunk.len() == 0 {
         return Ok(BackgroundProbeChunkMask::from_allowed_mask(&[]));
     }
-    if chunk.iter_cells().any(|cell| {
-        let Ok(row) = u32::try_from(cell.row()) else {
-            return true;
-        };
-        let Ok(col) = u32::try_from(cell.col()) else {
-            return true;
-        };
-        row == 0 || col == 0 || row > viewport.max_row.value() || col > viewport.max_col.value()
-    }) {
+    if chunk
+        .iter_cells()
+        .any(|cell| cell.row() > viewport.max_row() || cell.col() > viewport.max_col())
+    {
         return Err(BackgroundProbeMaskError::Shape(
             crate::lua::invalid_key_error(
                 "background_probe_mask",
@@ -178,7 +174,7 @@ mod tests {
     use crate::core::state::BackgroundProbePlan;
     use crate::core::state::BackgroundProbeProgress;
     use crate::lua::i64_from_object_typed;
-    use crate::types::ScreenCell;
+    use crate::position::ScreenCell;
     use pretty_assertions::assert_eq;
 
     #[test]

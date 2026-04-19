@@ -39,7 +39,7 @@ struct CursorColorMotionCacheKey {
     buffer_handle: i64,
     changedtick: u64,
     mode: String,
-    line: u32,
+    line: i64,
     colorscheme_generation: crate::core::types::Generation,
     cache_generation: crate::core::types::Generation,
 }
@@ -48,7 +48,7 @@ impl CursorColorMotionCacheKey {
     fn from_witness(witness: &CursorColorProbeWitness) -> Option<Self> {
         // Mirror `CompatibleWithinLine`: motion-cache reuse collapses only
         // column drift within the same line, never cross-line movement.
-        let line = witness.cursor_position()?.row.value();
+        let line = witness.cursor_position()?.row();
         Some(Self {
             window_handle: witness.window_handle(),
             buffer_handle: witness.buffer_handle(),

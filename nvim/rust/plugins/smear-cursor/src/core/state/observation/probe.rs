@@ -6,7 +6,7 @@ use super::background_probe::BackgroundProbeProgress;
 use super::background_probe::BackgroundProbeUpdate;
 use crate::core::types::ObservationId;
 use crate::core::types::ProbeRequestId;
-use crate::core::types::ViewportSnapshot;
+use crate::position::ViewportBounds;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) struct ProbeRequestSet {
@@ -336,7 +336,7 @@ impl BackgroundProbeState {
 
     pub(crate) fn accept_batch(
         &mut self,
-        viewport: ViewportSnapshot,
+        viewport: ViewportBounds,
         reuse: ProbeReuse,
         batch: BackgroundProbeBatch,
     ) -> bool {
@@ -359,7 +359,7 @@ impl BackgroundProbeState {
 
     pub(crate) fn apply_chunk(
         &mut self,
-        viewport: ViewportSnapshot,
+        viewport: ViewportBounds,
         chunk: &BackgroundProbeChunk,
         allowed_mask: &BackgroundProbeChunkMask,
     ) -> bool {

@@ -297,7 +297,7 @@ proptest! {
     ) {
         let frame = with_block_aspect_ratio(&base_frame(), 1.0);
         let centerline = vec![CenterSample {
-            pos: Point {
+            pos: RenderPoint {
                 row: 10.5,
                 col: 10.5,
             },

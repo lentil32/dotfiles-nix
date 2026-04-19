@@ -1,12 +1,12 @@
-use super::CursorLocation;
 use super::CursorShape;
+use super::TrackedCursor;
+use crate::position::RenderPoint;
 use crate::types::Particle;
-use crate::types::Point;
 use crate::types::StepOutput;
 use proptest::prelude::*;
 
-pub(super) fn point(row: f64, col: f64) -> Point {
-    Point { row, col }
+pub(super) fn point(row: f64, col: f64) -> RenderPoint {
+    RenderPoint { row, col }
 }
 
 pub(super) fn location(
@@ -14,12 +14,12 @@ pub(super) fn location(
     buffer_handle: i64,
     row: i64,
     col: i64,
-) -> CursorLocation {
-    CursorLocation::new(window_handle, buffer_handle, row, col)
+) -> TrackedCursor {
+    TrackedCursor::fixture(window_handle, buffer_handle, row, col)
 }
 
 pub(super) fn default_shape() -> CursorShape {
-    CursorShape::new(false, false)
+    CursorShape::block()
 }
 
 pub(super) fn sample_step_output() -> StepOutput {
@@ -42,23 +42,23 @@ pub(super) fn sample_step_output() -> StepOutput {
 
 pub(super) fn cursor_shape_strategy() -> BoxedStrategy<CursorShape> {
     prop_oneof![
-        Just(CursorShape::new(false, false)),
-        Just(CursorShape::new(true, false)),
-        Just(CursorShape::new(false, true)),
+        Just(CursorShape::block()),
+        Just(CursorShape::vertical_bar()),
+        Just(CursorShape::horizontal_bar()),
     ]
     .boxed()
 }
 
-pub(super) fn cursor_location_strategy() -> BoxedStrategy<CursorLocation> {
+pub(super) fn tracked_cursor_strategy() -> BoxedStrategy<TrackedCursor> {
     (
-        any::<i16>(),
-        any::<i16>(),
-        -256_i64..256_i64,
-        -256_i64..256_i64,
-        -64_i64..64_i64,
-        -64_i64..64_i64,
-        -32_i64..32_i64,
-        -32_i64..32_i64,
+        1_i16..=i16::MAX,
+        1_i16..=i16::MAX,
+        1_i64..256_i64,
+        1_i64..256_i64,
+        0_i64..64_i64,
+        0_i64..64_i64,
+        1_i64..32_i64,
+        1_i64..32_i64,
         1_i64..240_i64,
         1_i64..160_i64,
     )
@@ -75,7 +75,7 @@ pub(super) fn cursor_location_strategy() -> BoxedStrategy<CursorLocation> {
                 window_width,
                 window_height,
             )| {
-                CursorLocation::new(
+                TrackedCursor::fixture(
                     i64::from(window_handle),
                     i64::from(buffer_handle),
                     top_row,
@@ -89,19 +89,15 @@ pub(super) fn cursor_location_strategy() -> BoxedStrategy<CursorLocation> {
         .boxed()
 }
 
-pub(super) fn surface_changed(previous: Option<&CursorLocation>, next: &CursorLocation) -> bool {
-    previous.is_some_and(|tracked| {
-        tracked.window_handle != next.window_handle
-            || tracked.buffer_handle != next.buffer_handle
-            || tracked.window_dimensions_changed(next)
-    })
-}
-
-pub(super) fn translate_corners(corners: [Point; 4], row_delta: f64, col_delta: f64) -> [Point; 4] {
+pub(super) fn translate_corners(
+    corners: [RenderPoint; 4],
+    row_delta: f64,
+    col_delta: f64,
+) -> [RenderPoint; 4] {
     corners.map(|corner| point(corner.row + row_delta, corner.col + col_delta))
 }
 
-pub(super) fn row_bounds(corners: &[Point; 4]) -> (f64, f64) {
+pub(super) fn row_bounds(corners: &[RenderPoint; 4]) -> (f64, f64) {
     let mut min_row = f64::INFINITY;
     let mut max_row = f64::NEG_INFINITY;
     for corner in corners {
@@ -112,14 +108,23 @@ pub(super) fn row_bounds(corners: &[Point; 4]) -> (f64, f64) {
     (min_row, max_row)
 }
 
-pub(super) fn perturbed_location(location: &CursorLocation) -> CursorLocation {
-    CursorLocation::new(
-        location.window_handle,
-        location.buffer_handle,
-        location.top_row,
-        location.line.saturating_add(1),
+pub(super) fn perturbed_location(location: &TrackedCursor) -> TrackedCursor {
+    TrackedCursor::fixture(
+        location.window_handle(),
+        location.buffer_handle(),
+        location.surface().top_buffer_line().value(),
+        location.buffer_line().value(),
     )
-    .with_viewport_columns(location.left_col, location.text_offset)
-    .with_window_origin(location.window_row, location.window_col)
-    .with_window_dimensions(location.window_width, location.window_height)
+    .with_viewport_columns(
+        i64::from(location.surface().left_col0()),
+        i64::from(location.surface().text_offset0()),
+    )
+    .with_window_origin(
+        location.surface().window_origin().row(),
+        location.surface().window_origin().col(),
+    )
+    .with_window_dimensions(
+        location.surface().window_size().max_col().saturating_add(1),
+        location.surface().window_size().max_row(),
+    )
 }

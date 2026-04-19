@@ -8,10 +8,10 @@ proptest! {
     fn prop_transition_operations_preserve_velocity_and_tracking_contracts(
         initial_position in finite_point(),
         initial_shape in cursor_shape_strategy(),
-        initial_location in cursor_location_strategy(),
+        initial_location in tracked_cursor_strategy(),
         transition_position in finite_point(),
         transition_shape in cursor_shape_strategy(),
-        transition_location in cursor_location_strategy(),
+        transition_location in tracked_cursor_strategy(),
         transition in cursor_transition_case_strategy(),
         setup_phase in transition_setup_phase_strategy(),
         velocity in finite_point(),
@@ -22,7 +22,7 @@ proptest! {
         baseline_rng_state in any::<u32>(),
         pending_position in finite_point(),
         pending_shape in cursor_shape_strategy(),
-        pending_location in cursor_location_strategy(),
+        pending_location in tracked_cursor_strategy(),
         pending_now_ms in 0.0_f64..256.0_f64,
     ) {
         let mut state = RuntimeState::default();
@@ -59,13 +59,14 @@ proptest! {
             }
         }
 
-        let expected_epoch = state.retarget_epoch().wrapping_add(
-            u64::from(state.target_position() != transition_position)
-                + u64::from(surface_changed(
-                    state.tracked_location_ref(),
-                    &transition_location,
-                )),
-        );
+        let expected_epoch = state.retarget_epoch().wrapping_add(u64::from(
+            state.retarget_key()
+                != RuntimeTargetRetargetKey::from_snapshot(
+                    transition_position,
+                    transition_shape,
+                    Some(&transition_location),
+                ),
+        ));
         let baseline_stroke = state.trail_stroke_id();
         let baseline_particles = state.particles().to_vec();
         let baseline_velocity = state.velocity_corners();
@@ -142,7 +143,7 @@ proptest! {
         prop_assert_eq!(state.trail_elapsed_ms(), [0.0; 4]);
         prop_assert_eq!(state.trail_stroke_id(), baseline_stroke.next());
         prop_assert_eq!(state.retarget_epoch(), expected_epoch);
-        prop_assert_eq!(state.tracked_location_ref(), Some(&transition_location));
+        prop_assert_eq!(state.tracked_cursor_ref(), Some(&transition_location));
         prop_assert!(state.settling_window().is_none());
     }
 }

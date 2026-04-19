@@ -38,7 +38,7 @@ fn buffer_perf_mode_strategy() -> BoxedStrategy<BufferPerfMode> {
 
 #[derive(Clone, Debug)]
 enum InvalidRuntimeOptionCase {
-    NonPositiveFps(f64),
+    NonPositiveTimeInterval(f64),
     TailResponseBelowHead {
         head_response_ms: f64,
         tail_response_ms: f64,
@@ -56,7 +56,9 @@ enum InvalidRuntimeOptionCase {
 impl InvalidRuntimeOptionCase {
     fn entries(&self) -> Vec<(&'static str, Object)> {
         match self {
-            Self::NonPositiveFps(fps) => vec![("fps", Object::from(*fps))],
+            Self::NonPositiveTimeInterval(time_interval) => {
+                vec![("time_interval", Object::from(*time_interval))]
+            }
             Self::TailResponseBelowHead {
                 head_response_ms,
                 tail_response_ms,
@@ -86,7 +88,7 @@ impl InvalidRuntimeOptionCase {
 
     const fn expected_key(&self) -> &'static str {
         match self {
-            Self::NonPositiveFps(_) => "fps",
+            Self::NonPositiveTimeInterval(_) => "time_interval",
             Self::TailResponseBelowHead { .. } => "tail_response_ms",
             Self::NonPositiveDampingRatio(_) => "damping_ratio",
             Self::StopExitBelowEnter { .. } => "stop_distance_exit",
@@ -100,7 +102,7 @@ impl InvalidRuntimeOptionCase {
 fn invalid_runtime_option_case_strategy() -> BoxedStrategy<InvalidRuntimeOptionCase> {
     prop_oneof![
         prop_oneof![Just(0.0_f64), -64.0_f64..0.0_f64]
-            .prop_map(InvalidRuntimeOptionCase::NonPositiveFps),
+            .prop_map(InvalidRuntimeOptionCase::NonPositiveTimeInterval),
         ((1.0_f64..320.0_f64), (0.0_f64..320.0_f64))
             .prop_filter(
                 "tail response must be lower than the head response",
@@ -189,44 +191,21 @@ fn runtime_options_patch_apply_clears_filetypes_list() {
 }
 
 #[test]
-fn apply_runtime_options_time_interval_alias_updates_canonical_frame_timing() {
+fn apply_runtime_options_time_interval_updates_canonical_frame_timing() {
     let mut state = RuntimeState::default();
 
     apply_options_expect_ok(&mut state, [("time_interval", Object::from(9.5_f64))]);
 
     assert_eq!(state.config.time_interval, 9.5);
-    assert_eq!(state.config.fps(), RuntimeConfig::fps_for_interval_ms(9.5));
 }
 
 #[test]
-fn apply_runtime_options_fps_alias_updates_canonical_frame_timing() {
+fn apply_runtime_options_clamps_sub_millisecond_time_interval_to_the_canonical_minimum() {
     let mut state = RuntimeState::default();
-    let expected_time_interval = RuntimeConfig::interval_ms_for_fps(90.0);
 
-    apply_options_expect_ok(&mut state, [("fps", Object::from(90.0_f64))]);
+    apply_options_expect_ok(&mut state, [("time_interval", Object::from(0.25_f64))]);
 
-    assert_eq!(state.config.time_interval, expected_time_interval);
-    assert_eq!(
-        state.config.fps(),
-        RuntimeConfig::fps_for_interval_ms(expected_time_interval)
-    );
-}
-
-#[test]
-fn apply_runtime_options_rejects_dual_frame_timing_aliases() {
-    let mut state = RuntimeState::default();
-    let baseline = state.clone();
-    let err = apply_runtime_options(
-        &mut state,
-        &options_dict([
-            ("time_interval", Object::from(12.0_f64)),
-            ("fps", Object::from(90.0_f64)),
-        ]),
-    )
-    .expect_err("expected mixed frame-timing alias rejection");
-
-    assert!(err.to_string().contains("fps"));
-    pretty_assertions::assert_eq!(state, baseline);
+    assert_eq!(state.config.time_interval, 1.0);
 }
 
 #[test]
@@ -251,9 +230,7 @@ proptest! {
 
     #[test]
     fn prop_apply_runtime_options_sets_requested_fields_and_preserves_others(
-        use_fps_alias in any::<bool>(),
         explicit_time_interval in 1.0_f64..80.0_f64,
-        fps in 1.0_f64..400.0_f64,
         simulation_hz in 1.0_f64..400.0_f64,
         max_simulation_steps_per_frame in 1_u32..32_u32,
         animate_in_insert_mode in any::<bool>(),
@@ -281,7 +258,7 @@ proptest! {
         let mut state = RuntimeState::default();
         let expected_tail_response_ms = head_response_ms + tail_response_delta;
         let expected_stop_distance_exit = stop_distance_enter + stop_distance_exit_delta;
-        let mut entries = vec![
+        let entries = vec![
             ("simulation_hz", Object::from(simulation_hz)),
             (
                 "max_simulation_steps_per_frame",
@@ -317,20 +294,14 @@ proptest! {
             ("trail_min_distance", Object::from(trail_min_distance)),
             ("trail_thickness", Object::from(trail_thickness)),
             ("trail_thickness_x", Object::from(trail_thickness_x)),
+            ("time_interval", Object::from(explicit_time_interval)),
         ];
-        let expected_time_interval = if use_fps_alias {
-            entries.push(("fps", Object::from(fps)));
-            RuntimeConfig::interval_ms_for_fps(fps)
-        } else {
-            entries.push(("time_interval", Object::from(explicit_time_interval)));
-            explicit_time_interval
-        };
         apply_options_expect_ok(&mut state, entries);
 
         pretty_assertions::assert_eq!(
             state.config,
             RuntimeConfig {
-                time_interval: expected_time_interval,
+                time_interval: explicit_time_interval,
                 simulation_hz,
                 max_simulation_steps_per_frame,
                 animate_in_insert_mode,
@@ -357,7 +328,6 @@ proptest! {
                 ..RuntimeConfig::default()
             }
         );
-        pretty_assertions::assert_eq!(state.config.fps(), RuntimeConfig::fps_for_interval_ms(expected_time_interval));
     }
 
     #[test]

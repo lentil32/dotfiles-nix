@@ -1,5 +1,6 @@
 use super::core_state_summary;
 use super::effect_summary;
+use super::runtime_target_summary;
 use crate::core::effect::ApplyProposalEffect;
 use crate::core::effect::ApplyRenderCleanupEffect;
 use crate::core::effect::Effect;
@@ -37,9 +38,6 @@ use crate::core::state::RenderCleanupState;
 use crate::core::state::RetainedProjection;
 use crate::core::state::ScenePatch;
 use crate::core::state::TimerState;
-use crate::core::types::CursorCol;
-use crate::core::types::CursorPosition;
-use crate::core::types::CursorRow;
 use crate::core::types::DelayBudgetMs;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
@@ -53,48 +51,44 @@ use crate::core::types::SemanticRevision;
 use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
-use crate::core::types::ViewportSnapshot;
 use crate::draw::render_plan::CellOp;
 use crate::draw::render_plan::Glyph;
 use crate::draw::render_plan::HighlightLevel;
 use crate::draw::render_plan::HighlightRef;
 use crate::draw::render_plan::PlannerState;
-use crate::state::CursorLocation;
+use crate::position::BufferLine;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 use crate::state::RuntimeState;
+use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
 use insta::assert_snapshot;
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
-fn cursor_position(row: u32, col: u32) -> CursorPosition {
-    CursorPosition {
-        row: CursorRow(row),
-        col: CursorCol(col),
-    }
+fn cursor_position(row: u32, col: u32) -> ScreenCell {
+    ScreenCell::new(i64::from(row), i64::from(col)).expect("positive cursor position")
 }
 
-fn viewport() -> ViewportSnapshot {
-    ViewportSnapshot::new(CursorRow(40), CursorCol(120))
-}
-
-fn cursor_location() -> CursorLocation {
-    CursorLocation::new(17, 29, 4, 8)
-        .with_viewport_columns(2, 1)
-        .with_window_origin(1, 3)
-        .with_window_dimensions(120, 40)
+fn viewport() -> ViewportBounds {
+    ViewportBounds::new(40, 120).expect("positive viewport bounds")
 }
 
 fn external_demand(
     seq: u64,
     kind: ExternalDemandKind,
     observed_at: u64,
-    target: Option<CursorPosition>,
     buffer_perf_class: BufferPerfClass,
 ) -> ExternalDemand {
     ExternalDemand::new(
         IngressSeq::new(seq),
         kind,
         Millis::new(observed_at),
-        target,
         buffer_perf_class,
     )
 }
@@ -106,13 +100,7 @@ fn pending_observation(
     requested_probes: ProbeRequestSet,
 ) -> PendingObservation {
     PendingObservation::new(
-        external_demand(
-            seq,
-            kind,
-            observed_at,
-            Some(cursor_position(8, 16)),
-            BufferPerfClass::FastMotion,
-        ),
+        external_demand(seq, kind, observed_at, BufferPerfClass::FastMotion),
         requested_probes,
     )
 }
@@ -125,8 +113,18 @@ fn observation_snapshot(
     let basis = ObservationBasis::new(
         Millis::new(144),
         "n".to_string(),
-        Some(cursor_position(8, 16)),
-        cursor_location(),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(17, 29).expect("positive handles"),
+            BufferLine::new(4).expect("positive top buffer line"),
+            2,
+            1,
+            ScreenCell::new(1, 3).expect("one-based window origin"),
+            viewport(),
+        ),
+        CursorObservation::new(
+            BufferLine::new(8).expect("positive buffer line"),
+            ObservedCell::Exact(cursor_position(8, 16)),
+        ),
         viewport(),
     )
     .with_buffer_revision(buffer_revision);
@@ -176,22 +174,44 @@ fn demand_queue() -> DemandQueue {
         4,
         ExternalDemandKind::ExternalCursor,
         90,
-        Some(cursor_position(3, 5)),
         BufferPerfClass::Full,
     )));
     let (queue, _) = queue.enqueue(QueuedDemand::ready(external_demand(
         5,
         ExternalDemandKind::BoundaryRefresh,
         95,
-        None,
         BufferPerfClass::Skip,
     )));
     queue
 }
 
+fn tracked_cursor() -> TrackedCursor {
+    TrackedCursor::fixture(17, 29, 4, 8)
+        .with_viewport_columns(2, 1)
+        .with_window_origin(1, 3)
+        .with_window_dimensions(120, 40)
+}
+
 fn runtime_state(max_kept_windows: usize) -> RuntimeState {
     let mut runtime = RuntimeState::default();
     runtime.config.max_kept_windows = max_kept_windows;
+    runtime.initialize_cursor(
+        RenderPoint::from(cursor_position(7, 15)),
+        crate::state::CursorShape::block(),
+        7,
+        &tracked_cursor(),
+    );
+    runtime
+}
+
+fn runtime_state_with_minimal_tracked_cursor() -> RuntimeState {
+    let mut runtime = RuntimeState::default();
+    runtime.initialize_cursor(
+        RenderPoint::from(cursor_position(7, 15)),
+        crate::state::CursorShape::block(),
+        7,
+        &TrackedCursor::fixture(17, 29, 4, 8),
+    );
     runtime
 }
 
@@ -321,4 +341,12 @@ fn trace_summary_snapshot_renders_phase_owned_state_and_effects() {
     .join("\n");
 
     assert_snapshot!(snapshot);
+}
+
+#[test]
+fn runtime_target_summary_renders_minimal_canonical_tracked_surface() {
+    assert_eq!(
+        runtime_target_summary(&runtime_state_with_minimal_tracked_cursor()),
+        "cell=7:15 epoch=1 tracked=(surface=(id=(win=17 buf=29) top=4 left=0 textoff=0 origin=1:1 size=1x1) buffer_line=8)"
+    );
 }

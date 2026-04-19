@@ -6,7 +6,7 @@ use super::runtime::IngressReadSnapshot;
 use crate::config::BufferPerfMode;
 pub(super) use crate::core::state::BufferPerfClass;
 #[cfg(test)]
-use crate::types::ScreenCell;
+use crate::position::ScreenCell;
 pub(super) use telemetry::BufferPerfSignals;
 pub(super) use telemetry::BufferPerfTelemetry;
 pub(super) use telemetry::BufferPerfTelemetryCache;

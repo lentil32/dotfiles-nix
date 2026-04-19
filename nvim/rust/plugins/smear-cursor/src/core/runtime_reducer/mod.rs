@@ -31,6 +31,7 @@ pub(crate) use decision::CursorTransition;
 pub(crate) use decision::CursorVisibilityEffect;
 pub(crate) use decision::EventSource;
 pub(crate) use decision::MotionClass;
+pub(crate) use decision::MotionTarget;
 pub(crate) use decision::RenderAction;
 pub(crate) use decision::RenderAllocationPolicy;
 pub(crate) use decision::RenderCleanupAction;

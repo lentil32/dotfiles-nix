@@ -14,7 +14,6 @@ use crate::core::state::PlannedRender;
 use crate::core::state::ProbeFailure;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RealizationDivergence;
-use crate::core::types::CursorPosition;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
 use crate::core::types::ProposalId;
@@ -29,7 +28,6 @@ pub(crate) struct InitializeEvent {
 pub(crate) struct ExternalDemandQueuedEvent {
     pub(crate) kind: ExternalDemandKind,
     pub(crate) observed_at: Millis,
-    pub(crate) requested_target: Option<CursorPosition>,
     pub(crate) buffer_perf_class: BufferPerfClass,
     pub(crate) ingress_cursor_presentation: Option<IngressCursorPresentationRequest>,
     pub(crate) ingress_observation_surface: Option<IngressObservationSurface>,

@@ -5,6 +5,8 @@ use crate::core::state::CursorColorSample;
 use crate::core::state::CursorTextContext;
 use crate::core::state::ProbeReuse;
 use crate::core::types::Generation;
+use crate::position::ScreenCell;
+use crate::position::WindowSurfaceSnapshot;
 use std::sync::Arc;
 
 const CURSOR_TEXT_CONTEXT_CACHE_CAPACITY: usize = 32;
@@ -19,7 +21,7 @@ pub(super) use cursor_color::CachedCursorColorProbeSample;
 pub(super) use cursor_color::CursorColorCacheLookup;
 pub(super) use cursor_color::CursorColorProbeCache;
 
-pub(super) type ConcealScreenCell = (i64, i64);
+pub(super) type ConcealScreenCell = ScreenCell;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ConcealRegion {
@@ -110,27 +112,24 @@ pub(super) struct ConcealScreenCellCacheKey {
 }
 
 impl ConcealScreenCellCacheKey {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        window_handle: i64,
-        buffer_handle: i64,
-        text_revision: u64,
-        line: usize,
+    pub(super) fn from_surface(
+        conceal_key: &ConcealCacheKey,
+        surface_snapshot: WindowSurfaceSnapshot,
         col1: i64,
-        window_row: i64,
-        window_col: i64,
-        window_width: i64,
-        window_height: i64,
-        topline: i64,
-        leftcol: i64,
-        textoff: i64,
-        window_state: ConcealWindowState,
     ) -> Self {
+        let surface_id = surface_snapshot.id();
+        debug_assert_eq!(
+            conceal_key.buffer_handle(),
+            surface_id.buffer_handle(),
+            "conceal cache keys must use a surface snapshot from the same buffer"
+        );
+        let (window_row, window_col, window_width, window_height, topline, leftcol, textoff) =
+            surface_cache_fields(surface_snapshot);
         Self {
-            window_handle,
-            buffer_handle,
-            text_revision,
-            line,
+            window_handle: surface_id.window_handle(),
+            buffer_handle: conceal_key.buffer_handle(),
+            text_revision: conceal_key.text_revision(),
+            line: conceal_key.line(),
             col1,
             window_row,
             window_col,
@@ -139,7 +138,7 @@ impl ConcealScreenCellCacheKey {
             topline,
             leftcol,
             textoff,
-            window_state,
+            window_state: conceal_key.window_state().clone(),
         }
     }
 
@@ -165,26 +164,23 @@ pub(super) struct ConcealDeltaCacheKey {
 }
 
 impl ConcealDeltaCacheKey {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        window_handle: i64,
-        buffer_handle: i64,
-        text_revision: u64,
-        line: usize,
-        window_row: i64,
-        window_col: i64,
-        window_width: i64,
-        window_height: i64,
-        topline: i64,
-        leftcol: i64,
-        textoff: i64,
-        window_state: ConcealWindowState,
+    pub(super) fn from_surface(
+        conceal_key: &ConcealCacheKey,
+        surface_snapshot: WindowSurfaceSnapshot,
     ) -> Self {
+        let surface_id = surface_snapshot.id();
+        debug_assert_eq!(
+            conceal_key.buffer_handle(),
+            surface_id.buffer_handle(),
+            "conceal cache keys must use a surface snapshot from the same buffer"
+        );
+        let (window_row, window_col, window_width, window_height, topline, leftcol, textoff) =
+            surface_cache_fields(surface_snapshot);
         Self {
-            window_handle,
-            buffer_handle,
-            text_revision,
-            line,
+            window_handle: surface_id.window_handle(),
+            buffer_handle: conceal_key.buffer_handle(),
+            text_revision: conceal_key.text_revision(),
+            line: conceal_key.line(),
             window_row,
             window_col,
             window_width,
@@ -192,13 +188,27 @@ impl ConcealDeltaCacheKey {
             topline,
             leftcol,
             textoff,
-            window_state,
+            window_state: conceal_key.window_state().clone(),
         }
     }
 
     pub(super) const fn buffer_handle(&self) -> i64 {
         self.buffer_handle
     }
+}
+
+fn surface_cache_fields(
+    surface_snapshot: WindowSurfaceSnapshot,
+) -> (i64, i64, i64, i64, i64, i64, i64) {
+    (
+        surface_snapshot.window_origin().row(),
+        surface_snapshot.window_origin().col(),
+        surface_snapshot.window_size().max_col(),
+        surface_snapshot.window_size().max_row(),
+        surface_snapshot.top_buffer_line().value(),
+        i64::from(surface_snapshot.left_col0()),
+        i64::from(surface_snapshot.text_offset0()),
+    )
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]

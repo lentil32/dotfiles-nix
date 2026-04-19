@@ -1,4 +1,5 @@
 use super::*;
+use crate::position::ViewportBounds;
 
 fn staged_draw_state() -> CoreState {
     planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 61).0
@@ -28,7 +29,7 @@ fn animation_timer_draw_populates_retained_projection_from_the_retained_observat
     pretty_assert_eq!(projection.witness().observation_id().value(), 9);
     pretty_assert_eq!(
         projection.witness().viewport(),
-        ViewportSnapshot::new(CursorRow(40), CursorCol(120))
+        ViewportBounds::new(40, 120).expect("positive viewport bounds")
     );
     pretty_assert_eq!(
         projection

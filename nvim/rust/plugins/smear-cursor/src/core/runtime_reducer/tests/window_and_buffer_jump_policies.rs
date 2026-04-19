@@ -87,8 +87,8 @@ proptest! {
 
         let window_handle = if case.change.changes_window() { 99 } else { 10 };
         let buffer_handle = if case.change.changes_buffer() { 999 } else { 20 };
-        let expected_location = CursorLocation::new(window_handle, buffer_handle, 1, 1);
-        let target_position = Point {
+        let expected_location = TrackedCursor::fixture(window_handle, buffer_handle, 1, 1);
+        let target_position = RenderPoint {
             row: 5.0,
             col: case.motion.target_col(),
         };
@@ -109,7 +109,7 @@ proptest! {
             || (case.change.changes_buffer() && !case.smear_between_buffers);
 
         prop_assert_eq!(transition.motion_class, case.motion.expected_motion_class());
-        prop_assert_eq!(state.tracked_location(), Some(expected_location));
+        prop_assert_eq!(state.tracked_cursor(), Some(expected_location));
         prop_assert_eq!(state.target_position(), target_position);
         prop_assert!(state.trail_stroke_id() > before_stroke_id);
         if expected_clear {

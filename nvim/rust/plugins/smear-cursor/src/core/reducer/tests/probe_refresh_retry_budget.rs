@@ -4,7 +4,7 @@ fn exhausted_refresh_transition() -> (PendingObservation, Transition) {
     let scenario = ObservationScenario::new(cursor_color_probe_ready_state());
     let queued_newer = reduce(
         &scenario.based.next,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 27, Some(cursor(9, 10))),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 27),
     )
     .next;
 
@@ -45,10 +45,7 @@ fn refresh_budget_exhaustion_promotes_the_newer_ingress_request() {
         .cloned()
         .expect("newer ingress should take over after retry budget exhaustion");
     assert_ne!(replacement_request, request);
-    pretty_assert_eq!(
-        replacement_request.demand().requested_target(),
-        Some(cursor(9, 10))
-    );
+    pretty_assert_eq!(replacement_request.demand().observed_at(), Millis::new(27));
     pretty_assert_eq!(exhausted.next.lifecycle(), Lifecycle::Observing);
 }
 

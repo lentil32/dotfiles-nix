@@ -40,7 +40,6 @@ use crate::core::state::BackgroundProbeState;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
 use crate::core::state::CursorColorSample;
-use crate::core::state::CursorPositionSync;
 use crate::core::state::CursorTextContext;
 use crate::core::state::CursorTextContextState;
 use crate::core::state::DegradedApplyMetrics;
@@ -68,9 +67,6 @@ use crate::core::state::RecoveryPolicyState;
 use crate::core::state::RenderCleanupState;
 use crate::core::state::RenderThermalState;
 use crate::core::state::ScenePatch;
-use crate::core::types::CursorCol;
-use crate::core::types::CursorPosition;
-use crate::core::types::CursorRow;
 use crate::core::types::DelayBudgetMs;
 use crate::core::types::IngressSeq;
 use crate::core::types::Lifecycle;
@@ -78,14 +74,13 @@ use crate::core::types::Millis;
 use crate::core::types::ProposalId;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
-use crate::core::types::ViewportSnapshot;
-use crate::state::CursorLocation;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
+use crate::state::TrackedCursor;
 use crate::test_support::cursor;
 use crate::test_support::sparse_probe_cells;
-use crate::types::Point;
-use crate::types::ScreenCell;
 use pretty_assertions::assert_eq as pretty_assert_eq;
 
 mod support;
@@ -100,8 +95,7 @@ struct ObservationScenario {
 
 impl ObservationScenario {
     fn new(ready: CoreState) -> Self {
-        let observing =
-            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+        let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25);
         let request = active_request(&observing);
         let basis = observation_basis(Some(cursor(7, 8)), 26);
         let based =
@@ -114,8 +108,7 @@ impl ObservationScenario {
     }
 
     fn with_background_plan(ready: CoreState, plan_cells: Vec<ScreenCell>) -> Self {
-        let observing =
-            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+        let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25);
         let request = active_request(&observing);
         let basis = observation_basis(Some(cursor(7, 8)), 26);
         let mut observation =
@@ -131,7 +124,7 @@ impl ObservationScenario {
             BackgroundProbeState::from_plan(BackgroundProbePlan::from_cells(plan_cells));
         let next = observing
             .clone()
-            .with_latest_exact_cursor_position(Some(cursor(7, 8)))
+            .with_latest_exact_cursor_cell(Some(cursor(7, 8)))
             .with_active_observation(observation.clone())
             .expect("observation should stay active");
         let cursor_color_fallback = observation_cursor_color_fallback(&observing);
@@ -195,6 +188,7 @@ mod observation_completion;
 mod observation_completion_planning;
 mod observation_request_planning;
 mod observing_cursor_demand_queue;
+mod position_validation;
 mod probe_completion_sequence;
 mod probe_failure_retention;
 mod probe_refresh_retry_budget;

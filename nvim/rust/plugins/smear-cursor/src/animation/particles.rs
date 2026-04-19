@@ -1,13 +1,13 @@
 #[derive(Debug)]
 struct ParticleStepResult {
     particles: Vec<Particle>,
-    previous_center: Point,
+    previous_center: RenderPoint,
 }
 
 fn update_particles(
     input: &StepInput,
-    current_corners: &[Point; 4],
-    velocity_corners: &[Point; 4],
+    current_corners: &[RenderPoint; 4],
+    velocity_corners: &[RenderPoint; 4],
     mut particles: Vec<Particle>,
     rng: &mut Rng32,
 ) -> ParticleStepResult {
@@ -48,10 +48,10 @@ fn update_particles(
         center_velocity.row = center_velocity.row / dt * input.block_aspect_ratio;
         center_velocity.col /= dt;
     } else {
-        center_velocity = Point::ZERO;
+        center_velocity = RenderPoint::ZERO;
     }
 
-    let movement = Point {
+    let movement = RenderPoint {
         row: current_center.row - input.previous_center.row,
         col: current_center.col - input.previous_center.col,
     };
@@ -88,7 +88,7 @@ fn update_particles(
     for _ in 0..spawn_count {
         let s = rng.next_unit();
 
-        let particle_position = Point {
+        let particle_position = RenderPoint {
             row: input.previous_center.row
                 + s * movement.row
                 + (rng.next_unit() - 0.5) * row_spread,
@@ -100,7 +100,7 @@ fn update_particles(
         let velocity_magnitude = input.particle_max_initial_velocity * rng.next_unit().sqrt();
         let velocity_angle = rng.next_unit() * 2.0 * std::f64::consts::PI;
 
-        let particle_velocity = Point {
+        let particle_velocity = RenderPoint {
             row: velocity_magnitude * velocity_angle.cos()
                 + input.particle_velocity_from_cursor * center_velocity.row,
             col: velocity_magnitude * velocity_angle.sin()

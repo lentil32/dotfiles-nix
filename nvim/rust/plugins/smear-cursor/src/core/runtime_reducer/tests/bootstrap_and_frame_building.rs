@@ -38,9 +38,9 @@ fn first_external_event_bootstraps_frame_cleanup_allocation_and_idle_state() {
 #[test]
 fn build_render_frame_preserves_core_cursor_geometry() {
     let mut state = RuntimeState::default();
-    let location = CursorLocation::new(10, 20, 1, 1);
-    let shape = CursorShape::new(false, false);
-    let position = Point { row: 5.0, col: 7.0 };
+    let location = TrackedCursor::fixture(10, 20, 1, 1);
+    let shape = CursorShape::block();
+    let position = RenderPoint { row: 5.0, col: 7.0 };
     state.initialize_cursor(position, shape, 3, &location);
     let current_corners = state.current_corners();
     let target_position = state.target_position();
@@ -67,9 +67,9 @@ fn build_render_frame_preserves_core_cursor_geometry() {
 #[test]
 fn build_render_frame_reclaims_render_step_sample_scratch() {
     let mut state = RuntimeState::default();
-    let location = CursorLocation::new(10, 20, 1, 1);
-    let shape = CursorShape::new(false, false);
-    let position = Point { row: 5.0, col: 7.0 };
+    let location = TrackedCursor::fixture(10, 20, 1, 1);
+    let shape = CursorShape::block();
+    let position = RenderPoint { row: 5.0, col: 7.0 };
     state.initialize_cursor(position, shape, 3, &location);
     let current_corners = state.current_corners();
     let target_position = state.target_position();
@@ -104,9 +104,9 @@ fn build_render_frame_reclaims_render_step_sample_scratch() {
 #[test]
 fn build_render_frame_omits_particles_when_perf_class_disables_ornamental_effects() {
     let mut state = RuntimeState::default();
-    let location = CursorLocation::new(10, 20, 1, 1);
-    let shape = CursorShape::new(false, false);
-    let position = Point { row: 5.0, col: 7.0 };
+    let location = TrackedCursor::fixture(10, 20, 1, 1);
+    let shape = CursorShape::block();
+    let position = RenderPoint { row: 5.0, col: 7.0 };
     state.initialize_cursor(position, shape, 3, &location);
     state.apply_step_output(StepOutput {
         current_corners: state.current_corners(),
@@ -114,11 +114,11 @@ fn build_render_frame_omits_particles_when_perf_class_disables_ornamental_effect
         spring_velocity_corners: state.spring_velocity_corners(),
         trail_elapsed_ms: state.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 5.25,
                 col: 7.5,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 1.0,
         }],
         previous_center: state.previous_center(),
@@ -149,9 +149,9 @@ fn build_render_frame_omits_particles_when_perf_class_disables_ornamental_effect
 #[test]
 fn build_render_frame_reuses_cached_particle_aggregation() {
     let mut state = RuntimeState::default();
-    let location = CursorLocation::new(10, 20, 1, 1);
-    let shape = CursorShape::new(false, false);
-    let position = Point { row: 5.0, col: 7.0 };
+    let location = TrackedCursor::fixture(10, 20, 1, 1);
+    let shape = CursorShape::block();
+    let position = RenderPoint { row: 5.0, col: 7.0 };
     state.initialize_cursor(position, shape, 3, &location);
     state.apply_step_output(StepOutput {
         current_corners: state.current_corners(),
@@ -159,11 +159,11 @@ fn build_render_frame_reuses_cached_particle_aggregation() {
         spring_velocity_corners: state.spring_velocity_corners(),
         trail_elapsed_ms: state.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 5.25,
                 col: 7.5,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 1.0,
         }],
         previous_center: state.previous_center(),
@@ -198,9 +198,9 @@ fn build_render_frame_reuses_cached_particle_aggregation() {
 fn build_render_frame_reuses_cached_particle_screen_cells_for_background_probes() {
     let mut state = RuntimeState::default();
     state.config.particles_over_text = false;
-    let location = CursorLocation::new(10, 20, 1, 1);
-    let shape = CursorShape::new(false, false);
-    let position = Point { row: 5.0, col: 7.0 };
+    let location = TrackedCursor::fixture(10, 20, 1, 1);
+    let shape = CursorShape::block();
+    let position = RenderPoint { row: 5.0, col: 7.0 };
     state.initialize_cursor(position, shape, 3, &location);
     state.apply_step_output(StepOutput {
         current_corners: state.current_corners(),
@@ -208,11 +208,11 @@ fn build_render_frame_reuses_cached_particle_screen_cells_for_background_probes(
         spring_velocity_corners: state.spring_velocity_corners(),
         trail_elapsed_ms: state.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 5.25,
                 col: 7.5,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 1.0,
         }],
         previous_center: state.previous_center(),
@@ -247,9 +247,9 @@ fn build_render_frame_reuses_cached_particle_screen_cells_for_background_probes(
 fn build_render_frame_matches_with_warm_or_purged_particle_cache() {
     let mut warm_state = RuntimeState::default();
     warm_state.config.particles_over_text = false;
-    let location = CursorLocation::new(10, 20, 1, 1);
-    let shape = CursorShape::new(false, false);
-    let position = Point { row: 5.0, col: 7.0 };
+    let location = TrackedCursor::fixture(10, 20, 1, 1);
+    let shape = CursorShape::block();
+    let position = RenderPoint { row: 5.0, col: 7.0 };
     warm_state.initialize_cursor(position, shape, 3, &location);
     warm_state.apply_step_output(StepOutput {
         current_corners: warm_state.current_corners(),
@@ -257,11 +257,11 @@ fn build_render_frame_matches_with_warm_or_purged_particle_cache() {
         spring_velocity_corners: warm_state.spring_velocity_corners(),
         trail_elapsed_ms: warm_state.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 5.25,
                 col: 7.5,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 1.0,
         }],
         previous_center: warm_state.previous_center(),
@@ -362,11 +362,11 @@ fn degraded_perf_class_clears_particles_before_runtime_step_and_frame_export() {
         spring_velocity_corners: state.spring_velocity_corners(),
         trail_elapsed_ms: state.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 5.25,
                 col: 6.5,
             },
-            velocity: Point::ZERO,
+            velocity: RenderPoint::ZERO,
             lifetime: 1.0,
         }],
         previous_center: state.previous_center(),

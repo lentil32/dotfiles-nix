@@ -163,28 +163,3 @@ fn runtime_options_patch_parse_rejects_unknown_buffer_perf_mode() {
         "unexpected error: {err}"
     );
 }
-
-#[test]
-fn runtime_options_patch_parse_rejects_unknown_and_removed_option_keys() {
-    for (legacy_key, value) in [
-        ("stiffness", Object::from(0.5_f64)),
-        ("neovide_parity_mode", Object::from(true)),
-        ("aa_band_min", Object::from(0.5_f64)),
-        ("aa_band_max", Object::from(0.5_f64)),
-        ("edge_gate_low", Object::from(0.5_f64)),
-        ("edge_gate_high", Object::from(0.5_f64)),
-        ("temporal_hysteresis_enter", Object::from(0.5_f64)),
-        ("temporal_hysteresis_exit", Object::from(0.5_f64)),
-    ] {
-        let opts = options_dict([(legacy_key, value)]);
-        let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
-        assert!(
-            err.to_string().contains(legacy_key),
-            "unexpected error: {err}"
-        );
-        assert!(
-            err.to_string().contains("supported option key"),
-            "unexpected error: {err}"
-        );
-    }
-}

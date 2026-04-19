@@ -6,32 +6,27 @@ mod screenpos;
 pub(super) use buffer_meta::BufferMetadata;
 pub(in crate::events) use buffer_meta::BufferMetadataCache;
 pub(super) use color_probe::sampled_cursor_color_at_current_position;
-#[cfg(test)]
-pub(crate) use conceal::ConcealScreenCellView;
 pub(super) use screenpos::current_mode;
-pub(super) use screenpos::cursor_position_for_mode;
-pub(super) use screenpos::cursor_position_read_for_mode_with_probe_policy;
-pub(super) use screenpos::line_value;
+pub(super) use screenpos::cursor_observation_for_mode_with_probe_policy;
+pub(in crate::events) use screenpos::cursor_observation_for_mode_with_probe_policy_typed;
 pub(super) use screenpos::smear_outside_cmd_row;
 
 use crate::lua::LuaParseError;
 
-type ScreenCell = (i64, i64);
-type ScreenPoint = (f64, f64);
-type CursorResult<T> = std::result::Result<T, CursorReadError>;
+pub(in crate::events) type CursorResult<T> = std::result::Result<T, CursorReadError>;
 
 #[derive(Debug, thiserror::Error)]
-enum CursorParseError {
+pub(in crate::events) enum CursorParseError {
+    #[error("{context} returned invalid dictionary")]
+    InvalidDictionary { context: &'static str },
     #[error("screenpos returned invalid dictionary")]
     ScreenposDictionary,
     #[error("screenpos missing row/col pair")]
     ScreenposMissingRowCol,
-    #[error("getwininfo returned invalid list")]
-    GetwininfoInvalidList,
-    #[error("getwininfo returned unexpected list length")]
-    GetwininfoUnexpectedLen,
-    #[error("getwininfo returned invalid dictionary")]
-    GetwininfoDictionary,
+    #[error("screenpos returned invalid one-based cell row={row} col={col}")]
+    ScreenposInvalidCell { row: i64, col: i64 },
+    #[error("window cursor returned invalid one-based buffer line {line}")]
+    InvalidBufferLine { line: usize },
     #[error("synconcealed returned invalid list")]
     SynconcealedInvalidList,
     #[error("synconcealed returned unexpected list length")]
@@ -50,7 +45,7 @@ enum CursorParseError {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum CursorReadError {
+pub(in crate::events) enum CursorReadError {
     #[error(transparent)]
     Shell(#[from] nvim_oxi::Error),
     #[error(transparent)]

@@ -1,21 +1,24 @@
+use super::CursorShape;
 use super::RuntimeOptionsEffects;
 use super::RuntimeOptionsPatch;
 use super::RuntimeState;
+use super::TrackedCursor;
 use super::types::AnimationPhase;
 use super::types::CachedParticleArtifacts;
+use super::types::RuntimeTargetRetargetKey;
 use super::types::SettlingWindow;
 use crate::config::DerivedConfigCache;
 use crate::core::types::StrokeId;
+use crate::position::RenderPoint;
+use crate::position::current_visual_cursor_anchor;
 use crate::types::Particle;
 use crate::types::ParticleScreenCellsMode;
-use crate::types::Point;
 use crate::types::RenderStepSample;
 use crate::types::SharedAggregatedParticleCells;
 use crate::types::SharedParticleScreenCells;
 use crate::types::StaticRenderConfig;
 use crate::types::aggregate_particle_artifacts_with_scratch;
 use crate::types::aggregate_particle_screen_cells;
-use crate::types::current_visual_cursor_anchor;
 use std::sync::Arc;
 
 impl RuntimeState {
@@ -124,29 +127,48 @@ impl RuntimeState {
         }
     }
 
-    pub(crate) fn current_corners(&self) -> [Point; 4] {
+    pub(crate) fn current_corners(&self) -> [RenderPoint; 4] {
         self.current_corners
     }
 
-    pub(crate) fn trail_origin_corners(&self) -> [Point; 4] {
+    pub(crate) fn trail_origin_corners(&self) -> [RenderPoint; 4] {
         self.trail.origin_corners
     }
 
-    pub(crate) fn target_corners(&self) -> [Point; 4] {
+    pub(crate) fn target_corners(&self) -> [RenderPoint; 4] {
         self.target.corners()
     }
 
-    pub(crate) fn target_position(&self) -> Point {
+    pub(crate) fn target_position(&self) -> RenderPoint {
         self.target.position
     }
 
-    pub(crate) fn current_visual_cursor_anchor(&self) -> Point {
+    pub(crate) fn target_shape(&self) -> crate::state::CursorShape {
+        self.target.shape
+    }
+
+    pub(crate) fn retarget_key(&self) -> RuntimeTargetRetargetKey {
+        self.target.retarget_key()
+    }
+
+    pub(crate) fn current_visual_cursor_anchor(&self) -> RenderPoint {
         let target_corners = self.target_corners();
         current_visual_cursor_anchor(&self.current_corners, &target_corners, self.target.position)
     }
 
     pub(crate) fn retarget_epoch(&self) -> u64 {
         self.target.retarget_epoch
+    }
+
+    pub(crate) fn settling_target_matches(
+        &self,
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: &TrackedCursor,
+    ) -> bool {
+        self.target.position == position
+            && self.target.retarget_key()
+                == RuntimeTargetRetargetKey::from_snapshot(position, shape, Some(tracked_cursor))
     }
 
     pub(crate) fn trail_stroke_id(&self) -> StrokeId {
@@ -176,11 +198,11 @@ impl RuntimeState {
             super::types::LastObservedMode::from_cmdline(current_is_cmdline);
     }
 
-    pub(crate) fn velocity_corners(&self) -> [Point; 4] {
+    pub(crate) fn velocity_corners(&self) -> [RenderPoint; 4] {
         self.velocity_corners
     }
 
-    pub(crate) fn spring_velocity_corners(&self) -> [Point; 4] {
+    pub(crate) fn spring_velocity_corners(&self) -> [RenderPoint; 4] {
         self.spring_velocity_corners
     }
 
@@ -205,7 +227,7 @@ impl RuntimeState {
         }
         if let AnimationPhase::Settling(phase) = &self.animation_phase {
             debug_assert!(
-                self.target.tracked_location.is_some(),
+                self.target.tracked_cursor.is_some(),
                 "settling requires transient tracking ownership"
             );
             debug_assert!(
@@ -213,6 +235,28 @@ impl RuntimeState {
                 "settling deadline must not precede the stable-since timestamp"
             );
         }
+        debug_assert_eq!(
+            self.target.cell,
+            crate::position::ScreenCell::from_rounded_point(self.target.position),
+            "runtime target cell must stay derived from the retained target position"
+        );
+        debug_assert_eq!(
+            self.target.retarget_surface,
+            self.target
+                .tracked_cursor
+                .as_ref()
+                .map(super::types::RetargetSurfaceKey::from_tracked_cursor),
+            "retarget surface facts must stay in sync with tracked cursor ownership"
+        );
+        debug_assert_eq!(
+            self.target.retarget_key(),
+            super::types::RuntimeTargetRetargetKey::from_snapshot(
+                self.target.position,
+                self.target.shape,
+                self.target.tracked_cursor.as_ref(),
+            ),
+            "runtime target equality must stay derived from the retained target snapshot"
+        );
     }
 
     #[cfg(not(debug_assertions))]
@@ -381,7 +425,7 @@ impl RuntimeState {
             .particle_screen_cells_capacity()
     }
 
-    pub(crate) fn previous_center(&self) -> Point {
+    pub(crate) fn previous_center(&self) -> RenderPoint {
         self.previous_center
     }
 

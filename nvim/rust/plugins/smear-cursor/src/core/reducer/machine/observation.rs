@@ -231,7 +231,6 @@ pub(super) fn reduce_external_demand_queued(
     let ExternalDemandQueuedEvent {
         kind,
         observed_at,
-        requested_target,
         buffer_perf_class,
         ingress_cursor_presentation,
         ingress_observation_surface,
@@ -246,7 +245,7 @@ pub(super) fn reduce_external_demand_queued(
     let ingress_effect =
         ingress_cursor_presentation_effect(&state_with_policy, ingress_cursor_presentation);
     let (state_with_seq, seq) = state_with_policy.allocate_ingress_seq();
-    let demand = ExternalDemand::new(seq, kind, observed_at, requested_target, buffer_perf_class);
+    let demand = ExternalDemand::new(seq, kind, observed_at, buffer_perf_class);
     let immediate_ingress_observation =
         ImmediateIngressObservation::new(seq, ingress_observation_surface);
     let mut transition = queue_external_demand(
@@ -279,8 +278,11 @@ pub(super) fn reduce_observation_base_collected(
     }
     let pending = active_pending;
 
-    let next_latest_exact_cursor_position =
-        state.fallback_cursor_position(motion.exact_cursor_position(basis.cursor_position()));
+    let next_latest_exact_cursor_cell = state.fallback_cursor_cell(match basis.cursor().cell() {
+        crate::position::ObservedCell::Unavailable => None,
+        crate::position::ObservedCell::Exact(cell) => Some(cell),
+        crate::position::ObservedCell::Deferred(_) => None,
+    });
     let observed_at = basis.observed_at();
     let cursor_color_fallback = observation_cursor_color_fallback(state.retained_observation());
     let previous_observation = state.take_retained_observation();
@@ -313,9 +315,8 @@ pub(super) fn reduce_observation_base_collected(
         next_observation
     };
     let next_observation = complete_mode_scoped_cursor_color_probe(&state, next_observation);
-    let mut base_state = reset_recovery_attempt(
-        state.with_latest_exact_cursor_position(next_latest_exact_cursor_position),
-    );
+    let mut base_state =
+        reset_recovery_attempt(state.with_latest_exact_cursor_cell(next_latest_exact_cursor_cell));
     let next_probe =
         next_pending_probe_effect(&base_state, &next_observation, cursor_color_fallback);
     let Some(next_probe) = next_probe else {
@@ -472,19 +473,23 @@ fn finalize_ready_observation(
     prepared_plan: Option<crate::core::state::PreparedObservationPlan>,
     previous_observation: Option<&ObservationSnapshot>,
 ) -> Transition {
-    let Some((observed_at, exact_cursor_position)) = state.observation().map(|observation| {
-        (
-            observation.basis().observed_at(),
-            observation.exact_cursor_position(),
-        )
-    }) else {
+    let Some((observed_at, next_latest_exact_cursor_cell)) =
+        state.observation().map(|observation| {
+            (
+                observation.basis().observed_at(),
+                state.fallback_cursor_cell(match observation.basis().cursor().cell() {
+                    crate::position::ObservedCell::Unavailable => None,
+                    crate::position::ObservedCell::Exact(cell) => Some(cell),
+                    crate::position::ObservedCell::Deferred(_) => None,
+                }),
+            )
+        })
+    else {
         return Transition::stay_owned(state);
     };
-    let next_latest_exact_cursor_position = state.fallback_cursor_position(exact_cursor_position);
     let prepared_plan = prepared_plan.or_else(|| state.take_prepared_observation_plan());
-    let ready = reset_recovery_attempt(
-        state.with_latest_exact_cursor_position(next_latest_exact_cursor_position),
-    );
+    let ready =
+        reset_recovery_attempt(state.with_latest_exact_cursor_cell(next_latest_exact_cursor_cell));
     if let Some(prepared_plan) = prepared_plan {
         plan_ready_state_with_observation_plan(ready, observed_at, prepared_plan)
     } else {

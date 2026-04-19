@@ -1,8 +1,8 @@
 use crate::config::RuntimeConfig;
+use crate::position::RenderPoint;
 use crate::types::BASE_TIME_INTERVAL;
 use crate::types::EPSILON;
 use crate::types::Particle;
-use crate::types::Point;
 use crate::types::Rng32;
 use crate::types::StepInput;
 use crate::types::StepOutput;

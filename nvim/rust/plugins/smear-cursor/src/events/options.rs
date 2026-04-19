@@ -10,7 +10,6 @@ use crate::lua::parse_optional_with as parse_optional_value_with;
 use crate::lua::string_from_object;
 use crate::state::ColorOptionsPatch;
 use crate::state::CtermCursorColorsPatch;
-use crate::state::FrameTimingPatch;
 use crate::state::MotionOptionsPatch;
 use crate::state::OptionalChange;
 use crate::state::ParticleOptionsPatch;
@@ -28,7 +27,6 @@ use nvim_oxi::String as NvimString;
 enum OptionKey {
     Enabled,
     TimeInterval,
-    Fps,
     SimulationHz,
     MaxSimulationStepsPerFrame,
     DelayEventToSmear,
@@ -105,7 +103,6 @@ impl OptionKey {
         match self {
             Self::Enabled => "enabled",
             Self::TimeInterval => "time_interval",
-            Self::Fps => "fps",
             Self::SimulationHz => "simulation_hz",
             Self::MaxSimulationStepsPerFrame => "max_simulation_steps_per_frame",
             Self::DelayEventToSmear => "delay_event_to_smear",
@@ -432,7 +429,7 @@ fn parse_optional_change_u16(
 }
 
 fn parse_optional_time_interval(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
-    Ok(parse_optional_with(raw, key, validated_f64)?.map(|parsed| parsed.max(1.0)))
+    Ok(parse_optional_with(raw, key, validated_positive_f64)?.map(|parsed| parsed.max(1.0)))
 }
 
 macro_rules! define_option_spec {
@@ -457,13 +454,6 @@ define_option_spec!(
     parse_optional_bool,
     runtime.enabled
 );
-fn reject_overlapping_frame_timing_alias(key: &'static str) -> Result<()> {
-    Err(invalid_key(
-        key,
-        "set either fps or time_interval, but not both",
-    ))
-}
-
 fn spec_time_interval_apply(
     opts: &Dictionary,
     patch: &mut RuntimeOptionsPatch,
@@ -473,33 +463,12 @@ fn spec_time_interval_apply(
     else {
         return Ok(());
     };
-    if patch.runtime.frame_timing.is_some() {
-        return reject_overlapping_frame_timing_alias(key.as_str());
-    }
-    patch.runtime.frame_timing = Some(FrameTimingPatch::TimeInterval(value));
+    patch.runtime.time_interval = Some(value);
     Ok(())
 }
 
 const SPEC_TIME_INTERVAL: OptionSpec =
     OptionSpec::new(OptionKey::TimeInterval, spec_time_interval_apply);
-
-fn spec_fps_apply(
-    opts: &Dictionary,
-    patch: &mut RuntimeOptionsPatch,
-    key: OptionKey,
-) -> Result<()> {
-    let Some(value) = parse_optional_positive_f64(raw_option(opts, key.as_str()), key.as_str())?
-    else {
-        return Ok(());
-    };
-    if patch.runtime.frame_timing.is_some() {
-        return reject_overlapping_frame_timing_alias(key.as_str());
-    }
-    patch.runtime.frame_timing = Some(FrameTimingPatch::Fps(value));
-    Ok(())
-}
-
-const SPEC_FPS: OptionSpec = OptionSpec::new(OptionKey::Fps, spec_fps_apply);
 define_option_spec!(
     spec_simulation_hz_apply,
     SPEC_SIMULATION_HZ,
@@ -987,7 +956,6 @@ define_option_spec!(
 const OPTION_SPECS: &[OptionSpec] = &[
     SPEC_ENABLED,
     SPEC_TIME_INTERVAL,
-    SPEC_FPS,
     SPEC_SIMULATION_HZ,
     SPEC_MAX_SIMULATION_STEPS_PER_FRAME,
     SPEC_DELAY_EVENT_TO_SMEAR,

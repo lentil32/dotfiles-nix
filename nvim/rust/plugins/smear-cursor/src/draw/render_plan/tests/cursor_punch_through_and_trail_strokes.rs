@@ -1,12 +1,10 @@
 use super::*;
+use crate::position::ViewportBounds;
 
 #[test]
 fn render_plan_leaves_target_cell_available_for_cursor_punch_through() {
     let frame = base_frame();
-    let viewport = Viewport {
-        max_row: 200,
-        max_col: 200,
-    };
+    let viewport = ViewportBounds::new(200, 200).expect("positive viewport bounds");
 
     let output = render_frame_to_plan(&frame, PlannerState::default(), viewport);
     let target = (
@@ -26,29 +24,26 @@ fn render_plan_leaves_target_cell_available_for_cursor_punch_through() {
 
 #[test]
 fn trail_stroke_change_preserves_old_tail_without_bridging() {
-    let viewport = Viewport {
-        max_row: 200,
-        max_col: 200,
-    };
+    let viewport = ViewportBounds::new(200, 200).expect("positive viewport bounds");
 
     let mut first = base_frame();
     first.target.col = 8.0;
     set_frame_corners(
         &mut first,
         [
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 8.0,
             },
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 9.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 9.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 8.0,
             },
@@ -60,19 +55,19 @@ fn trail_stroke_change_preserves_old_tail_without_bridging() {
     set_frame_corners(
         &mut second,
         [
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 24.0,
             },
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 25.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 25.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 24.0,
             },

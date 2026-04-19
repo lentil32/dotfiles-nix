@@ -10,8 +10,8 @@ use crate::core::types::ProjectorRevision;
 use crate::core::types::RenderRevision;
 use crate::core::types::SemanticRevision;
 use crate::core::types::StepIndex;
-use crate::core::types::ViewportSnapshot;
 use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
+use crate::position::ViewportBounds;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -76,7 +76,7 @@ impl ProjectionPlannerClock {
 pub(crate) struct ProjectionWitness {
     render_revision: RenderRevision,
     observation_id: ObservationId,
-    viewport: ViewportSnapshot,
+    viewport: ViewportBounds,
     projector_revision: ProjectorRevision,
 }
 
@@ -84,7 +84,7 @@ impl ProjectionWitness {
     pub(crate) fn new(
         render_revision: RenderRevision,
         observation_id: ObservationId,
-        viewport: ViewportSnapshot,
+        viewport: ViewportBounds,
         projector_revision: ProjectorRevision,
     ) -> Self {
         Self {
@@ -103,7 +103,7 @@ impl ProjectionWitness {
         self.observation_id
     }
 
-    pub(crate) const fn viewport(self) -> ViewportSnapshot {
+    pub(crate) const fn viewport(self) -> ViewportBounds {
         self.viewport
     }
 
@@ -475,12 +475,7 @@ impl PatchBasis {
                 ScenePatchKind::Noop
             }
             (Some(_), None) => ScenePatchKind::Clear,
-            (None, Some(_)) | (Some(_), Some(_)) => {
-                // phase 4 keeps patch shape intentionally coarse. The authoritative basis
-                // is explicit now; phase 5 can refine replace work into realization-specific
-                // projection without reopening protocol ownership.
-                ScenePatchKind::Replace
-            }
+            (None, Some(_)) | (Some(_), Some(_)) => ScenePatchKind::Replace,
         }
     }
 }
@@ -594,8 +589,6 @@ mod tests {
     use crate::core::realization::LogicalRaster;
     use crate::core::realization::realize_logical_raster;
     use crate::core::runtime_reducer::TargetCellPresentation;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::MotionRevision;
     use crate::core::types::ObservationId;
@@ -603,13 +596,13 @@ mod tests {
     use crate::core::types::ProjectorRevision;
     use crate::core::types::RenderRevision;
     use crate::core::types::SemanticRevision;
-    use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::CellOp;
     use crate::draw::render_plan::ClearOp;
     use crate::draw::render_plan::Glyph;
     use crate::draw::render_plan::HighlightLevel;
     use crate::draw::render_plan::HighlightRef;
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
+    use crate::position::ViewportBounds;
     use pretty_assertions::assert_eq;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -618,7 +611,7 @@ mod tests {
         ProjectionWitness::new(
             RenderRevision::INITIAL,
             ObservationId::from_ingress_seq(IngressSeq::new(ingress_seq)),
-            ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+            ViewportBounds::new(40, 120).expect("positive viewport bounds"),
             ProjectorRevision::CURRENT,
         )
     }

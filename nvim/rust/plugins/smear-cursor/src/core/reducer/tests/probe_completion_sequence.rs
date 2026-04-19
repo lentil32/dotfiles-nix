@@ -284,8 +284,8 @@ fn background_ready_probe_report_stores_allowed_cells_and_reuse_state_in_snapsho
         .background()
         .batch()
         .expect("background probe batch");
-    assert!(background.allows_particle(crate::types::ScreenCell::new(7, 8).expect("cell")));
-    assert!(!background.allows_particle(crate::types::ScreenCell::new(7, 9).expect("cell")));
+    assert!(background.allows_particle(crate::position::ScreenCell::new(7, 8).expect("cell")));
+    assert!(!background.allows_particle(crate::position::ScreenCell::new(7, 9).expect("cell")));
     pretty_assert_eq!(
         observation.probes().background().reuse(),
         Some(ProbeReuse::Exact)
@@ -295,8 +295,7 @@ fn background_ready_probe_report_stores_allowed_cells_and_reuse_state_in_snapsho
 #[test]
 fn background_probe_preparation_leaves_live_runtime_unchanged_until_completion() {
     let ready = dual_probe_ready_state();
-    let observing =
-        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25);
     let request = active_request(&observing);
     let basis = observation_basis(Some(cursor(7, 8)), 26);
 
@@ -314,13 +313,13 @@ fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
     let ready = background_probe_ready_state();
     let mut prepared_runtime = ready.runtime().clone();
     prepared_runtime.initialize_cursor(
-        Point {
+        RenderPoint {
             row: 19.0,
             col: 11.0,
         },
-        CursorShape::new(false, false),
+        CursorShape::block(),
         7,
-        &CursorLocation::new(31, 32, 4, 12),
+        &TrackedCursor::fixture(31, 32, 4, 12),
     );
     prepared_runtime.apply_step_output(StepOutput {
         current_corners: prepared_runtime.current_corners(),
@@ -328,11 +327,11 @@ fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
         spring_velocity_corners: prepared_runtime.spring_velocity_corners(),
         trail_elapsed_ms: prepared_runtime.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 19.0,
                 col: 12.0,
             },
-            velocity: Point {
+            velocity: RenderPoint {
                 row: 0.5,
                 col: 0.25,
             },
@@ -381,8 +380,7 @@ fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
 #[test]
 fn final_background_probe_completion_reuses_the_cached_runtime_transition() {
     let ready = dual_probe_ready_state();
-    let observing =
-        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25);
     let request = active_request(&observing);
     let basis = observation_basis(Some(cursor(7, 8)), 26);
     let based = collect_observation_base(&observing, &request, basis, observation_motion());
@@ -506,8 +504,7 @@ fn background_only_probe_completion_matches_with_or_without_prepared_transition_
 #[test]
 fn background_only_probe_completion_reuses_the_cached_runtime_transition() {
     let ready = background_probe_ready_state();
-    let observing =
-        observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
+    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25);
     pretty_assert_eq!(
         active_request(&observing).probes(),
         ProbeRequestSet::only(ProbeKind::Background)
@@ -515,13 +512,13 @@ fn background_only_probe_completion_reuses_the_cached_runtime_transition() {
 
     let mut prepared_runtime = ready.runtime().clone();
     prepared_runtime.initialize_cursor(
-        Point {
+        RenderPoint {
             row: 19.0,
             col: 11.0,
         },
-        CursorShape::new(false, false),
+        CursorShape::block(),
         7,
-        &CursorLocation::new(31, 32, 4, 12),
+        &TrackedCursor::fixture(31, 32, 4, 12),
     );
     let prepared_transition = crate::core::runtime_reducer::CursorTransition {
         render_decision: crate::core::runtime_reducer::RenderDecision {

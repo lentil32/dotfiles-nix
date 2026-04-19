@@ -128,11 +128,11 @@ proptest! {
         let mut frame = single_sample_frame(row, col);
         frame.set_particles(std::sync::Arc::new((0..particle_count)
             .map(|index| Particle {
-                position: Point {
+                position: RenderPoint {
                     row: f64::from(row) + index as f64 * 0.25,
                     col: f64::from(col) + index as f64 * 0.25,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime,
             })
             .collect::<Vec<_>>()));
@@ -140,11 +140,11 @@ proptest! {
         let mut moved_particles = frame.clone();
         moved_particles.set_particles(std::sync::Arc::new((0..particle_count)
             .map(|index| Particle {
-                position: Point {
+                position: RenderPoint {
                     row: f64::from(row) + index as f64 * 0.25 + 0.5,
                     col: f64::from(col) + index as f64 * 0.25 + 0.5,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime,
             })
             .collect::<Vec<_>>()));
@@ -164,11 +164,11 @@ proptest! {
         let mut frame = single_sample_frame(row, col);
         frame.set_particles(std::sync::Arc::new((0..particle_count)
             .map(|index| Particle {
-                position: Point {
+                position: RenderPoint {
                     row: f64::from(row) + index as f64 * 0.25,
                     col: f64::from(col) + index as f64 * 0.25,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime,
             })
             .collect::<Vec<_>>()));
@@ -176,11 +176,11 @@ proptest! {
         let mut moved_particles = frame.clone();
         moved_particles.set_particles(std::sync::Arc::new((0..particle_count)
             .map(|index| Particle {
-                position: Point {
+                position: RenderPoint {
                     row: f64::from(row) + index as f64 * 0.25 + 0.5,
                     col: f64::from(col) + index as f64 * 0.25 + 0.5,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime,
             })
             .collect::<Vec<_>>()));

@@ -2,12 +2,12 @@ use super::CursorVisibilityEffect;
 use super::RenderAction;
 use super::RenderSideEffects;
 use super::TargetCellPresentation;
+use crate::position::RenderPoint;
 use crate::types::CursorCellShape;
-use crate::types::Point;
 use crate::types::RenderFrame;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 
-fn bounds_for_corners(corners: &[Point; 4]) -> (f64, f64, f64, f64) {
+fn bounds_for_corners(corners: &[RenderPoint; 4]) -> (f64, f64, f64, f64) {
     let mut min_row = f64::INFINITY;
     let mut max_row = f64::NEG_INFINITY;
     let mut min_col = f64::INFINITY;
@@ -114,21 +114,21 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::Arc;
 
-    fn rectangle(min_row: f64, max_row: f64, min_col: f64, max_col: f64) -> [Point; 4] {
+    fn rectangle(min_row: f64, max_row: f64, min_col: f64, max_col: f64) -> [RenderPoint; 4] {
         [
-            Point {
+            RenderPoint {
                 row: min_row,
                 col: min_col,
             },
-            Point {
+            RenderPoint {
                 row: min_row,
                 col: max_col,
             },
-            Point {
+            RenderPoint {
                 row: max_row,
                 col: max_col,
             },
-            Point {
+            RenderPoint {
                 row: max_row,
                 col: min_col,
             },
@@ -136,8 +136,8 @@ mod tests {
     }
 
     fn test_frame(
-        corners: [Point; 4],
-        target_corners: [Point; 4],
+        corners: [RenderPoint; 4],
+        target_corners: [RenderPoint; 4],
         hide_target_hack: bool,
     ) -> RenderFrame {
         let config = RuntimeConfig {
@@ -151,7 +151,7 @@ mod tests {
             corners,
             step_samples: Vec::<RenderStepSample>::new().into(),
             planner_idle_steps: 0,
-            target: Point {
+            target: RenderPoint {
                 row: target_corners[0].row,
                 col: target_corners[0].col,
             },

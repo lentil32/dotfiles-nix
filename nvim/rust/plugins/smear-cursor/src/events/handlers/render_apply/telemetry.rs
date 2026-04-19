@@ -192,20 +192,18 @@ mod tests {
     use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ProjectionWitness;
     use crate::core::state::RetainedProjection;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::ObservationId;
     use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::RenderRevision;
-    use crate::core::types::ViewportSnapshot;
     use crate::draw::ApplyMetrics;
     use crate::draw::TabPoolSnapshot;
     use crate::draw::render_plan::CellOp;
     use crate::draw::render_plan::Glyph;
     use crate::draw::render_plan::HighlightLevel;
     use crate::draw::render_plan::HighlightRef;
+    use crate::position::ViewportBounds;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
@@ -225,7 +223,7 @@ mod tests {
             ProjectionWitness::new(
                 RenderRevision::INITIAL,
                 ObservationId::from_ingress_seq(IngressSeq::new(1)),
-                ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
+                ViewportBounds::new(20, 40).expect("positive viewport bounds"),
                 ProjectorRevision::CURRENT,
             ),
             ProjectionReuseKey::new(

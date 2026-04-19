@@ -3,9 +3,9 @@ use super::Particle;
 use super::ParticleAggregationArtifacts;
 use super::ParticleAggregationScratch;
 use super::ParticleScreenCellsMode;
-use super::Point;
-use super::ScreenCell;
 use super::aggregate_particle_artifacts_with_scratch;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -14,18 +14,18 @@ use std::sync::Arc;
 fn aggregate_particle_artifacts_with_scratch_reuses_retained_buffers() {
     let particles = vec![
         Particle {
-            position: Point { row: 4.1, col: 2.1 },
-            velocity: Point::ZERO,
+            position: RenderPoint { row: 4.1, col: 2.1 },
+            velocity: RenderPoint::ZERO,
             lifetime: 2.0,
         },
         Particle {
-            position: Point { row: 3.2, col: 5.4 },
-            velocity: Point::ZERO,
+            position: RenderPoint { row: 3.2, col: 5.4 },
+            velocity: RenderPoint::ZERO,
             lifetime: 3.0,
         },
         Particle {
-            position: Point { row: 4.6, col: 2.6 },
-            velocity: Point::ZERO,
+            position: RenderPoint { row: 4.6, col: 2.6 },
+            velocity: RenderPoint::ZERO,
             lifetime: 4.0,
         },
     ];
@@ -161,11 +161,11 @@ fn particle_aggregation_benchmark_fixture() -> Vec<Particle> {
         for col in 1..=24 {
             for sample in 0..4 {
                 particles.push(Particle {
-                    position: Point {
+                    position: RenderPoint {
                         row: f64::from(row) + 0.13 * f64::from(sample),
                         col: f64::from(col) + 0.27 * f64::from(sample),
                     },
-                    velocity: Point::ZERO,
+                    velocity: RenderPoint::ZERO,
                     lifetime: 1.0 + f64::from((row + col + sample) % 5),
                 });
             }

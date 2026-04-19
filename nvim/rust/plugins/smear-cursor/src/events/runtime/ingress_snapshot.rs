@@ -6,10 +6,11 @@ use super::read_engine_state;
 use crate::config::BufferPerfMode;
 use crate::config::RuntimeConfig;
 use crate::core::state::BufferPerfClass;
-use crate::state::CursorLocation;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
+use crate::position::current_visual_cursor_anchor;
+use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
-use crate::types::Point;
-use crate::types::ScreenCell;
 use nvim_oxi::api;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
@@ -79,10 +80,10 @@ impl IngressModePolicySnapshot {
 pub(crate) struct IngressReadSnapshot {
     enabled: bool,
     needs_initialize: bool,
-    current_corners: [Point; 4],
-    target_corners: [Point; 4],
-    target_position: Point,
-    tracked_location: Option<CursorLocation>,
+    current_corners: [RenderPoint; 4],
+    target_corners: [RenderPoint; 4],
+    target_position: RenderPoint,
+    tracked_cursor: Option<TrackedCursor>,
     mode_policy: IngressModePolicySnapshot,
     buffer_perf_mode: BufferPerfMode,
     callback_duration_estimate_ms: f64,
@@ -95,10 +96,10 @@ pub(crate) struct IngressReadSnapshot {
 pub(crate) struct IngressReadSnapshotTestInput {
     pub(crate) enabled: bool,
     pub(crate) needs_initialize: bool,
-    pub(crate) current_corners: [Point; 4],
-    pub(crate) target_corners: [Point; 4],
-    pub(crate) target_position: Point,
-    pub(crate) tracked_location: Option<CursorLocation>,
+    pub(crate) current_corners: [RenderPoint; 4],
+    pub(crate) target_corners: [RenderPoint; 4],
+    pub(crate) target_position: RenderPoint,
+    pub(crate) tracked_cursor: Option<TrackedCursor>,
     pub(crate) mode_flags: [bool; 4],
     pub(crate) buffer_perf_mode: BufferPerfMode,
     pub(crate) callback_duration_estimate_ms: f64,
@@ -130,7 +131,7 @@ impl IngressReadSnapshot {
                 current_corners: runtime.current_corners(),
                 target_corners: runtime.target_corners(),
                 target_position: runtime.target_position(),
-                tracked_location: runtime.tracked_location(),
+                tracked_cursor: runtime.tracked_cursor(),
                 mode_policy: IngressModePolicySnapshot::from_runtime_config(config),
                 buffer_perf_mode: config.buffer_perf_mode,
                 callback_duration_estimate_ms,
@@ -153,24 +154,24 @@ impl IngressReadSnapshot {
         self.needs_initialize
     }
 
-    pub(crate) const fn current_corners(&self) -> [Point; 4] {
+    pub(crate) const fn current_corners(&self) -> [RenderPoint; 4] {
         self.current_corners
     }
 
     pub(crate) fn current_visual_cursor_cell(&self) -> Option<ScreenCell> {
-        ScreenCell::from_visual_cursor_anchor(
+        ScreenCell::from_rounded_point(current_visual_cursor_anchor(
             &self.current_corners,
             &self.target_corners,
             self.target_position,
-        )
+        ))
     }
 
     pub(crate) fn current_visual_cursor_shape(&self) -> CursorCellShape {
         CursorCellShape::from_corners(&self.target_corners)
     }
 
-    pub(crate) fn tracked_location(&self) -> Option<&CursorLocation> {
-        self.tracked_location.as_ref()
+    pub(crate) fn tracked_cursor(&self) -> Option<&TrackedCursor> {
+        self.tracked_cursor.as_ref()
     }
 
     pub(crate) fn mode_allowed(&self, mode: &str) -> bool {
@@ -210,7 +211,7 @@ impl IngressReadSnapshot {
             current_corners: input.current_corners,
             target_corners: input.target_corners,
             target_position: input.target_position,
-            tracked_location: input.tracked_location,
+            tracked_cursor: input.tracked_cursor,
             mode_policy: IngressModePolicySnapshot::from_mode_flags(input.mode_flags),
             buffer_perf_mode: input.buffer_perf_mode,
             callback_duration_estimate_ms: input.callback_duration_estimate_ms,
@@ -259,9 +260,9 @@ mod tests {
     use super::IngressReadSnapshotTestInput;
     use crate::config::BufferPerfMode;
     use crate::core::state::BufferPerfClass;
+    use crate::position::RenderPoint;
+    use crate::position::ScreenCell;
     use crate::test_support::proptest::pure_config;
-    use crate::types::Point;
-    use crate::types::ScreenCell;
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
     use std::collections::HashSet;
@@ -313,10 +314,10 @@ mod tests {
             let snapshot = IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
                 enabled: true,
                 needs_initialize: false,
-                current_corners: [Point { row: 1.0, col: 2.0 }; 4],
-                target_corners: [Point { row: 1.0, col: 2.0 }; 4],
-                target_position: Point { row: 1.0, col: 2.0 },
-                tracked_location: None,
+                current_corners: [RenderPoint { row: 1.0, col: 2.0 }; 4],
+                target_corners: [RenderPoint { row: 1.0, col: 2.0 }; 4],
+                target_position: RenderPoint { row: 1.0, col: 2.0 },
+                tracked_cursor: None,
                 mode_flags: [true, true, true, true],
                 buffer_perf_mode: BufferPerfMode::Auto,
                 callback_duration_estimate_ms: f64::from(callback_duration_estimate_ms),
@@ -376,10 +377,10 @@ mod tests {
         let snapshot = IngressReadSnapshot {
             enabled: true,
             needs_initialize: false,
-            current_corners: [Point::ZERO; 4],
-            target_corners: [Point::ZERO; 4],
-            target_position: Point::ZERO,
-            tracked_location: None,
+            current_corners: [RenderPoint::ZERO; 4],
+            target_corners: [RenderPoint::ZERO; 4],
+            target_position: RenderPoint::ZERO,
+            tracked_cursor: None,
             mode_policy: IngressModePolicySnapshot::from_mode_flags([true, true, true, true]),
             buffer_perf_mode: BufferPerfMode::Auto,
             callback_duration_estimate_ms: 12.5,
@@ -412,46 +413,46 @@ mod tests {
             enabled: true,
             needs_initialize: false,
             current_corners: [
-                Point {
+                RenderPoint {
                     row: 9.0,
                     col: 14.0,
                 },
-                Point {
+                RenderPoint {
                     row: 10.0,
                     col: 14.0,
                 },
-                Point {
+                RenderPoint {
                     row: 10.0,
                     col: 15.0,
                 },
-                Point {
+                RenderPoint {
                     row: 9.0,
                     col: 15.0,
                 },
             ],
             target_corners: [
-                Point {
+                RenderPoint {
                     row: 9.0,
                     col: 14.0,
                 },
-                Point {
+                RenderPoint {
                     row: 10.0,
                     col: 14.0,
                 },
-                Point {
+                RenderPoint {
                     row: 10.0,
                     col: 15.0,
                 },
-                Point {
+                RenderPoint {
                     row: 9.0,
                     col: 15.0,
                 },
             ],
-            target_position: Point {
+            target_position: RenderPoint {
                 row: 10.0,
                 col: 15.0,
             },
-            tracked_location: None,
+            tracked_cursor: None,
             mode_flags: [true, true, true, true],
             buffer_perf_mode: BufferPerfMode::Auto,
             callback_duration_estimate_ms: 0.0,
@@ -474,10 +475,10 @@ mod tests {
         let disabled_snapshot = IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
             enabled: false,
             needs_initialize: false,
-            current_corners: [Point::ZERO; 4],
-            target_corners: [Point::ZERO; 4],
-            target_position: Point::ZERO,
-            tracked_location: None,
+            current_corners: [RenderPoint::ZERO; 4],
+            target_corners: [RenderPoint::ZERO; 4],
+            target_position: RenderPoint::ZERO,
+            tracked_cursor: None,
             mode_flags: [true, true, true, true],
             buffer_perf_mode: BufferPerfMode::Auto,
             callback_duration_estimate_ms: 0.0,
@@ -491,11 +492,11 @@ mod tests {
 
     #[test]
     fn ingress_snapshot_remains_stable_after_later_core_state_mutation() {
-        let shape = crate::state::CursorShape::new(false, false);
-        let initial_location = crate::state::CursorLocation::new(11, 22, 3, 4);
+        let shape = crate::state::CursorShape::block();
+        let initial_location = crate::state::TrackedCursor::fixture(11, 22, 3, 4);
         let mut initial_runtime = crate::state::RuntimeState::default();
         initial_runtime.initialize_cursor(
-            Point { row: 3.0, col: 4.0 },
+            RenderPoint { row: 3.0, col: 4.0 },
             shape,
             7,
             &initial_location,
@@ -510,11 +511,11 @@ mod tests {
             IngressReadSnapshot::capture_with_current_buffer(None).expect("snapshot capture");
         let expected = snapshot.clone();
 
-        let mutated_location = crate::state::CursorLocation::new(99, 88, 7, 6);
+        let mutated_location = crate::state::TrackedCursor::fixture(99, 88, 7, 6);
         let mut mutated_runtime = crate::state::RuntimeState::default();
         mutated_runtime.set_enabled(false);
         mutated_runtime.initialize_cursor(
-            Point {
+            RenderPoint {
                 row: 30.0,
                 col: 40.0,
             },

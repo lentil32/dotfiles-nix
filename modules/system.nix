@@ -239,7 +239,7 @@
     };
   };
 
-  power.sleep.display = 60;
+  power.sleep.display = 120;
 
   # Add ability to used TouchID for sudo authentication
   security.pam.services.sudo_local.touchIdAuth = true;

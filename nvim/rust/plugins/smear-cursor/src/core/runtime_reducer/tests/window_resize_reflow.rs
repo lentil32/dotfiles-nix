@@ -7,28 +7,29 @@ fn window_resize_clears_inflight_smear_and_classifies_as_surface_retarget() {
     state.config.delay_event_to_smear = 0.0;
     state.config.max_simulation_steps_per_frame = 0;
 
-    let previous_location = CursorLocation::new(10, 20, 4, 12).with_window_dimensions(80, 24);
+    let previous_location = TrackedCursor::fixture(10, 20, 4, 12).with_window_dimensions(80, 24);
     state.initialize_cursor(
-        Point {
+        RenderPoint {
             row: 15.0,
             col: 18.0,
         },
-        CursorShape::new(false, false),
+        CursorShape::block(),
         7,
         &previous_location,
     );
-    state.set_target(
-        Point {
+    replace_target_preserving_tracking(
+        &mut state,
+        RenderPoint {
             row: 15.0,
             col: 24.0,
         },
-        CursorShape::new(false, false),
+        CursorShape::block(),
     );
     state.start_animation_towards_target();
     state.set_last_tick_ms(Some(100.0));
     let baseline_epoch = state.retarget_epoch();
 
-    let current_location = CursorLocation::new(10, 20, 4, 12).with_window_dimensions(72, 24);
+    let current_location = TrackedCursor::fixture(10, 20, 4, 12).with_window_dimensions(72, 24);
     let transition = reduce_cursor_event(
         &mut state,
         "n",
@@ -37,7 +38,7 @@ fn window_resize_clears_inflight_smear_and_classifies_as_surface_retarget() {
             col: 24.0,
             now_ms: 116.0,
             seed: 9,
-            cursor_location: current_location.clone(),
+            tracked_cursor: current_location.clone(),
             scroll_shift: None,
             semantic_event: SemanticEvent::ViewportOrWindowMoved,
         },
@@ -51,10 +52,10 @@ fn window_resize_clears_inflight_smear_and_classifies_as_surface_retarget() {
     );
     assert_eq!(transition.motion_class, MotionClass::SurfaceRetarget);
     assert!(!state.is_animating());
-    assert_eq!(state.tracked_location(), Some(current_location));
+    assert_eq!(state.tracked_cursor(), Some(current_location));
     assert_eq!(
         state.target_position(),
-        Point {
+        RenderPoint {
             row: 15.0,
             col: 24.0
         }

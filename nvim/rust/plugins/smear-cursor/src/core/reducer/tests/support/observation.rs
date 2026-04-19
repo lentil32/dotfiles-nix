@@ -1,5 +1,14 @@
 use super::super::*;
 use crate::core::effect::ObservationRuntimeContextArgs;
+use crate::core::effect::RetainedCursorColorFallback;
+use crate::core::effect::tracked_observation_inputs;
+use crate::position::BufferLine;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::ScreenCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 
 pub(in crate::core::reducer::tests) fn ready_state() -> CoreState {
     let mut runtime = RuntimeState::default();
@@ -19,26 +28,18 @@ pub(in crate::core::reducer::tests) fn ready_state_with_runtime_config(
 pub(in crate::core::reducer::tests) fn external_demand_event(
     kind: ExternalDemandKind,
     observed_at: u64,
-    requested_target: Option<CursorPosition>,
 ) -> Event {
-    external_demand_event_with_perf_class(
-        kind,
-        observed_at,
-        requested_target,
-        BufferPerfClass::Full,
-    )
+    external_demand_event_with_perf_class(kind, observed_at, BufferPerfClass::Full)
 }
 
 pub(in crate::core::reducer::tests) fn external_demand_event_with_perf_class(
     kind: ExternalDemandKind,
     observed_at: u64,
-    requested_target: Option<CursorPosition>,
     buffer_perf_class: BufferPerfClass,
 ) -> Event {
     Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
         kind,
         observed_at: Millis::new(observed_at),
-        requested_target,
         buffer_perf_class,
         ingress_cursor_presentation: None,
         ingress_observation_surface: None,
@@ -64,7 +65,6 @@ pub(in crate::core::reducer::tests) fn observation_request_with_perf_class(
             IngressSeq::new(seq),
             kind,
             Millis::new(observed_at),
-            None,
             buffer_perf_class,
         ),
         ProbeRequestSet::default(),
@@ -72,23 +72,49 @@ pub(in crate::core::reducer::tests) fn observation_request_with_perf_class(
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis(
-    position: Option<CursorPosition>,
+    position: Option<ScreenCell>,
     observed_at: u64,
 ) -> ObservationBasis {
-    observation_basis_in_mode(position, observed_at, "n")
+    observation_basis_with_observed_cell(
+        position.map_or(ObservedCell::Unavailable, ObservedCell::Exact),
+        observed_at,
+        "n",
+    )
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis_in_mode(
-    position: Option<CursorPosition>,
+    position: Option<ScreenCell>,
+    observed_at: u64,
+    mode: &str,
+) -> ObservationBasis {
+    observation_basis_with_observed_cell(
+        position.map_or(ObservedCell::Unavailable, ObservedCell::Exact),
+        observed_at,
+        mode,
+    )
+}
+
+pub(in crate::core::reducer::tests) fn observation_basis_with_observed_cell(
+    observed_cell: ObservedCell,
     observed_at: u64,
     mode: &str,
 ) -> ObservationBasis {
     ObservationBasis::new(
         Millis::new(observed_at),
         mode.to_string(),
-        position,
-        CursorLocation::new(11, 22, 3, 4),
-        ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(11, 22).expect("positive handles"),
+            BufferLine::new(3).expect("positive top buffer line"),
+            0,
+            0,
+            ScreenCell::new(1, 1).expect("one-based window origin"),
+            ViewportBounds::new(40, 120).expect("positive window size"),
+        ),
+        CursorObservation::new(
+            BufferLine::new(4).expect("positive buffer line"),
+            observed_cell,
+        ),
+        ViewportBounds::new(40, 120).expect("positive viewport bounds"),
     )
     .with_buffer_revision(Some(0))
 }
@@ -115,7 +141,7 @@ pub(in crate::core::reducer::tests) fn text_context(
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
-    position: Option<CursorPosition>,
+    position: Option<ScreenCell>,
     observed_at: u64,
     cursor_line: i64,
     changedtick: u64,
@@ -125,9 +151,19 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
     ObservationBasis::new(
         Millis::new(observed_at),
         "n".to_string(),
-        position,
-        CursorLocation::new(11, 22, 3, cursor_line),
-        ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(11, 22).expect("positive handles"),
+            BufferLine::new(3).expect("positive top buffer line"),
+            0,
+            0,
+            ScreenCell::new(1, 1).expect("one-based window origin"),
+            ViewportBounds::new(40, 120).expect("positive window size"),
+        ),
+        CursorObservation::new(
+            BufferLine::new(cursor_line).expect("positive buffer line"),
+            position.map_or(ObservedCell::Unavailable, ObservedCell::Exact),
+        ),
+        ViewportBounds::new(40, 120).expect("positive viewport bounds"),
     )
     .with_buffer_revision(Some(changedtick))
     .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
@@ -139,7 +175,7 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis_with_text_context_boundary(
-    position: Option<CursorPosition>,
+    position: Option<ScreenCell>,
     observed_at: u64,
     cursor_line: i64,
     boundary: crate::core::state::CursorTextContextBoundary,
@@ -147,9 +183,19 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context_bound
     ObservationBasis::new(
         Millis::new(observed_at),
         "n".to_string(),
-        position,
-        CursorLocation::new(11, 22, 3, cursor_line),
-        ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(11, 22).expect("positive handles"),
+            BufferLine::new(3).expect("positive top buffer line"),
+            0,
+            0,
+            ScreenCell::new(1, 1).expect("one-based window origin"),
+            ViewportBounds::new(40, 120).expect("positive window size"),
+        ),
+        CursorObservation::new(
+            BufferLine::new(cursor_line).expect("positive buffer line"),
+            position.map_or(ObservedCell::Unavailable, ObservedCell::Exact),
+        ),
+        ViewportBounds::new(40, 120).expect("positive viewport bounds"),
     )
     .with_buffer_revision(Some(0))
     .with_cursor_text_context_state(CursorTextContextState::BoundaryOnly(boundary))
@@ -168,7 +214,7 @@ pub(in crate::core::reducer::tests) fn observation_motion() -> ObservationMotion
 }
 
 pub(in crate::core::reducer::tests) fn observation_snapshot(
-    position: CursorPosition,
+    position: ScreenCell,
 ) -> ObservationSnapshot {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let basis = observation_basis(Some(position), 91);
@@ -176,14 +222,14 @@ pub(in crate::core::reducer::tests) fn observation_snapshot(
 }
 
 pub(in crate::core::reducer::tests) fn observation_snapshot_with_cursor_color(
-    position: CursorPosition,
+    position: ScreenCell,
     color: u32,
 ) -> ObservationSnapshot {
     observation_snapshot_with_cursor_color_reuse(position, color, ProbeReuse::Exact)
 }
 
 pub(in crate::core::reducer::tests) fn observation_snapshot_with_cursor_color_reuse(
-    position: CursorPosition,
+    position: ScreenCell,
     color: u32,
     reuse: ProbeReuse,
 ) -> ObservationSnapshot {
@@ -192,7 +238,6 @@ pub(in crate::core::reducer::tests) fn observation_snapshot_with_cursor_color_re
             IngressSeq::new(9),
             ExternalDemandKind::ExternalCursor,
             Millis::new(90),
-            None,
             BufferPerfClass::Full,
         ),
         ProbeRequestSet::only(ProbeKind::CursorColor),
@@ -225,13 +270,8 @@ pub(in crate::core::reducer::tests) fn observing_state_from_demand(
     ready: &CoreState,
     kind: ExternalDemandKind,
     observed_at: u64,
-    requested_target: Option<CursorPosition>,
 ) -> CoreState {
-    reduce(
-        ready,
-        external_demand_event(kind, observed_at, requested_target),
-    )
-    .next
+    reduce(ready, external_demand_event(kind, observed_at)).next
 }
 
 pub(in crate::core::reducer::tests) fn active_request(state: &CoreState) -> PendingObservation {
@@ -307,10 +347,14 @@ pub(in crate::core::reducer::tests) fn expected_probe_policy(
     buffer_perf_class: BufferPerfClass,
     cursor_color_fallback: Option<&CursorColorFallback>,
 ) -> ProbePolicy {
+    let retained_cursor_color_fallback = match cursor_color_fallback {
+        Some(_) => RetainedCursorColorFallback::CompatibleSample,
+        None => RetainedCursorColorFallback::Unavailable,
+    };
     ProbePolicy::for_demand(
         demand_kind,
         buffer_perf_class,
-        cursor_color_fallback.is_some(),
+        retained_cursor_color_fallback,
     )
 }
 
@@ -320,14 +364,14 @@ pub(in crate::core::reducer::tests) fn compatible_cursor_color_ready_state(
     let mut runtime = ready_state().runtime().clone();
     runtime.config.cursor_color = Some("none".to_string());
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 3, 9),
+        &TrackedCursor::fixture(11, 22, 3, 9),
     );
     configure_runtime(&mut runtime);
     ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_cell(Some(cursor(9, 9)))
         .with_runtime(runtime)
         .with_ready_observation(observation_snapshot_with_cursor_color_reuse(
             cursor(9, 9),
@@ -342,10 +386,10 @@ pub(in crate::core::reducer::tests) fn conceal_deferred_cursor_ready_state(
 ) -> CoreState {
     let mut runtime = ready_state().runtime().clone();
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 3, 9),
+        &TrackedCursor::fixture(11, 22, 3, 9),
     );
     configure_runtime(&mut runtime);
 
@@ -355,15 +399,11 @@ pub(in crate::core::reducer::tests) fn conceal_deferred_cursor_ready_state(
         90,
         BufferPerfClass::FastMotion,
     );
-    let basis = observation_basis(Some(cursor(9, 9)), 91);
-    let observation = ObservationSnapshot::new(
-        request,
-        basis,
-        observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
-    );
+    let basis = observation_basis_with_observed_cell(ObservedCell::Deferred(cursor(9, 9)), 91, "n");
+    let observation = ObservationSnapshot::new(request, basis, observation_motion());
 
     ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_cell(Some(cursor(9, 9)))
         .with_runtime(runtime)
         .with_ready_observation(observation)
         .expect("primed state should accept a conceal-deferred ready observation")
@@ -385,10 +425,13 @@ pub(in crate::core::reducer::tests) fn observation_runtime_context_with_perf_cla
     let cursor_text_context_boundary = state
         .phase_observation()
         .and_then(|observation| observation.basis().cursor_text_context_boundary());
+    let (tracked_surface, tracked_buffer_position) =
+        tracked_observation_inputs(state.runtime().tracked_cursor_ref());
     ObservationRuntimeContext::new(ObservationRuntimeContextArgs {
         cursor_position_policy: cursor_position_policy(state),
         scroll_buffer_space: state.runtime().config.scroll_buffer_space,
-        tracked_location: state.runtime().tracked_location(),
+        tracked_surface,
+        tracked_buffer_position,
         cursor_text_context_boundary,
         current_corners: state.runtime().current_corners(),
         ingress_observation_surface: None,
@@ -423,11 +466,11 @@ pub(in crate::core::reducer::tests) fn cursor_color_probe_failed(
 }
 
 pub(in crate::core::reducer::tests) fn background_probe_batch(
-    viewport: ViewportSnapshot,
+    viewport: ViewportBounds,
     allowed_cells: &[(u32, u32)],
 ) -> BackgroundProbeBatch {
-    let width = usize::try_from(viewport.max_col.value()).expect("viewport width");
-    let height = usize::try_from(viewport.max_row.value()).expect("viewport height");
+    let width = usize::try_from(viewport.max_col()).expect("viewport width");
+    let height = usize::try_from(viewport.max_row()).expect("viewport height");
     let mut allowed_mask = vec![false; width * height];
     for &(row, col) in allowed_cells {
         let row_index = usize::try_from(row.saturating_sub(1)).expect("row index");
@@ -441,7 +484,7 @@ pub(in crate::core::reducer::tests) fn background_probe_batch(
 
 pub(in crate::core::reducer::tests) fn background_probe_report(
     request: &PendingObservation,
-    viewport: ViewportSnapshot,
+    viewport: ViewportBounds,
     allowed_cells: &[(u32, u32)],
     reuse: ProbeReuse,
 ) -> Event {
@@ -455,7 +498,7 @@ pub(in crate::core::reducer::tests) fn background_probe_report(
 pub(in crate::core::reducer::tests) fn background_chunk_probe_report(
     request: &PendingObservation,
     chunk: &BackgroundProbeChunk,
-    _viewport: ViewportSnapshot,
+    _viewport: ViewportBounds,
     allowed_cells: &[(u32, u32)],
 ) -> Event {
     let allowed_mask = chunk
@@ -479,16 +522,16 @@ pub(in crate::core::reducer::tests) fn background_chunk_probe_report(
 }
 
 pub(in crate::core::reducer::tests) fn ready_state_with_observation(
-    position: CursorPosition,
+    position: ScreenCell,
 ) -> CoreState {
     primed_state_with_ready_observation(
-        ready_state().with_latest_exact_cursor_position(Some(position)),
+        ready_state().with_latest_exact_cursor_cell(Some(position)),
         observation_snapshot(position),
     )
 }
 
 pub(in crate::core::reducer::tests) fn recovering_state_with_observation(
-    position: CursorPosition,
+    position: ScreenCell,
 ) -> CoreState {
     ready_state_with_observation(position).enter_recovering()
 }

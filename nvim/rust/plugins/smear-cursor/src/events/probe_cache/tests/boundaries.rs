@@ -8,7 +8,7 @@ proptest! {
         color_sample in cursor_color_sample_strategy(),
         concealcursor in concealcursor_strategy(),
         regions in conceal_regions_strategy(),
-        screen_cell in proptest::option::of((any::<i64>(), any::<i64>())),
+        screen_cell in conceal_screen_cell_strategy(),
         current_col1 in any::<i64>(),
         delta in any::<i64>(),
         nearby_rows in observed_rows_strategy(2),
@@ -20,34 +20,14 @@ proptest! {
         let context_key = cursor_text_context_key(22, 14, 7, Some(5));
         let context = Some(cursor_text_context(22, 14, 7, nearby_rows, tracked_nearby_rows));
         let conceal_key = conceal_key(22, 14, 7, 2, &concealcursor);
-        let screen_cell_key = ConcealScreenCellCacheKey::new(
-            8,
-            22,
-            14,
-            7,
+        let screen_cell_key = ConcealScreenCellCacheKey::from_surface(
+            &conceal_key,
+            conceal_surface_snapshot(8, 22, 11, 0, 4, 2, 3, 40, 120),
             5,
-            2,
-            3,
-            120,
-            40,
-            11,
-            0,
-            4,
-            conceal_window_state(2, &concealcursor),
         );
-        let delta_key = ConcealDeltaCacheKey::new(
-            8,
-            22,
-            14,
-            7,
-            2,
-            3,
-            120,
-            40,
-            11,
-            0,
-            4,
-            conceal_window_state(2, &concealcursor),
+        let delta_key = ConcealDeltaCacheKey::from_surface(
+            &conceal_key,
+            conceal_surface_snapshot(8, 22, 11, 0, 4, 2, 3, 40, 120),
         );
 
         cache.store_cursor_color_sample(color_witness.clone(), color_sample);

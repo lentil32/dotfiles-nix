@@ -154,10 +154,10 @@ fn draining_runtime(case: &TailDrainCountdownCase) -> RuntimeState {
     state.config.simulation_hz = f64::from(case.simulation_hz);
     state.config.max_simulation_steps_per_frame = case.max_simulation_steps_per_frame;
     state.initialize_cursor(
-        Point { row: 5.0, col: 6.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 5.0, col: 6.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(10, 20, 1, 1),
+        &TrackedCursor::fixture(10, 20, 1, 1),
     );
     state.start_tail_drain(case.remaining_steps);
     state.set_last_tick_ms(Some(100.0));
@@ -327,10 +327,10 @@ fn tail_drain_advances_existing_particles_without_emitting_new_ones() {
     state.config.particles_per_second = 0.0;
     state.config.particles_per_length = 0.0;
     state.initialize_cursor(
-        Point { row: 5.0, col: 6.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 5.0, col: 6.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(10, 20, 1, 1),
+        &TrackedCursor::fixture(10, 20, 1, 1),
     );
     state.apply_step_output(StepOutput {
         current_corners: state.current_corners(),
@@ -338,8 +338,8 @@ fn tail_drain_advances_existing_particles_without_emitting_new_ones() {
         spring_velocity_corners: state.spring_velocity_corners(),
         trail_elapsed_ms: state.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point { row: 5.0, col: 7.0 },
-            velocity: Point { row: 2.0, col: 1.0 },
+            position: RenderPoint { row: 5.0, col: 7.0 },
+            velocity: RenderPoint { row: 2.0, col: 1.0 },
             lifetime: 500.0,
         }],
         previous_center: state.previous_center(),

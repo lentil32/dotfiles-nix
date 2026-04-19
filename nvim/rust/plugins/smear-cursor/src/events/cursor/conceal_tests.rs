@@ -1,13 +1,18 @@
 use super::CachedConcealDriftHint;
-use super::ConcealScreenCellView;
 use super::WrappedScreenCellLayout;
 use super::apply_conceal_delta;
 use super::cached_conceal_drift_hint_from_regions_and_delta;
+use super::conceal_delta_cache_key;
 use super::conceal_delta_for_regions;
+use super::conceal_screen_cell_cache_key;
 use super::concealcursor_allows_mode;
 use super::merge_conceal_region;
 use crate::events::probe_cache::ConcealRegion;
-use crate::test_support::ConcealScreenCellViewBuilder;
+use crate::position::BufferLine;
+use crate::position::ScreenCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 use crate::test_support::conceal_key;
 use crate::test_support::conceal_region;
 use crate::test_support::proptest::cache_key_mutation_axis;
@@ -55,10 +60,69 @@ struct ConcealDeltaRegionSpec {
 #[derive(Clone, Debug)]
 struct ConcealDeltaFixture {
     current_col1: i64,
-    raw_cell: (i64, i64),
+    raw_cell: ScreenCell,
     regions: Vec<ConcealRegion>,
-    cells_by_col1: BTreeMap<i64, (i64, i64)>,
+    cells_by_col1: BTreeMap<i64, ScreenCell>,
     expected_delta: i64,
+}
+
+fn screen_cell(row: i64, col: i64) -> ScreenCell {
+    ScreenCell::new(row, col).expect("test screen cells should stay one-based")
+}
+
+fn surface_snapshot(
+    window_row: i64,
+    window_col: i64,
+    window_width: i64,
+    window_height: i64,
+    topline: i64,
+    leftcol: i64,
+    textoff: i64,
+) -> WindowSurfaceSnapshot {
+    surface_snapshot_with_handles(
+        11,
+        17,
+        window_row,
+        window_col,
+        window_width,
+        window_height,
+        topline,
+        leftcol,
+        textoff,
+    )
+}
+
+fn surface_snapshot_with_handles(
+    window_handle: i64,
+    buffer_handle: i64,
+    window_row: i64,
+    window_col: i64,
+    window_width: i64,
+    window_height: i64,
+    topline: i64,
+    leftcol: i64,
+    textoff: i64,
+) -> WindowSurfaceSnapshot {
+    WindowSurfaceSnapshot::new(
+        SurfaceId::new(window_handle, buffer_handle).expect("positive handles"),
+        BufferLine::new(topline).expect("positive top buffer line"),
+        u32::try_from(leftcol).expect("non-negative left column"),
+        u32::try_from(textoff).expect("non-negative text offset"),
+        screen_cell(window_row, window_col),
+        ViewportBounds::new(window_height, window_width).expect("positive viewport bounds"),
+    )
+}
+
+fn surface_parts(surface_snapshot: WindowSurfaceSnapshot) -> (i64, i64, i64, i64, i64, i64, i64) {
+    (
+        surface_snapshot.window_origin().row(),
+        surface_snapshot.window_origin().col(),
+        surface_snapshot.window_size().max_col(),
+        surface_snapshot.window_size().max_row(),
+        surface_snapshot.top_buffer_line().value(),
+        i64::from(surface_snapshot.left_col0()),
+        i64::from(surface_snapshot.text_offset0()),
+    )
 }
 
 fn concealcursor_strategy() -> BoxedStrategy<String> {
@@ -228,34 +292,35 @@ fn merge_regions(specs: &[MergeCellSpec]) -> Vec<ConcealRegion> {
     regions
 }
 
-fn same_row_advance((row, col): (i64, i64), delta: i64) -> (i64, i64) {
-    (row, col.saturating_add(delta))
+fn same_row_advance(cell: ScreenCell, delta: i64) -> ScreenCell {
+    screen_cell(cell.row(), cell.col().saturating_add(delta))
 }
 
 fn wrapped_advance(
     layout: WrappedScreenCellLayout,
-    mut cell: (i64, i64),
+    cell: ScreenCell,
     mut delta: i64,
-) -> (i64, i64) {
+) -> ScreenCell {
+    let mut row = cell.row();
+    let mut col = cell.col();
     while delta > 0 {
-        let cells_to_row_end = layout.text_end_col().saturating_sub(cell.1);
+        let cells_to_row_end = layout.text_end_col().saturating_sub(col);
         if delta <= cells_to_row_end {
-            cell.1 = cell.1.saturating_add(delta);
-            return cell;
+            return screen_cell(row, col.saturating_add(delta));
         }
 
         delta = delta.saturating_sub(cells_to_row_end.saturating_add(1));
-        cell.0 = cell.0.saturating_add(1);
-        cell.1 = layout.text_start_col;
+        row = row.saturating_add(1);
+        col = layout.text_start_col;
     }
 
-    cell
+    screen_cell(row, col)
 }
 
 fn build_conceal_delta_fixture(
     specs: &[ConcealDeltaRegionSpec],
-    start_cell: (i64, i64),
-    mut advance: impl FnMut((i64, i64), i64) -> (i64, i64),
+    start_cell: ScreenCell,
+    mut advance: impl FnMut(ScreenCell, i64) -> ScreenCell,
 ) -> ConcealDeltaFixture {
     let mut current_col1 = 1_i64;
     let mut cursor = start_cell;
@@ -317,30 +382,110 @@ fn expected_drift_hint(
     }
 }
 
-fn mutate_view(
-    view: ConcealScreenCellView,
+#[test]
+fn conceal_cache_keys_follow_the_caller_supplied_surface_snapshot() {
+    let base_surface = surface_snapshot(5, 11, 80, 24, 23, 4, 2);
+    let shifted_surface = surface_snapshot(8, 13, 72, 18, 29, 7, 3);
+    let conceal_key = conceal_key(17, 101, 23, 2, "n");
+
+    assert_eq!(surface_parts(base_surface), (5, 11, 80, 24, 23, 4, 2));
+    assert_eq!(surface_parts(shifted_surface), (8, 13, 72, 18, 29, 7, 3));
+    assert_ne!(
+        conceal_screen_cell_cache_key(base_surface, &conceal_key, 7),
+        conceal_screen_cell_cache_key(shifted_surface, &conceal_key, 7),
+    );
+    assert_ne!(
+        conceal_delta_cache_key(base_surface, &conceal_key),
+        conceal_delta_cache_key(shifted_surface, &conceal_key),
+    );
+}
+
+fn mutate_surface(
+    snapshot: WindowSurfaceSnapshot,
     axis: usize,
     textoff_limit: i64,
-) -> ConcealScreenCellView {
-    let builder = ConcealScreenCellViewBuilder::from_view(view);
+) -> WindowSurfaceSnapshot {
+    let surface_id = snapshot.id();
     match axis {
-        0 => builder
-            .window_row(view.window_row.saturating_add(1))
-            .build(),
-        1 => builder
-            .window_col(view.window_col.saturating_add(1))
-            .build(),
-        2 => builder
-            .window_width(view.window_width.saturating_add(1))
-            .build(),
-        3 => builder
-            .window_height(view.window_height.saturating_add(1))
-            .build(),
-        4 => builder.topline(view.topline.saturating_add(1)).build(),
-        5 => builder.leftcol(view.leftcol.saturating_add(1)).build(),
-        6 => builder
-            .textoff((view.textoff.saturating_add(1)).min(textoff_limit))
-            .build(),
+        0 => surface_snapshot_with_handles(
+            surface_id.window_handle(),
+            surface_id.buffer_handle(),
+            snapshot.window_origin().row().saturating_add(1),
+            snapshot.window_origin().col(),
+            snapshot.window_size().max_col(),
+            snapshot.window_size().max_row(),
+            snapshot.top_buffer_line().value(),
+            i64::from(snapshot.left_col0()),
+            i64::from(snapshot.text_offset0()),
+        ),
+        1 => surface_snapshot_with_handles(
+            surface_id.window_handle(),
+            surface_id.buffer_handle(),
+            snapshot.window_origin().row(),
+            snapshot.window_origin().col().saturating_add(1),
+            snapshot.window_size().max_col(),
+            snapshot.window_size().max_row(),
+            snapshot.top_buffer_line().value(),
+            i64::from(snapshot.left_col0()),
+            i64::from(snapshot.text_offset0()),
+        ),
+        2 => surface_snapshot_with_handles(
+            surface_id.window_handle(),
+            surface_id.buffer_handle(),
+            snapshot.window_origin().row(),
+            snapshot.window_origin().col(),
+            snapshot.window_size().max_col().saturating_add(1),
+            snapshot.window_size().max_row(),
+            snapshot.top_buffer_line().value(),
+            i64::from(snapshot.left_col0()),
+            i64::from(snapshot.text_offset0()),
+        ),
+        3 => surface_snapshot_with_handles(
+            surface_id.window_handle(),
+            surface_id.buffer_handle(),
+            snapshot.window_origin().row(),
+            snapshot.window_origin().col(),
+            snapshot.window_size().max_col(),
+            snapshot.window_size().max_row().saturating_add(1),
+            snapshot.top_buffer_line().value(),
+            i64::from(snapshot.left_col0()),
+            i64::from(snapshot.text_offset0()),
+        ),
+        4 => surface_snapshot_with_handles(
+            surface_id.window_handle(),
+            surface_id.buffer_handle(),
+            snapshot.window_origin().row(),
+            snapshot.window_origin().col(),
+            snapshot.window_size().max_col(),
+            snapshot.window_size().max_row(),
+            snapshot.top_buffer_line().value().saturating_add(1),
+            i64::from(snapshot.left_col0()),
+            i64::from(snapshot.text_offset0()),
+        ),
+        5 => surface_snapshot_with_handles(
+            surface_id.window_handle(),
+            surface_id.buffer_handle(),
+            snapshot.window_origin().row(),
+            snapshot.window_origin().col(),
+            snapshot.window_size().max_col(),
+            snapshot.window_size().max_row(),
+            snapshot.top_buffer_line().value(),
+            i64::from(snapshot.left_col0()).saturating_add(1),
+            i64::from(snapshot.text_offset0()),
+        ),
+        6 => surface_snapshot_with_handles(
+            surface_id.window_handle(),
+            surface_id.buffer_handle(),
+            snapshot.window_origin().row(),
+            snapshot.window_origin().col(),
+            snapshot.window_size().max_col(),
+            snapshot.window_size().max_row(),
+            snapshot.top_buffer_line().value(),
+            i64::from(snapshot.left_col0()),
+            i64::from(snapshot.text_offset0())
+                .saturating_add(1)
+                .min(textoff_limit),
+        ),
         _ => panic!("unexpected view axis {axis}"),
     }
 }
@@ -354,24 +499,21 @@ proptest! {
         raw_col in 1_i64..256,
         conceal_delta in any::<i64>(),
     ) {
-        let raw_cell = (raw_row, raw_col);
+        let raw_cell = screen_cell(raw_row, raw_col);
 
         prop_assert_eq!(
             apply_conceal_delta(raw_cell, conceal_delta, None),
-            (
-                raw_row as f64,
-                raw_col.saturating_sub(conceal_delta).max(1) as f64,
-            ),
+            screen_cell(raw_cell.row(), raw_cell.col().saturating_sub(conceal_delta).max(1)),
         );
     }
 
     #[test]
-    fn prop_apply_conceal_delta_matches_wrapped_shift_left_when_view_is_valid(
-        window_row in any::<i64>(),
+    fn prop_apply_conceal_delta_matches_wrapped_shift_left_when_surface_is_valid(
+        window_row in 1_i64..64,
         window_col in 1_i64..16,
         window_height in 1_i64..64,
-        topline in any::<i64>(),
-        leftcol in any::<i64>(),
+        topline in 1_i64..512,
+        leftcol in 0_i64..128,
         textoff in 0_i64..8,
         text_width in 1_i64..12,
         raw_row in 2_i64..64,
@@ -380,25 +522,29 @@ proptest! {
     ) {
         prop_assume!(start_offset < text_width);
 
-        let view = ConcealScreenCellViewBuilder::new()
-            .window_origin(window_row, window_col)
-            .window_size(textoff.saturating_add(text_width), window_height)
-            .viewport(topline, leftcol, textoff)
-            .build();
-        let layout = WrappedScreenCellLayout::from_view(view)
+        let surface_snapshot = surface_snapshot(
+            window_row,
+            window_col,
+            textoff.saturating_add(text_width),
+            window_height,
+            topline,
+            leftcol,
+            textoff,
+        );
+        let layout = WrappedScreenCellLayout::from_surface(surface_snapshot)
             .expect("positive window_col and text_width should produce a wrapped layout");
-        let raw_cell = (
+        let raw_cell = screen_cell(
             raw_row,
             layout.text_start_col.saturating_add(start_offset),
         );
-        let expected_cell = layout.shift_left(raw_cell, conceal_delta).unwrap_or((
-            raw_cell.0,
-            raw_cell.1.saturating_sub(conceal_delta).max(1),
+        let expected_cell = layout.shift_left(raw_cell, conceal_delta).unwrap_or(screen_cell(
+            raw_cell.row(),
+            raw_cell.col().saturating_sub(conceal_delta).max(1),
         ));
 
         prop_assert_eq!(
-            apply_conceal_delta(raw_cell, conceal_delta, Some(view)),
-            (expected_cell.0 as f64, expected_cell.1 as f64),
+            apply_conceal_delta(raw_cell, conceal_delta, Some(surface_snapshot)),
+            expected_cell,
         );
     }
 
@@ -453,74 +599,91 @@ proptest! {
 
     #[test]
     fn prop_screen_cell_cache_key_changes_for_each_effective_view_axis(
-        window_handle in any::<i64>(),
-        buffer_handle in any::<i64>(),
+        window_handle in 1_i64..256,
+        buffer_handle in 1_i64..256,
         changedtick in any::<u64>(),
         line in 0_usize..256,
         col1 in 1_i64..256,
         conceallevel in any::<i64>(),
         concealcursor in concealcursor_strategy(),
-        window_row in any::<i64>(),
-        window_col in any::<i64>(),
+        window_row in 1_i64..64,
+        window_col in 1_i64..64,
         window_width in 4_i64..128,
         window_height in 1_i64..64,
-        topline in any::<i64>(),
-        leftcol in any::<i64>(),
+        topline in 1_i64..512,
+        leftcol in 0_i64..128,
         textoff in 0_i64..3,
         axis in cache_key_mutation_axis(SCREEN_CELL_VIEW_AXIS_COUNT),
     ) {
         let conceal_key =
             conceal_key(buffer_handle, changedtick, line, conceallevel, concealcursor);
-        let base_view = ConcealScreenCellViewBuilder::new()
-            .window_origin(window_row, window_col)
-            .window_size(window_width, window_height)
-            .viewport(topline, leftcol, textoff)
-            .build();
-        let base_key = base_view.cache_key(window_handle, &conceal_key, col1);
+        let base_surface = surface_snapshot_with_handles(
+            window_handle,
+            buffer_handle,
+            window_row,
+            window_col,
+            window_width,
+            window_height,
+            topline,
+            leftcol,
+            textoff,
+        );
+        let base_key = conceal_screen_cell_cache_key(base_surface, &conceal_key, col1);
         let mutated_key = match axis.index() {
-            0 => base_view.cache_key(window_handle, &conceal_key, col1.saturating_add(1)),
-            axis_index => mutate_view(base_view, axis_index.saturating_sub(1), window_width)
-                .cache_key(window_handle, &conceal_key, col1),
+            0 => {
+                conceal_screen_cell_cache_key(base_surface, &conceal_key, col1.saturating_add(1))
+            }
+            axis_index => conceal_screen_cell_cache_key(
+                mutate_surface(base_surface, axis_index.saturating_sub(1), window_width),
+                &conceal_key,
+                col1,
+            ),
         };
 
         prop_assert_eq!(
             &base_key,
-            &base_view.cache_key(window_handle, &conceal_key, col1),
+            &conceal_screen_cell_cache_key(base_surface, &conceal_key, col1),
         );
         prop_assert_ne!(&base_key, &mutated_key);
     }
 
     #[test]
     fn prop_delta_cache_key_changes_for_each_effective_view_axis(
-        window_handle in any::<i64>(),
-        buffer_handle in any::<i64>(),
+        window_handle in 1_i64..256,
+        buffer_handle in 1_i64..256,
         changedtick in any::<u64>(),
         line in 0_usize..256,
         conceallevel in any::<i64>(),
         concealcursor in concealcursor_strategy(),
-        window_row in any::<i64>(),
-        window_col in any::<i64>(),
+        window_row in 1_i64..64,
+        window_col in 1_i64..64,
         window_width in 4_i64..128,
         window_height in 1_i64..64,
-        topline in any::<i64>(),
-        leftcol in any::<i64>(),
+        topline in 1_i64..512,
+        leftcol in 0_i64..128,
         textoff in 0_i64..3,
         axis in cache_key_mutation_axis(DELTA_CACHE_VIEW_AXIS_COUNT),
     ) {
         let conceal_key =
             conceal_key(buffer_handle, changedtick, line, conceallevel, concealcursor);
-        let base_view = ConcealScreenCellViewBuilder::new()
-            .window_origin(window_row, window_col)
-            .window_size(window_width, window_height)
-            .viewport(topline, leftcol, textoff)
-            .build();
-        let base_key = base_view.delta_cache_key(window_handle, &conceal_key);
-        let mutated_key = mutate_view(base_view, axis.index(), window_width)
-            .delta_cache_key(window_handle, &conceal_key);
+        let base_surface = surface_snapshot_with_handles(
+            window_handle,
+            buffer_handle,
+            window_row,
+            window_col,
+            window_width,
+            window_height,
+            topline,
+            leftcol,
+            textoff,
+        );
+        let base_key = conceal_delta_cache_key(base_surface, &conceal_key);
+        let mutated_key =
+            conceal_delta_cache_key(mutate_surface(base_surface, axis.index(), window_width), &conceal_key);
 
         prop_assert_eq!(
             &base_key,
-            &base_view.delta_cache_key(window_handle, &conceal_key),
+            &conceal_delta_cache_key(base_surface, &conceal_key),
         );
         prop_assert_ne!(&base_key, &mutated_key);
     }
@@ -579,7 +742,7 @@ proptest! {
         row in 1_i64..64,
         start_col in 1_i64..48,
     ) {
-        let fixture = build_conceal_delta_fixture(&specs, (row, start_col), same_row_advance);
+        let fixture = build_conceal_delta_fixture(&specs, screen_cell(row, start_col), same_row_advance);
         let delta = conceal_delta_for_regions(
             fixture.current_col1,
             fixture.raw_cell,
@@ -610,14 +773,10 @@ proptest! {
     ) {
         prop_assume!(start_offset < text_width);
 
-        let view = ConcealScreenCellViewBuilder::new()
-            .window_origin(1, window_col)
-            .window_size(textoff.saturating_add(text_width), 32)
-            .viewport(1, 0, textoff)
-            .build();
-        let layout = WrappedScreenCellLayout::from_view(view)
+        let surface_snapshot = surface_snapshot(1, window_col, textoff.saturating_add(text_width), 32, 1, 0, textoff);
+        let layout = WrappedScreenCellLayout::from_surface(surface_snapshot)
             .expect("positive window_col and text_width should produce a wrapped layout");
-        let start_cell = (
+        let start_cell = screen_cell(
             start_row,
             layout.text_start_col.saturating_add(start_offset),
         );

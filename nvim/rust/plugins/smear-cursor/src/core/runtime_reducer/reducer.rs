@@ -29,10 +29,10 @@ use crate::animation::stop_metrics;
 use crate::animation::within_stop_enter;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::SemanticEvent;
+use crate::position::RenderPoint;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
 use crate::types::EPSILON;
-use crate::types::Point;
 use crate::types::RenderStepSample;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 
@@ -97,8 +97,8 @@ fn planner_tail_drain_steps(state: &RuntimeState) -> u32 {
     .unwrap_or(1)
 }
 
-fn lerp_point(from: Point, to: Point, t: f64) -> Point {
-    Point {
+fn lerp_point(from: RenderPoint, to: RenderPoint, t: f64) -> RenderPoint {
+    RenderPoint {
         row: from.row + ((to.row - from.row) * t),
         col: from.col + ((to.col - from.col) * t),
     }
@@ -106,8 +106,8 @@ fn lerp_point(from: Point, to: Point, t: f64) -> Point {
 
 fn jump_bridge_step_samples(
     state: &RuntimeState,
-    from_position: Point,
-    to_position: Point,
+    from_position: RenderPoint,
+    to_position: RenderPoint,
     vertical_bar: bool,
     horizontal_bar: bool,
     samples: &mut Vec<RenderStepSample>,
@@ -138,8 +138,8 @@ fn jump_bridge_step_samples(
 #[derive(Clone, Copy)]
 struct JumpFrameSpec {
     event_now_ms: f64,
-    from_position: Point,
-    to_position: Point,
+    from_position: RenderPoint,
+    to_position: RenderPoint,
     vertical_bar: bool,
     horizontal_bar: bool,
     motion_class: MotionClass,
@@ -189,7 +189,7 @@ fn draw_discontinuous_jump_frame(
 
 fn apply_event_scroll_shift(
     state: &mut RuntimeState,
-    target_position: &mut Point,
+    target_position: &mut RenderPoint,
     scroll_shift: ScrollShift,
 ) {
     apply_scroll_shift_to_state(state, scroll_shift);
@@ -220,7 +220,7 @@ fn draw_drain_frame(
     state: &mut RuntimeState,
     mode: &str,
     event_now_ms: f64,
-    target_position: Point,
+    target_position: RenderPoint,
     vertical_bar: bool,
     buffer_perf_class: BufferPerfClass,
 ) -> CursorTransition {
@@ -340,10 +340,10 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             state.clear_particles();
         }
 
-        let vertical_bar = state.config.cursor_is_vertical_bar(mode);
-        let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
-        let cursor_shape = CursorShape::new(vertical_bar, horizontal_bar);
-        let event_target = Point {
+        let cursor_shape = CursorShape::from_cell_shape(state.config.cursor_cell_shape(mode));
+        let vertical_bar = cursor_shape.is_vertical_bar();
+        let horizontal_bar = cursor_shape.is_horizontal_bar();
+        let event_target = RenderPoint {
             row: event.row,
             col: event.col,
         };
@@ -359,12 +359,12 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             EventSource::External => event_target,
         };
         let (window_changed, buffer_changed, window_dimensions_changed) = state
-            .tracked_location_ref()
+            .tracked_cursor_ref()
             .map_or((false, false, false), |tracked| {
                 (
-                    tracked.window_handle != event.cursor_location.window_handle,
-                    tracked.buffer_handle != event.cursor_location.buffer_handle,
-                    tracked.window_dimensions_changed(&event.cursor_location),
+                    tracked.window_handle() != event.tracked_cursor.window_handle(),
+                    tracked.buffer_handle() != event.tracked_cursor.buffer_handle(),
+                    tracked.window_dimensions_changed(&event.tracked_cursor),
                 )
             });
         let mut motion_class = MotionClass::Continuous;
@@ -380,7 +380,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     state.jump_and_stop_animation(
                         target_position,
                         cursor_shape,
-                        &event.cursor_location,
+                        &event.tracked_cursor,
                     );
                     return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
                         .with_render_cleanup_action(RenderCleanupAction::Schedule);
@@ -390,7 +390,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     state.jump_and_stop_animation(
                         target_position,
                         cursor_shape,
-                        &event.cursor_location,
+                        &event.tracked_cursor,
                     );
                     return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
                         .with_motion_class(motion_class)
@@ -411,7 +411,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     state.jump_and_stop_animation(
                         target_position,
                         cursor_shape,
-                        &event.cursor_location,
+                        &event.tracked_cursor,
                     );
                     return draw_discontinuous_jump_frame(
                         state,
@@ -439,7 +439,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     state.jump_preserving_motion(
                         target_position,
                         cursor_shape,
-                        &event.cursor_location,
+                        &event.tracked_cursor,
                     );
                     return draw_discontinuous_jump_frame(
                         state,
@@ -464,7 +464,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 target_position,
                 cursor_shape,
                 event.seed,
-                &event.cursor_location,
+                &event.tracked_cursor,
             );
             let current_corners = state.current_corners();
             let bootstrap_step_sample =
@@ -496,15 +496,15 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
         }
 
         let should_update_target = matches!(source, EventSource::External) || tick_retarget;
-        let mut settling_target_unchanged = state.target_position() == target_position
-            && state.tracked_location_ref() == Some(&event.cursor_location);
+        let mut settling_target_unchanged =
+            state.settling_target_matches(target_position, cursor_shape, &event.tracked_cursor);
         if should_update_target {
             if let Some(scroll_shift) = event.scroll_shift {
                 apply_event_scroll_shift(state, &mut target_position, scroll_shift);
             }
 
-            settling_target_unchanged = state.target_position() == target_position
-                && state.tracked_location_ref() == Some(&event.cursor_location);
+            settling_target_unchanged =
+                state.settling_target_matches(target_position, cursor_shape, &event.tracked_cursor);
 
             let path_segmentation = classify_target_transition(
                 state,
@@ -518,11 +518,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             // stay on the regular spring/comet pipeline unless policy requires an actual snap.
 
             if path_segmentation.should_jump {
-                state.jump_and_stop_animation(
-                    target_position,
-                    cursor_shape,
-                    &event.cursor_location,
-                );
+                state.jump_and_stop_animation(target_position, cursor_shape, &event.tracked_cursor);
                 return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
                     .with_motion_class(motion_class)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
@@ -531,8 +527,11 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             if path_segmentation.starts_new_trail_stroke {
                 state.start_new_trail_stroke();
             }
-            state.set_target(target_position, cursor_shape);
-            state.update_tracking(&event.cursor_location);
+            state.retarget_tracked_preserving_current_pose(
+                target_position,
+                cursor_shape,
+                &event.tracked_cursor,
+            );
         }
 
         let mut just_started = false;
@@ -546,18 +545,26 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             );
             if outside_stop_exit(&state.config, metrics) {
                 if state.is_settling() {
-                    state.refresh_settling_target_with_match(
-                        target_position,
-                        cursor_shape,
-                        &event.cursor_location,
-                        event.now_ms,
-                        settling_target_unchanged,
-                    );
+                    if settling_target_unchanged {
+                        state.refresh_settling_target_preserving_stable_since(
+                            target_position,
+                            cursor_shape,
+                            &event.tracked_cursor,
+                            event.now_ms,
+                        );
+                    } else {
+                        state.refresh_settling_target_resetting_stable_since(
+                            target_position,
+                            cursor_shape,
+                            &event.tracked_cursor,
+                            event.now_ms,
+                        );
+                    }
                 } else {
                     state.begin_settling(
                         target_position,
                         cursor_shape,
-                        &event.cursor_location,
+                        &event.tracked_cursor,
                         event.now_ms,
                     );
                 }
@@ -565,7 +572,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 if state.should_promote_settled_target(
                     event.now_ms,
                     target_position,
-                    &event.cursor_location,
+                    &event.tracked_cursor,
                 ) {
                     promote_settled_target(state);
                     just_started = true;
@@ -597,19 +604,27 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 && state.should_promote_settled_target(
                     event.now_ms,
                     target_position,
-                    &event.cursor_location,
+                    &event.tracked_cursor,
                 )
             {
                 promote_settled_target(state);
                 just_started = true;
             } else {
-                state.refresh_settling_target_with_match(
-                    target_position,
-                    cursor_shape,
-                    &event.cursor_location,
-                    event.now_ms,
-                    settling_target_unchanged,
-                );
+                if settling_target_unchanged {
+                    state.refresh_settling_target_preserving_stable_since(
+                        target_position,
+                        cursor_shape,
+                        &event.tracked_cursor,
+                        event.now_ms,
+                    );
+                } else {
+                    state.refresh_settling_target_resetting_stable_since(
+                        target_position,
+                        cursor_shape,
+                        &event.tracked_cursor,
+                        event.now_ms,
+                    );
+                }
                 return waiting_for_settled_target(
                     state,
                     mode,

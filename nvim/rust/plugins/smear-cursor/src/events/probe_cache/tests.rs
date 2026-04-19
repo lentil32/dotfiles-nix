@@ -14,9 +14,13 @@ pub(super) use crate::core::state::CursorColorSample;
 pub(super) use crate::core::state::CursorTextContext;
 pub(super) use crate::core::state::ObservedTextRow;
 pub(super) use crate::core::types::Generation;
+use crate::position::BufferLine;
+pub(super) use crate::position::ScreenCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 pub(super) use crate::test_support::conceal_key;
 pub(super) use crate::test_support::conceal_region;
-pub(super) use crate::test_support::conceal_window_state;
 pub(super) use crate::test_support::cursor;
 pub(super) use crate::test_support::cursor_color_probe_witness_with_cache_generation as witness_with_cache_generation;
 pub(super) use crate::test_support::proptest::cache_key_mutation_axis;
@@ -63,6 +67,27 @@ pub(super) fn cursor_text_context(
     )
 }
 
+pub(super) fn conceal_surface_snapshot(
+    window_handle: i64,
+    buffer_handle: i64,
+    top_buffer_line: i64,
+    left_col0: u32,
+    text_offset0: u32,
+    window_row: i64,
+    window_col: i64,
+    window_height: i64,
+    window_width: i64,
+) -> WindowSurfaceSnapshot {
+    WindowSurfaceSnapshot::new(
+        SurfaceId::new(window_handle, buffer_handle).expect("positive handles"),
+        BufferLine::new(top_buffer_line).expect("positive top buffer line"),
+        left_col0,
+        text_offset0,
+        ScreenCell::new(window_row, window_col).expect("one-based window origin"),
+        ViewportBounds::new(window_height, window_width).expect("positive window size"),
+    )
+}
+
 pub(super) fn concealcursor_strategy() -> BoxedStrategy<String> {
     prop_oneof![
         Just(String::new()),
@@ -106,6 +131,15 @@ pub(super) fn conceal_regions_strategy() -> BoxedStrategy<Arc<[ConcealRegion]>> 
                 .into()
         })
         .boxed()
+}
+
+pub(super) fn conceal_screen_cell_strategy() -> BoxedStrategy<Option<ScreenCell>> {
+    proptest::option::of(
+        (1_i64..=256, 1_i64..=256).prop_map(|(row, col)| {
+            ScreenCell::new(row, col).expect("one-based screen cell strategy")
+        }),
+    )
+    .boxed()
 }
 
 #[derive(Clone, Copy, Debug)]

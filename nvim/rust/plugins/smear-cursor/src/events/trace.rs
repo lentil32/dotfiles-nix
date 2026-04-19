@@ -36,13 +36,17 @@ use crate::core::state::RenderCleanupState;
 use crate::core::state::RenderThermalState;
 use crate::core::state::ScenePatch;
 use crate::core::state::ScenePatchKind;
-use crate::core::types::CursorPosition;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
-use crate::core::types::ViewportSnapshot;
-use crate::state::CursorLocation;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::ScreenCell;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
+use crate::state::RuntimeState;
+use crate::state::TrackedCursor;
 
 pub(super) fn timer_kind_name(kind: TimerKind) -> &'static str {
     match kind {
@@ -81,22 +85,70 @@ fn optional_millis_summary(millis: Option<Millis>) -> String {
     )
 }
 
-fn cursor_position_summary(position: Option<CursorPosition>) -> String {
+fn cursor_position_summary(position: Option<ScreenCell>) -> String {
     position.map_or_else(
         || "none".to_string(),
-        |position| format!("{}:{}", position.row.value(), position.col.value()),
+        |position| format!("{}:{}", position.row(), position.col()),
     )
 }
 
-fn cursor_location_summary(location: &CursorLocation) -> String {
+fn observed_cell_summary(cell: ObservedCell) -> String {
+    match cell {
+        ObservedCell::Unavailable => "unavailable".to_string(),
+        ObservedCell::Exact(cell) => format!("exact({})", cursor_position_summary(Some(cell))),
+        ObservedCell::Deferred(cell) => {
+            format!("deferred({})", cursor_position_summary(Some(cell)))
+        }
+    }
+}
+
+fn surface_summary(surface: WindowSurfaceSnapshot) -> String {
     format!(
-        "win={} buf={} top={} line={}",
-        location.window_handle, location.buffer_handle, location.top_row, location.line
+        "id=(win={} buf={}) top={} left={} textoff={} origin={} size={}",
+        surface.id().window_handle(),
+        surface.id().buffer_handle(),
+        surface.top_buffer_line().value(),
+        surface.left_col0(),
+        surface.text_offset0(),
+        cursor_position_summary(Some(surface.window_origin())),
+        viewport_summary(surface.window_size()),
     )
 }
 
-fn viewport_summary(viewport: ViewportSnapshot) -> String {
-    format!("{}x{}", viewport.max_row.value(), viewport.max_col.value())
+fn runtime_target_tracked_cursor_summary(tracked_cursor: &TrackedCursor) -> String {
+    let surface = format!("({})", surface_summary(tracked_cursor.surface()));
+    let buffer_line = tracked_cursor.buffer_line().value().to_string();
+    format!("surface={surface} buffer_line={buffer_line}")
+}
+
+fn runtime_target_summary(runtime: &RuntimeState) -> String {
+    format!(
+        "cell={} epoch={} tracked={}",
+        cursor_position_summary(ScreenCell::from_rounded_point(runtime.target_position())),
+        runtime.retarget_epoch(),
+        runtime.tracked_cursor_ref().map_or_else(
+            || "none".to_string(),
+            |tracked_cursor| {
+                format!(
+                    "({})",
+                    runtime_target_tracked_cursor_summary(tracked_cursor)
+                )
+            }
+        ),
+    )
+}
+
+fn cursor_observation_summary(surface: WindowSurfaceSnapshot, cursor: CursorObservation) -> String {
+    format!(
+        "surface=({}) cursor=(line={} cell={})",
+        surface_summary(surface),
+        cursor.buffer_line().value(),
+        observed_cell_summary(cursor.cell()),
+    )
+}
+
+fn viewport_summary(viewport: ViewportBounds) -> String {
+    format!("{}x{}", viewport.max_row(), viewport.max_col())
 }
 
 fn external_demand_kind_name(kind: ExternalDemandKind) -> &'static str {
@@ -114,12 +166,11 @@ fn buffer_perf_class_name(class: crate::core::state::BufferPerfClass) -> &'stati
 
 fn external_demand_summary(demand: &ExternalDemand) -> String {
     format!(
-        "kind={} perf_class={} seq={} observed_at={} target={}",
+        "kind={} perf_class={} seq={} observed_at={}",
         external_demand_kind_name(demand.kind()),
         buffer_perf_class_name(demand.buffer_perf_class()),
         demand.seq().value(),
         millis_summary(demand.observed_at()),
-        cursor_position_summary(demand.requested_target()),
     )
 }
 
@@ -177,11 +228,10 @@ fn observation_basis_summary(basis: &ObservationBasis) -> String {
         .buffer_revision()
         .map_or_else(|| "none".to_string(), |revision| revision.to_string());
     format!(
-        "observed_at={} mode={} cursor={} location=({}) viewport={} buffer_revision={}",
+        "observed_at={} mode={} {} viewport={} buffer_revision={}",
         millis_summary(basis.observed_at()),
         basis.mode(),
-        cursor_position_summary(basis.cursor_position()),
-        cursor_location_summary(&basis.cursor_location()),
+        cursor_observation_summary(basis.surface(), basis.cursor()),
         viewport_summary(basis.viewport()),
         buffer_revision,
     )
@@ -503,10 +553,12 @@ pub(super) fn core_state_summary(state: &CoreState) -> String {
         .pending_proposal()
         .map_or_else(|| "none".to_string(), proposal_summary);
     format!(
-        "lifecycle={:?} phase={} cleanup={} timers={} queue={} observation={} proposal={} realization={}",
+        "lifecycle={:?} phase={} cleanup={} exact_anchor={} runtime_target=({}) timers={} queue={} observation={} proposal={} realization={}",
         state.lifecycle(),
         protocol_phase_kind_name(state.phase_kind()),
         render_cleanup_state_summary(state.render_cleanup(), &state.runtime().config),
+        cursor_position_summary(state.latest_exact_cursor_cell()),
+        runtime_target_summary(state.runtime()),
         timer_state_summary(state.timers()),
         demand_queue_summary(state.demand_queue()),
         observation,
@@ -574,10 +626,9 @@ pub(super) fn core_event_summary(event: &CoreEvent) -> String {
             format!("observed_at={}", millis_summary(payload.observed_at))
         }
         CoreEvent::ExternalDemandQueued(payload) => format!(
-            "kind={} observed_at={} target={} ingress_cursor_presentation={:?}",
+            "kind={} observed_at={} ingress_cursor_presentation={:?}",
             external_demand_kind_name(payload.kind),
             millis_summary(payload.observed_at),
-            cursor_position_summary(payload.requested_target),
             payload.ingress_cursor_presentation,
         ),
         CoreEvent::ObservationBaseCollected(payload) => format!(

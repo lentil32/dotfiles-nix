@@ -16,11 +16,11 @@ use super::SceneState;
 use super::SemanticState;
 use super::TimerState;
 use crate::core::runtime_reducer::CursorTransition;
-use crate::core::types::CursorPosition;
 use crate::core::types::Generation;
 use crate::core::types::IngressSeq;
 use crate::core::types::Lifecycle;
 use crate::core::types::ProposalId;
+use crate::position::ScreenCell;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -601,7 +601,7 @@ impl ProtocolState {
 pub(crate) struct CoreStatePayload {
     // authoritative: reducer-owned subtrees and sequence allocators.
     pub(crate) entropy: EntropyState,
-    pub(crate) latest_exact_cursor_position: Option<CursorPosition>,
+    pub(crate) latest_exact_cursor_cell: Option<ScreenCell>,
     pub(crate) motion: Rc<crate::state::RuntimeState>,
     pub(crate) semantics: Rc<SemanticState>,
     pub(crate) projection: Rc<ProjectionState>,
@@ -683,6 +683,19 @@ impl CoreState {
         self.projection_state().debug_assert_invariants();
         self.realization().debug_assert_invariants();
         self.protocol.debug_assert_invariants();
+        if let Some(observation) = self.phase_observation() {
+            match observation.basis().cursor().cell() {
+                crate::position::ObservedCell::Exact(cell) => {
+                    debug_assert_eq!(
+                        self.latest_exact_cursor_cell(),
+                        Some(cell),
+                        "exact observations must refresh the latest exact cursor cell anchor",
+                    );
+                }
+                crate::position::ObservedCell::Deferred(_)
+                | crate::position::ObservedCell::Unavailable => {}
+            }
+        }
     }
 
     #[cfg(not(debug_assertions))]
@@ -705,17 +718,17 @@ impl CoreState {
         matches!(self.protocol.phase_kind(), ProtocolPhaseKind::Idle)
     }
 
-    pub(crate) const fn latest_exact_cursor_position(&self) -> Option<CursorPosition> {
-        self.payload.latest_exact_cursor_position
+    pub(crate) const fn latest_exact_cursor_cell(&self) -> Option<ScreenCell> {
+        self.payload.latest_exact_cursor_cell
     }
 
-    pub(crate) const fn fallback_cursor_position(
+    pub(crate) const fn fallback_cursor_cell(
         &self,
-        observed_cursor_position: Option<CursorPosition>,
-    ) -> Option<CursorPosition> {
-        match observed_cursor_position {
-            Some(cursor_position) => Some(cursor_position),
-            None => self.latest_exact_cursor_position(),
+        observed_cursor_cell: Option<ScreenCell>,
+    ) -> Option<ScreenCell> {
+        match observed_cursor_cell {
+            Some(cursor_cell) => Some(cursor_cell),
+            None => self.latest_exact_cursor_cell(),
         }
     }
 
@@ -859,11 +872,11 @@ impl CoreState {
         self
     }
 
-    pub(crate) fn with_latest_exact_cursor_position(
+    pub(crate) fn with_latest_exact_cursor_cell(
         mut self,
-        latest_exact_cursor_position: Option<CursorPosition>,
+        latest_exact_cursor_cell: Option<ScreenCell>,
     ) -> Self {
-        self.payload.latest_exact_cursor_position = latest_exact_cursor_position;
+        self.payload.latest_exact_cursor_cell = latest_exact_cursor_cell;
         self
     }
 
@@ -924,7 +937,9 @@ impl CoreState {
 
     #[cfg(test)]
     pub(crate) fn with_active_observation(self, observation: ObservationSnapshot) -> Option<Self> {
-        let mut state = self;
+        let next_latest_exact_cursor_cell =
+            self.fallback_cursor_cell(observation.exact_cursor_position());
+        let mut state = self.with_latest_exact_cursor_cell(next_latest_exact_cursor_cell);
         state.activate_observation(observation).then_some(state)
     }
 

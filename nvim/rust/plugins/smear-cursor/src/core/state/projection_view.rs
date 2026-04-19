@@ -108,20 +108,18 @@ mod tests {
     use crate::core::state::PatchBasis;
     use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ScenePatchKind;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::ObservationId;
     use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::RenderRevision;
-    use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::CellOp;
     use crate::draw::render_plan::ClearOp;
     use crate::draw::render_plan::Glyph;
     use crate::draw::render_plan::HighlightLevel;
     use crate::draw::render_plan::HighlightRef;
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
+    use crate::position::ViewportBounds;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
 
@@ -129,7 +127,7 @@ mod tests {
         ProjectionWitness::new(
             RenderRevision::INITIAL,
             ObservationId::from_ingress_seq(IngressSeq::new(7)),
-            ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
+            ViewportBounds::new(20, 40).expect("positive viewport bounds"),
             ProjectorRevision::CURRENT,
         )
     }

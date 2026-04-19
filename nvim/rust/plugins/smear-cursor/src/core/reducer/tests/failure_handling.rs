@@ -6,7 +6,7 @@ use crate::core::state::RetainedProjection;
 // Keep these as curated examples: reducer failure contracts and stale-token
 // handling are easier to audit as named scenarios than as generated sequences.
 
-fn staged_noop_apply(position: CursorPosition) -> (CoreState, ProposalId) {
+fn staged_noop_apply(position: ScreenCell) -> (CoreState, ProposalId) {
     applying_state_with_realization_plan(
         ready_state_with_observation(position),
         noop_realization_plan(),
@@ -242,7 +242,7 @@ fn effect_failure_for_pending_proposal_preserves_acknowledged_basis_in_divergenc
 fn effect_failure_during_collecting_requeues_the_interrupted_demand() {
     let observing = reduce(
         &ready_state(),
-        external_demand_event(ExternalDemandKind::ExternalCursor, 25, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 25),
     )
     .next;
     let request = observing
@@ -295,7 +295,7 @@ fn effect_failure_during_observing_retries_from_the_root_demand() {
     let ready = ready_state().with_runtime(runtime);
     let observing = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 25, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 25),
     )
     .next;
     let request = observing

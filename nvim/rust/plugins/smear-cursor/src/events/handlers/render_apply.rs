@@ -36,6 +36,7 @@ use crate::draw::editor_bounds;
 use crate::draw::prepaint_cursor_cell;
 use crate::draw::purge_render_windows;
 use crate::draw::redraw;
+use crate::position::ViewportBounds;
 use nvim_oxi::Result;
 
 #[derive(Debug, thiserror::Error)]
@@ -229,11 +230,9 @@ fn apply_cursor_visibility_effect(
 
 fn viewport_matches_projection_witness(
     projection: ShellProjection<'_>,
-    live_viewport: crate::draw::render_plan::Viewport,
+    live_viewport: ViewportBounds,
 ) -> bool {
-    let expected_viewport = projection.witness().viewport();
-    live_viewport.max_row == i64::from(expected_viewport.max_row.value())
-        && live_viewport.max_col == i64::from(expected_viewport.max_col.value())
+    projection.witness().viewport() == live_viewport
 }
 
 fn live_viewport_matches_projection(projection: ShellProjection<'_>) -> Result<bool> {
@@ -362,26 +361,23 @@ mod tests {
     use crate::core::state::RealizationFailure;
     use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::ObservationId;
     use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::ProposalId;
     use crate::core::types::RenderRevision;
-    use crate::core::types::ViewportSnapshot;
     use crate::draw::ClearActiveRenderWindowsSummary;
     use crate::draw::ClearPrepaintOverlaysSummary;
     use crate::draw::CompactRenderWindowsSummary;
     use crate::draw::PurgeRenderWindowsSummary;
     use crate::draw::render_plan::CellOp;
-    use crate::draw::render_plan::Viewport;
+    use crate::position::ViewportBounds;
     use crate::test_support::proptest::pure_config;
     use proptest::prelude::*;
     use std::sync::Arc;
 
-    fn retained_projection(viewport: ViewportSnapshot) -> RetainedProjection {
+    fn retained_projection(viewport: ViewportBounds) -> RetainedProjection {
         RetainedProjection::new(
             ProjectionWitness::new(
                 RenderRevision::INITIAL,
@@ -530,20 +526,21 @@ mod tests {
 
         #[test]
         fn prop_viewport_match_depends_only_on_editor_bounds_equality(
-            max_row in 0_u16..256_u16,
-            max_col in 0_u16..512_u16,
-            live_row in -1_i64..258_i64,
-            live_col in -1_i64..514_i64,
+            max_row in 1_u16..256_u16,
+            max_col in 1_u16..512_u16,
+            live_row in 1_u16..258_u16,
+            live_col in 1_u16..514_u16,
         ) {
-            let projection = retained_projection(ViewportSnapshot::new(
-                CursorRow(u32::from(max_row)),
-                CursorCol(u32::from(max_col)),
-            ));
-            let live_viewport = Viewport { max_row: live_row, max_col: live_col };
+            let projection = retained_projection(
+                ViewportBounds::new(i64::from(max_row), i64::from(max_col))
+                    .expect("positive viewport bounds"),
+            );
+            let live_viewport = ViewportBounds::new(i64::from(live_row), i64::from(live_col))
+                .expect("positive live viewport bounds");
 
             prop_assert_eq!(
                 viewport_matches_projection_witness(projection.shell_projection(), live_viewport),
-                live_row == i64::from(max_row) && live_col == i64::from(max_col)
+                live_row == max_row && live_col == max_col
             );
         }
 
@@ -576,7 +573,7 @@ mod tests {
 
     #[test]
     fn draw_proposal_uses_target_projection_for_noop_patch_basis() {
-        let viewport = ViewportSnapshot::new(CursorRow(20), CursorCol(40));
+        let viewport = ViewportBounds::new(20, 40).expect("positive viewport bounds");
         let projection = retained_projection(viewport);
         let patch = ScenePatch::derive(PatchBasis::new(
             Some(projection.clone().into()),
@@ -588,11 +585,11 @@ mod tests {
             crate::core::state::RealizationDraw::new(
                 crate::core::realization::PaletteSpec::from_frame(&crate::types::RenderFrame {
                     mode: crate::types::ModeClass::NormalLike,
-                    corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
+                    corners: [crate::position::RenderPoint { row: 1.0, col: 1.0 }; 4],
                     step_samples: Vec::new().into(),
                     planner_idle_steps: 0,
-                    target: crate::types::Point { row: 1.0, col: 1.0 },
-                    target_corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
+                    target: crate::position::RenderPoint { row: 1.0, col: 1.0 },
+                    target_corners: [crate::position::RenderPoint { row: 1.0, col: 1.0 }; 4],
                     vertical_bar: false,
                     trail_stroke_id: crate::core::types::StrokeId::new(1),
                     retarget_epoch: 1,

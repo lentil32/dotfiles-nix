@@ -16,21 +16,18 @@ pub(crate) enum SemanticEvent {
 
 fn cursor_motion_detected(previous: &ObservationBasis, current: &ObservationBasis) -> bool {
     previous.cursor_position() != current.cursor_position()
-        || previous.cursor_location().line != current.cursor_location().line
+        || previous.cursor().buffer_line() != current.cursor().buffer_line()
 }
 
 fn viewport_or_window_moved(previous: &ObservationBasis, current: &ObservationBasis) -> bool {
-    let previous_location = previous.cursor_location();
-    let current_location = current.cursor_location();
-    previous_location.window_handle != current_location.window_handle
-        || previous_location.buffer_handle != current_location.buffer_handle
-        || previous_location.top_row != current_location.top_row
-        || previous_location.left_col != current_location.left_col
-        || previous_location.text_offset != current_location.text_offset
-        || previous_location.window_row != current_location.window_row
-        || previous_location.window_col != current_location.window_col
-        || previous_location.window_width != current_location.window_width
-        || previous_location.window_height != current_location.window_height
+    let previous_surface = previous.surface();
+    let current_surface = current.surface();
+    previous_surface.id() != current_surface.id()
+        || previous_surface.top_buffer_line() != current_surface.top_buffer_line()
+        || previous_surface.left_col0() != current_surface.left_col0()
+        || previous_surface.text_offset0() != current_surface.text_offset0()
+        || previous_surface.window_origin() != current_surface.window_origin()
+        || previous_surface.window_size() != current_surface.window_size()
         || previous.viewport() != current.viewport()
 }
 

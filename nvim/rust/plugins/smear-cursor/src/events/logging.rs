@@ -24,7 +24,7 @@ use std::time::UNIX_EPOCH;
 
 static LOG_FILE_PATH: LazyLock<Option<PathBuf>> =
     LazyLock::new(|| std::env::var_os("SMEAR_CURSOR_LOG_FILE").map(PathBuf::from));
-// Keep file logging buffered unless a live-tailed session explicitly opts into per-line flushes.
+// Keep file logging buffered unless a live-tailed session explicitly opts into always-flush mode.
 static LOG_FILE_FLUSH_POLICY: LazyLock<LogFileFlushPolicy> = LazyLock::new(|| {
     std::env::var("SMEAR_CURSOR_LOG_FLUSH")
         .ok()
@@ -50,11 +50,7 @@ enum LogFileFlushPolicy {
 impl LogFileFlushPolicy {
     fn from_env_value(value: &str) -> Self {
         let normalized = value.trim();
-        if normalized == "1"
-            || normalized.eq_ignore_ascii_case("true")
-            || normalized.eq_ignore_ascii_case("always")
-            || normalized.eq_ignore_ascii_case("line")
-        {
+        if normalized.eq_ignore_ascii_case("always") {
             Self::Always
         } else {
             Self::Buffered
@@ -298,21 +294,9 @@ mod tests {
     use crate::events::runtime::mutate_engine_state;
 
     #[test]
-    fn log_file_flush_policy_accepts_explicit_per_line_aliases() {
+    fn log_file_flush_policy_accepts_only_the_canonical_opt_in() {
         assert_eq!(
             LogFileFlushPolicy::from_env_value("always"),
-            LogFileFlushPolicy::Always
-        );
-        assert_eq!(
-            LogFileFlushPolicy::from_env_value(" LINE "),
-            LogFileFlushPolicy::Always
-        );
-        assert_eq!(
-            LogFileFlushPolicy::from_env_value("true"),
-            LogFileFlushPolicy::Always
-        );
-        assert_eq!(
-            LogFileFlushPolicy::from_env_value("1"),
             LogFileFlushPolicy::Always
         );
     }

@@ -1,8 +1,8 @@
 use super::background_probe_cells::BackgroundProbeCellRange;
 use super::background_probe_cells::BackgroundProbeCellView;
-use crate::core::types::ViewportSnapshot;
+use crate::position::ScreenCell;
+use crate::position::ViewportBounds;
 use crate::types::RenderFrame;
-use crate::types::ScreenCell;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -49,7 +49,7 @@ impl BackgroundProbePlan {
         }
     }
 
-    pub(crate) fn from_render_frame(frame: &RenderFrame, viewport: ViewportSnapshot) -> Self {
+    pub(crate) fn from_render_frame(frame: &RenderFrame, viewport: ViewportBounds) -> Self {
         let target_cell = ScreenCell::from_rounded_point(frame.target)
             .filter(|cell| in_viewport(viewport, *cell));
         let source_cells = Arc::clone(&frame.particle_screen_cells);
@@ -242,11 +242,11 @@ impl Iterator for BackgroundProbePackedMaskIter<'_> {
 
 impl BackgroundProbeBatch {
     #[cfg(test)]
-    fn viewport_cell_len(viewport: ViewportSnapshot) -> usize {
-        usize::try_from(viewport.max_row.value())
+    fn viewport_cell_len(viewport: ViewportBounds) -> usize {
+        usize::try_from(viewport.max_row())
             .ok()
             .and_then(|rows| {
-                usize::try_from(viewport.max_col.value())
+                usize::try_from(viewport.max_col())
                     .ok()
                     .and_then(|cols| rows.checked_mul(cols))
             })
@@ -261,7 +261,7 @@ impl BackgroundProbeBatch {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_allowed_mask(viewport: ViewportSnapshot, allowed_mask: Vec<bool>) -> Self {
+    pub(crate) fn from_allowed_mask(viewport: ViewportBounds, allowed_mask: Vec<bool>) -> Self {
         let expected_len = Self::viewport_cell_len(viewport);
         if allowed_mask.len() != expected_len {
             // Surprising: the shell returned a malformed background probe batch. Keep the
@@ -303,7 +303,7 @@ impl BackgroundProbeBatch {
         Self::from_probed_cells(probed_cells, allowed_mask)
     }
 
-    pub(crate) fn is_valid_for_viewport(&self, viewport: ViewportSnapshot) -> bool {
+    pub(crate) fn is_valid_for_viewport(&self, viewport: ViewportBounds) -> bool {
         self.probed_cells.len() == self.allowed_mask.len()
             && self.probed_cells.is_sorted_unique()
             && self
@@ -370,9 +370,9 @@ impl BackgroundProbePackedMaskBuilder {
 }
 
 #[cfg(test)]
-fn viewport_cells(viewport: ViewportSnapshot) -> Option<Vec<ScreenCell>> {
-    let max_row = i64::from(viewport.max_row.value());
-    let max_col = i64::from(viewport.max_col.value());
+fn viewport_cells(viewport: ViewportBounds) -> Option<Vec<ScreenCell>> {
+    let max_row = viewport.max_row();
+    let max_col = viewport.max_col();
     let capacity = BackgroundProbeBatch::viewport_cell_len(viewport);
     let mut cells = Vec::with_capacity(capacity);
     for row in 1..=max_row {
@@ -383,14 +383,8 @@ fn viewport_cells(viewport: ViewportSnapshot) -> Option<Vec<ScreenCell>> {
     Some(cells)
 }
 
-fn in_viewport(viewport: ViewportSnapshot, cell: ScreenCell) -> bool {
-    let Ok(row) = u32::try_from(cell.row()) else {
-        return false;
-    };
-    let Ok(col) = u32::try_from(cell.col()) else {
-        return false;
-    };
-    row >= 1 && row <= viewport.max_row.value() && col >= 1 && col <= viewport.max_col.value()
+fn in_viewport(viewport: ViewportBounds, cell: ScreenCell) -> bool {
+    cell.row() <= viewport.max_row() && cell.col() <= viewport.max_col()
 }
 
 const MAX_BACKGROUND_PROBE_CELLS_PER_CHUNK: usize = 2048;

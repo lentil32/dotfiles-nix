@@ -15,21 +15,23 @@ use crate::core::state::ProbeKind;
 use crate::core::state::ProbeRequestSet;
 use crate::core::state::ProbeReuse;
 use crate::core::state::ProbeState;
-use crate::core::types::CursorCol;
-use crate::core::types::CursorRow;
 use crate::core::types::Generation;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
 use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
-use crate::core::types::ViewportSnapshot;
 use crate::events::RealCursorVisibility;
 use crate::events::cursor::BufferMetadata;
 #[cfg(feature = "perf-counters")]
 use crate::events::ingress::AutocmdIngress;
 use crate::events::policy::BufferEventPolicy;
 use crate::events::policy::BufferPerfTelemetry;
-use crate::state::CursorLocation;
+use crate::position::BufferLine;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 use crate::test_support::cursor;
 use insta::assert_snapshot;
 use nvim_oxi::Object;
@@ -169,6 +171,31 @@ fn transient_reset_clears_real_cursor_visibility_cache() {
 }
 
 #[test]
+fn draw_editor_bounds_matches_the_cached_editor_viewport_owner() {
+    reset_transient_event_state();
+    let viewport = EditorViewportSnapshot::from_dimensions(40, 2, 120);
+    let expected = ViewportBounds::new(39, 120).expect("command row math should produce bounds");
+
+    mutate_engine_state(|state| {
+        state.shell.editor_viewport_cache.store_for_test(viewport);
+    })
+    .expect("engine state access should succeed");
+
+    assert_eq!(
+        editor_viewport_for_bounds()
+            .expect("cached editor viewport should be readable")
+            .bounds(),
+        Some(expected)
+    );
+    assert_eq!(
+        crate::draw::editor_bounds().expect("draw bounds should use cached editor viewport"),
+        expected
+    );
+
+    reset_transient_event_state();
+}
+
+#[test]
 fn colorscheme_boundary_clears_only_color_dependent_shell_caches() {
     let (metadata, policy, context_key, context) = prime_shell_boundary_state();
     let cleared_color_witness = shell_cache_color_witness(Generation::new(1), Generation::new(1));
@@ -221,7 +248,10 @@ fn colorscheme_boundary_clears_only_color_dependent_shell_caches() {
     .expect("engine state access should succeed");
 
     assert_eq!(real_cursor_visibility, None);
-    assert_eq!(viewport, Some(EditorViewport::from_dimensions(24, 1, 80)));
+    assert_eq!(
+        viewport,
+        Some(EditorViewportSnapshot::from_dimensions(24, 1, 80))
+    );
     assert_eq!(cached_metadata, Some(metadata));
     assert_eq!(cached_policy, Some(policy));
     assert_eq!(
@@ -434,7 +464,6 @@ fn perf_diagnostics_report_uses_phase_owned_cursor_color_for_probe_policy() {
             IngressSeq::new(7),
             ExternalDemandKind::ExternalCursor,
             Millis::new(25),
-            Some(cursor(3, 5)),
             BufferPerfClass::Full,
         ),
         ProbeRequestSet::only(ProbeKind::CursorColor),
@@ -442,9 +471,19 @@ fn perf_diagnostics_report_uses_phase_owned_cursor_color_for_probe_policy() {
     let basis = ObservationBasis::new(
         Millis::new(26),
         "n".to_string(),
-        Some(cursor(3, 5)),
-        CursorLocation::new(11, SHELL_CACHE_TEST_BUFFER_HANDLE, 3, 5),
-        ViewportSnapshot::new(CursorRow(24), CursorCol(80)),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(11, SHELL_CACHE_TEST_BUFFER_HANDLE).expect("positive handles"),
+            BufferLine::new(3).expect("positive top buffer line"),
+            0,
+            0,
+            crate::position::ScreenCell::new(1, 1).expect("one-based window origin"),
+            ViewportBounds::new(24, 80).expect("positive window size"),
+        ),
+        CursorObservation::new(
+            BufferLine::new(5).expect("positive buffer line"),
+            ObservedCell::Exact(cursor(3, 5)),
+        ),
+        ViewportBounds::new(24, 80).expect("positive viewport bounds"),
     )
     .with_buffer_revision(Some(17));
     let mut observation = ObservationSnapshot::new(pending, basis, ObservationMotion::new(None))
@@ -668,7 +707,7 @@ fn prime_shell_boundary_state() -> (
         state
             .shell
             .editor_viewport_cache
-            .store_for_test(EditorViewport::from_dimensions(24, 1, 80));
+            .store_for_test(EditorViewportSnapshot::from_dimensions(24, 1, 80));
         state
             .shell
             .buffer_metadata_cache
@@ -797,10 +836,10 @@ fn snapshot_for_perf_mode(perf_mode: BufferPerfMode) -> IngressReadSnapshot {
     IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
         enabled: true,
         needs_initialize: false,
-        current_corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
-        target_corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
-        target_position: crate::types::Point { row: 1.0, col: 1.0 },
-        tracked_location: None,
+        current_corners: [crate::position::RenderPoint { row: 1.0, col: 1.0 }; 4],
+        target_corners: [crate::position::RenderPoint { row: 1.0, col: 1.0 }; 4],
+        target_position: crate::position::RenderPoint { row: 1.0, col: 1.0 },
+        tracked_cursor: None,
         mode_flags: [true, true, true, true],
         buffer_perf_mode: perf_mode,
         callback_duration_estimate_ms: 0.0,

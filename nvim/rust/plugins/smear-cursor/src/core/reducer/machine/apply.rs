@@ -47,7 +47,7 @@ pub(super) fn reduce_render_plan_computed(
     let proposal = planned_render.proposal().clone();
     let buffer_handle = state
         .observation()
-        .map(|observation| observation.basis().cursor_location().buffer_handle);
+        .map(|observation| observation.basis().surface().id().buffer_handle());
     if !state.accept_planned_render_mut(planned_render) {
         return Transition::new(
             state,

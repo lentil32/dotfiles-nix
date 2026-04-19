@@ -1,7 +1,8 @@
 use crate::core::types::ArcLenQ16;
 use crate::draw::PARTICLE_ZINDEX_OFFSET;
 use crate::octant_chars::OCTANT_CHARACTERS;
-use crate::types::Point;
+use crate::position::RenderPoint;
+use crate::position::ViewportBounds;
 use crate::types::RenderFrame;
 use crate::types::smoothstep01;
 use std::collections::BTreeMap;
@@ -44,7 +45,6 @@ pub(crate) use self::infra::shared::PlannerOutput;
 pub(crate) use self::infra::shared::PlannerState;
 pub(crate) use self::infra::shared::RenderPlan;
 pub(crate) use self::infra::shared::TargetCellOverlay;
-pub(crate) use self::infra::shared::Viewport;
 use self::infra::shared::*;
 use self::latent_field::AgeMoment;
 use self::latent_field::CompiledCell;

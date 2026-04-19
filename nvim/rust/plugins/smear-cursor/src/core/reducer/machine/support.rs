@@ -15,8 +15,10 @@ use crate::core::effect::RenderPlanningContext;
 use crate::core::effect::RequestObservationBaseEffect;
 use crate::core::effect::RequestProbeEffect;
 use crate::core::effect::RequestRenderPlanEffect;
+use crate::core::effect::RetainedCursorColorFallback;
 use crate::core::effect::ScheduleTimerEffect;
 use crate::core::effect::TimerKind;
+use crate::core::effect::tracked_observation_inputs;
 use crate::core::event::RenderCleanupAppliedAction;
 use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderDecision;
@@ -173,7 +175,11 @@ pub(super) fn exact_boundary_refresh_required(state: &CoreState) -> bool {
         .config
         .requires_cursor_color_sampling_for_mode(observation.basis().mode())
         && observation.requires_exact_cursor_color_refresh();
-    let cursor_position_refresh = observation.requires_exact_cursor_position_refresh();
+    let cursor_position_refresh = match observation.basis().cursor().cell() {
+        crate::position::ObservedCell::Unavailable => false,
+        crate::position::ObservedCell::Exact(_) => false,
+        crate::position::ObservedCell::Deferred(_) => true,
+    };
 
     cursor_color_refresh || cursor_position_refresh
 }
@@ -186,10 +192,6 @@ pub(super) fn start_boundary_refresh_observation(
         return None;
     }
 
-    let requested_target = state
-        .phase_observation()
-        .and_then(ObservationSnapshot::exact_cursor_position);
-    let requested_target = state.fallback_cursor_position(requested_target);
     let buffer_perf_class = state
         .phase_observation()
         .map_or(BufferPerfClass::Full, |observation| {
@@ -200,7 +202,6 @@ pub(super) fn start_boundary_refresh_observation(
         seq,
         ExternalDemandKind::BoundaryRefresh,
         observed_at,
-        requested_target,
         buffer_perf_class,
     );
     let pending = PendingObservation::new(demand, probe_requests_for(&state, buffer_perf_class));
@@ -220,15 +221,22 @@ fn observation_runtime_context(
     let cursor_text_context_boundary =
         observation_cursor_text_context_boundary(state.phase_observation());
     let buffer_perf_class = pending.demand().buffer_perf_class();
+    let retained_cursor_color_fallback = match cursor_color_fallback {
+        Some(_) => RetainedCursorColorFallback::CompatibleSample,
+        None => RetainedCursorColorFallback::Unavailable,
+    };
     let probe_policy = ProbePolicy::for_demand(
         pending.demand().kind(),
         buffer_perf_class,
-        cursor_color_fallback.is_some(),
+        retained_cursor_color_fallback,
     );
+    let (tracked_surface, tracked_buffer_position) =
+        tracked_observation_inputs(state.runtime().tracked_cursor_ref());
     ObservationRuntimeContext::new(ObservationRuntimeContextArgs {
         cursor_position_policy: cursor_position_read_policy(state),
         scroll_buffer_space: state.runtime().config.scroll_buffer_space,
-        tracked_location: state.runtime().tracked_location(),
+        tracked_surface,
+        tracked_buffer_position,
         cursor_text_context_boundary,
         current_corners: state.runtime().current_corners(),
         ingress_observation_surface,
@@ -275,10 +283,14 @@ fn request_probe(
     buffer_perf_class: BufferPerfClass,
     cursor_color_fallback: Option<CursorColorFallback>,
 ) -> Effect {
+    let retained_cursor_color_fallback = match cursor_color_fallback {
+        Some(_) => RetainedCursorColorFallback::CompatibleSample,
+        None => RetainedCursorColorFallback::Unavailable,
+    };
     let probe_policy = ProbePolicy::for_demand(
         demand_kind,
         buffer_perf_class,
-        cursor_color_fallback.is_some(),
+        retained_cursor_color_fallback,
     );
     Effect::RequestProbe(RequestProbeEffect {
         observation_id,

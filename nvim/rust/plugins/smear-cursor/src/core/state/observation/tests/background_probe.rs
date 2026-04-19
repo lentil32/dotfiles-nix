@@ -3,11 +3,11 @@ use crate::core::runtime_reducer::RenderFrameRequest;
 use crate::core::runtime_reducer::build_render_frame;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::ProbeKind;
-use crate::state::CursorLocation;
+use crate::position::RenderPoint;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
+use crate::state::TrackedCursor;
 use crate::types::Particle;
-use crate::types::Point;
 use crate::types::StepOutput;
 use pretty_assertions::assert_eq;
 
@@ -58,7 +58,7 @@ fn background_probe_progress_materializes_particles_from_packed_chunk_masks() {
 #[test]
 fn requested_background_probe_tracks_progress_until_completion() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = ViewportSnapshot::new(CursorRow(600), CursorCol(4));
+    let viewport = viewport_bounds(600, 4);
     let cells = (0_i64..2050_i64)
         .map(|index| {
             let row = index / 4 + 1;
@@ -109,7 +109,7 @@ fn requested_background_probe_tracks_progress_until_completion() {
 #[test]
 fn background_probe_completion_rejects_batches_outside_observation_viewport() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = ViewportSnapshot::new(CursorRow(1), CursorCol(1));
+    let viewport = viewport_bounds(1, 1);
     let mut snapshot = ObservationSnapshot::new(
         request,
         observation_basis(viewport),
@@ -149,7 +149,7 @@ fn background_probe_completion_rejects_batches_outside_observation_viewport() {
 #[test]
 fn requested_background_probe_preserves_sparse_bits_across_chunk_completion() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = ViewportSnapshot::new(CursorRow(600), CursorCol(4));
+    let viewport = viewport_bounds(600, 4);
     let cells = (0_i64..2050_i64)
         .map(|index| {
             let row = index / 4 + 1;
@@ -222,10 +222,10 @@ fn requested_background_probe_preserves_sparse_bits_across_chunk_completion() {
 fn background_probe_plan_from_render_frame_filters_target_and_out_of_viewport_cells() {
     let mut state = RuntimeState::default();
     state.config.particles_over_text = false;
-    let tracked = CursorLocation::new(10, 20, 1, 1);
+    let tracked = TrackedCursor::fixture(10, 20, 1, 1);
     state.initialize_cursor(
-        Point { row: 2.0, col: 2.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 2.0, col: 2.0 },
+        CursorShape::block(),
         7,
         &tracked,
     );
@@ -236,23 +236,23 @@ fn background_probe_plan_from_render_frame_filters_target_and_out_of_viewport_ce
         trail_elapsed_ms: state.trail_elapsed_ms(),
         particles: vec![
             Particle {
-                position: Point { row: 2.2, col: 2.4 },
-                velocity: Point::ZERO,
+                position: RenderPoint { row: 2.2, col: 2.4 },
+                velocity: RenderPoint::ZERO,
                 lifetime: 0.75,
             },
             Particle {
-                position: Point { row: 1.1, col: 3.4 },
-                velocity: Point::ZERO,
+                position: RenderPoint { row: 1.1, col: 3.4 },
+                velocity: RenderPoint::ZERO,
                 lifetime: 0.75,
             },
             Particle {
-                position: Point { row: 1.1, col: 6.2 },
-                velocity: Point::ZERO,
+                position: RenderPoint { row: 1.1, col: 6.2 },
+                velocity: RenderPoint::ZERO,
                 lifetime: 0.75,
             },
             Particle {
-                position: Point { row: 2.1, col: 4.2 },
-                velocity: Point::ZERO,
+                position: RenderPoint { row: 2.1, col: 4.2 },
+                velocity: RenderPoint::ZERO,
                 lifetime: 0.75,
             },
         ],
@@ -261,7 +261,7 @@ fn background_probe_plan_from_render_frame_filters_target_and_out_of_viewport_ce
         index_tail: 0,
         rng_state: state.rng_state(),
     });
-    let viewport = ViewportSnapshot::new(CursorRow(5), CursorCol(5));
+    let viewport = viewport_bounds(5, 5);
     let current_corners = state.current_corners();
     let target_position = state.target_position();
     let frame = build_render_frame(
@@ -295,7 +295,7 @@ fn background_probe_plan_from_render_frame_filters_target_and_out_of_viewport_ce
 #[test]
 fn background_probe_progress_and_terminal_batch_share_one_state_node() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = ViewportSnapshot::new(CursorRow(4), CursorCol(4));
+    let viewport = viewport_bounds(4, 4);
     let mut snapshot = ObservationSnapshot::new(
         request,
         observation_basis(viewport),
@@ -330,7 +330,7 @@ fn background_probe_progress_and_terminal_batch_share_one_state_node() {
 #[test]
 fn background_probe_chunk_updates_only_apply_while_collecting() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = ViewportSnapshot::new(CursorRow(4), CursorCol(4));
+    let viewport = viewport_bounds(4, 4);
     let plan = BackgroundProbePlan::from_cells(vec![ScreenCell::new(1, 1).expect("cell")]);
     let progress = BackgroundProbeProgress::new(plan.clone());
     let chunk = progress
@@ -398,7 +398,7 @@ fn background_probe_chunk_updates_only_apply_while_collecting() {
 #[test]
 fn background_probe_terminal_states_reject_further_transitions() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = ViewportSnapshot::new(CursorRow(4), CursorCol(4));
+    let viewport = viewport_bounds(4, 4);
     let plan = BackgroundProbePlan::from_cells(vec![ScreenCell::new(1, 1).expect("cell")]);
     let mut ready_snapshot = ObservationSnapshot::new(
         request.clone(),
@@ -457,7 +457,7 @@ fn background_probe_terminal_states_reject_further_transitions() {
 #[test]
 fn empty_background_probe_plan_becomes_ready_without_collecting_progress() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = ViewportSnapshot::new(CursorRow(4), CursorCol(4));
+    let viewport = viewport_bounds(4, 4);
     let snapshot = ObservationSnapshot::new(
         request,
         observation_basis(viewport),

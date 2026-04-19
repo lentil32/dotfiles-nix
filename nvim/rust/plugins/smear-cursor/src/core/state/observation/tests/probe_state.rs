@@ -5,7 +5,7 @@ use pretty_assertions::assert_eq;
 #[test]
 fn unrequested_probe_slots_reject_probe_population() {
     let request = observation_request(ProbeRequestSet::default());
-    let viewport = ViewportSnapshot::new(CursorRow(8), CursorCol(16));
+    let viewport = viewport_bounds(8, 16);
     let mut snapshot = ObservationSnapshot::new(
         request,
         observation_basis(viewport),
@@ -43,7 +43,6 @@ fn observation_id_is_derived_only_from_the_root_demand_sequence() {
         IngressSeq::new(41),
         ExternalDemandKind::ExternalCursor,
         Millis::new(10),
-        None,
         BufferPerfClass::Full,
     );
     let request = PendingObservation::new(
@@ -52,7 +51,7 @@ fn observation_id_is_derived_only_from_the_root_demand_sequence() {
     );
     let snapshot = ObservationSnapshot::new(
         request.clone(),
-        observation_basis(ViewportSnapshot::new(CursorRow(8), CursorCol(16))),
+        observation_basis(viewport_bounds(8, 16)),
         ObservationMotion::default(),
     );
 
@@ -68,7 +67,7 @@ fn activated_cursor_color_requestedness_lives_in_the_probe_slot() {
     let request = observation_request(ProbeRequestSet::only(
         crate::core::state::ProbeKind::CursorColor,
     ));
-    let viewport = ViewportSnapshot::new(CursorRow(8), CursorCol(16));
+    let viewport = viewport_bounds(8, 16);
     let snapshot = ObservationSnapshot::new(
         request,
         observation_basis(viewport),
@@ -88,7 +87,7 @@ fn cursor_color_probe_witness_is_derived_from_boundary_and_generations() {
     let request = observation_request(ProbeRequestSet::only(
         crate::core::state::ProbeKind::CursorColor,
     ));
-    let viewport = ViewportSnapshot::new(CursorRow(8), CursorCol(16));
+    let viewport = viewport_bounds(8, 16);
     let basis = observation_basis(viewport).with_buffer_revision(Some(14));
     let generations = crate::core::state::CursorColorProbeGenerations::new(
         Generation::new(3),
@@ -104,10 +103,7 @@ fn cursor_color_probe_witness_is_derived_from_boundary_and_generations() {
             1,
             14,
             "n".to_string(),
-            Some(CursorPosition {
-                row: CursorRow(4),
-                col: CursorCol(5),
-            }),
+            Some(screen_cell(4, 5)),
             Generation::new(3),
             Generation::new(5),
         )),
@@ -119,7 +115,7 @@ fn cursor_color_probe_witness_requires_a_buffer_revision() {
     let request = observation_request(ProbeRequestSet::only(
         crate::core::state::ProbeKind::CursorColor,
     ));
-    let viewport = ViewportSnapshot::new(CursorRow(8), CursorCol(16));
+    let viewport = viewport_bounds(8, 16);
     let snapshot = ObservationSnapshot::new(
         request,
         observation_basis(viewport),

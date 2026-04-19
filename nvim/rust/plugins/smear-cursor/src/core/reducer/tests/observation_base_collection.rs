@@ -74,7 +74,6 @@ proptest! {
             external_demand_event_with_perf_class(
                 ExternalDemandKind::ExternalCursor,
                 25,
-                None,
                 buffer_perf_class,
             ),
         )
@@ -184,7 +183,6 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
         Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
             kind: ExternalDemandKind::ExternalCursor,
             observed_at: Millis::new(25),
-            requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
             ingress_observation_surface: None,
@@ -221,4 +219,122 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
         }
         other => panic!("expected ready cursor color probe, got {other:?}"),
     }
+}
+
+fn observing_state_with_latest_exact_cursor_cell(
+    latest_exact_cursor_cell: Option<ScreenCell>,
+) -> (CoreState, PendingObservation) {
+    let ready = ready_state().with_latest_exact_cursor_cell(latest_exact_cursor_cell);
+    let observing = reduce(
+        &ready,
+        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+            kind: ExternalDemandKind::ExternalCursor,
+            observed_at: Millis::new(25),
+            buffer_perf_class: BufferPerfClass::Full,
+            ingress_cursor_presentation: None,
+            ingress_observation_surface: None,
+        }),
+    )
+    .next;
+    let request = observing
+        .pending_observation()
+        .cloned()
+        .expect("active observation");
+    (observing, request)
+}
+
+#[test]
+fn observation_base_collection_stores_exact_cursor_reads_and_refreshes_exact_anchor() {
+    let previous_exact_anchor = cursor(3, 4);
+    let exact_cell = cursor(7, 8);
+    let (observing, request) =
+        observing_state_with_latest_exact_cursor_cell(Some(previous_exact_anchor));
+
+    let transition = collect_observation_base(
+        &observing,
+        &request,
+        observation_basis_with_observed_cell(
+            crate::position::ObservedCell::Exact(exact_cell),
+            26,
+            "n",
+        ),
+        observation_motion(),
+    );
+
+    let observation = transition
+        .next
+        .observation()
+        .expect("exact cursor read should be retained");
+    pretty_assert_eq!(
+        observation.basis().cursor().cell(),
+        crate::position::ObservedCell::Exact(exact_cell)
+    );
+    pretty_assert_eq!(observation.basis().cursor_position(), Some(exact_cell));
+    pretty_assert_eq!(observation.exact_cursor_position(), Some(exact_cell));
+    pretty_assert_eq!(transition.next.latest_exact_cursor_cell(), Some(exact_cell));
+}
+
+#[test]
+fn observation_base_collection_stores_deferred_cursor_reads_without_overwriting_exact_anchor() {
+    let previous_exact_anchor = cursor(3, 4);
+    let deferred_cell = cursor(7, 8);
+    let (observing, request) =
+        observing_state_with_latest_exact_cursor_cell(Some(previous_exact_anchor));
+
+    let transition = collect_observation_base(
+        &observing,
+        &request,
+        observation_basis_with_observed_cell(
+            crate::position::ObservedCell::Deferred(deferred_cell),
+            26,
+            "n",
+        ),
+        observation_motion(),
+    );
+
+    let observation = transition
+        .next
+        .observation()
+        .expect("deferred cursor read should be retained");
+    pretty_assert_eq!(
+        observation.basis().cursor().cell(),
+        crate::position::ObservedCell::Deferred(deferred_cell)
+    );
+    pretty_assert_eq!(observation.basis().cursor_position(), Some(deferred_cell));
+    pretty_assert_eq!(observation.exact_cursor_position(), None);
+    assert!(observation.requires_exact_cursor_position_refresh());
+    pretty_assert_eq!(
+        transition.next.latest_exact_cursor_cell(),
+        Some(previous_exact_anchor)
+    );
+}
+
+#[test]
+fn observation_base_collection_stores_unavailable_cursor_reads_without_fabricating_exact_anchor() {
+    let previous_exact_anchor = cursor(3, 4);
+    let (observing, request) =
+        observing_state_with_latest_exact_cursor_cell(Some(previous_exact_anchor));
+
+    let transition = collect_observation_base(
+        &observing,
+        &request,
+        observation_basis_with_observed_cell(crate::position::ObservedCell::Unavailable, 26, "n"),
+        observation_motion(),
+    );
+
+    let observation = transition
+        .next
+        .observation()
+        .expect("unavailable cursor read should be retained");
+    pretty_assert_eq!(
+        observation.basis().cursor().cell(),
+        crate::position::ObservedCell::Unavailable
+    );
+    pretty_assert_eq!(observation.basis().cursor_position(), None);
+    pretty_assert_eq!(observation.exact_cursor_position(), None);
+    assert!(!observation.requires_exact_cursor_position_refresh());
+    pretty_assert_eq!(
+        transition.next.latest_exact_cursor_cell(),
+        Some(previous_exact_anchor)
+    );
 }

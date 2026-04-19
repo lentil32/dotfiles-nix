@@ -1,22 +1,20 @@
 #![allow(dead_code)]
 
 use crate::animation::corners_for_cursor;
-use crate::core::types::CursorCol;
-use crate::core::types::CursorRow;
 use crate::core::types::Generation;
 use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
-use crate::core::types::ViewportSnapshot;
 use crate::draw::WindowPlacement;
 use crate::events::probe_cache::ConcealWindowState;
-use crate::state::CursorLocation;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
+use crate::position::ViewportBounds;
+use crate::state::TrackedCursor;
 use crate::test_support::models::WindowPoolFixture;
 use crate::test_support::models::WindowPoolPlacementSpec;
 use crate::test_support::models::WindowPoolWindowSpec;
-use crate::types::Point;
 use crate::types::RenderStepSample;
-use crate::types::ScreenCell;
 use proptest::collection::vec;
 use proptest::prelude::*;
 
@@ -72,9 +70,9 @@ pub(crate) enum CursorShapeCase {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CursorRectFixture {
-    pub(crate) position: Point,
+    pub(crate) position: RenderPoint,
     pub(crate) shape: CursorShapeCase,
-    pub(crate) corners: [Point; 4],
+    pub(crate) corners: [RenderPoint; 4],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,7 +100,7 @@ pub(crate) fn approx_eq_f64(left: f64, right: f64, epsilon: f64) -> bool {
     (left - right).abs() <= epsilon.max(DEFAULT_FLOAT_EPSILON)
 }
 
-pub(crate) fn approx_eq_point(left: Point, right: Point, epsilon: f64) -> bool {
+pub(crate) fn approx_eq_point(left: RenderPoint, right: RenderPoint, epsilon: f64) -> bool {
     approx_eq_f64(left.row, right.row, epsilon) && approx_eq_f64(left.col, right.col, epsilon)
 }
 
@@ -144,12 +142,12 @@ pub(crate) fn mode_case() -> BoxedStrategy<ModeCase> {
     .boxed()
 }
 
-pub(crate) fn finite_point() -> BoxedStrategy<Point> {
+pub(crate) fn finite_point() -> BoxedStrategy<RenderPoint> {
     (
         -FINITE_POINT_LIMIT..FINITE_POINT_LIMIT,
         -FINITE_POINT_LIMIT..FINITE_POINT_LIMIT,
     )
-        .prop_map(|(row, col)| Point { row, col })
+        .prop_map(|(row, col)| RenderPoint { row, col })
         .boxed()
 }
 
@@ -159,10 +157,10 @@ pub(crate) fn screen_cell() -> BoxedStrategy<ScreenCell> {
         .boxed()
 }
 
-pub(crate) fn cursor_location() -> BoxedStrategy<CursorLocation> {
+pub(crate) fn tracked_cursor() -> BoxedStrategy<TrackedCursor> {
     (
-        any::<i16>(),
-        any::<i16>(),
+        1_i16..=i16::MAX,
+        1_i16..=i16::MAX,
         1_i64..=SCREEN_CELL_LIMIT,
         1_i64..=SCREEN_CELL_LIMIT,
         0_i64..=WINDOW_DIMENSION_LIMIT,
@@ -185,7 +183,7 @@ pub(crate) fn cursor_location() -> BoxedStrategy<CursorLocation> {
                 window_width,
                 window_height,
             )| {
-                CursorLocation::new(
+                TrackedCursor::fixture(
                     i64::from(window_handle),
                     i64::from(buffer_handle),
                     top_row,
@@ -199,11 +197,13 @@ pub(crate) fn cursor_location() -> BoxedStrategy<CursorLocation> {
         .boxed()
 }
 
-pub(crate) fn viewport_snapshot() -> BoxedStrategy<ViewportSnapshot> {
+fn viewport_snapshot_from_dimensions(max_row: u32, max_col: u32) -> ViewportBounds {
+    ViewportBounds::new(i64::from(max_row), i64::from(max_col)).expect("positive viewport bounds")
+}
+
+pub(crate) fn viewport_snapshot() -> BoxedStrategy<ViewportBounds> {
     (1_u32..=VIEWPORT_LIMIT, 1_u32..=VIEWPORT_LIMIT)
-        .prop_map(|(max_row, max_col)| {
-            ViewportSnapshot::new(CursorRow(max_row), CursorCol(max_col))
-        })
+        .prop_map(|(max_row, max_col)| viewport_snapshot_from_dimensions(max_row, max_col))
         .boxed()
 }
 
@@ -230,7 +230,7 @@ pub(crate) fn cursor_rectangle() -> BoxedStrategy<CursorRectFixture> {
         ],
     )
         .prop_map(|(row, col, shape)| {
-            let position = Point {
+            let position = RenderPoint {
                 row: row as f64,
                 col: col as f64,
             };
@@ -364,4 +364,19 @@ pub(crate) fn staged_render_step_samples(max_steps: usize) -> BoxedStrategy<Vec<
                 .collect()
         })
         .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewport_snapshot_from_dimensions;
+    use crate::position::ViewportBounds;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn viewport_snapshot_strategy_constructs_snapshots_from_canonical_bounds() {
+        assert_eq!(
+            viewport_snapshot_from_dimensions(24, 80),
+            ViewportBounds::new(24, 80).expect("positive viewport bounds")
+        );
+    }
 }

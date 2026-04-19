@@ -1,26 +1,27 @@
-use super::CursorLocation;
 use super::CursorShape;
 use super::RuntimeState;
+use super::TrackedCursor;
 use super::types::AnimationPhase;
 use super::types::DrainingPhase;
 use super::types::MotionClock;
 use super::types::RunningPhase;
+use super::types::RuntimeTargetRetargetKey;
 use super::types::SettlingPhase;
 use super::types::SettlingWindow;
 use crate::animation::center;
 use crate::animation::initial_velocity;
 use crate::animation::zero_velocity_corners;
-use crate::types::Point;
+use crate::position::RenderPoint;
 use crate::types::StepOutput;
 
-fn translate_corners(corners: &mut [Point; 4], row_delta: f64, col_delta: f64) {
+fn translate_corners(corners: &mut [RenderPoint; 4], row_delta: f64, col_delta: f64) {
     for corner in corners {
         corner.row += row_delta;
         corner.col += col_delta;
     }
 }
 
-fn row_translation_to_clamp_window(corners: &[Point; 4], min_row: f64, max_row: f64) -> f64 {
+fn row_translation_to_clamp_window(corners: &[RenderPoint; 4], min_row: f64, max_row: f64) -> f64 {
     let mut current_min_row = f64::INFINITY;
     let mut current_max_row = f64::NEG_INFINITY;
     for corner in corners {
@@ -101,58 +102,72 @@ impl RuntimeState {
 
     pub(crate) fn begin_settling(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
         now_ms: f64,
     ) {
-        let delay_ms = self.config.delay_event_to_smear.max(0.0);
-        self.set_target(position, shape);
-        self.update_tracking(location);
-        self.animation_phase = AnimationPhase::Settling(SettlingPhase {
-            settling_window: SettlingWindow {
-                stable_since_ms: now_ms,
-                settle_deadline_ms: now_ms + delay_ms,
-            },
-        });
+        self.update_settling_target(position, shape, tracked_cursor, now_ms, now_ms);
     }
 
     #[cfg(test)]
     pub(crate) fn refresh_settling_target(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
         now_ms: f64,
     ) {
-        let preserve_stable_since =
-            self.target_position() == position && self.tracked_location_ref() == Some(location);
-        self.refresh_settling_target_with_match(
-            position,
-            shape,
-            location,
-            now_ms,
-            preserve_stable_since,
-        );
+        if self.settling_target_matches(position, shape, tracked_cursor) {
+            self.refresh_settling_target_preserving_stable_since(
+                position,
+                shape,
+                tracked_cursor,
+                now_ms,
+            );
+        } else {
+            self.refresh_settling_target_resetting_stable_since(
+                position,
+                shape,
+                tracked_cursor,
+                now_ms,
+            );
+        }
     }
 
-    pub(crate) fn refresh_settling_target_with_match(
+    pub(crate) fn refresh_settling_target_preserving_stable_since(
         &mut self,
-        position: Point,
+        position: RenderPoint,
         shape: CursorShape,
-        location: &CursorLocation,
+        tracked_cursor: &TrackedCursor,
         now_ms: f64,
-        preserve_stable_since: bool,
+    ) {
+        let stable_since_ms = self
+            .settling_window()
+            .map_or(now_ms, |existing| existing.stable_since_ms);
+        self.update_settling_target(position, shape, tracked_cursor, now_ms, stable_since_ms);
+    }
+
+    pub(crate) fn refresh_settling_target_resetting_stable_since(
+        &mut self,
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: &TrackedCursor,
+        now_ms: f64,
+    ) {
+        self.update_settling_target(position, shape, tracked_cursor, now_ms, now_ms);
+    }
+
+    fn update_settling_target(
+        &mut self,
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: &TrackedCursor,
+        now_ms: f64,
+        stable_since_ms: f64,
     ) {
         let delay_ms = self.config.delay_event_to_smear.max(0.0);
-        let stable_since_ms = if preserve_stable_since {
-            self.settling_window()
-                .map_or(now_ms, |existing| existing.stable_since_ms)
-        } else {
-            now_ms
-        };
-        self.set_target(position, shape);
-        self.update_tracking(location);
+        self.retarget_tracked_preserving_current_pose(position, shape, tracked_cursor);
         self.animation_phase = AnimationPhase::Settling(SettlingPhase {
             settling_window: SettlingWindow {
                 stable_since_ms,
@@ -164,14 +179,19 @@ impl RuntimeState {
     pub(crate) fn should_promote_settled_target(
         &self,
         now_ms: f64,
-        observed_position: Point,
-        observed_location: &CursorLocation,
+        observed_position: RenderPoint,
+        observed_tracked_cursor: &TrackedCursor,
     ) -> bool {
         let Some(settling_window) = self.settling_window() else {
             return false;
         };
         self.target_position() == observed_position
-            && self.tracked_location_ref() == Some(observed_location)
+            && self.retarget_key()
+                == RuntimeTargetRetargetKey::from_snapshot(
+                    observed_position,
+                    self.target_shape(),
+                    Some(observed_tracked_cursor),
+                )
             && settling_window.settle_deadline_ms >= settling_window.stable_since_ms
             && now_ms >= settling_window.settle_deadline_ms
     }
@@ -348,24 +368,12 @@ impl RuntimeState {
         }
     }
 
-    pub(crate) fn tracked_location(&self) -> Option<CursorLocation> {
-        self.tracked_location_ref().cloned()
+    pub(crate) fn tracked_cursor(&self) -> Option<TrackedCursor> {
+        self.tracked_cursor_ref().cloned()
     }
 
-    pub(crate) fn tracked_location_ref(&self) -> Option<&CursorLocation> {
-        self.target.tracked_location.as_ref()
-    }
-
-    pub(crate) fn update_tracking(&mut self, location: &CursorLocation) {
-        let surface_changed = self.tracked_location_ref().is_some_and(|tracked| {
-            tracked.window_handle != location.window_handle
-                || tracked.buffer_handle != location.buffer_handle
-                || tracked.window_dimensions_changed(location)
-        });
-        if surface_changed {
-            self.target.retarget_epoch = self.target.retarget_epoch.wrapping_add(1);
-        }
-        self.target.tracked_location = Some(location.clone());
+    pub(crate) fn tracked_cursor_ref(&self) -> Option<&TrackedCursor> {
+        self.target.tracked_cursor.as_ref()
     }
 
     pub(crate) fn apply_scroll_shift(

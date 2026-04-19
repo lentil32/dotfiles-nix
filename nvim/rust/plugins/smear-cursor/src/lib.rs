@@ -7,7 +7,7 @@
 //! ```lua
 //! local smear = require("nvimrs_smear_cursor")
 //! -- `setup()` installs the Rust autocmd callbacks.
-//! smear.setup({ enabled = true, fps = 120 })
+//! smear.setup({ enabled = true, time_interval = 8.33 })
 //! ```
 
 mod allocation_counters;
@@ -22,6 +22,7 @@ mod lua;
 #[cfg(test)]
 mod mutex;
 mod octant_chars;
+mod position;
 mod state;
 mod step;
 #[cfg(test)]
@@ -73,15 +74,6 @@ fn nvimrs_smear_cursor() -> Dictionary {
             guard_plugin_call("setup", || {
                 let opts = opts.unwrap_or_else(Dictionary::new);
                 events::setup(&opts)
-            })
-        }),
-    );
-    api.insert(
-        "on_core_timer",
-        Function::<i64, ()>::from_fn(|timer_id| {
-            guard_plugin_call("on_core_timer", || {
-                events::on_core_timer_event(timer_id);
-                Ok(())
             })
         }),
     );

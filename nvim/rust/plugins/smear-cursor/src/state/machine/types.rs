@@ -1,9 +1,10 @@
-use super::CursorLocation;
 use super::CursorShape;
+use super::TrackedCursor;
 use crate::core::types::StrokeId;
+use crate::position::RenderPoint;
+use crate::position::ScreenCell;
 use crate::types::Particle;
 use crate::types::ParticleAggregationScratch;
-use crate::types::Point;
 use crate::types::RenderStepSample;
 use crate::types::SharedAggregatedParticleCells;
 use crate::types::SharedParticleScreenCells;
@@ -101,27 +102,165 @@ impl AnimationPhase {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) struct RetargetSurfaceKey {
+    window_handle: i64,
+    buffer_handle: i64,
+    window_width: i64,
+    window_height: i64,
+}
+
+impl RetargetSurfaceKey {
+    pub(super) fn from_tracked_cursor(tracked_cursor: &TrackedCursor) -> Self {
+        let surface = tracked_cursor.surface();
+        let surface_id = surface.id();
+        let window_size = surface.window_size();
+        Self {
+            window_handle: surface_id.window_handle(),
+            buffer_handle: surface_id.buffer_handle(),
+            window_width: window_size.max_col(),
+            window_height: window_size.max_row(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RuntimeTargetRetargetKey {
+    cell: Option<ScreenCell>,
+    shape: CursorShape,
+    surface: Option<RetargetSurfaceKey>,
+}
+
+impl RuntimeTargetRetargetKey {
+    const fn new(
+        cell: Option<ScreenCell>,
+        shape: CursorShape,
+        surface: Option<RetargetSurfaceKey>,
+    ) -> Self {
+        Self {
+            cell,
+            shape,
+            surface,
+        }
+    }
+
+    pub(crate) fn from_snapshot(
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: Option<&TrackedCursor>,
+    ) -> Self {
+        Self::new(
+            ScreenCell::from_rounded_point(position),
+            shape,
+            tracked_cursor.map(RetargetSurfaceKey::from_tracked_cursor),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RuntimeTargetSnapshot {
+    position: RenderPoint,
+    cell: Option<ScreenCell>,
+    shape: CursorShape,
+    retarget_surface: Option<RetargetSurfaceKey>,
+    tracked_cursor: Option<TrackedCursor>,
+    retarget_key: RuntimeTargetRetargetKey,
+}
+
+impl RuntimeTargetSnapshot {
+    fn new(
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: Option<TrackedCursor>,
+    ) -> Self {
+        let cell = ScreenCell::from_rounded_point(position);
+        let retarget_surface = tracked_cursor
+            .as_ref()
+            .map(RetargetSurfaceKey::from_tracked_cursor);
+        let retarget_key = RuntimeTargetRetargetKey::new(cell, shape, retarget_surface);
+        Self {
+            position,
+            cell,
+            shape,
+            retarget_surface,
+            tracked_cursor,
+            retarget_key,
+        }
+    }
+
+    pub(crate) fn tracked(
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: &TrackedCursor,
+    ) -> Self {
+        Self::new(position, shape, Some(tracked_cursor.clone()))
+    }
+
+    pub(crate) fn preserving_tracking(
+        position: RenderPoint,
+        shape: CursorShape,
+        tracked_cursor: Option<&TrackedCursor>,
+    ) -> Self {
+        Self::new(position, shape, tracked_cursor.cloned())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct CursorTarget {
-    pub(super) position: Point,
+    pub(super) position: RenderPoint,
+    pub(super) cell: Option<ScreenCell>,
     pub(super) shape: CursorShape,
-    pub(super) tracked_location: Option<CursorLocation>,
+    pub(super) retarget_surface: Option<RetargetSurfaceKey>,
+    pub(super) tracked_cursor: Option<TrackedCursor>,
     pub(super) retarget_epoch: u64,
 }
 
 impl Default for CursorTarget {
     fn default() -> Self {
         Self {
-            position: Point::ZERO,
-            shape: CursorShape::new(false, false),
-            tracked_location: None,
+            position: RenderPoint::ZERO,
+            cell: None,
+            shape: CursorShape::block(),
+            retarget_surface: None,
+            tracked_cursor: None,
             retarget_epoch: 0,
         }
     }
 }
 
 impl CursorTarget {
-    pub(super) fn corners(&self) -> [Point; 4] {
+    pub(super) fn retarget_key(&self) -> RuntimeTargetRetargetKey {
+        RuntimeTargetRetargetKey {
+            cell: self.cell,
+            shape: self.shape,
+            surface: self.retarget_surface,
+        }
+    }
+
+    pub(super) fn apply_snapshot(&mut self, snapshot: RuntimeTargetSnapshot) -> bool {
+        let RuntimeTargetSnapshot {
+            position,
+            cell,
+            shape,
+            retarget_surface,
+            tracked_cursor,
+            retarget_key,
+        } = snapshot;
+        let geometry_changed = self.position != position || self.shape != shape;
+        if self.retarget_key() != retarget_key {
+            self.retarget_epoch = self.retarget_epoch.wrapping_add(1);
+        }
+
+        self.position = position;
+        self.cell = cell;
+        self.shape = shape;
+        self.retarget_surface = retarget_surface;
+        self.tracked_cursor = tracked_cursor;
+
+        geometry_changed
+    }
+
+    pub(super) fn corners(&self) -> [RenderPoint; 4] {
         self.shape.corners(self.position)
     }
 }
@@ -129,7 +268,7 @@ impl CursorTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct TrailState {
     pub(super) stroke_id: StrokeId,
-    pub(super) origin_corners: [Point; 4],
+    pub(super) origin_corners: [RenderPoint; 4],
     pub(super) elapsed_ms: [f64; 4],
 }
 
@@ -137,7 +276,7 @@ impl Default for TrailState {
     fn default() -> Self {
         Self {
             stroke_id: StrokeId::INITIAL,
-            origin_corners: [Point::ZERO; 4],
+            origin_corners: [RenderPoint::ZERO; 4],
             elapsed_ms: [0.0; 4],
         }
     }
@@ -220,4 +359,155 @@ pub(super) enum CursorTransitionPolicy {
     JumpPreservingMotion,
     JumpAndStopAnimation,
     SyncToCurrentCursor,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CursorShape;
+    use super::CursorTarget;
+    use super::RetargetSurfaceKey;
+    use super::RuntimeTargetRetargetKey;
+    use super::RuntimeTargetSnapshot;
+    use crate::position::BufferLine;
+    use crate::position::RenderPoint;
+    use crate::position::ScreenCell;
+    use crate::position::SurfaceId;
+    use crate::position::ViewportBounds;
+    use crate::position::WindowSurfaceSnapshot;
+    use crate::state::TrackedCursor;
+    use pretty_assertions::assert_eq;
+
+    fn tracked_cursor(
+        top_row: i64,
+        line: i64,
+        viewport_columns: (i64, i64),
+        window_origin: (i64, i64),
+        window_dimensions: (i64, i64),
+    ) -> TrackedCursor {
+        let (left_col, text_offset) = viewport_columns;
+        let (window_row, window_col) = window_origin;
+        let (window_width, window_height) = window_dimensions;
+
+        TrackedCursor::new(
+            WindowSurfaceSnapshot::new(
+                SurfaceId::new(11, 17).expect("positive handles"),
+                BufferLine::new(top_row).expect("positive top buffer line"),
+                u32::try_from(left_col).expect("non-negative left column"),
+                u32::try_from(text_offset).expect("non-negative text offset"),
+                ScreenCell::new(window_row, window_col).expect("one-based window origin"),
+                ViewportBounds::new(window_height, window_width).expect("positive window size"),
+            ),
+            BufferLine::new(line).expect("positive cursor buffer line"),
+        )
+    }
+
+    #[test]
+    fn retarget_surface_key_uses_tracked_cursor_surface_identity_and_dimensions() {
+        assert_eq!(
+            RetargetSurfaceKey::from_tracked_cursor(&tracked_cursor(
+                23,
+                29,
+                (5, 2),
+                (7, 13),
+                (80, 24),
+            )),
+            RetargetSurfaceKey {
+                window_handle: 11,
+                buffer_handle: 17,
+                window_width: 80,
+                window_height: 24,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_target_key_omits_surface_when_tracking_is_absent() {
+        let position = RenderPoint {
+            row: 7.0,
+            col: 19.0,
+        };
+        let shape = CursorShape::block();
+        assert_eq!(
+            RuntimeTargetRetargetKey::from_snapshot(position, shape, None),
+            RuntimeTargetRetargetKey::new(
+                Some(ScreenCell::new(7, 19).expect("rounded render point should stay one-based")),
+                shape,
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn cursor_target_retarget_epoch_ignores_surface_translations_outside_the_retarget_key() {
+        let position = RenderPoint {
+            row: 7.0,
+            col: 19.0,
+        };
+        let shape = CursorShape::block();
+        let base_tracked_cursor = tracked_cursor(23, 29, (5, 2), (7, 13), (80, 24));
+        let translated_tracked_cursor = tracked_cursor(41, 29, (11, 4), (9, 21), (80, 24));
+        let mut target = CursorTarget::default();
+
+        assert!(target.apply_snapshot(RuntimeTargetSnapshot::tracked(
+            position,
+            shape,
+            &base_tracked_cursor,
+        )));
+        let baseline_epoch = target.retarget_epoch;
+
+        assert!(!target.apply_snapshot(RuntimeTargetSnapshot::tracked(
+            position,
+            shape,
+            &translated_tracked_cursor,
+        )));
+        assert_eq!(target.retarget_epoch, baseline_epoch);
+        assert_eq!(target.tracked_cursor, Some(translated_tracked_cursor));
+    }
+
+    #[test]
+    fn cursor_target_retarget_epoch_advances_when_the_retarget_key_changes() {
+        let position = RenderPoint {
+            row: 7.0,
+            col: 19.0,
+        };
+        let base_tracked_cursor = tracked_cursor(23, 29, (5, 2), (7, 13), (80, 24));
+        let resized_tracked_cursor = tracked_cursor(23, 29, (5, 2), (7, 13), (100, 24));
+        let mut target = CursorTarget::default();
+
+        target.apply_snapshot(RuntimeTargetSnapshot::tracked(
+            position,
+            CursorShape::block(),
+            &base_tracked_cursor,
+        ));
+        let baseline_epoch = target.retarget_epoch;
+
+        assert!(target.apply_snapshot(RuntimeTargetSnapshot::tracked(
+            position,
+            CursorShape::vertical_bar(),
+            &base_tracked_cursor,
+        )));
+        assert_eq!(target.retarget_epoch, baseline_epoch.wrapping_add(1));
+
+        let after_shape_epoch = target.retarget_epoch;
+        assert!(target.apply_snapshot(RuntimeTargetSnapshot::tracked(
+            RenderPoint {
+                row: 8.0,
+                col: 19.0,
+            },
+            CursorShape::vertical_bar(),
+            &base_tracked_cursor,
+        )));
+        assert_eq!(target.retarget_epoch, after_shape_epoch.wrapping_add(1));
+
+        let after_cell_epoch = target.retarget_epoch;
+        assert!(!target.apply_snapshot(RuntimeTargetSnapshot::tracked(
+            RenderPoint {
+                row: 8.0,
+                col: 19.0,
+            },
+            CursorShape::vertical_bar(),
+            &resized_tracked_cursor,
+        )));
+        assert_eq!(target.retarget_epoch, after_cell_epoch.wrapping_add(1));
+    }
 }

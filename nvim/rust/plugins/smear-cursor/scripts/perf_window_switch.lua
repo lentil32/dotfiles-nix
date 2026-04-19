@@ -808,7 +808,7 @@ local function main()
     trail_thickness = trail_thickness,
     trail_thickness_x = trail_thickness_x,
     top_k_per_cell = top_k_per_cell,
-    fps = 120,
+    time_interval = 1000.0 / 120.0,
   }
   if max_kept_windows ~= nil then
     setup_options.max_kept_windows = max_kept_windows

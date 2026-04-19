@@ -1,14 +1,13 @@
 ---
 source: plugins/smear-cursor/src/core/runtime_reducer/tests/trajectory_goldens.rs
-assertion_line: 138
 expression: transcript.render()
 ---
 00 ext t=100.000 pos=5.000,6.000 surf=10/20 motion=cont action=draw samples=[5.500,6.500@4.167] center=5.500,6.500 target=5.000,6.000 next=- cleanup=schedule alloc=bootstrap vis=show sched=0 state=a0s0d0 stroke=1 epoch=1
-01 ext t=108.000 pos=20.000,30.000 surf=11/21 motion=jump action=draw samples=[5.656,6.749@4.167;6.064,7.403@4.167;6.651,8.342@4.167] center=6.651,8.342 target=20.000,30.000 next=121 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=2 epoch=3
-02 tick t=116.000 pos=20.000,30.000 surf=11/21 motion=cont action=draw samples=[7.359,9.474@4.167;8.141,10.725@4.167] center=8.141,10.725 target=20.000,30.000 next=121 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=2 epoch=3
-03 ext t=124.000 pos=9.000,14.000 surf=10/20 motion=jump action=draw samples=[8.848,11.874@4.167;9.384,12.775@4.167] center=9.384,12.775 target=9.000,14.000 next=135 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=3 epoch=5
-04 tick t=132.000 pos=9.000,14.000 surf=10/20 motion=cont action=draw samples=[9.782,13.474@4.167;10.070,14.011@4.167] center=10.070,14.011 target=9.000,14.000 next=135 cleanup=invalidate alloc=reuse vis=show sched=1 state=a1s0d0 stroke=3 epoch=5
-05 ext t=140.000 pos=24.000,4.000 surf=12/22 motion=jump action=draw samples=[10.428,14.313@4.167;10.970,14.342@4.167] center=10.970,14.342 target=24.000,4.000 next=149 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=4 epoch=7
-06 tick t=148.000 pos=24.000,4.000 surf=12/22 motion=cont action=draw samples=[11.638,14.169@4.167] center=11.638,14.169 target=24.000,4.000 next=149 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=4 epoch=7
-07 tick t=156.000 pos=24.000,4.000 surf=12/22 motion=cont action=draw samples=[12.385,13.851@4.167;13.177,13.430@4.167] center=13.177,13.430 target=24.000,4.000 next=163 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=4 epoch=7
-final center=13.177,13.430 target=24.000,4.000 state=a1s0d0 stroke=4 epoch=7 surf=12/22
+01 ext t=108.000 pos=20.000,30.000 surf=11/21 motion=jump action=draw samples=[5.656,6.749@4.167;6.064,7.403@4.167;6.651,8.342@4.167] center=6.651,8.342 target=20.000,30.000 next=121 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=2 epoch=2
+02 tick t=116.000 pos=20.000,30.000 surf=11/21 motion=cont action=draw samples=[7.359,9.474@4.167;8.141,10.725@4.167] center=8.141,10.725 target=20.000,30.000 next=121 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=2 epoch=2
+03 ext t=124.000 pos=9.000,14.000 surf=10/20 motion=jump action=draw samples=[8.848,11.874@4.167;9.384,12.775@4.167] center=9.384,12.775 target=9.000,14.000 next=135 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=3 epoch=3
+04 tick t=132.000 pos=9.000,14.000 surf=10/20 motion=cont action=draw samples=[9.782,13.474@4.167;10.070,14.011@4.167] center=10.070,14.011 target=9.000,14.000 next=135 cleanup=invalidate alloc=reuse vis=show sched=1 state=a1s0d0 stroke=3 epoch=3
+05 ext t=140.000 pos=24.000,4.000 surf=12/22 motion=jump action=draw samples=[10.428,14.313@4.167;10.970,14.342@4.167] center=10.970,14.342 target=24.000,4.000 next=149 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=4 epoch=4
+06 tick t=148.000 pos=24.000,4.000 surf=12/22 motion=cont action=draw samples=[11.638,14.169@4.167] center=11.638,14.169 target=24.000,4.000 next=149 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=4 epoch=4
+07 tick t=156.000 pos=24.000,4.000 surf=12/22 motion=cont action=draw samples=[12.385,13.851@4.167;13.177,13.430@4.167] center=13.177,13.430 target=24.000,4.000 next=163 cleanup=invalidate alloc=reuse vis=hide sched=1 state=a1s0d0 stroke=4 epoch=4
+final center=13.177,13.430 target=24.000,4.000 state=a1s0d0 stroke=4 epoch=4 surf=12/22

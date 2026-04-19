@@ -88,8 +88,8 @@ pub(crate) fn advance_second_order_response(
     }
 }
 
-pub(crate) fn center(corners: &[Point; 4]) -> Point {
-    crate::types::corners_center(corners)
+pub(crate) fn center(corners: &[RenderPoint; 4]) -> RenderPoint {
+    crate::position::corners_center(corners)
 }
 
 pub(crate) fn corners_for_cursor(
@@ -97,19 +97,19 @@ pub(crate) fn corners_for_cursor(
     col: f64,
     vertical_bar: bool,
     horizontal_bar: bool,
-) -> [Point; 4] {
+) -> [RenderPoint; 4] {
     if vertical_bar {
         return [
-            Point { row, col },
-            Point {
+            RenderPoint { row, col },
+            RenderPoint {
                 row,
                 col: col + 1.0 / 8.0,
             },
-            Point {
+            RenderPoint {
                 row: row + 1.0,
                 col: col + 1.0 / 8.0,
             },
-            Point {
+            RenderPoint {
                 row: row + 1.0,
                 col,
             },
@@ -118,19 +118,19 @@ pub(crate) fn corners_for_cursor(
 
     if horizontal_bar {
         return [
-            Point {
+            RenderPoint {
                 row: row + 7.0 / 8.0,
                 col,
             },
-            Point {
+            RenderPoint {
                 row: row + 7.0 / 8.0,
                 col: col + 1.0,
             },
-            Point {
+            RenderPoint {
                 row: row + 1.0,
                 col: col + 1.0,
             },
-            Point {
+            RenderPoint {
                 row: row + 1.0,
                 col,
             },
@@ -138,32 +138,32 @@ pub(crate) fn corners_for_cursor(
     }
 
     [
-        Point { row, col },
-        Point {
+        RenderPoint { row, col },
+        RenderPoint {
             row,
             col: col + 1.0,
         },
-        Point {
+        RenderPoint {
             row: row + 1.0,
             col: col + 1.0,
         },
-        Point {
+        RenderPoint {
             row: row + 1.0,
             col,
         },
     ]
 }
 
-pub(crate) fn zero_velocity_corners() -> [Point; 4] {
-    [Point::ZERO; 4]
+pub(crate) fn zero_velocity_corners() -> [RenderPoint; 4] {
+    [RenderPoint::ZERO; 4]
 }
 
 pub(crate) fn initial_velocity(
-    current_corners: &[Point; 4],
-    target_corners: &[Point; 4],
+    current_corners: &[RenderPoint; 4],
+    target_corners: &[RenderPoint; 4],
     anticipation: f64,
-) -> [Point; 4] {
-    let mut velocity_corners = [Point::ZERO; 4];
+) -> [RenderPoint; 4] {
+    let mut velocity_corners = [RenderPoint::ZERO; 4];
     for index in 0..4 {
         velocity_corners[index].row =
             (current_corners[index].row - target_corners[index].row) * anticipation;
@@ -181,9 +181,9 @@ pub(crate) struct StopMetrics {
 }
 
 pub(crate) fn stop_metrics(
-    current_corners: &[Point; 4],
-    target_corners: &[Point; 4],
-    velocity_corners: &[Point; 4],
+    current_corners: &[RenderPoint; 4],
+    target_corners: &[RenderPoint; 4],
+    velocity_corners: &[RenderPoint; 4],
     block_aspect_ratio: f64,
     particles: &[Particle],
 ) -> StopMetrics {
@@ -195,7 +195,7 @@ pub(crate) fn stop_metrics(
             current_corners[index].display_distance(target_corners[index], block_aspect_ratio);
         max_distance = max_distance.max(distance);
 
-        let velocity = velocity_corners[index].display_distance(Point::ZERO, block_aspect_ratio);
+        let velocity = velocity_corners[index].display_distance(RenderPoint::ZERO, block_aspect_ratio);
         max_velocity = max_velocity.max(velocity);
     }
 
@@ -219,8 +219,8 @@ pub(crate) fn outside_stop_exit(config: &RuntimeConfig, metrics: StopMetrics) ->
 
 pub(crate) fn corners_for_render(
     _config: &RuntimeConfig,
-    current_corners: &[Point; 4],
-    _target_corners: &[Point; 4],
-) -> [Point; 4] {
+    current_corners: &[RenderPoint; 4],
+    _target_corners: &[RenderPoint; 4],
+) -> [RenderPoint; 4] {
     *current_corners
 }

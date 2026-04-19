@@ -48,13 +48,13 @@ fn ready_state_for_observation_request_case(
         runtime.config.smear_to_cmd = smear_to_cmd;
         if initialize_cursor {
             runtime.initialize_cursor(
-                Point {
+                RenderPoint {
                     row: f64::from(tracked_row),
                     col: f64::from(tracked_col),
                 },
-                CursorShape::new(false, false),
+                CursorShape::block(),
                 7,
-                &CursorLocation::new(window_handle, buffer_handle, top_row, line),
+                &TrackedCursor::fixture(window_handle, buffer_handle, top_row, line),
             );
         }
     });
@@ -115,7 +115,6 @@ proptest! {
             external_demand_event_with_perf_class(
                 ExternalDemandKind::ExternalCursor,
                 observed_at,
-                None,
                 buffer_perf_class,
             ),
         );
@@ -136,7 +135,6 @@ proptest! {
                 IngressSeq::new(1),
                 ExternalDemandKind::ExternalCursor,
                 Millis::new(observed_at),
-                None,
                 buffer_perf_class,
             ),
             expected_probes,
@@ -186,7 +184,7 @@ fn retained_cursor_text_context_boundary_is_carried_into_observation_runtime_con
 
     let transition = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
     );
 
     let Some(Effect::RequestObservationBase(payload)) = transition
@@ -222,7 +220,7 @@ fn retained_cursor_text_context_boundary_survives_without_sampled_rows() {
 
     let transition = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
     );
 
     let Some(Effect::RequestObservationBase(payload)) = transition

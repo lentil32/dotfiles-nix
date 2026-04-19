@@ -68,7 +68,7 @@ fn vertical_history(
     let mut row = start_row as f64;
     history.push_back(CenterPathSample {
         step_index: StepIndex::new(1),
-        pos: Point {
+        pos: RenderPoint {
             row,
             col: start_col as f64,
         },
@@ -78,7 +78,7 @@ fn vertical_history(
         row += f64::from(delta);
         history.push_back(CenterPathSample {
             step_index: StepIndex::new(u64::try_from(index + 2).unwrap_or(u64::MAX)),
-            pos: Point {
+            pos: RenderPoint {
                 row,
                 col: start_col as f64,
             },
@@ -115,7 +115,7 @@ fn straight_centerline(
             };
 
             CenterSample {
-                pos: Point { row, col },
+                pos: RenderPoint { row, col },
                 tangent_row,
                 tangent_col,
             }
@@ -129,19 +129,19 @@ fn staged_deposit_band_masses_shift_with_speed() {
     set_frame_corners(
         &mut moving_frame,
         [
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 14.0,
             },
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 15.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 15.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 14.0,
             },
@@ -235,7 +235,7 @@ proptest! {
         prop_assert!(core_slices.len() <= step_samples.len());
         prop_assert_eq!(
             state.center_history.back().map(|sample| sample.pos),
-            Some(crate::types::corners_center(&final_corners)),
+            Some(crate::position::corners_center(&final_corners)),
         );
 
         let mut previous_arc_len = 0_u32;
@@ -377,7 +377,7 @@ proptest! {
         let aspect_one = with_block_aspect_ratio(&base_frame(), 1.0);
         let aspect_two = with_block_aspect_ratio(&base_frame(), aspect_ratio);
         let centerline_one = vec![CenterSample {
-            pos: Point {
+            pos: RenderPoint {
                 row: 10.5 - display_offset,
                 col: 10.5,
             },
@@ -385,7 +385,7 @@ proptest! {
             tangent_col: 1.0,
         }];
         let centerline_two = vec![CenterSample {
-            pos: Point {
+            pos: RenderPoint {
                 row: 10.5 - display_offset / aspect_ratio,
                 col: 10.5,
             },

@@ -1,13 +1,38 @@
 use super::*;
+use crate::core::types::Millis;
+use crate::position::BufferLine;
+use crate::position::CursorObservation;
+use crate::position::ObservedCell;
+use crate::position::SurfaceId;
+use crate::position::ViewportBounds;
+use crate::position::WindowSurfaceSnapshot;
 use pretty_assertions::assert_eq;
+
+fn observation_basis_with_surface(
+    observed_at: u64,
+    position: ScreenCell,
+    surface: WindowSurfaceSnapshot,
+    viewport: ViewportBounds,
+) -> ObservationBasis {
+    ObservationBasis::new(
+        Millis::new(observed_at),
+        "n".to_string(),
+        surface,
+        CursorObservation::new(
+            BufferLine::new(1).expect("positive buffer line"),
+            ObservedCell::Exact(position),
+        ),
+        viewport,
+    )
+}
 
 #[test]
 fn semantic_classifier_detects_text_mutation_cases() {
     struct TestCase {
-        previous_position: CursorPosition,
+        previous_position: ScreenCell,
         previous_line: i64,
         previous_rows: &'static [&'static str],
-        current_position: CursorPosition,
+        current_position: ScreenCell,
         current_line: i64,
         current_rows: &'static [&'static str],
         current_tracked_rows: Option<&'static [&'static str]>,
@@ -15,106 +40,64 @@ fn semantic_classifier_detects_text_mutation_cases() {
 
     let cases = [
         TestCase {
-            previous_position: CursorPosition {
-                row: CursorRow(4),
-                col: CursorCol(5),
-            },
+            previous_position: screen_cell(4, 5),
             previous_line: 7,
             previous_rows: &["before", "alpha", "after"],
-            current_position: CursorPosition {
-                row: CursorRow(4),
-                col: CursorCol(6),
-            },
+            current_position: screen_cell(4, 6),
             current_line: 8,
             current_rows: &["alph", "a", "after"],
             current_tracked_rows: Some(&["before", "alph", "a"]),
         },
         TestCase {
-            previous_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            },
+            previous_position: screen_cell(5, 5),
             previous_line: 9,
             previous_rows: &["header", "alpha", "tail"],
-            current_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(6),
-            },
+            current_position: screen_cell(5, 6),
             current_line: 9,
             current_rows: &["header", "alphax", "tail"],
             current_tracked_rows: Some(&["header", "alphax", "tail"]),
         },
         TestCase {
-            previous_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(6),
-            },
+            previous_position: screen_cell(5, 6),
             previous_line: 9,
             previous_rows: &["header", "alphax", "tail"],
-            current_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            },
+            current_position: screen_cell(5, 5),
             current_line: 9,
             current_rows: &["header", "alpha", "tail"],
             current_tracked_rows: Some(&["header", "alpha", "tail"]),
         },
         TestCase {
-            previous_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            },
+            previous_position: screen_cell(5, 5),
             previous_line: 9,
             previous_rows: &["header", "alpha", "tail"],
-            current_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            },
+            current_position: screen_cell(5, 5),
             current_line: 9,
             current_rows: &["header", "alha", "tail"],
             current_tracked_rows: Some(&["header", "alha", "tail"]),
         },
         TestCase {
-            previous_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            },
+            previous_position: screen_cell(5, 5),
             previous_line: 9,
             previous_rows: &["header", "alpha", "tail"],
-            current_position: CursorPosition {
-                row: CursorRow(6),
-                col: CursorCol(3),
-            },
+            current_position: screen_cell(6, 3),
             current_line: 10,
             current_rows: &["alpha pasted", "block", "tail"],
             current_tracked_rows: Some(&["header", "alpha pasted", "block"]),
         },
         TestCase {
-            previous_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            },
+            previous_position: screen_cell(5, 5),
             previous_line: 9,
             previous_rows: &["header", "ka", "tail"],
-            current_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(7),
-            },
+            current_position: screen_cell(5, 7),
             current_line: 9,
             current_rows: &["header", "kana", "tail"],
             current_tracked_rows: Some(&["header", "kana", "tail"]),
         },
         TestCase {
-            previous_position: CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            },
+            previous_position: screen_cell(5, 5),
             previous_line: 9,
             previous_rows: &["header", "alpha", "tail"],
-            current_position: CursorPosition {
-                row: CursorRow(10),
-                col: CursorCol(3),
-            },
+            current_position: screen_cell(10, 3),
             current_line: 14,
             current_rows: &["inserted two", "inserted three", "tail"],
             current_tracked_rows: Some(&["header", "alpha pasted", "inserted one"]),
@@ -137,7 +120,7 @@ fn semantic_classifier_detects_text_mutation_cases() {
 #[test]
 fn semantic_classifier_detects_motion_without_text_mutation() {
     let request = observation_request(ProbeRequestSet::default());
-    let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+    let viewport = viewport_bounds(40, 120);
     let previous = ObservationSnapshot::new(
         request.clone(),
         observation_basis(viewport).with_cursor_text_context_state(
@@ -155,11 +138,18 @@ fn semantic_classifier_detects_motion_without_text_mutation() {
         ObservationBasis::new(
             Millis::new(11),
             "n".to_string(),
-            Some(CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            }),
-            CursorLocation::new(1, 1, 1, 8),
+            WindowSurfaceSnapshot::new(
+                SurfaceId::new(1, 1).expect("positive handles"),
+                BufferLine::new(1).expect("positive top buffer line"),
+                0,
+                0,
+                ScreenCell::new(1, 1).expect("one-based window origin"),
+                viewport,
+            ),
+            CursorObservation::new(
+                BufferLine::new(8).expect("positive buffer line"),
+                ObservedCell::Exact(screen_cell(5, 5)),
+            ),
             viewport,
         )
         .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
@@ -180,32 +170,51 @@ fn semantic_classifier_detects_motion_without_text_mutation() {
 #[test]
 fn semantic_classifier_detects_viewport_or_window_motion_cases() {
     let request = observation_request(ProbeRequestSet::default());
-    let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+    let viewport = viewport_bounds(40, 120);
     let previous = ObservationSnapshot::new(
         request.clone(),
         observation_basis(viewport),
         ObservationMotion::default(),
     );
     let cases = [
-        CursorLocation::new(2, 1, 3, 1),
-        CursorLocation::new(1, 1, 1, 1).with_viewport_columns(3, 0),
-        CursorLocation::new(1, 1, 1, 1).with_window_origin(3, 4),
-        CursorLocation::new(1, 1, 1, 1).with_window_dimensions(80, 24),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(2, 1).expect("positive handles"),
+            BufferLine::new(3).expect("positive top buffer line"),
+            0,
+            0,
+            screen_cell(1, 1),
+            viewport,
+        ),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(1, 1).expect("positive handles"),
+            BufferLine::new(1).expect("positive top buffer line"),
+            3,
+            0,
+            screen_cell(1, 1),
+            viewport,
+        ),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(1, 1).expect("positive handles"),
+            BufferLine::new(1).expect("positive top buffer line"),
+            0,
+            0,
+            screen_cell(3, 4),
+            viewport,
+        ),
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(1, 1).expect("positive handles"),
+            BufferLine::new(1).expect("positive top buffer line"),
+            0,
+            0,
+            screen_cell(1, 1),
+            viewport_bounds(24, 80),
+        ),
     ];
 
-    for current_location in cases {
+    for surface in cases {
         let current = ObservationSnapshot::new(
             request.clone(),
-            ObservationBasis::new(
-                Millis::new(11),
-                "n".to_string(),
-                Some(CursorPosition {
-                    row: CursorRow(4),
-                    col: CursorCol(5),
-                }),
-                current_location,
-                viewport,
-            ),
+            observation_basis_with_surface(11, screen_cell(4, 5), surface, viewport),
             ObservationMotion::default(),
         );
 
@@ -224,12 +233,11 @@ fn semantic_classifier_detects_mode_change() {
             IngressSeq::new(1),
             ExternalDemandKind::ModeChanged,
             Millis::new(10),
-            None,
             BufferPerfClass::Full,
         ),
         ProbeRequestSet::default(),
     );
-    let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+    let viewport = viewport_bounds(40, 120);
     let previous = ObservationSnapshot::new(
         previous_request,
         observation_basis(viewport),
@@ -240,11 +248,18 @@ fn semantic_classifier_detects_mode_change() {
         ObservationBasis::new(
             Millis::new(11),
             "i".to_string(),
-            Some(CursorPosition {
-                row: CursorRow(4),
-                col: CursorCol(5),
-            }),
-            CursorLocation::new(1, 1, 1, 1),
+            WindowSurfaceSnapshot::new(
+                SurfaceId::new(1, 1).expect("positive handles"),
+                BufferLine::new(1).expect("positive top buffer line"),
+                0,
+                0,
+                ScreenCell::new(1, 1).expect("one-based window origin"),
+                viewport,
+            ),
+            CursorObservation::new(
+                BufferLine::new(1).expect("positive buffer line"),
+                ObservedCell::Exact(screen_cell(4, 5)),
+            ),
             viewport,
         ),
         ObservationMotion::default(),
@@ -259,18 +274,25 @@ fn semantic_classifier_detects_mode_change() {
 #[test]
 fn semantic_classifier_prioritizes_text_mutation_before_viewport_motion() {
     let request = observation_request(ProbeRequestSet::default());
-    let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
+    let viewport = viewport_bounds(40, 120);
     let previous =
         ObservationSnapshot::new(
             request.clone(),
             ObservationBasis::new(
                 Millis::new(10),
                 "n".to_string(),
-                Some(CursorPosition {
-                    row: CursorRow(5),
-                    col: CursorCol(5),
-                }),
-                CursorLocation::new(1, 1, 1, 9),
+                WindowSurfaceSnapshot::new(
+                    SurfaceId::new(1, 1).expect("positive handles"),
+                    BufferLine::new(1).expect("positive top buffer line"),
+                    0,
+                    0,
+                    ScreenCell::new(1, 1).expect("one-based window origin"),
+                    viewport,
+                ),
+                CursorObservation::new(
+                    BufferLine::new(9).expect("positive buffer line"),
+                    ObservedCell::Exact(screen_cell(5, 5)),
+                ),
                 viewport,
             )
             .with_cursor_text_context_state(CursorTextContextState::Sampled(
@@ -283,11 +305,18 @@ fn semantic_classifier_prioritizes_text_mutation_before_viewport_motion() {
         ObservationBasis::new(
             Millis::new(11),
             "n".to_string(),
-            Some(CursorPosition {
-                row: CursorRow(6),
-                col: CursorCol(3),
-            }),
-            CursorLocation::new(1, 1, 4, 10),
+            WindowSurfaceSnapshot::new(
+                SurfaceId::new(1, 1).expect("positive handles"),
+                BufferLine::new(4).expect("positive top buffer line"),
+                0,
+                0,
+                ScreenCell::new(1, 1).expect("one-based window origin"),
+                viewport,
+            ),
+            CursorObservation::new(
+                BufferLine::new(10).expect("positive buffer line"),
+                ObservedCell::Exact(screen_cell(6, 3)),
+            ),
             viewport,
         )
         .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(

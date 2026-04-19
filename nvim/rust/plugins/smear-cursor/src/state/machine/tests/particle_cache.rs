@@ -33,7 +33,7 @@ fn aggregated_particle_cache_reuses_cached_cells_until_particles_change() {
     assert_eq!(state.particles()[0].position, point(5.0, 9.0));
     assert_eq!(
         shifted_aggregates[0].screen_cell(),
-        crate::types::ScreenCell::new(5, 9)
+        crate::position::ScreenCell::new(5, 9)
     );
 }
 
@@ -72,7 +72,7 @@ fn particle_screen_cell_cache_reuses_cached_cells_until_particles_change() {
     ));
     assert_eq!(
         shifted_screen_cells.as_ref(),
-        &[crate::types::ScreenCell::new(5, 9).expect("shifted screen cell")]
+        &[crate::position::ScreenCell::new(5, 9).expect("shifted screen cell")]
     );
 }
 

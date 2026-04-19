@@ -1,4 +1,4 @@
-use crate::types::ScreenCell;
+use crate::position::ScreenCell;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::position::ViewportBounds;
 use crate::types::Particle;
 use crate::types::StepOutput;
 
@@ -55,19 +56,22 @@ fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
     );
     let mut runtime = ready_state().runtime().clone();
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 3, 9),
+        &TrackedCursor::fixture(11, 22, 3, 9)
+            .with_window_origin(1, 1)
+            .with_window_dimensions(120, 40),
     );
+    runtime.record_observed_mode(/*current_is_cmdline*/ false);
     let ready = ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_cell(Some(cursor(9, 9)))
         .with_runtime(runtime)
         .with_ready_observation(previous_observation)
         .expect("primed state should accept a retained ready observation");
     let observing = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
     )
     .next;
     let request = active_request(&observing);
@@ -112,44 +116,52 @@ fn observation_completion_with_motion_only_requests_draw_render_plan() {
     );
     let mut runtime = ready_state().runtime().clone();
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 3, 9),
+        &TrackedCursor::fixture(11, 22, 3, 9)
+            .with_window_origin(1, 1)
+            .with_window_dimensions(120, 40),
     );
+    runtime.record_observed_mode(/*current_is_cmdline*/ false);
     let ready = ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_cell(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .with_ready_observation(previous_observation)
+        .with_ready_observation(previous_observation.clone())
         .expect("primed state should accept a retained ready observation");
     let observing = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
     )
     .next;
     let request = active_request(&observing);
-
-    let transition = collect_observation_base(
-        &observing,
-        &request,
-        observation_basis_with_text_context(
-            Some(cursor(10, 9)),
-            101,
-            10,
-            10,
-            &["alpha", "after", "tail"],
-            Some(&["before", "alpha", "after"]),
-        ),
-        observation_motion(),
+    let current_basis = observation_basis_with_text_context(
+        Some(cursor(10, 9)),
+        101,
+        10,
+        10,
+        &["alpha", "after", "tail"],
+        Some(&["before", "alpha", "after"]),
     );
+    pretty_assert_eq!(
+        crate::core::state::classify_semantic_event(
+            Some(&previous_observation),
+            &ObservationSnapshot::new(request.clone(), current_basis.clone(), observation_motion(),),
+        ),
+        crate::core::state::SemanticEvent::CursorMovedWithoutTextMutation
+    );
+
+    let transition =
+        collect_observation_base(&observing, &request, current_basis, observation_motion());
 
     let [Effect::RequestRenderPlan(payload)] = transition.effects.as_slice() else {
         panic!("expected render plan request after motion-only observation");
     };
-    assert!(matches!(
-        payload.render_decision.render_action,
-        RenderAction::Draw(_)
-    ));
+    assert!(
+        matches!(payload.render_decision.render_action, RenderAction::Draw(_)),
+        "expected draw render action, got {:?}",
+        payload.render_decision.render_action
+    );
 }
 
 #[test]
@@ -169,19 +181,19 @@ fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all
     );
     let mut runtime = ready_state().runtime().clone();
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 1, 9),
+        &TrackedCursor::fixture(11, 22, 1, 9),
     );
     let ready = ready_state()
-        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_cell(Some(cursor(9, 9)))
         .with_runtime(runtime)
         .with_ready_observation(previous_observation)
         .expect("primed state should accept a retained ready observation");
     let observing = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
     )
     .next;
     let request = active_request(&observing);
@@ -192,9 +204,19 @@ fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all
         ObservationBasis::new(
             Millis::new(101),
             "n".to_string(),
-            Some(cursor(10, 3)),
-            CursorLocation::new(11, 22, 4, 10),
-            ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+            crate::position::WindowSurfaceSnapshot::new(
+                crate::position::SurfaceId::new(11, 22).expect("positive handles"),
+                crate::position::BufferLine::new(4).expect("positive top buffer line"),
+                0,
+                0,
+                crate::position::ScreenCell::new(1, 1).expect("one-based window origin"),
+                ViewportBounds::new(40, 120).expect("positive window size"),
+            ),
+            crate::position::CursorObservation::new(
+                crate::position::BufferLine::new(10).expect("positive buffer line"),
+                crate::position::ObservedCell::Exact(cursor(10, 3)),
+            ),
+            ViewportBounds::new(40, 120).expect("positive viewport bounds"),
         )
         .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
             11,
@@ -219,10 +241,10 @@ fn observation_completion_moves_runtime_particles_into_render_planning() {
     let mut runtime = ready_state().runtime().clone();
     runtime.config.particles_enabled = false;
     runtime.initialize_cursor(
-        Point { row: 9.0, col: 9.0 },
-        CursorShape::new(false, false),
+        RenderPoint { row: 9.0, col: 9.0 },
+        CursorShape::block(),
         7,
-        &CursorLocation::new(11, 22, 3, 9),
+        &TrackedCursor::fixture(11, 22, 3, 9),
     );
     runtime.apply_step_output(StepOutput {
         current_corners: runtime.current_corners(),
@@ -230,11 +252,11 @@ fn observation_completion_moves_runtime_particles_into_render_planning() {
         spring_velocity_corners: runtime.spring_velocity_corners(),
         trail_elapsed_ms: runtime.trail_elapsed_ms(),
         particles: vec![Particle {
-            position: Point {
+            position: RenderPoint {
                 row: 9.0,
                 col: 10.0,
             },
-            velocity: Point {
+            velocity: RenderPoint {
                 row: 0.5,
                 col: 0.25,
             },
@@ -250,7 +272,7 @@ fn observation_completion_moves_runtime_particles_into_render_planning() {
     let ready = ready_state().with_runtime(runtime);
     let observing = crate::core::reducer::reduce_owned(
         ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
     )
     .next;
     let request = active_request(&observing);
@@ -262,9 +284,19 @@ fn observation_completion_moves_runtime_particles_into_render_planning() {
             basis: ObservationBasis::new(
                 Millis::new(101),
                 "n".to_string(),
-                Some(cursor(40, 20)),
-                CursorLocation::new(99, 22, 3, 40),
-                ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+                crate::position::WindowSurfaceSnapshot::new(
+                    crate::position::SurfaceId::new(99, 22).expect("positive handles"),
+                    crate::position::BufferLine::new(3).expect("positive top buffer line"),
+                    0,
+                    0,
+                    crate::position::ScreenCell::new(1, 1).expect("one-based window origin"),
+                    ViewportBounds::new(40, 120).expect("positive window size"),
+                ),
+                crate::position::CursorObservation::new(
+                    crate::position::BufferLine::new(40).expect("positive buffer line"),
+                    crate::position::ObservedCell::Exact(cursor(40, 20)),
+                ),
+                ViewportBounds::new(40, 120).expect("positive viewport bounds"),
             ),
             cursor_color_probe_generations: None,
             motion: observation_motion(),
@@ -286,7 +318,7 @@ fn conceal_deferred_observation_completion_preserves_latest_exact_cursor_anchor(
     let ready = ready_state_with_observation(cursor(9, 9));
     let observing = reduce(
         &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100),
     )
     .next;
     let request = active_request(&observing);
@@ -294,12 +326,16 @@ fn conceal_deferred_observation_completion_preserves_latest_exact_cursor_anchor(
     let transition = collect_observation_base(
         &observing,
         &request,
-        observation_basis(Some(cursor(12, 13)), 101),
-        observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+        observation_basis_with_observed_cell(
+            crate::position::ObservedCell::Deferred(cursor(12, 13)),
+            101,
+            "n",
+        ),
+        observation_motion(),
     );
 
     pretty_assert_eq!(
-        transition.next.latest_exact_cursor_position(),
+        transition.next.latest_exact_cursor_cell(),
         Some(cursor(9, 9))
     );
     let Some(observation) = transition.next.observation() else {

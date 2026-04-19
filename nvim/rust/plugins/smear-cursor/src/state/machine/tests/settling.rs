@@ -5,9 +5,9 @@ use proptest::collection::vec;
 fn setup_phase(
     state: &mut RuntimeState,
     phase: TransitionSetupPhase,
-    pending_position: Point,
+    pending_position: RenderPoint,
     pending_shape: CursorShape,
-    pending_location: &CursorLocation,
+    pending_location: &TrackedCursor,
     now_ms: f64,
 ) {
     state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, pending_location);
@@ -27,7 +27,7 @@ proptest! {
     fn prop_settled_target_promotion_depends_on_deadline_and_observation_match(
         target in finite_point(),
         shape in cursor_shape_strategy(),
-        tracked in cursor_location_strategy(),
+        tracked in tracked_cursor_strategy(),
         delay_event_to_smear in -32.0_f64..64.0_f64,
         start_ms in 0.0_f64..256.0_f64,
         elapsed_ms in -8.0_f64..96.0_f64,
@@ -62,7 +62,7 @@ proptest! {
 
         prop_assert!(state.is_settling());
         prop_assert_eq!(state.target_position(), target);
-        prop_assert_eq!(state.tracked_location_ref(), Some(&tracked));
+        prop_assert_eq!(state.tracked_cursor_ref(), Some(&tracked));
         prop_assert_eq!(state.settling_window().copied(), Some(expected_window));
         prop_assert!(expected_window.settle_deadline_ms >= expected_window.stable_since_ms);
         prop_assert_eq!(
@@ -103,7 +103,7 @@ proptest! {
         phase in transition_setup_phase_strategy(),
         pending_position in finite_point(),
         pending_shape in cursor_shape_strategy(),
-        pending_location in cursor_location_strategy(),
+        pending_location in tracked_cursor_strategy(),
         now_ms in 0.0_f64..256.0_f64,
     ) {
         let mut state = RuntimeState::default();
@@ -126,7 +126,7 @@ proptest! {
                 prop_assert!(state.settling_window().is_none());
                 prop_assert_eq!(state.target_position(), baseline.target_position());
                 prop_assert_eq!(state.target_corners(), baseline.target_corners());
-                prop_assert_eq!(state.tracked_location_ref(), baseline.tracked_location_ref());
+                prop_assert_eq!(state.tracked_cursor_ref(), baseline.tracked_cursor_ref());
             }
             TransitionSetupPhase::Idle | TransitionSetupPhase::Running => {
                 prop_assert_eq!(state.semantic_view(), baseline.semantic_view());
@@ -152,8 +152,13 @@ fn settling_window_uses_runtime_owned_target_and_tracking_for_promotion() {
         })
     );
 
-    state.set_target(point(12.0, 13.0), default_shape());
-    state.update_tracking(&retargeted_location);
+    replace_target_preserving_tracking(&mut state, point(12.0, 13.0), default_shape());
+    replace_target_with_tracking(
+        &mut state,
+        point(12.0, 13.0),
+        default_shape(),
+        &retargeted_location,
+    );
 
     assert!(!state.should_promote_settled_target(120.0, point(8.0, 9.0), &original_location,));
     assert!(state.should_promote_settled_target(120.0, point(12.0, 13.0), &retargeted_location,));
@@ -171,7 +176,7 @@ fn refresh_settling_target_preserves_stable_since_until_runtime_owner_changes() 
     state.refresh_settling_target(point(8.0, 9.0), default_shape(), &original_location, 110.0);
 
     assert_eq!(state.target_position(), point(8.0, 9.0));
-    assert_eq!(state.tracked_location_ref(), Some(&original_location));
+    assert_eq!(state.tracked_cursor_ref(), Some(&original_location));
     assert_eq!(
         state.settling_window().copied(),
         Some(SettlingWindow {
@@ -188,12 +193,73 @@ fn refresh_settling_target_preserves_stable_since_until_runtime_owner_changes() 
     );
 
     assert_eq!(state.target_position(), point(12.0, 13.0));
-    assert_eq!(state.tracked_location_ref(), Some(&retargeted_location));
+    assert_eq!(state.tracked_cursor_ref(), Some(&retargeted_location));
     assert_eq!(
         state.settling_window().copied(),
         Some(SettlingWindow {
             stable_since_ms: 115.0,
             settle_deadline_ms: 135.0,
+        })
+    );
+}
+
+#[test]
+fn refresh_settling_target_preserves_stable_since_for_same_key_tracking_updates() {
+    let original_location = TrackedCursor::fixture(1, 2, 3, 4)
+        .with_viewport_columns(2, 1)
+        .with_window_origin(7, 13)
+        .with_window_dimensions(80, 24);
+    let translated_location = TrackedCursor::fixture(1, 2, 5, 4)
+        .with_viewport_columns(4, 1)
+        .with_window_origin(9, 16)
+        .with_window_dimensions(80, 24);
+    let mut state = RuntimeState::default();
+    state.config.delay_event_to_smear = 20.0;
+    state.mark_initialized();
+    state.begin_settling(point(8.0, 9.0), default_shape(), &original_location, 100.0);
+
+    state.refresh_settling_target(
+        point(8.0, 9.0),
+        default_shape(),
+        &translated_location,
+        110.0,
+    );
+
+    assert_eq!(state.target_position(), point(8.0, 9.0));
+    assert_eq!(state.tracked_cursor_ref(), Some(&translated_location));
+    assert_eq!(
+        state.settling_window().copied(),
+        Some(SettlingWindow {
+            stable_since_ms: 100.0,
+            settle_deadline_ms: 130.0,
+        })
+    );
+    assert!(state.should_promote_settled_target(130.0, point(8.0, 9.0), &translated_location,));
+}
+
+#[test]
+fn refresh_settling_target_resets_stable_since_when_shape_changes() {
+    let tracked = location(1, 2, 3, 4);
+    let mut state = RuntimeState::default();
+    state.config.delay_event_to_smear = 20.0;
+    state.mark_initialized();
+    state.begin_settling(point(8.0, 9.0), default_shape(), &tracked, 100.0);
+
+    state.refresh_settling_target(
+        point(8.0, 9.0),
+        CursorShape::vertical_bar(),
+        &tracked,
+        110.0,
+    );
+
+    assert_eq!(state.target_position(), point(8.0, 9.0));
+    assert_eq!(state.target_shape(), CursorShape::vertical_bar());
+    assert_eq!(state.tracked_cursor_ref(), Some(&tracked));
+    assert_eq!(
+        state.settling_window().copied(),
+        Some(SettlingWindow {
+            stable_since_ms: 110.0,
+            settle_deadline_ms: 130.0,
         })
     );
 }

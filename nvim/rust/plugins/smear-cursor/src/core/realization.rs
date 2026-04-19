@@ -18,11 +18,11 @@ use crate::draw::render_plan::Glyph;
 use crate::draw::render_plan::HighlightRef;
 use crate::draw::render_plan::RenderPlan;
 use crate::draw::render_plan::TargetCellOverlay;
-use crate::draw::render_plan::Viewport;
 use crate::octant_chars::OCTANT_CHARACTERS;
+use crate::position::ScreenCell;
+use crate::position::ViewportBounds;
 use crate::types::ModeClass;
 use crate::types::RenderFrame;
-use crate::types::ScreenCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -379,8 +379,8 @@ impl RealizationSpanBuilder {
     }
 }
 
-fn in_bounds(viewport: Viewport, row: i64, col: i64) -> bool {
-    row >= 1 && row <= viewport.max_row && col >= 1 && col <= viewport.max_col
+fn in_bounds(viewport: ViewportBounds, row: i64, col: i64) -> bool {
+    row >= 1 && row <= viewport.max_row() && col >= 1 && col <= viewport.max_col()
 }
 
 fn overlay_cell(overlay: TargetCellOverlay) -> CellOp {
@@ -419,7 +419,7 @@ fn push_projected_particle_cell(
     cells: &mut Vec<CellOp>,
     cell: CellOp,
     requires_background_probe: bool,
-    viewport: Viewport,
+    viewport: ViewportBounds,
     background_probe: Option<&BackgroundProbeBatch>,
 ) {
     if !in_bounds(viewport, cell.row, cell.col) {
@@ -439,7 +439,7 @@ fn push_projected_particle_cell(
 
 fn project_particle_ops(
     particle_ops: &[crate::draw::render_plan::ParticleOp],
-    viewport: Viewport,
+    viewport: ViewportBounds,
     background_probe: Option<&BackgroundProbeBatch>,
 ) -> Arc<[CellOp]> {
     let mut cells = Vec::<CellOp>::with_capacity(particle_ops.len());
@@ -459,7 +459,7 @@ fn project_particle_ops(
 
 pub(crate) fn project_particle_overlay_cells(
     frame: &RenderFrame,
-    viewport: Viewport,
+    viewport: ViewportBounds,
     background_probe: Option<&BackgroundProbeBatch>,
 ) -> Arc<[CellOp]> {
     if !frame.has_particles() {
@@ -577,7 +577,7 @@ pub(crate) fn project_particle_overlay_cells(
 
 pub(crate) fn project_render_plan(
     plan: &RenderPlan,
-    viewport: Viewport,
+    viewport: ViewportBounds,
     background_probe: Option<&BackgroundProbeBatch>,
 ) -> LogicalRaster {
     let particle_cells = project_particle_ops(&plan.particle_ops, viewport, background_probe);
@@ -610,25 +610,23 @@ mod tests {
     use crate::core::state::ProjectionWitness;
     use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::ObservationId;
     use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::RenderRevision;
     use crate::core::types::StrokeId;
-    use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::HighlightLevel;
     use crate::draw::render_plan::ParticleOp;
     use crate::draw::render_plan::PlannerState;
     use crate::draw::render_plan::render_frame_to_plan;
+    use crate::position::RenderPoint;
+    use crate::position::ViewportBounds;
     use crate::test_support::proptest::pure_config;
     use crate::types::BASE_TIME_INTERVAL;
     use crate::types::CursorCellShape;
     use crate::types::ModeClass;
     use crate::types::Particle;
-    use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
     use crate::types::StaticRenderConfig;
@@ -638,25 +636,29 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::Arc;
 
-    fn sample_for_corners(corners: [Point; 4]) -> RenderStepSample {
+    fn sample_for_corners(corners: [RenderPoint; 4]) -> RenderStepSample {
         RenderStepSample::new(corners, BASE_TIME_INTERVAL)
+    }
+
+    fn viewport_bounds(max_row: i64, max_col: i64) -> ViewportBounds {
+        ViewportBounds::new(max_row, max_col).expect("positive viewport bounds")
     }
 
     fn representative_frame() -> RenderFrame {
         let corners = [
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
-            Point {
+            RenderPoint {
                 row: 10.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 11.0,
             },
-            Point {
+            RenderPoint {
                 row: 11.0,
                 col: 10.0,
             },
@@ -666,7 +668,7 @@ mod tests {
             corners,
             step_samples: vec![sample_for_corners(corners)].into(),
             planner_idle_steps: 0,
-            target: Point {
+            target: RenderPoint {
                 row: 10.0,
                 col: 10.0,
             },
@@ -721,29 +723,6 @@ mod tests {
                     highlight: chunk.highlight(),
                 });
             }
-        }
-        cells
-    }
-
-    fn legacy_visible_cells_without_probe(plan: &RenderPlan, viewport: Viewport) -> Vec<CellOp> {
-        let mut cells = plan
-            .particle_ops
-            .iter()
-            .filter(|op| {
-                !op.requires_background_probe && in_bounds(viewport, op.cell.row, op.cell.col)
-            })
-            .map(|op| op.cell)
-            .collect::<Vec<_>>();
-        cells.extend(
-            plan.cell_ops
-                .iter()
-                .filter(|op| in_bounds(viewport, op.row, op.col))
-                .copied(),
-        );
-        if let Some(overlay) = plan.target_cell_overlay
-            && in_bounds(viewport, overlay.row, overlay.col)
-        {
-            cells.push(overlay_cell(overlay));
         }
         cells
     }
@@ -823,7 +802,7 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct RenderPlanFixture {
-        viewport: Viewport,
+        viewport: ViewportBounds,
         plan: RenderPlan,
         background_probe: Option<BackgroundProbeBatch>,
     }
@@ -831,12 +810,7 @@ mod tests {
     fn render_plan_fixture() -> BoxedStrategy<RenderPlanFixture> {
         (1_u32..=6_u32, 1_u32..=6_u32)
             .prop_flat_map(|(max_row, max_col)| {
-                let viewport = Viewport {
-                    max_row: i64::from(max_row),
-                    max_col: i64::from(max_col),
-                };
-                let viewport_snapshot =
-                    ViewportSnapshot::new(CursorRow(max_row), CursorCol(max_col));
+                let viewport = viewport_bounds(i64::from(max_row), i64::from(max_col));
                 let mask_len = usize::try_from(max_row.saturating_mul(max_col)).unwrap_or(0);
 
                 (
@@ -858,10 +832,7 @@ mod tests {
                             allowed_mask,
                         )| {
                             let background_probe = allowed_mask.map(|allowed_mask| {
-                                BackgroundProbeBatch::from_allowed_mask(
-                                    viewport_snapshot,
-                                    allowed_mask,
-                                )
+                                BackgroundProbeBatch::from_allowed_mask(viewport, allowed_mask)
                             });
                             RenderPlanFixture {
                                 viewport,
@@ -881,7 +852,7 @@ mod tests {
 
     fn expected_visible_cells(
         plan: &RenderPlan,
-        viewport: Viewport,
+        viewport: ViewportBounds,
         background_probe: Option<&BackgroundProbeBatch>,
     ) -> Vec<CellOp> {
         let mut cells = Vec::new();
@@ -929,7 +900,7 @@ mod tests {
         ProjectionWitness::new(
             RenderRevision::INITIAL,
             ObservationId::from_ingress_seq(IngressSeq::new(observation_seq)),
-            ViewportSnapshot::new(CursorRow(max_row), CursorCol(max_col)),
+            viewport_bounds(i64::from(max_row), i64::from(max_col)),
             ProjectorRevision::CURRENT,
         )
     }
@@ -1075,19 +1046,16 @@ mod tests {
     }
 
     #[test]
-    fn realization_projection_preserves_legacy_render_plan_cells_for_representative_frame() {
+    fn realization_projection_matches_render_plan_visible_cells_for_representative_frame() {
         let frame = representative_frame();
-        let viewport = Viewport {
-            max_row: 40,
-            max_col: 80,
-        };
+        let viewport = viewport_bounds(40, 80);
         let planner_output = render_frame_to_plan(&frame, PlannerState::default(), viewport);
         let raster = project_render_plan(&planner_output.plan, viewport, None);
         let realized = realize_logical_raster(&raster);
 
         assert_eq!(
             flatten_projection_cells(&realized),
-            legacy_visible_cells_without_probe(&planner_output.plan, viewport)
+            expected_visible_cells(&planner_output.plan, viewport, None)
         );
     }
 
@@ -1149,68 +1117,62 @@ mod tests {
     }
 
     #[test]
-    fn project_particle_overlay_cells_matches_legacy_particle_overlay_projection() {
+    fn project_particle_overlay_cells_matches_render_plan_particle_projection() {
         let mut render_frame = representative_frame();
         Arc::make_mut(&mut render_frame.static_config).particles_over_text = false;
         Arc::make_mut(&mut render_frame.static_config).particle_max_lifetime = 2.0;
         Arc::make_mut(&mut render_frame.static_config).particle_switch_octant_braille = 0.4;
         render_frame.set_particles(Arc::new(vec![
             Particle {
-                position: Point {
+                position: RenderPoint {
                     row: 10.1,
                     col: 12.1,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime: 1.6,
             },
             Particle {
-                position: Point {
+                position: RenderPoint {
                     row: 10.1,
                     col: 12.6,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime: 1.2,
             },
             Particle {
-                position: Point {
+                position: RenderPoint {
                     row: 11.1,
                     col: 13.1,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime: 0.2,
             },
             Particle {
-                position: Point {
+                position: RenderPoint {
                     row: 11.3,
                     col: 13.1,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime: 0.2,
             },
             Particle {
-                position: Point {
+                position: RenderPoint {
                     row: 10.1,
                     col: 10.1,
                 },
-                velocity: Point::ZERO,
+                velocity: RenderPoint::ZERO,
                 lifetime: 1.1,
             },
         ]));
-        let viewport = Viewport {
-            max_row: 20,
-            max_col: 20,
-        };
-        let probe = BackgroundProbeBatch::from_allowed_mask(
-            ViewportSnapshot::new(CursorRow(20), CursorCol(20)),
-            {
-                let mut allowed = vec![false; 400];
-                allowed[usize::from(9_u16) * usize::from(20_u16) + usize::from(11_u16)] = true;
-                allowed[usize::from(10_u16) * usize::from(20_u16) + usize::from(12_u16)] = true;
-                allowed
-            },
-        );
+        let viewport = viewport_bounds(20, 20);
+        let probe = BackgroundProbeBatch::from_allowed_mask(viewport_bounds(20, 20), {
+            let mut allowed = vec![false; 400];
+            allowed[usize::from(9_u16) * usize::from(20_u16) + usize::from(11_u16)] = true;
+            allowed[usize::from(10_u16) * usize::from(20_u16) + usize::from(12_u16)] = true;
+            allowed
+        });
 
-        let legacy_particle_cells = project_render_plan(
+        let expected_particle_cells = project_render_plan(
             &crate::draw::render_plan::particle_overlay_plan(&render_frame, viewport),
             viewport,
             Some(&probe),
@@ -1219,7 +1181,7 @@ mod tests {
 
         assert_eq!(
             project_particle_overlay_cells(&render_frame, viewport, Some(&probe)),
-            legacy_particle_cells,
+            expected_particle_cells,
         );
     }
 

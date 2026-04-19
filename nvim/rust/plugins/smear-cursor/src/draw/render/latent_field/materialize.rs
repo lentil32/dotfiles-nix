@@ -376,9 +376,9 @@ mod tests {
     use super::deposit_swept_occupancy;
     use super::materialize_swept_occupancy_with_scratch;
     use super::prepare_swept_occupancy_geometry;
+    use crate::position::RenderPoint;
     use crate::test_support::proptest::positive_aspect_ratio;
     use crate::test_support::proptest::pure_config;
-    use crate::types::Point;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
@@ -395,7 +395,7 @@ mod tests {
     fn aligned_pose() -> BoxedStrategy<Pose> {
         (-10_i64..=10_i64, -10_i64..=10_i64, 2_u8..=8_u8, 2_u8..=8_u8)
             .prop_map(|(row, col, half_height_steps, half_width_steps)| Pose {
-                center: Point {
+                center: RenderPoint {
                     row: row as f64 + 0.5,
                     col: col as f64 + 0.5,
                 },
@@ -576,12 +576,12 @@ mod tests {
         let mut scratch = SweepMaterializeScratch::default();
         prepare_swept_occupancy_geometry(
             Pose {
-                center: Point { row: 4.5, col: 6.5 },
+                center: RenderPoint { row: 4.5, col: 6.5 },
                 half_height: 0.5,
                 half_width: 0.5,
             },
             Pose {
-                center: Point {
+                center: RenderPoint {
                     row: 8.5,
                     col: 12.5,
                 },
@@ -606,12 +606,12 @@ mod tests {
 
         prepare_swept_occupancy_geometry(
             Pose {
-                center: Point { row: 5.5, col: 7.5 },
+                center: RenderPoint { row: 5.5, col: 7.5 },
                 half_height: 0.5,
                 half_width: 0.5,
             },
             Pose {
-                center: Point { row: 6.5, col: 8.5 },
+                center: RenderPoint { row: 6.5, col: 8.5 },
                 half_height: 0.5,
                 half_width: 0.5,
             },
@@ -638,12 +638,12 @@ mod tests {
     #[test]
     fn materialize_scratch_reuses_tile_buffer_between_band_sizes() {
         let start = Pose {
-            center: Point { row: 4.5, col: 6.5 },
+            center: RenderPoint { row: 4.5, col: 6.5 },
             half_height: 0.5,
             half_width: 0.5,
         };
         let end = Pose {
-            center: Point { row: 6.5, col: 9.5 },
+            center: RenderPoint { row: 6.5, col: 9.5 },
             half_height: 0.5,
             half_width: 0.5,
         };

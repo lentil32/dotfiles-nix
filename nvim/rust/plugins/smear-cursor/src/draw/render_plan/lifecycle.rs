@@ -41,7 +41,7 @@ pub(crate) fn frame_particle_overlay_signature(frame: &RenderFrame) -> Option<u6
 /// allowed to hide the target directly.
 pub(crate) fn plan_target_cell_overlay(
     frame: &RenderFrame,
-    viewport: Viewport,
+    viewport: ViewportBounds,
     shape: crate::types::CursorCellShape,
 ) -> Option<TargetCellOverlay> {
     if !frame.hide_target_hack {
@@ -50,7 +50,7 @@ pub(crate) fn plan_target_cell_overlay(
 
     let row = frame.target.row.round() as i64;
     let col = frame.target.col.round() as i64;
-    if row < 1 || row > viewport.max_row || col < 1 || col > viewport.max_col {
+    if row < 1 || row > viewport.max_row() || col < 1 || col > viewport.max_col() {
         return None;
     }
 
@@ -67,7 +67,7 @@ pub(crate) fn plan_target_cell_overlay(
 pub(crate) fn render_frame_to_plan(
     frame: &RenderFrame,
     state: PlannerState,
-    viewport: Viewport,
+    viewport: ViewportBounds,
 ) -> PlannerOutput {
     render_frame_to_plan_with_signature(frame, state, viewport, frame_draw_signature(frame))
 }
@@ -76,14 +76,14 @@ pub(crate) fn render_frame_to_plan(
 pub(crate) fn render_frame_to_plan_with_signature(
     frame: &RenderFrame,
     state: PlannerState,
-    viewport: Viewport,
+    viewport: ViewportBounds,
     maybe_signature: Option<u64>,
 ) -> PlannerOutput {
     let compiled = compile_render_frame(frame, state);
     decode_compiled_frame(frame, compiled, viewport, maybe_signature)
 }
 
-pub(crate) fn particle_overlay_plan(frame: &RenderFrame, viewport: Viewport) -> RenderPlan {
+pub(crate) fn particle_overlay_plan(frame: &RenderFrame, viewport: ViewportBounds) -> RenderPlan {
     let target_row = frame.target.row.round() as i64;
     let target_col = frame.target.col.round() as i64;
     let mut builder = PlanBuilder::with_capacity(viewport, 0, frame.aggregated_particle_cells().len());
@@ -105,7 +105,7 @@ pub(crate) fn particle_overlay_plan(frame: &RenderFrame, viewport: Viewport) -> 
 pub(in crate::draw::render_plan) fn decode_compiled_frame(
     frame: &RenderFrame,
     compiled_frame: CompiledPlannerFrame,
-    viewport: Viewport,
+    viewport: ViewportBounds,
     maybe_signature: Option<u64>,
 ) -> PlannerOutput {
     let CompiledPlannerFrame {

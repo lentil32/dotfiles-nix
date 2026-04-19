@@ -125,7 +125,7 @@ fn retargeting_while_settling_on_a_tick_after_the_previous_deadline_refreshes_in
     assert!(!state.is_animating());
     assert_eq!(
         state.target_position(),
-        Point {
+        RenderPoint {
             row: 5.0,
             col: 24.0
         }
@@ -138,6 +138,101 @@ fn retargeting_while_settling_on_a_tick_after_the_previous_deadline_refreshes_in
     assert_eq!(settling_window.settle_deadline_ms, 160.0);
 }
 
+#[test]
+fn shape_change_while_settling_resets_the_deadline_before_promotion() {
+    let (mut state, kickoff) = delayed_settling_scenario(20, 16);
+
+    assert!(matches!(render_action(&kickoff), RenderAction::Noop));
+    assert!(state.is_settling());
+    assert!(!state.is_animating());
+    let baseline_epoch = state.retarget_epoch();
+
+    let reshaped = reduce_cursor_event(
+        &mut state,
+        "i",
+        event_at(5.0, 16.0, 136.0),
+        EventSource::External,
+    );
+
+    assert!(matches!(render_action(&reshaped), RenderAction::Noop));
+    assert!(reshaped.should_schedule_next_animation);
+    assert_eq!(reshaped.next_animation_at_ms, Some(156));
+    assert!(state.is_settling());
+    assert!(!state.is_animating());
+    assert_eq!(
+        state.target_position(),
+        RenderPoint {
+            row: 5.0,
+            col: 16.0
+        }
+    );
+    assert_eq!(state.target_shape(), CursorShape::vertical_bar());
+    assert_eq!(state.retarget_epoch(), baseline_epoch.wrapping_add(1));
+    let settling_window = state
+        .settling_window()
+        .copied()
+        .expect("shape retarget should keep the settling window active");
+    assert_eq!(settling_window.stable_since_ms, 136.0);
+    assert_eq!(settling_window.settle_deadline_ms, 156.0);
+
+    let ready_tick = reduce_cursor_event(
+        &mut state,
+        "i",
+        event_at(5.0, 16.0, 156.0),
+        EventSource::AnimationTick,
+    );
+
+    assert!(matches!(render_action(&ready_tick), RenderAction::Draw(_)));
+    assert!(state.is_animating());
+    assert!(!state.is_settling());
+    assert_eq!(state.settling_window(), None);
+}
+
+#[test]
+fn same_key_tracking_update_while_settling_preserves_stable_since() {
+    let (mut state, kickoff) = delayed_settling_scenario(20, 16);
+
+    assert!(matches!(render_action(&kickoff), RenderAction::Noop));
+    assert!(state.is_settling());
+    let baseline_epoch = state.retarget_epoch();
+
+    let translated_tracking = TrackedCursor::fixture(10, 20, 3, 1);
+    let refresh = reduce_cursor_event(
+        &mut state,
+        "n",
+        CursorEventContext {
+            row: 5.0,
+            col: 16.0,
+            now_ms: 130.0,
+            seed: 7,
+            tracked_cursor: translated_tracking.clone(),
+            scroll_shift: None,
+            semantic_event: SemanticEvent::FrameCommitted,
+        },
+        EventSource::External,
+    );
+
+    assert!(matches!(render_action(&refresh), RenderAction::Noop));
+    assert!(refresh.should_schedule_next_animation);
+    assert_eq!(refresh.next_animation_at_ms, Some(150));
+    assert!(state.is_settling());
+    assert_eq!(
+        state.target_position(),
+        RenderPoint {
+            row: 5.0,
+            col: 16.0
+        }
+    );
+    assert_eq!(state.retarget_epoch(), baseline_epoch);
+    assert_eq!(state.tracked_cursor_ref(), Some(&translated_tracking));
+    let settling_window = state
+        .settling_window()
+        .copied()
+        .expect("same-key tracking refresh should preserve the settling window");
+    assert_eq!(settling_window.stable_since_ms, 116.0);
+    assert_eq!(settling_window.settle_deadline_ms, 150.0);
+}
+
 proptest! {
     #![proptest_config(stateful_config())]
 
@@ -145,11 +240,11 @@ proptest! {
     fn prop_delayed_settling_sequences_refresh_deadlines_until_animation_or_cancel(
         case in delayed_settling_case(),
     ) {
-        let target_position = Point {
+        let target_position = RenderPoint {
             row: 5.0,
             col: f64::from(case.target_col),
         };
-        let tracked_location = CursorLocation::new(10, 20, 1, 1);
+        let tracked_cursor = TrackedCursor::fixture(10, 20, 1, 1);
         let delay_ms = f64::from(case.delay_ms);
         let kickoff_now_ms = 116.0_f64;
         let (mut state, kickoff) = delayed_settling_scenario(case.delay_ms, case.target_col);
@@ -169,7 +264,7 @@ proptest! {
             .copied()
             .expect("kickoff should enter settling with a timing window");
         prop_assert_eq!(state.target_position(), target_position);
-        prop_assert_eq!(state.tracked_location_ref(), Some(&tracked_location));
+        prop_assert_eq!(state.tracked_cursor_ref(), Some(&tracked_cursor));
         prop_assert_eq!(settling_window.stable_since_ms, kickoff_now_ms);
         prop_assert_eq!(settling_window.settle_deadline_ms, kickoff_now_ms + delay_ms);
 
@@ -212,7 +307,7 @@ proptest! {
                 .copied()
                 .expect("refresh events should preserve the settling window");
             prop_assert_eq!(state.target_position(), target_position);
-            prop_assert_eq!(state.tracked_location_ref(), Some(&tracked_location));
+            prop_assert_eq!(state.tracked_cursor_ref(), Some(&tracked_cursor));
             prop_assert_eq!(settling_window.stable_since_ms, kickoff_now_ms);
             prop_assert_eq!(settling_window.settle_deadline_ms, expected_deadline_ms);
         }

@@ -10,6 +10,7 @@ use super::engine::reset_core_state;
 use super::timers::clear_all_core_timer_handles;
 use crate::allocation_counters;
 use crate::core::effect::ProbePolicy;
+use crate::core::effect::RetainedCursorColorFallback;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::ObservationSnapshot;
 use crate::core::state::RenderThermalState;
@@ -181,13 +182,18 @@ pub(crate) fn perf_diagnostics_report() -> String {
                 .phase_observation()
                 .and_then(ObservationSnapshot::cursor_color)
                 .is_some();
+            let retained_cursor_color_fallback = if has_phase_owned_cursor_color {
+                RetainedCursorColorFallback::CompatibleSample
+            } else {
+                RetainedCursorColorFallback::Unavailable
+            };
             let probe_policy = core
                 .active_demand()
                 .map(|demand| {
                     ProbePolicy::for_demand(
                         demand.kind(),
                         demand.buffer_perf_class(),
-                        has_phase_owned_cursor_color,
+                        retained_cursor_color_fallback,
                     )
                 })
                 .or_else(|| {
@@ -195,7 +201,7 @@ pub(crate) fn perf_diagnostics_report() -> String {
                         ProbePolicy::for_demand(
                             ExternalDemandKind::ExternalCursor,
                             policy.perf_class(),
-                            has_phase_owned_cursor_color,
+                            retained_cursor_color_fallback,
                         )
                     })
                 });

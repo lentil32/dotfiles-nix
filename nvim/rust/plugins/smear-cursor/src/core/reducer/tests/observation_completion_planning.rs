@@ -2,10 +2,10 @@ use super::*;
 
 fn completed_mode_change_observation_with_cursor_queued() -> Transition {
     let ready = ready_state();
-    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ModeChanged, 30, None);
+    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ModeChanged, 30);
     let observing_with_cursor_queued = reduce(
         &observing,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 31, None),
+        external_demand_event(ExternalDemandKind::ExternalCursor, 31),
     )
     .next;
     let request = active_request(&observing_with_cursor_queued);

@@ -1,12 +1,12 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
-fn jump_bridge_origin(frame: &RenderFrame) -> Point {
+fn jump_bridge_origin(frame: &RenderFrame) -> RenderPoint {
     let first_sample = frame
         .step_samples
         .first()
         .expect("jump bridge should start with an origin sample");
-    crate::types::current_visual_cursor_anchor(
+    crate::position::current_visual_cursor_anchor(
         &first_sample.corners,
         &frame.target_corners,
         frame.target,
@@ -50,8 +50,8 @@ fn insert_mode_jump_scroll_shift() -> ScrollShift {
     }
 }
 
-fn translated_by_scroll_shift(point: Point, scroll_shift: ScrollShift) -> Point {
-    Point {
+fn translated_by_scroll_shift(point: RenderPoint, scroll_shift: ScrollShift) -> RenderPoint {
+    RenderPoint {
         row: point.row - scroll_shift.row_shift,
         col: point.col - scroll_shift.col_shift,
     }
@@ -81,8 +81,8 @@ fn render_jump_bridge_snapshot(transition: &CursorTransition, state: &RuntimeSta
 
 fn assert_jump_bridge_origin_matches(
     transition: &CursorTransition,
-    expected_origin: Point,
-    unexpected_origin: Point,
+    expected_origin: RenderPoint,
+    unexpected_origin: RenderPoint,
     frame_context: &str,
 ) {
     let frame = draw_frame(transition)
@@ -123,7 +123,7 @@ fn assert_insert_mode_jump_bridge_starts_from_translated_live_head(case: InsertM
 
 fn mid_animation_insert_mode_jump(
     configure: impl FnOnce(&mut RuntimeState),
-) -> (RuntimeState, Point, Point, CursorTransition) {
+) -> (RuntimeState, RenderPoint, RenderPoint, CursorTransition) {
     let (mut state, _) = animating_runtime_after_kickoff(|state| {
         state.config.delay_event_to_smear = 0.0;
         configure(state);
@@ -152,7 +152,7 @@ fn mid_animation_insert_mode_jump(
 
 fn mid_animation_insert_mode_jump_with_scroll(
     configure: impl FnOnce(&mut RuntimeState),
-) -> (RuntimeState, Point, Point, CursorTransition) {
+) -> (RuntimeState, RenderPoint, RenderPoint, CursorTransition) {
     let (mut state, _) = animating_runtime_after_kickoff(|state| {
         state.config.delay_event_to_smear = 0.0;
         configure(state);
@@ -174,7 +174,7 @@ fn mid_animation_insert_mode_jump_with_scroll(
             col: 20.0,
             now_ms: 132.0,
             seed: 17,
-            cursor_location: CursorLocation::new(10, 20, 3, 2).with_viewport_columns(3, 0),
+            tracked_cursor: TrackedCursor::fixture(10, 20, 3, 2).with_viewport_columns(3, 0),
             scroll_shift: Some(insert_mode_jump_scroll_shift()),
             semantic_event: SemanticEvent::ViewportOrWindowMoved,
         },
@@ -283,7 +283,7 @@ fn animation_tick_retarget() -> (RuntimeState, u64, CursorTransition) {
             col: 24.0,
             now_ms: 132.0,
             seed: 12,
-            cursor_location: CursorLocation::new(10, 20, 1, 2),
+            tracked_cursor: TrackedCursor::fixture(10, 20, 1, 2),
             scroll_shift: None,
             semantic_event: SemanticEvent::FrameCommitted,
         },
@@ -305,7 +305,7 @@ fn insert_mode_immediate_snap_emits_a_discontinuous_jump_bridge_frame_and_update
     assert!(frame.step_samples.len() >= 3);
     assert_eq!(
         state.target_position(),
-        Point {
+        RenderPoint {
             row: 5.0,
             col: 20.0
         }
@@ -339,7 +339,7 @@ fn text_mutation_snap_clears_existing_smear_instead_of_animating() {
     assert!(!state.is_animating());
     assert_eq!(
         state.target_position(),
-        Point {
+        RenderPoint {
             row: 5.0,
             col: 20.0,
         }
@@ -394,14 +394,14 @@ fn animation_tick_retargets_update_target_and_location_while_keeping_frames_sche
     assert!(state.is_animating() || state.is_draining());
     assert_eq!(
         state.target_position(),
-        Point {
+        RenderPoint {
             row: 12.0,
             col: 24.0
         }
     );
     assert_eq!(
-        state.tracked_location(),
-        Some(CursorLocation::new(10, 20, 1, 2))
+        state.tracked_cursor(),
+        Some(TrackedCursor::fixture(10, 20, 1, 2))
     );
 }
 
