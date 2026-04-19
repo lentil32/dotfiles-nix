@@ -7,6 +7,20 @@
 let
   opengrepVersion = "1.16.0";
   opengrepReleaseBaseUrl = "https://github.com/opengrep/opengrep/releases/download/v${opengrepVersion}";
+  direnvPackage = pkgs.direnv.overrideAttrs (old: {
+    nativeCheckInputs = lib.filter (pkg: pkg != pkgs.fish) old.nativeCheckInputs;
+    # `direnv` currently flakes in `test-fish` on darwin; keep the other shell checks.
+    checkPhase = ''
+      runHook preCheck
+
+      make test-go test-bash test-zsh
+
+      runHook postCheck
+    '';
+  });
+  misePackage = pkgs.mise.override {
+    direnv = direnvPackage;
+  };
 
   opengrepReleaseForSystem =
     if pkgs.stdenvNoCC.hostPlatform.system == "aarch64-darwin" then
@@ -190,9 +204,12 @@ in
     };
     direnv = {
       enable = true;
+      package = direnvPackage;
       enableZshIntegration = true;
-      enableBashIntegration = true;
-      mise.enable = true;
+      mise = {
+        enable = true;
+        package = misePackage;
+      };
       nix-direnv.enable = true;
     };
     eza = {
@@ -212,6 +229,7 @@ in
     java.enable = true;
     mise = {
       enable = true;
+      package = misePackage;
       enableZshIntegration = true;
       globalConfig = {
         alias = {

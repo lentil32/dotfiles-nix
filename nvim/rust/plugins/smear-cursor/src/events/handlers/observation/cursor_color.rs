@@ -31,7 +31,7 @@ pub(super) fn current_cursor_color_probe_witness(
     let mode = editor.mode();
     let window_handle = i64::from(window.handle());
     let buffer_handle = i64::from(buffer.handle());
-    let changedtick = editor.current_changedtick()?;
+    let text_revision = editor.current_text_revision()?.value();
     let colorscheme_generation = cursor_color_colorscheme_generation()?;
     let cache_generation = cursor_color_cache_generation()?;
     // Cursor-color reuse stays observation-scoped until the plugin has a true highlight
@@ -39,8 +39,8 @@ pub(super) fn current_cursor_color_probe_witness(
     Ok(CursorColorProbeWitness::new(
         window_handle,
         buffer_handle,
-        changedtick,
-        mode.into_owned(),
+        text_revision,
+        mode.to_owned(),
         cursor_position,
         colorscheme_generation,
         cache_generation,
@@ -150,7 +150,7 @@ fn current_cursor_color_probe_validation(
 ) -> Result<CursorColorProbeValidation> {
     let editor = CurrentEditorSnapshot::capture()?;
     let mode = editor.mode();
-    if mode.as_ref() != expected_witness.mode() {
+    if mode != expected_witness.mode() {
         return Ok(CursorColorProbeValidation::RefreshRequired);
     }
 
@@ -159,14 +159,14 @@ fn current_cursor_color_probe_validation(
     let current_window = editor.current_window()?;
     let current_window_handle = i64::from(current_window.handle());
     let current_buffer_handle = i64::from(current_buffer.handle());
-    let current_changedtick = editor.current_changedtick()?;
+    let current_text_revision = editor.current_text_revision()?.value();
     let current_colorscheme_generation = cursor_color_colorscheme_generation()?;
     let current_cache_generation = cursor_color_cache_generation()?;
     let current_witness = CursorColorProbeWitness::new(
         current_window_handle,
         current_buffer_handle,
-        current_changedtick,
-        mode.into_owned(),
+        current_text_revision,
+        mode.to_owned(),
         current_position.position,
         current_colorscheme_generation,
         current_cache_generation,
@@ -267,6 +267,7 @@ pub(super) fn collect_cursor_color_report(
     }
 
     match sampled_cursor_color_at_current_position(
+        expected_witness.buffer_handle(),
         expected_witness.colorscheme_generation(),
         probe_policy,
     ) {

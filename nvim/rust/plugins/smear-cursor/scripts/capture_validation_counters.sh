@@ -39,6 +39,7 @@ baseline_iterations="${SMEAR_VALIDATION_BASELINE:-600}"
 windows_count="${SMEAR_VALIDATION_WINDOWS:-8}"
 drain_every="${SMEAR_VALIDATION_DRAIN_EVERY:-1}"
 report_file="${SMEAR_VALIDATION_REPORT_FILE:-}"
+export SMEAR_CARGO_FEATURES="${SMEAR_CARGO_FEATURES:-perf-counters}"
 
 IFS=',' read -r -a scenarios <<< "${scenario_csv}"
 if [[ "${#scenarios[@]}" -eq 0 ]]; then

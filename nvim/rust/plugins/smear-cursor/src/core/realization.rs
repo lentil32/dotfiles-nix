@@ -11,6 +11,7 @@ use crate::core::state::ProjectionSnapshot;
 use crate::core::state::ScenePatch;
 #[cfg(test)]
 use crate::core::state::ScenePatchKind;
+use crate::draw::PARTICLE_ZINDEX_OFFSET;
 use crate::draw::render_plan::CellOp;
 use crate::draw::render_plan::ClearOp;
 use crate::draw::render_plan::Glyph;
@@ -18,9 +19,11 @@ use crate::draw::render_plan::HighlightRef;
 use crate::draw::render_plan::RenderPlan;
 use crate::draw::render_plan::TargetCellOverlay;
 use crate::draw::render_plan::Viewport;
+use crate::octant_chars::OCTANT_CHARACTERS;
+use crate::types::ModeClass;
+use crate::types::PlannerFrame;
 use crate::types::RenderFrame;
 use crate::types::ScreenCell;
-use crate::types::StaticRenderConfig;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -30,58 +33,73 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PaletteSpec {
-    mode: String,
-    static_config: Arc<StaticRenderConfig>,
+    mode: ModeClass,
+    cursor_color: Option<String>,
+    cursor_color_insert_mode: Option<String>,
+    normal_bg: Option<String>,
+    transparent_bg_fallback_color: String,
+    cterm_cursor_colors: Option<Vec<u16>>,
+    cterm_bg: Option<u16>,
+    color_levels: u32,
+    gamma_bits: u64,
     color_at_cursor: Option<u32>,
 }
 
 impl PaletteSpec {
     pub(crate) fn from_frame(frame: &RenderFrame) -> Self {
+        let static_config = frame.static_config.as_ref();
         Self {
-            mode: frame.mode.clone(),
-            static_config: Arc::clone(&frame.static_config),
+            mode: frame.mode,
+            cursor_color: static_config.cursor_color.clone(),
+            cursor_color_insert_mode: static_config.cursor_color_insert_mode.clone(),
+            normal_bg: static_config.normal_bg.clone(),
+            transparent_bg_fallback_color: static_config.transparent_bg_fallback_color.clone(),
+            cterm_cursor_colors: static_config.cterm_cursor_colors.clone(),
+            cterm_bg: static_config.cterm_bg,
+            color_levels: static_config.color_levels,
+            gamma_bits: static_config.gamma.to_bits(),
             color_at_cursor: frame.color_at_cursor,
         }
     }
 
-    pub(crate) fn mode(&self) -> &str {
-        &self.mode
+    pub(crate) const fn mode(&self) -> ModeClass {
+        self.mode
     }
 
     pub(crate) fn cursor_color(&self) -> Option<&str> {
-        self.static_config.cursor_color.as_deref()
+        self.cursor_color.as_deref()
     }
 
     pub(crate) fn cursor_color_insert_mode(&self) -> Option<&str> {
-        self.static_config.cursor_color_insert_mode.as_deref()
+        self.cursor_color_insert_mode.as_deref()
     }
 
     pub(crate) fn normal_bg(&self) -> Option<&str> {
-        self.static_config.normal_bg.as_deref()
+        self.normal_bg.as_deref()
     }
 
     pub(crate) fn transparent_bg_fallback_color(&self) -> &str {
-        &self.static_config.transparent_bg_fallback_color
+        &self.transparent_bg_fallback_color
     }
 
     pub(crate) fn cterm_cursor_colors(&self) -> Option<&[u16]> {
-        self.static_config.cterm_cursor_colors.as_deref()
+        self.cterm_cursor_colors.as_deref()
     }
 
     pub(crate) fn cterm_bg(&self) -> Option<u16> {
-        self.static_config.cterm_bg
+        self.cterm_bg
     }
 
     pub(crate) fn color_levels(&self) -> u32 {
-        self.static_config.color_levels.max(1)
+        self.color_levels.max(1)
     }
 
     pub(crate) fn gamma(&self) -> f64 {
-        self.static_config.gamma
+        f64::from_bits(self.gamma_bits)
     }
 
     pub(crate) fn gamma_bits(&self) -> u64 {
-        self.static_config.gamma.to_bits()
+        self.gamma_bits
     }
 
     pub(crate) const fn color_at_cursor(&self) -> Option<u32> {
@@ -120,6 +138,14 @@ impl LogicalRaster {
 
     pub(crate) const fn clear(&self) -> Option<ClearOp> {
         self.clear
+    }
+
+    pub(crate) fn particle_cells(&self) -> &[CellOp] {
+        self.particle_cells.as_ref()
+    }
+
+    pub(crate) fn static_cells(&self) -> &[CellOp] {
+        self.static_cells.as_ref()
     }
 
     pub(crate) fn iter_cells(&self) -> impl Iterator<Item = &CellOp> {
@@ -180,18 +206,6 @@ impl RealizationSpan {
         hasher.finish()
     }
 
-    fn new(row: i64, col: i64, width: u32, zindex: u32, chunks: Vec<RealizationSpanChunk>) -> Self {
-        let payload_hash = Self::payload_hash_for_chunks(&chunks);
-        Self {
-            row,
-            col,
-            width,
-            zindex,
-            payload_hash,
-            chunks: Arc::from(chunks),
-        }
-    }
-
     pub(crate) const fn row(&self) -> i64 {
         self.row
     }
@@ -220,20 +234,47 @@ impl RealizationSpan {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct RealizationProjection {
     clear: Option<ClearOp>,
-    spans: Arc<[RealizationSpan]>,
+    particle_spans: Arc<[RealizationSpan]>,
+    static_spans: Arc<[RealizationSpan]>,
 }
 
 impl RealizationProjection {
-    pub(crate) fn new(clear: Option<ClearOp>, spans: Arc<[RealizationSpan]>) -> Self {
-        Self { clear, spans }
+    pub(crate) fn from_segments(
+        clear: Option<ClearOp>,
+        particle_spans: Arc<[RealizationSpan]>,
+        static_spans: Arc<[RealizationSpan]>,
+    ) -> Self {
+        Self {
+            clear,
+            particle_spans,
+            static_spans,
+        }
     }
 
     pub(crate) const fn clear(&self) -> Option<ClearOp> {
         self.clear
     }
 
-    pub(crate) fn spans(&self) -> &[RealizationSpan] {
-        self.spans.as_ref()
+    pub(crate) fn particle_spans(&self) -> &[RealizationSpan] {
+        self.particle_spans.as_ref()
+    }
+
+    pub(crate) fn static_spans(&self) -> &[RealizationSpan] {
+        self.static_spans.as_ref()
+    }
+
+    pub(crate) fn spans(&self) -> impl Iterator<Item = &RealizationSpan> + Clone {
+        self.particle_spans.iter().chain(self.static_spans.iter())
+    }
+
+    pub(crate) fn span_count(&self) -> usize {
+        self.particle_spans
+            .len()
+            .saturating_add(self.static_spans.len())
+    }
+
+    pub(crate) fn replace_particle_spans(&self, particle_spans: Arc<[RealizationSpan]>) -> Self {
+        Self::from_segments(self.clear, particle_spans, Arc::clone(&self.static_spans))
     }
 }
 
@@ -283,6 +324,7 @@ struct PendingSpan {
     width: u32,
     zindex: u32,
     chunks: Vec<RealizationSpanChunk>,
+    payload_hasher: DefaultHasher,
 }
 
 impl RealizationSpanBuilder {
@@ -291,13 +333,14 @@ impl RealizationSpanBuilder {
             return;
         };
 
-        self.spans.push(RealizationSpan::new(
-            pending.row,
-            pending.col,
-            pending.width,
-            pending.zindex,
-            pending.chunks,
-        ));
+        self.spans.push(RealizationSpan {
+            row: pending.row,
+            col: pending.col,
+            width: pending.width,
+            zindex: pending.zindex,
+            payload_hash: pending.payload_hasher.finish(),
+            chunks: Arc::from(pending.chunks),
+        });
     }
 
     fn push_cell(&mut self, cell: &CellOp) {
@@ -314,6 +357,7 @@ impl RealizationSpanBuilder {
                 width: 0,
                 zindex: cell.zindex,
                 chunks: Vec::new(),
+                payload_hasher: DefaultHasher::new(),
             });
         }
 
@@ -321,6 +365,8 @@ impl RealizationSpanBuilder {
             return;
         };
         pending.width = pending.width.saturating_add(1);
+        cell.glyph.hash(&mut pending.payload_hasher);
+        cell.highlight.hash(&mut pending.payload_hasher);
         pending
             .chunks
             .push(RealizationSpanChunk::new(cell.glyph, cell.highlight));
@@ -356,11 +402,38 @@ pub(crate) fn project_cell_ops_to_spans<'a>(
     builder.finish()
 }
 
+pub(crate) fn realize_particle_cells(particle_cells: &[CellOp]) -> Arc<[RealizationSpan]> {
+    project_cell_ops_to_spans(particle_cells.iter())
+}
+
 pub(crate) fn realize_logical_raster(raster: &LogicalRaster) -> RealizationProjection {
-    RealizationProjection::new(
+    RealizationProjection::from_segments(
         raster.clear(),
-        project_cell_ops_to_spans(raster.iter_cells()),
+        realize_particle_cells(raster.particle_cells()),
+        project_cell_ops_to_spans(raster.static_cells().iter()),
     )
+}
+
+fn push_projected_particle_cell(
+    cells: &mut Vec<CellOp>,
+    cell: CellOp,
+    requires_background_probe: bool,
+    viewport: Viewport,
+    background_probe: Option<&BackgroundProbeBatch>,
+) {
+    if !in_bounds(viewport, cell.row, cell.col) {
+        return;
+    }
+    if requires_background_probe {
+        let Some(screen_cell) = ScreenCell::new(cell.row, cell.col) else {
+            return;
+        };
+        if !background_probe.is_some_and(|probe| probe.allows_particle(screen_cell)) {
+            return;
+        }
+    }
+
+    cells.push(cell);
 }
 
 fn project_particle_ops(
@@ -371,19 +444,131 @@ fn project_particle_ops(
     let mut cells = Vec::<CellOp>::with_capacity(particle_ops.len());
 
     for op in particle_ops {
-        if !in_bounds(viewport, op.cell.row, op.cell.col) {
+        push_projected_particle_cell(
+            &mut cells,
+            op.cell,
+            op.requires_background_probe,
+            viewport,
+            background_probe,
+        );
+    }
+
+    Arc::from(cells)
+}
+
+pub(crate) fn project_particle_overlay_cells(
+    frame: &PlannerFrame,
+    viewport: Viewport,
+    background_probe: Option<&BackgroundProbeBatch>,
+) -> Arc<[CellOp]> {
+    if !frame.has_particles() {
+        return Arc::default();
+    }
+
+    let target_row = frame.target.row.round() as i64;
+    let target_col = frame.target.col.round() as i64;
+    let particle_zindex = frame.windows_zindex.saturating_sub(PARTICLE_ZINDEX_OFFSET);
+    let particle_max_lifetime = if frame.particle_max_lifetime.is_finite() {
+        frame.particle_max_lifetime.max(0.0)
+    } else {
+        0.0
+    };
+    let switch_ratio = if frame.particle_switch_octant_braille.is_finite() {
+        frame.particle_switch_octant_braille.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let lifetime_switch_octant_braille = switch_ratio * particle_max_lifetime;
+    let requires_background_probe = !frame.particles_over_text;
+    let mut cells = Vec::<CellOp>::with_capacity(frame.aggregated_particle_cells().len());
+
+    // Keep overlay refresh on the cheap path: rebuild only the particle cells directly from the
+    // retained aggregate instead of materializing a temporary one-off RenderPlan.
+    for aggregate in frame.aggregated_particle_cells() {
+        let row = aggregate.row();
+        let col = aggregate.col();
+        if row == target_row && col == target_col {
             continue;
         }
-        if op.requires_background_probe {
-            let Some(screen_cell) = ScreenCell::new(op.cell.row, op.cell.col) else {
+
+        let Some(lifetime_average) = aggregate.lifetime_average() else {
+            continue;
+        };
+
+        let shade = if lifetime_average > lifetime_switch_octant_braille {
+            let denominator = (particle_max_lifetime - lifetime_switch_octant_braille).max(1.0e-9);
+            ((lifetime_average - lifetime_switch_octant_braille) / denominator).clamp(0.0, 1.0)
+        } else {
+            let denominator = lifetime_switch_octant_braille.max(1.0e-9);
+            (lifetime_average / denominator).clamp(0.0, 1.0)
+        };
+        if !shade.is_finite() || frame.color_levels == 0 {
+            continue;
+        }
+
+        let rounded_level = ((shade * f64::from(frame.color_levels)) + 0.5).floor() as i64;
+        if rounded_level <= 0 {
+            continue;
+        }
+        let clamped_level = rounded_level.min(i64::from(frame.color_levels));
+        let Some(level) = u32::try_from(clamped_level)
+            .ok()
+            .and_then(crate::draw::render_plan::HighlightLevel::try_new)
+        else {
+            continue;
+        };
+
+        let cell = aggregate.cell();
+        let glyph = if lifetime_average > lifetime_switch_octant_braille {
+            let octant_index = usize::from(cell[0][0] > 0.0)
+                + usize::from(cell[0][1] > 0.0) * 2
+                + usize::from(cell[1][0] > 0.0) * 4
+                + usize::from(cell[1][1] > 0.0) * 8
+                + usize::from(cell[2][0] > 0.0) * 16
+                + usize::from(cell[2][1] > 0.0) * 32
+                + usize::from(cell[3][0] > 0.0) * 64
+                + usize::from(cell[3][1] > 0.0) * 128;
+            if octant_index == 0 {
+                continue;
+            }
+            let Some(character) = OCTANT_CHARACTERS
+                .get(octant_index.saturating_sub(1))
+                .copied()
+            else {
                 continue;
             };
-            if background_probe.is_some_and(|probe| probe.allows_particle(screen_cell)) {
-                cells.push(op.cell);
-            }
+            Glyph::Static(character)
         } else {
-            cells.push(op.cell);
-        }
+            let braille_index = usize::from(cell[0][0] > 0.0)
+                + usize::from(cell[1][0] > 0.0) * 2
+                + usize::from(cell[2][0] > 0.0) * 4
+                + usize::from(cell[0][1] > 0.0) * 8
+                + usize::from(cell[1][1] > 0.0) * 16
+                + usize::from(cell[2][1] > 0.0) * 32
+                + usize::from(cell[3][0] > 0.0) * 64
+                + usize::from(cell[3][1] > 0.0) * 128;
+            if braille_index == 0 {
+                continue;
+            }
+            let Ok(character) = u8::try_from(braille_index) else {
+                continue;
+            };
+            Glyph::Braille(character)
+        };
+
+        push_projected_particle_cell(
+            &mut cells,
+            CellOp {
+                row,
+                col,
+                zindex: particle_zindex,
+                glyph,
+                highlight: HighlightRef::Normal(level),
+            },
+            requires_background_probe,
+            viewport,
+            background_probe,
+        );
     }
 
     Arc::from(cells)
@@ -411,8 +596,8 @@ pub(crate) fn project_render_plan(
     }
 
     // background-dependent particle admission is resolved from the explicit
-    // observation probe before snapshot retention. The snapshot keeps only logical
-    // raster cells, and shell apply derives spans later.
+    // observation probe before snapshot retention. The retained projection keeps the
+    // logical raster and caches the realized spans for shell apply reuse.
     LogicalRaster::from_segments(plan.clear, particle_cells, Arc::from(static_cells))
 }
 
@@ -438,6 +623,9 @@ mod tests {
     use crate::test_support::proptest::pure_config;
     use crate::types::BASE_TIME_INTERVAL;
     use crate::types::CursorCellShape;
+    use crate::types::ModeClass;
+    use crate::types::Particle;
+    use crate::types::PlannerFrame;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
@@ -472,7 +660,7 @@ mod tests {
             },
         ];
         RenderFrame {
-            mode: "n".to_string(),
+            mode: ModeClass::NormalLike,
             corners,
             step_samples: vec![sample_for_corners(corners)].into(),
             planner_idle_steps: 0,
@@ -881,7 +1069,11 @@ mod tests {
             max_row: 40,
             max_col: 80,
         };
-        let planner_output = render_frame_to_plan(&frame, PlannerState::default(), viewport);
+        let planner_output = render_frame_to_plan(
+            &PlannerFrame::from_render_frame(&frame),
+            PlannerState::default(),
+            viewport,
+        );
         let raster = project_render_plan(&planner_output.plan, viewport, None);
         let realized = realize_logical_raster(&raster);
 
@@ -945,6 +1137,121 @@ mod tests {
                 static_cells[0],
                 static_cells[1],
             ]
+        );
+    }
+
+    #[test]
+    fn project_particle_overlay_cells_matches_legacy_particle_overlay_projection() {
+        let mut render_frame = representative_frame();
+        Arc::make_mut(&mut render_frame.static_config).particles_over_text = false;
+        Arc::make_mut(&mut render_frame.static_config).particle_max_lifetime = 2.0;
+        Arc::make_mut(&mut render_frame.static_config).particle_switch_octant_braille = 0.4;
+        render_frame.set_particles(Arc::new(vec![
+            Particle {
+                position: Point {
+                    row: 10.1,
+                    col: 12.1,
+                },
+                velocity: Point::ZERO,
+                lifetime: 1.6,
+            },
+            Particle {
+                position: Point {
+                    row: 10.1,
+                    col: 12.6,
+                },
+                velocity: Point::ZERO,
+                lifetime: 1.2,
+            },
+            Particle {
+                position: Point {
+                    row: 11.1,
+                    col: 13.1,
+                },
+                velocity: Point::ZERO,
+                lifetime: 0.2,
+            },
+            Particle {
+                position: Point {
+                    row: 11.3,
+                    col: 13.1,
+                },
+                velocity: Point::ZERO,
+                lifetime: 0.2,
+            },
+            Particle {
+                position: Point {
+                    row: 10.1,
+                    col: 10.1,
+                },
+                velocity: Point::ZERO,
+                lifetime: 1.1,
+            },
+        ]));
+        let frame = PlannerFrame::from_render_frame(&render_frame);
+
+        let viewport = Viewport {
+            max_row: 20,
+            max_col: 20,
+        };
+        let probe = BackgroundProbeBatch::from_allowed_mask(
+            ViewportSnapshot::new(CursorRow(20), CursorCol(20)),
+            {
+                let mut allowed = vec![false; 400];
+                allowed[usize::from(9_u16) * usize::from(20_u16) + usize::from(11_u16)] = true;
+                allowed[usize::from(10_u16) * usize::from(20_u16) + usize::from(12_u16)] = true;
+                allowed
+            },
+        );
+
+        let legacy_particle_cells = project_render_plan(
+            &crate::draw::render_plan::particle_overlay_plan(&frame, viewport),
+            viewport,
+            Some(&probe),
+        )
+        .into_particle_cells();
+
+        assert_eq!(
+            project_particle_overlay_cells(&frame, viewport, Some(&probe)),
+            legacy_particle_cells,
+        );
+    }
+
+    #[test]
+    fn project_cell_ops_to_spans_preserves_the_merged_span_payload_hash() {
+        let cells = [
+            CellOp {
+                row: 6,
+                col: 8,
+                zindex: 12,
+                glyph: Glyph::BLOCK,
+                highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(2)),
+            },
+            CellOp {
+                row: 6,
+                col: 9,
+                zindex: 12,
+                glyph: Glyph::Braille(3),
+                highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(4)),
+            },
+        ];
+        let expected_chunks = vec![
+            RealizationSpanChunk::new(cells[0].glyph, cells[0].highlight),
+            RealizationSpanChunk::new(cells[1].glyph, cells[1].highlight),
+        ];
+
+        let spans = project_cell_ops_to_spans(cells.iter());
+
+        assert_eq!(
+            spans.as_ref(),
+            &[RealizationSpan {
+                row: 6,
+                col: 8,
+                width: 2,
+                zindex: 12,
+                payload_hash: RealizationSpan::payload_hash_for_chunks(&expected_chunks),
+                chunks: Arc::from(expected_chunks),
+            }]
         );
     }
 }

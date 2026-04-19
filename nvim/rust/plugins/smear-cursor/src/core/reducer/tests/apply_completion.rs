@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn render_plan_completion_threads_observation_buffer_handle_into_apply_effect() {
+    let (armed_state, token) = timer_armed_state(ready_state_with_observation(cursor(9, 9)));
+    let transition = reduce(&armed_state, animation_tick_event(token, 62));
+    let Effect::RequestRenderPlan(payload) = transition
+        .effects
+        .into_iter()
+        .next()
+        .expect("render plan request after animation tick")
+    else {
+        panic!("expected render plan request after animation tick");
+    };
+    let proposal_id = payload.proposal_id;
+
+    let computed = reduce(
+        &transition.next,
+        Event::RenderPlanComputed(RenderPlanComputedEvent {
+            proposal_id,
+            planned_render: Box::new(
+                crate::core::reducer::build_planned_render(
+                    payload.planning,
+                    payload.proposal_id,
+                    &payload.render_decision,
+                    payload.animation_schedule,
+                )
+                .expect("planned render should satisfy proposal shape invariants"),
+            ),
+            observed_at: payload.requested_at,
+        }),
+    );
+
+    pretty_assert_eq!(
+        computed.effects,
+        vec![Effect::ApplyProposal(Box::new(
+            crate::core::effect::ApplyProposalEffect {
+                proposal: computed
+                    .next
+                    .pending_proposal()
+                    .cloned()
+                    .expect("render plan completion should stage a proposal"),
+                buffer_handle: Some(22),
+                requested_at: Millis::new(62),
+            }
+        ))]
+    );
+}
+
+#[test]
 fn apply_completed_advances_acknowledged_projection() {
     let (staged, proposal_id) =
         planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 62);
@@ -127,7 +174,7 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
-        .into_applying(proposal)
+        .enter_applying(proposal)
         .expect("staging clear proposal requires retained observation");
 
     let completed = reduce(

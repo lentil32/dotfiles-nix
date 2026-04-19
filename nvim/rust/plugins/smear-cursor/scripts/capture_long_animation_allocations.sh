@@ -41,6 +41,7 @@ baseline_iterations="${SMEAR_LONG_ANIMATION_BASELINE:-1200}"
 windows_count="${SMEAR_LONG_ANIMATION_WINDOWS:-8}"
 drain_every="${SMEAR_LONG_ANIMATION_DRAIN_EVERY:-1}"
 report_file="${SMEAR_LONG_ANIMATION_REPORT_FILE:-}"
+export SMEAR_CARGO_FEATURES="${SMEAR_CARGO_FEATURES:-perf-counters}"
 
 artifact_dir="$(mktemp -d /tmp/smear_long_animation_allocations.XXXXXX)"
 results_tsv="${artifact_dir}/long_animation_allocations.tsv"
@@ -80,6 +81,8 @@ run_once() {
   local probe_policy
   local delta_particle_simulation_steps
   local delta_particle_aggregation_calls
+  local delta_planning_preview_invocations
+  local delta_planning_preview_copied_particles
   local delta_particle_overlay_refreshes
   local delta_allocation_ops
   local allocation_ops_per_s
@@ -134,6 +137,16 @@ run_once() {
       "$(smear_extract_field "${baseline_validation_line}" "pac")" \
       "$(smear_extract_field "${warmup_validation_line}" "pac")"
   )"
+  delta_planning_preview_invocations="$(
+    calc_delta \
+      "$(smear_extract_field "${baseline_validation_line}" "ppi")" \
+      "$(smear_extract_field "${warmup_validation_line}" "ppi")"
+  )"
+  delta_planning_preview_copied_particles="$(
+    calc_delta \
+      "$(smear_extract_field "${baseline_validation_line}" "ppp")" \
+      "$(smear_extract_field "${warmup_validation_line}" "ppp")"
+  )"
   delta_particle_overlay_refreshes="$(
     calc_delta \
       "$(smear_extract_field "${baseline_validation_line}" "por")" \
@@ -152,7 +165,7 @@ run_once() {
   )"
   allocation_bytes_per_s="$(calc_rate_per_s "${delta_allocation_bytes}" "${baseline_elapsed_ms}")"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${scenario_name}" \
     "${repeat_index}" \
     "${baseline_elapsed_ms}" \
@@ -161,6 +174,8 @@ run_once() {
     "${probe_policy}" \
     "${delta_particle_simulation_steps}" \
     "${delta_particle_aggregation_calls}" \
+    "${delta_planning_preview_invocations}" \
+    "${delta_planning_preview_copied_particles}" \
     "${delta_particle_overlay_refreshes}" \
     "${delta_allocation_ops}" \
     "${allocation_ops_per_s}" \
@@ -168,7 +183,7 @@ run_once() {
     "${allocation_bytes_per_s}" \
     >>"${results_tsv}"
 
-  printf '%-24s run=%s baseline_ms=%s alloc_ops/s=%s alloc_bytes/s=%s particle_steps=%s aggregation_calls=%s overlay_refreshes=%s\n' \
+  printf '%-24s run=%s baseline_ms=%s alloc_ops/s=%s alloc_bytes/s=%s particle_steps=%s aggregation_calls=%s preview_calls=%s preview_copied_particles=%s overlay_refreshes=%s\n' \
     "${scenario_name}" \
     "${repeat_index}" \
     "${baseline_elapsed_ms}" \
@@ -176,6 +191,8 @@ run_once() {
     "${allocation_bytes_per_s}" \
     "${delta_particle_simulation_steps}" \
     "${delta_particle_aggregation_calls}" \
+    "${delta_planning_preview_invocations}" \
+    "${delta_planning_preview_copied_particles}" \
     "${delta_particle_overlay_refreshes}"
 }
 
@@ -191,11 +208,13 @@ render_summary_table() {
       baseline_us_sum += $4
       particle_steps_sum += $7
       aggregation_calls_sum += $8
-      overlay_refreshes_sum += $9
-      allocation_ops_sum += $10
-      allocation_ops_per_s_sum += $11
-      allocation_bytes_sum += $12
-      allocation_bytes_per_s_sum += $13
+      planning_preview_invocations_sum += $9
+      planning_preview_copied_particles_sum += $10
+      overlay_refreshes_sum += $11
+      allocation_ops_sum += $12
+      allocation_ops_per_s_sum += $13
+      allocation_bytes_sum += $14
+      allocation_bytes_per_s_sum += $15
       count += 1
       scenario = $1
       perf_class = $5
@@ -203,8 +222,8 @@ render_summary_table() {
     }
     END {
       if (count > 0) {
-        printf "scenario\tavg_baseline_ms\tavg_baseline_us\tperf_class\tprobe_policy\tavg_particle_simulation_steps\tavg_particle_aggregation_calls\tavg_particle_overlay_refreshes\tavg_allocation_ops\tavg_allocation_ops_per_s\tavg_allocation_bytes\tavg_allocation_bytes_per_s\n"
-        printf "%s\t%.3f\t%.3f\t%s\t%s\t%.1f\t%.1f\t%.1f\t%.1f\t%.3f\t%.1f\t%.3f\n",
+        printf "scenario\tavg_baseline_ms\tavg_baseline_us\tperf_class\tprobe_policy\tavg_particle_simulation_steps\tavg_particle_aggregation_calls\tavg_planning_preview_invocations\tavg_planning_preview_copied_particles\tavg_particle_overlay_refreshes\tavg_allocation_ops\tavg_allocation_ops_per_s\tavg_allocation_bytes\tavg_allocation_bytes_per_s\n"
+        printf "%s\t%.3f\t%.3f\t%s\t%s\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.3f\t%.1f\t%.3f\n",
           scenario,
           baseline_ms_sum / count,
           baseline_us_sum / count,
@@ -212,6 +231,8 @@ render_summary_table() {
           probe_policy,
           particle_steps_sum / count,
           aggregation_calls_sum / count,
+          planning_preview_invocations_sum / count,
+          planning_preview_copied_particles_sum / count,
           overlay_refreshes_sum / count,
           allocation_ops_sum / count,
           allocation_ops_per_s_sum / count,
@@ -222,7 +243,7 @@ render_summary_table() {
   ' "${results_tsv}" | column -t -s $'\t'
 }
 
-printf 'scenario\trun\tbaseline_elapsed_ms\tbaseline_avg_us\tperf_class\tprobe_policy\tparticle_simulation_steps\tparticle_aggregation_calls\tparticle_overlay_refreshes\tallocation_ops\tallocation_ops_per_s\tallocation_bytes\tallocation_bytes_per_s\n' >"${results_tsv}"
+printf 'scenario\trun\tbaseline_elapsed_ms\tbaseline_avg_us\tperf_class\tprobe_policy\tparticle_simulation_steps\tparticle_aggregation_calls\tplanning_preview_invocations\tplanning_preview_copied_particles\tparticle_overlay_refreshes\tallocation_ops\tallocation_ops_per_s\tallocation_bytes\tallocation_bytes_per_s\n' >"${results_tsv}"
 
 echo "repo=${repo_dir}"
 echo "artifacts=${artifact_dir}"

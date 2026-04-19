@@ -3,8 +3,8 @@ use crate::core::types::StepIndex;
 use crate::core::types::StrokeId;
 use crate::draw::BRAILLE_CODE_MIN;
 use crate::types::CursorCellShape;
+use crate::types::PlannerFrame as RenderFrame;
 use crate::types::Point;
-use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -175,6 +175,8 @@ pub(crate) struct PlannerState {
     pub(in crate::draw::render_plan) previous_cells: SharedPreviousCells,
     pub(in crate::draw::render_plan) compiled_cache: CompiledFieldCache,
     pub(in crate::draw::render_plan) decode_scratch: PlannerDecodeScratch,
+    pub(in crate::draw::render_plan) sweep_scratch:
+        super::super::latent_field::SweepMaterializeScratch,
     // Production planner truth lives in `latent_cache`; tests keep a mirrored slice log for
     // assertions over staged metadata without forcing the runtime to retain the trail twice.
     #[cfg(test)]
@@ -213,6 +215,7 @@ impl Clone for PlannerState {
             previous_cells: Arc::clone(&self.previous_cells),
             compiled_cache: self.compiled_cache.clone(),
             decode_scratch: PlannerDecodeScratch::default(),
+            sweep_scratch: super::super::latent_field::SweepMaterializeScratch::default(),
             #[cfg(test)]
             history: self.history.clone(),
         }

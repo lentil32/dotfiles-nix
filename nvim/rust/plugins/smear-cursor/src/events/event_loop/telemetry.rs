@@ -1,3 +1,4 @@
+use super::super::ingress::AutocmdIngress;
 use crate::core::effect::TimerKind;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
@@ -46,6 +47,37 @@ impl ValidationReadTelemetry {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::events) struct PlanningPreviewTelemetry {
+    pub(in crate::events) calls: u64,
+    pub(in crate::events) copied_particles: u64,
+}
+
+impl PlanningPreviewTelemetry {
+    pub(super) const fn new() -> Self {
+        Self {
+            calls: 0,
+            copied_particles: 0,
+        }
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(super) fn record_invocation(&mut self) {
+        self.calls = self.calls.saturating_add(1);
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(super) fn record_copied_particles(&mut self, particle_count: usize) {
+        saturating_add_count(&mut self.copied_particles, particle_count);
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(super) fn record_copy(&mut self, particle_count: usize) {
+        self.record_invocation();
+        self.record_copied_particles(particle_count);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::events) struct ParticlePathTelemetry {
     pub(in crate::events) simulation_steps: u64,
     pub(in crate::events) simulation_particles: u64,
@@ -67,16 +99,19 @@ impl ParticlePathTelemetry {
         }
     }
 
+    #[cfg(feature = "perf-counters")]
     pub(super) fn record_simulation_step(&mut self, particle_count: usize) {
         self.simulation_steps = self.simulation_steps.saturating_add(1);
         saturating_add_count(&mut self.simulation_particles, particle_count);
     }
 
+    #[cfg(feature = "perf-counters")]
     pub(super) fn record_aggregation(&mut self, particle_count: usize) {
         self.aggregation_calls = self.aggregation_calls.saturating_add(1);
         saturating_add_count(&mut self.aggregation_particles, particle_count);
     }
 
+    #[cfg(feature = "perf-counters")]
     pub(super) fn record_overlay_refresh(&mut self, cell_count: usize) {
         self.overlay_refreshes = self.overlay_refreshes.saturating_add(1);
         saturating_add_count(&mut self.overlay_refresh_cells, cell_count);
@@ -239,6 +274,70 @@ impl HitMissTelemetry {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::events) struct DropContinueTelemetry {
+    pub(in crate::events) dropped: u64,
+    pub(in crate::events) continued: u64,
+}
+
+impl DropContinueTelemetry {
+    pub(super) const fn new() -> Self {
+        Self {
+            dropped: 0,
+            continued: 0,
+        }
+    }
+
+    pub(super) fn record_dropped(&mut self) {
+        self.dropped = self.dropped.saturating_add(1);
+    }
+
+    pub(super) fn record_continued(&mut self) {
+        self.continued = self.continued.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::events) struct CursorAutocmdFastPathTelemetry {
+    pub(in crate::events) win_enter: DropContinueTelemetry,
+    pub(in crate::events) win_scrolled: DropContinueTelemetry,
+    pub(in crate::events) buf_enter: DropContinueTelemetry,
+}
+
+impl CursorAutocmdFastPathTelemetry {
+    pub(super) const fn new() -> Self {
+        Self {
+            win_enter: DropContinueTelemetry::new(),
+            win_scrolled: DropContinueTelemetry::new(),
+            buf_enter: DropContinueTelemetry::new(),
+        }
+    }
+
+    fn ingress_metrics_mut(
+        &mut self,
+        ingress: AutocmdIngress,
+    ) -> Option<&mut DropContinueTelemetry> {
+        match ingress {
+            AutocmdIngress::WinEnter => Some(&mut self.win_enter),
+            AutocmdIngress::WinScrolled => Some(&mut self.win_scrolled),
+            AutocmdIngress::BufEnter => Some(&mut self.buf_enter),
+            _ => None,
+        }
+    }
+
+    pub(super) fn record_dropped(&mut self, ingress: AutocmdIngress) {
+        if let Some(metrics) = self.ingress_metrics_mut(ingress) {
+            metrics.record_dropped();
+        }
+    }
+
+    pub(super) fn record_continued(&mut self, ingress: AutocmdIngress) {
+        if let Some(metrics) = self.ingress_metrics_mut(ingress) {
+            metrics.record_continued();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::events) struct ProbeReuseTelemetry {
     pub(in crate::events) exact: u64,
     pub(in crate::events) compatible: u64,
@@ -324,6 +423,8 @@ pub(in crate::events) struct PlannerTelemetry {
     pub(in crate::events) candidate_cells_built: u64,
     pub(in crate::events) reference_compiles: u64,
     pub(in crate::events) local_query_compiles: u64,
+    pub(in crate::events) projection_reuse: HitMissTelemetry,
+    pub(in crate::events) compiled_field_cache: HitMissTelemetry,
 }
 
 impl PlannerTelemetry {
@@ -339,6 +440,8 @@ impl PlannerTelemetry {
             candidate_cells_built: 0,
             reference_compiles: 0,
             local_query_compiles: 0,
+            projection_reuse: HitMissTelemetry::new(),
+            compiled_field_cache: HitMissTelemetry::new(),
         }
     }
 
@@ -381,6 +484,22 @@ impl PlannerTelemetry {
 
     pub(super) fn record_local_query_compile(&mut self) {
         self.local_query_compiles = self.local_query_compiles.saturating_add(1);
+    }
+
+    pub(super) fn record_projection_reuse_hit(&mut self) {
+        self.projection_reuse.record_hit();
+    }
+
+    pub(super) fn record_projection_reuse_miss(&mut self) {
+        self.projection_reuse.record_miss();
+    }
+
+    pub(super) fn record_compiled_field_cache_hit(&mut self) {
+        self.compiled_field_cache.record_hit();
+    }
+
+    pub(super) fn record_compiled_field_cache_miss(&mut self) {
+        self.compiled_field_cache.record_miss();
     }
 }
 
@@ -439,6 +558,7 @@ pub(in crate::events) struct RuntimeBehaviorMetrics {
     pub(in crate::events) ingress_coalesced: u64,
     pub(in crate::events) ingress_dropped: u64,
     pub(in crate::events) ingress_applied: u64,
+    pub(in crate::events) cursor_autocmd_fast_path: CursorAutocmdFastPathTelemetry,
     pub(in crate::events) observation_requests_executed: u64,
     pub(in crate::events) degraded_draw_applications: u64,
     pub(in crate::events) stale_token_events: u64,
@@ -460,6 +580,7 @@ pub(in crate::events) struct RuntimeBehaviorMetrics {
     pub(in crate::events) background_probe: ProbeTelemetry,
     pub(in crate::events) conceal_probe: ConcealProbeTelemetry,
     pub(in crate::events) planner: PlannerTelemetry,
+    pub(in crate::events) planning_preview: PlanningPreviewTelemetry,
     pub(in crate::events) particle_path: ParticlePathTelemetry,
     pub(in crate::events) validation_reads: ValidationReadTelemetry,
 }
@@ -471,6 +592,7 @@ impl RuntimeBehaviorMetrics {
             ingress_coalesced: 0,
             ingress_dropped: 0,
             ingress_applied: 0,
+            cursor_autocmd_fast_path: CursorAutocmdFastPathTelemetry::new(),
             observation_requests_executed: 0,
             degraded_draw_applications: 0,
             stale_token_events: 0,
@@ -508,6 +630,7 @@ impl RuntimeBehaviorMetrics {
             background_probe: ProbeTelemetry::new(),
             conceal_probe: ConcealProbeTelemetry::new(),
             planner: PlannerTelemetry::new(),
+            planning_preview: PlanningPreviewTelemetry::new(),
             particle_path: ParticlePathTelemetry::new(),
             validation_reads: ValidationReadTelemetry::new(),
         }
@@ -538,6 +661,20 @@ impl RuntimeBehaviorMetrics {
 
     pub(in crate::events) fn record_ingress_applied(&mut self) {
         self.ingress_applied = self.ingress_applied.saturating_add(1);
+    }
+
+    pub(in crate::events) fn record_cursor_autocmd_fast_path_dropped(
+        &mut self,
+        ingress: AutocmdIngress,
+    ) {
+        self.cursor_autocmd_fast_path.record_dropped(ingress);
+    }
+
+    pub(in crate::events) fn record_cursor_autocmd_fast_path_continued(
+        &mut self,
+        ingress: AutocmdIngress,
+    ) {
+        self.cursor_autocmd_fast_path.record_continued(ingress);
     }
 
     pub(in crate::events) fn record_observation_request_executed(&mut self) {
@@ -748,14 +885,52 @@ impl RuntimeBehaviorMetrics {
         self.planner.record_local_query_compile();
     }
 
+    pub(in crate::events) fn record_projection_reuse_hit(&mut self) {
+        self.planner.record_projection_reuse_hit();
+    }
+
+    pub(in crate::events) fn record_projection_reuse_miss(&mut self) {
+        self.planner.record_projection_reuse_miss();
+    }
+
+    pub(in crate::events) fn record_compiled_field_cache_hit(&mut self) {
+        self.planner.record_compiled_field_cache_hit();
+    }
+
+    pub(in crate::events) fn record_compiled_field_cache_miss(&mut self) {
+        self.planner.record_compiled_field_cache_miss();
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(in crate::events) fn record_planning_preview_invocation(&mut self) {
+        self.planning_preview.record_invocation();
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(in crate::events) fn record_planning_preview_copied_particles(
+        &mut self,
+        particle_count: usize,
+    ) {
+        self.planning_preview
+            .record_copied_particles(particle_count);
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(in crate::events) fn record_planning_preview_copy(&mut self, particle_count: usize) {
+        self.planning_preview.record_copy(particle_count);
+    }
+
+    #[cfg(feature = "perf-counters")]
     pub(in crate::events) fn record_particle_simulation_step(&mut self, particle_count: usize) {
         self.particle_path.record_simulation_step(particle_count);
     }
 
+    #[cfg(feature = "perf-counters")]
     pub(in crate::events) fn record_particle_aggregation(&mut self, particle_count: usize) {
         self.particle_path.record_aggregation(particle_count);
     }
 
+    #[cfg(feature = "perf-counters")]
     pub(in crate::events) fn record_particle_overlay_refresh(&mut self, cell_count: usize) {
         self.particle_path.record_overlay_refresh(cell_count);
     }

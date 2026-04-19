@@ -15,8 +15,8 @@ fn unrequested_probe_slots_reject_probe_population() {
         ProbeSlot::Unrequested
     ));
     assert!(matches!(
-        snapshot.probes().background(),
-        ProbeSlot::Unrequested
+        snapshot.background_probe_state(),
+        BackgroundProbeState::Unrequested
     ));
     assert!(snapshot.background_progress().is_none());
     assert!(
@@ -32,19 +32,10 @@ fn unrequested_probe_slots_reject_probe_population() {
     );
     assert!(
         snapshot
-            .clone()
-            .with_background_progress(BackgroundProbeProgress::new(
-                viewport,
-                BackgroundProbePlan::from_cells(Vec::new()),
-            ))
-            .is_none()
-    );
-    assert!(
-        snapshot
-            .with_background_probe(ProbeState::failed(
+            .with_background_probe_failed(
                 ProbeKind::Background.request_id(request.observation_id()),
                 ProbeFailure::ShellReadFailed,
-            ))
+            )
             .is_none()
     );
 }

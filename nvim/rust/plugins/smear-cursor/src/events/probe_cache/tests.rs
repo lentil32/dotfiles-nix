@@ -30,6 +30,7 @@ mod conceal_deltas;
 mod conceal_regions;
 mod conceal_screen_cells;
 mod cursor_text_context;
+mod invalidation;
 
 pub(super) const CURSOR_TEXT_CONTEXT_AXIS_COUNT: usize = 4;
 

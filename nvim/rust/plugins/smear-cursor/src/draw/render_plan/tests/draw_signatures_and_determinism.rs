@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_support::proptest::pure_config;
+use crate::types::ModeClass;
 use crate::types::Particle;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
@@ -10,40 +11,24 @@ fn compact_origins(max_len: usize) -> BoxedStrategy<Vec<(i16, i16)>> {
     vec((8_i16..=20_i16, 8_i16..=20_i16), 1..=max_len).boxed()
 }
 
-fn mutate_static_config(frame: &mut RenderFrame, mutator: impl FnOnce(&mut StaticRenderConfig)) {
-    let mut config = (*frame.static_config).clone();
-    mutator(&mut config);
-    frame.static_config = Arc::new(config);
-}
-
 fn mutate_signature_axis(frame: &mut RenderFrame, axis: usize, row: i16, col: i16) {
     match axis {
-        0 => frame.mode.push('i'),
+        0 => {
+            frame.mode = if frame.mode.is_insert_like() {
+                ModeClass::NormalLike
+            } else {
+                ModeClass::InsertLike
+            };
+        }
         1 => frame.vertical_bar = !frame.vertical_bar,
-        2 => frame.retarget_epoch = frame.retarget_epoch.saturating_add(1),
-        3 => frame.planner_idle_steps = frame.planner_idle_steps.saturating_add(1),
+        2 => frame.trail_stroke_id = frame.trail_stroke_id.next(),
+        3 => frame.retarget_epoch = frame.retarget_epoch.saturating_add(1),
         4 => frame.target.col += 0.5,
         5 => {
             let corners = unit_square_corners_at(row.saturating_add(1), col.saturating_add(2));
             frame.corners = corners;
             frame.target_corners = corners;
         }
-        6 => {
-            frame.step_samples = vec![
-                sample_for_corners(unit_square_corners_at(row, col)),
-                sample_for_corners(unit_square_corners_at(row, col.saturating_add(1))),
-            ]
-            .into();
-        }
-        7 => mutate_static_config(frame, |config| {
-            config.tail_duration_ms += 1.0;
-        }),
-        8 => mutate_static_config(frame, |config| {
-            config.top_k_per_cell = config.top_k_per_cell.saturating_add(1);
-        }),
-        9 => mutate_static_config(frame, |config| {
-            config.block_aspect_ratio += 0.25;
-        }),
         _ => panic!("unexpected signature mutation axis {axis}"),
     }
 }
@@ -58,6 +43,8 @@ fn planner_state_clone_shares_retained_storage_until_the_next_mutation() {
     assert!(Arc::ptr_eq(&seeded.center_history, &shared.center_history));
     assert!(Arc::ptr_eq(&seeded.previous_cells, &shared.previous_cells));
     assert!(shared.decode_scratch.centerline.is_empty());
+    assert!(seeded.sweep_scratch.tile_capacity() > 0);
+    assert_eq!(shared.sweep_scratch.tile_capacity(), 0);
 
     let advanced = render_frame_to_plan(&single_sample_frame(12, 14), shared, viewport).next_state;
 
@@ -77,6 +64,21 @@ fn planner_state_clone_shares_retained_storage_until_the_next_mutation() {
 #[test]
 fn frame_particle_overlay_signature_skips_empty_overlay_frames() {
     assert_eq!(frame_particle_overlay_signature(&base_frame()), None);
+}
+
+#[test]
+fn frame_draw_signature_ignores_policy_only_inputs() {
+    let baseline = quiescent_frame(10, 10);
+    let baseline_signature = frame_draw_signature(&baseline);
+
+    assert_eq!(
+        baseline_signature,
+        frame_draw_signature(&with_block_aspect_ratio(&baseline, 1.0))
+    );
+    assert_eq!(
+        baseline_signature,
+        frame_draw_signature(&with_trail_thickness(&baseline, 2.0))
+    );
 }
 
 proptest! {
@@ -107,7 +109,7 @@ proptest! {
     fn prop_frame_draw_signature_changes_when_any_representative_hashed_axis_changes(
         row in 8_i16..=20_i16,
         col in 8_i16..=20_i16,
-        axis in 0_usize..10_usize,
+        axis in 0_usize..6_usize,
     ) {
         let first = single_sample_frame(row, col);
         let mut second = first.clone();

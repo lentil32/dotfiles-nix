@@ -95,11 +95,47 @@ fn returning_to_the_current_cursor_leaves_the_runtime_idle_and_cursor_visible() 
     assert!(matches!(render_action(&returned), RenderAction::Noop));
     assert!(!state.is_animating());
     assert!(!state.is_settling());
-    assert_eq!(state.pending_target(), None);
+    assert_eq!(state.settling_window(), None);
     assert_eq!(
         render_side_effects(&returned).cursor_visibility,
         CursorVisibilityEffect::Show
     );
+}
+
+#[test]
+fn retargeting_while_settling_on_a_tick_after_the_previous_deadline_refreshes_instead_of_promoting()
+{
+    let (mut state, kickoff) = delayed_settling_scenario(20, 16);
+
+    assert!(matches!(render_action(&kickoff), RenderAction::Noop));
+    assert!(state.is_settling());
+    assert!(!state.is_animating());
+
+    let retarget = reduce_cursor_event(
+        &mut state,
+        "n",
+        event_at(5.0, 24.0, 140.0),
+        EventSource::AnimationTick,
+    );
+
+    assert!(matches!(render_action(&retarget), RenderAction::Noop));
+    assert!(retarget.should_schedule_next_animation);
+    assert_eq!(retarget.next_animation_at_ms, Some(160));
+    assert!(state.is_settling());
+    assert!(!state.is_animating());
+    assert_eq!(
+        state.target_position(),
+        Point {
+            row: 5.0,
+            col: 24.0
+        }
+    );
+    let settling_window = state
+        .settling_window()
+        .copied()
+        .expect("retargeted settle should still carry a timing window");
+    assert_eq!(settling_window.stable_since_ms, 140.0);
+    assert_eq!(settling_window.settle_deadline_ms, 160.0);
 }
 
 proptest! {
@@ -128,15 +164,14 @@ proptest! {
         prop_assert_eq!(render_cleanup_action(&kickoff), RenderCleanupAction::Invalidate);
         prop_assert!(state.is_settling());
         prop_assert!(!state.is_animating());
-        {
-            let pending = state
-                .pending_target()
-                .expect("kickoff should enter settling with a pending target");
-            prop_assert_eq!(pending.position, target_position);
-            prop_assert_eq!(&pending.cursor_location, &tracked_location);
-            prop_assert_eq!(pending.stable_since_ms, kickoff_now_ms);
-            prop_assert_eq!(pending.settle_deadline_ms, kickoff_now_ms + delay_ms);
-        }
+        let settling_window = state
+            .settling_window()
+            .copied()
+            .expect("kickoff should enter settling with a timing window");
+        prop_assert_eq!(state.target_position(), target_position);
+        prop_assert_eq!(state.tracked_location_ref(), Some(&tracked_location));
+        prop_assert_eq!(settling_window.stable_since_ms, kickoff_now_ms);
+        prop_assert_eq!(settling_window.settle_deadline_ms, kickoff_now_ms + delay_ms);
 
         let mut now_ms = kickoff_now_ms;
         let mut expected_deadline_ms = kickoff_now_ms + delay_ms;
@@ -172,13 +207,14 @@ proptest! {
             prop_assert!(state.is_settling());
             prop_assert!(!state.is_animating());
 
-            let pending = state
-                .pending_target()
-                .expect("refresh events should preserve the settling target");
-            prop_assert_eq!(pending.position, target_position);
-            prop_assert_eq!(&pending.cursor_location, &tracked_location);
-            prop_assert_eq!(pending.stable_since_ms, kickoff_now_ms);
-            prop_assert_eq!(pending.settle_deadline_ms, expected_deadline_ms);
+            let settling_window = state
+                .settling_window()
+                .copied()
+                .expect("refresh events should preserve the settling window");
+            prop_assert_eq!(state.target_position(), target_position);
+            prop_assert_eq!(state.tracked_location_ref(), Some(&tracked_location));
+            prop_assert_eq!(settling_window.stable_since_ms, kickoff_now_ms);
+            prop_assert_eq!(settling_window.settle_deadline_ms, expected_deadline_ms);
         }
 
         match case.terminal {
@@ -204,7 +240,7 @@ proptest! {
                 );
                 prop_assert!(state.is_animating());
                 prop_assert!(!state.is_settling());
-                prop_assert_eq!(state.pending_target(), None);
+                prop_assert_eq!(state.settling_window(), None);
             }
             TerminalEvent::ReturnToCurrent { gap_ms } => {
                 now_ms += f64::from(gap_ms);
@@ -232,7 +268,7 @@ proptest! {
                 );
                 prop_assert!(!state.is_animating());
                 prop_assert!(!state.is_settling());
-                prop_assert_eq!(state.pending_target(), None);
+                prop_assert_eq!(state.settling_window(), None);
             }
         }
     }

@@ -1,9 +1,12 @@
+use super::CellRect;
 use super::EPSILON;
 use super::MICRO_H;
 use super::MICRO_W;
+use super::MaterializedTile;
 use super::MicroTile;
 use super::Pose;
 use super::SAMPLE_Q12_SCALE;
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -53,8 +56,8 @@ impl AxisSampleProjection {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub(in super::super) struct SweptOccupancyGeometry {
+#[derive(Debug, Default)]
+struct SweptOccupancyGeometry {
     row_projections: Vec<(i64, SampleProjectionRow)>,
     col_projections: Vec<(i64, SampleProjectionCol)>,
     safe_aspect_ratio: f64,
@@ -66,8 +69,31 @@ pub(in super::super) struct SweptOccupancyGeometry {
 
 #[derive(Debug, Default)]
 pub(in super::super) struct SweepMaterializeScratch {
+    geometry: SweptOccupancyGeometry,
     row_intervals: Vec<(i64, SampleIntervals<MICRO_H>)>,
     col_intervals: Vec<(i64, SampleIntervals<MICRO_W>)>,
+    tiles: Vec<MaterializedTile>,
+}
+
+impl SweepMaterializeScratch {
+    pub(in super::super) fn materialized_tiles(&self) -> &[MaterializedTile] {
+        &self.tiles
+    }
+
+    #[cfg(test)]
+    pub(in super::super) fn tile_capacity(&self) -> usize {
+        self.tiles.capacity()
+    }
+
+    #[cfg(test)]
+    pub(in super::super) fn row_projection_capacity(&self) -> usize {
+        self.geometry.row_projections.capacity()
+    }
+
+    #[cfg(test)]
+    pub(in super::super) fn col_projection_capacity(&self) -> usize {
+        self.geometry.col_projections.capacity()
+    }
 }
 
 type SampleProjectionRow = [AxisSampleProjection; MICRO_H];
@@ -100,17 +126,19 @@ type AxisInterval = (f64, f64);
 type SampleIntervals<const N: usize> = [Option<AxisInterval>; N];
 type SampleProjection<const N: usize> = [AxisSampleProjection; N];
 
-fn axis_projections_for_cells<const N: usize>(
+fn populate_axis_projections_for_cells_with_target<const N: usize>(
     min_cell: i64,
     max_cell: i64,
     sample_scale: f64,
     start: f64,
     end: f64,
     max_half_extent: f64,
-) -> Vec<(i64, SampleProjection<N>)> {
+    target: &mut Vec<(i64, SampleProjection<N>)>,
+) {
+    target.clear();
     let cell_count =
         usize::try_from(max_cell.saturating_sub(min_cell).saturating_add(1)).unwrap_or_default();
-    let mut cells = Vec::with_capacity(cell_count);
+    target.reserve(cell_count.saturating_sub(target.len()));
 
     for cell in min_cell..=max_cell {
         let mut projections = [AxisSampleProjection::Invalid; N];
@@ -123,11 +151,9 @@ fn axis_projections_for_cells<const N: usize>(
         }
 
         if any_coverage {
-            cells.push((cell, projections));
+            target.push((cell, projections));
         }
     }
-
-    cells
 }
 
 fn populate_axis_intervals_from_projections<const N: usize>(
@@ -158,7 +184,8 @@ pub(in super::super) fn prepare_swept_occupancy_geometry(
     block_aspect_ratio: f64,
     thickness_y: f64,
     thickness_x: f64,
-) -> SweptOccupancyGeometry {
+    scratch: &mut SweepMaterializeScratch,
+) {
     let safe_aspect_ratio = if block_aspect_ratio.is_finite() {
         block_aspect_ratio.max(EPSILON)
     } else {
@@ -179,53 +206,61 @@ pub(in super::super) fn prepare_swept_occupancy_geometry(
     let max_half_width = (base_half_width * width_scale).max(EPSILON);
     let max_half_height = (base_half_height * height_scale).max(EPSILON);
 
-    let mut geometry = SweptOccupancyGeometry {
-        safe_aspect_ratio,
-        base_half_height,
-        base_half_width,
-        max_half_height,
-        max_half_width,
-        ..SweptOccupancyGeometry::default()
-    };
+    let geometry = &mut scratch.geometry;
+    geometry.safe_aspect_ratio = safe_aspect_ratio;
+    geometry.base_half_height = base_half_height;
+    geometry.base_half_width = base_half_width;
+    geometry.max_half_height = max_half_height;
+    geometry.max_half_width = max_half_width;
+    geometry.row_projections.clear();
+    geometry.col_projections.clear();
 
     let Some((min_row, max_row)) =
         sample_center_cell_span(start.center.row, end.center.row, max_half_height, MICRO_H)
     else {
-        return geometry;
+        return;
     };
     let Some((min_col, max_col)) =
         sample_center_cell_span(start.center.col, end.center.col, max_half_width, MICRO_W)
     else {
-        return geometry;
+        return;
     };
 
-    geometry.row_projections = axis_projections_for_cells::<MICRO_H>(
+    populate_axis_projections_for_cells_with_target::<MICRO_H>(
         min_row,
         max_row,
         safe_aspect_ratio,
         start.center.row * safe_aspect_ratio,
         end.center.row * safe_aspect_ratio,
         max_half_height * safe_aspect_ratio,
+        &mut geometry.row_projections,
     );
-    geometry.col_projections = axis_projections_for_cells::<MICRO_W>(
+    populate_axis_projections_for_cells_with_target::<MICRO_W>(
         min_col,
         max_col,
         1.0,
         start.center.col,
         end.center.col,
         max_half_width,
+        &mut geometry.col_projections,
     );
-    geometry
 }
 
 pub(in super::super) fn materialize_swept_occupancy_with_scratch(
-    geometry: &SweptOccupancyGeometry,
     thickness_y: f64,
     thickness_x: f64,
     scratch: &mut SweepMaterializeScratch,
-) -> BTreeMap<(i64, i64), MicroTile> {
+) -> Option<CellRect> {
+    let SweepMaterializeScratch {
+        geometry,
+        row_intervals,
+        col_intervals,
+        tiles,
+    } = scratch;
+    tiles.clear();
+
     if geometry.row_projections.is_empty() || geometry.col_projections.is_empty() {
-        return BTreeMap::new();
+        return None;
     }
 
     let width_scale = if thickness_x.is_finite() {
@@ -249,21 +284,19 @@ pub(in super::super) fn materialize_swept_occupancy_with_scratch(
     populate_axis_intervals_from_projections(
         &geometry.row_projections,
         half_height * geometry.safe_aspect_ratio,
-        &mut scratch.row_intervals,
+        row_intervals,
     );
-    populate_axis_intervals_from_projections(
-        &geometry.col_projections,
-        half_width,
-        &mut scratch.col_intervals,
-    );
-    if scratch.row_intervals.is_empty() || scratch.col_intervals.is_empty() {
-        return BTreeMap::new();
+    populate_axis_intervals_from_projections(&geometry.col_projections, half_width, col_intervals);
+    if row_intervals.is_empty() || col_intervals.is_empty() {
+        return None;
     }
 
-    let mut tiles = BTreeMap::<(i64, i64), MicroTile>::new();
+    let prepared_tile_capacity = row_intervals.len().saturating_mul(col_intervals.len());
+    tiles.reserve(prepared_tile_capacity.saturating_sub(tiles.len()));
+    let mut bbox = None::<CellRect>;
 
-    for (row, row_intervals) in &scratch.row_intervals {
-        for (col, col_intervals) in &scratch.col_intervals {
+    for (row, row_intervals) in row_intervals.iter() {
+        for (col, col_intervals) in col_intervals.iter() {
             let mut tile = MicroTile::default();
             let mut any_coverage = false;
 
@@ -286,12 +319,26 @@ pub(in super::super) fn materialize_swept_occupancy_with_scratch(
             }
 
             if any_coverage {
-                tiles.insert((*row, *col), tile);
+                // Row-major emission keeps deterministic iteration order without rebuilding a
+                // tree-shaped container on the hot path.
+                tiles.push(MaterializedTile {
+                    coord: (*row, *col),
+                    tile,
+                });
+                bbox = Some(match bbox {
+                    Some(bounds) => CellRect::new(
+                        bounds.min_row.min(*row),
+                        bounds.max_row.max(*row),
+                        bounds.min_col.min(*col),
+                        bounds.max_col.max(*col),
+                    ),
+                    None => CellRect::new(*row, *row, *col, *col),
+                });
             }
         }
     }
 
-    tiles
+    bbox
 }
 
 #[cfg(test)]
@@ -302,10 +349,21 @@ pub(in super::super) fn deposit_swept_occupancy(
     thickness_y: f64,
     thickness_x: f64,
 ) -> BTreeMap<(i64, i64), MicroTile> {
-    let geometry =
-        prepare_swept_occupancy_geometry(start, end, block_aspect_ratio, thickness_y, thickness_x);
     let mut scratch = SweepMaterializeScratch::default();
-    materialize_swept_occupancy_with_scratch(&geometry, thickness_y, thickness_x, &mut scratch)
+    prepare_swept_occupancy_geometry(
+        start,
+        end,
+        block_aspect_ratio,
+        thickness_y,
+        thickness_x,
+        &mut scratch,
+    );
+    let _ = materialize_swept_occupancy_with_scratch(thickness_y, thickness_x, &mut scratch);
+    scratch
+        .materialized_tiles()
+        .iter()
+        .map(|tile| (tile.coord, tile.tile))
+        .collect()
 }
 
 #[cfg(test)]
@@ -322,6 +380,7 @@ mod tests {
     use crate::test_support::proptest::pure_config;
     use crate::types::Point;
     use proptest::prelude::*;
+    use std::collections::BTreeMap;
 
     #[derive(Clone, Debug)]
     struct MaterializeFixture {
@@ -395,6 +454,16 @@ mod tests {
             .boxed()
     }
 
+    fn materialized_tiles_map(
+        scratch: &SweepMaterializeScratch,
+    ) -> BTreeMap<(i64, i64), super::super::MicroTile> {
+        scratch
+            .materialized_tiles()
+            .iter()
+            .map(|tile| (tile.coord, tile.tile))
+            .collect()
+    }
+
     proptest! {
         #![proptest_config(pure_config())]
 
@@ -402,14 +471,15 @@ mod tests {
         fn prop_deposit_bounds_cover_endpoints_and_shared_geometry_matches_direct_materialization(
             fixture in materialize_fixture(),
         ) {
-            let geometry = prepare_swept_occupancy_geometry(
+            let mut scratch = SweepMaterializeScratch::default();
+            prepare_swept_occupancy_geometry(
                 fixture.start,
                 fixture.end,
                 fixture.block_aspect_ratio,
                 fixture.max_thickness_y,
                 fixture.max_thickness_x,
+                &mut scratch,
             );
-            let mut scratch = SweepMaterializeScratch::default();
             let start_cell = (
                 fixture.start.center.row.floor() as i64,
                 fixture.start.center.col.floor() as i64,
@@ -428,13 +498,13 @@ mod tests {
                     *thickness_x,
                 );
                 let shared = materialize_swept_occupancy_with_scratch(
-                    &geometry,
                     *thickness_y,
                     *thickness_x,
                     &mut scratch,
                 );
+                let shared_tiles = materialized_tiles_map(&scratch);
                 prop_assert_eq!(
-                    &shared,
+                    &shared_tiles,
                     &direct,
                     "shared sweep geometry should preserve direct deposition for {:?}",
                     band,
@@ -444,6 +514,7 @@ mod tests {
                     // center falls inside the swept support for this band.
                     continue;
                 };
+                prop_assert_eq!(shared, Some(bbox));
 
                 prop_assert!(bbox.contains(start_cell));
                 prop_assert!(bbox.contains(end_cell));
@@ -454,28 +525,26 @@ mod tests {
         fn prop_shared_sweep_geometry_materialization_is_order_independent(
             fixture in materialize_fixture(),
         ) {
-            let geometry = prepare_swept_occupancy_geometry(
-                fixture.start,
-                fixture.end,
-                fixture.block_aspect_ratio,
-                fixture.max_thickness_y,
-                fixture.max_thickness_x,
-            );
             let materialize_band_order =
                 |ordered_band_thicknesses: &[(TailBand, f64, f64)]| {
                     let mut scratch = SweepMaterializeScratch::default();
+                    prepare_swept_occupancy_geometry(
+                        fixture.start,
+                        fixture.end,
+                        fixture.block_aspect_ratio,
+                        fixture.max_thickness_y,
+                        fixture.max_thickness_x,
+                        &mut scratch,
+                    );
                     ordered_band_thicknesses
                         .iter()
                         .map(|(band, thickness_y, thickness_x)| {
-                            (
-                                *band,
-                                materialize_swept_occupancy_with_scratch(
-                                    &geometry,
-                                    *thickness_y,
-                                    *thickness_x,
-                                    &mut scratch,
-                                ),
-                            )
+                            let _ = materialize_swept_occupancy_with_scratch(
+                                *thickness_y,
+                                *thickness_x,
+                                &mut scratch,
+                            );
+                            (*band, materialized_tiles_map(&scratch))
                         })
                         .collect::<Vec<_>>()
                 };
@@ -500,5 +569,103 @@ mod tests {
                 prop_assert_eq!(forward_tiles, reverse_tiles);
             }
         }
+    }
+
+    #[test]
+    fn materialize_scratch_reuses_projection_and_tile_buffers_between_prepares() {
+        let mut scratch = SweepMaterializeScratch::default();
+        prepare_swept_occupancy_geometry(
+            Pose {
+                center: Point { row: 4.5, col: 6.5 },
+                half_height: 0.5,
+                half_width: 0.5,
+            },
+            Pose {
+                center: Point {
+                    row: 8.5,
+                    col: 12.5,
+                },
+                half_height: 0.5,
+                half_width: 0.5,
+            },
+            2.0,
+            1.5,
+            1.5,
+            &mut scratch,
+        );
+        let _ = materialize_swept_occupancy_with_scratch(1.5, 1.5, &mut scratch);
+        let first_capacities = (
+            scratch.row_projection_capacity(),
+            scratch.col_projection_capacity(),
+            scratch.tile_capacity(),
+        );
+        assert!(
+            first_capacities.0 > 0 && first_capacities.1 > 0 && first_capacities.2 > 0,
+            "wide sweep should retain reusable projection and tile capacity"
+        );
+
+        prepare_swept_occupancy_geometry(
+            Pose {
+                center: Point { row: 5.5, col: 7.5 },
+                half_height: 0.5,
+                half_width: 0.5,
+            },
+            Pose {
+                center: Point { row: 6.5, col: 8.5 },
+                half_height: 0.5,
+                half_width: 0.5,
+            },
+            2.0,
+            0.75,
+            0.75,
+            &mut scratch,
+        );
+        let second_bbox = materialize_swept_occupancy_with_scratch(0.75, 0.75, &mut scratch);
+        assert!(
+            second_bbox.is_some(),
+            "narrower sweep should still materialize coverage"
+        );
+        assert_eq!(
+            (
+                scratch.row_projection_capacity(),
+                scratch.col_projection_capacity(),
+                scratch.tile_capacity(),
+            ),
+            first_capacities
+        );
+    }
+
+    #[test]
+    fn materialize_scratch_reuses_tile_buffer_between_band_sizes() {
+        let start = Pose {
+            center: Point { row: 4.5, col: 6.5 },
+            half_height: 0.5,
+            half_width: 0.5,
+        };
+        let end = Pose {
+            center: Point { row: 6.5, col: 9.5 },
+            half_height: 0.5,
+            half_width: 0.5,
+        };
+        let mut scratch = SweepMaterializeScratch::default();
+        prepare_swept_occupancy_geometry(start, end, 2.0, 1.5, 1.5, &mut scratch);
+
+        let first_bbox = materialize_swept_occupancy_with_scratch(1.5, 1.5, &mut scratch);
+        let first_capacity = scratch.tile_capacity();
+        assert!(
+            first_bbox.is_some(),
+            "wide sweep should materialize coverage"
+        );
+        assert!(
+            first_capacity > 0,
+            "materialized tiles should retain reusable capacity"
+        );
+
+        let second_bbox = materialize_swept_occupancy_with_scratch(0.75, 0.75, &mut scratch);
+        assert!(
+            second_bbox.is_some(),
+            "narrower sweep should still materialize coverage"
+        );
+        assert_eq!(scratch.tile_capacity(), first_capacity);
     }
 }

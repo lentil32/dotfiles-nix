@@ -59,9 +59,7 @@ function M.start_timer_once(slot_id, token_generation, timeout)
   local slot = timer_slot(slot_id)
   slot.handle:stop()
   slot.handle:start(timeout, 0, function()
-    vim.schedule(function()
-      dispatch_core_timer(slot_id, token_generation)
-    end)
+    dispatch_core_timer(slot_id, token_generation)
   end)
 
   return slot_id

@@ -117,8 +117,10 @@ pub(super) fn compiled_field_for_state(
         && cache.latent_revision == state.latent_cache.revision()
         && cache.query_bounds == query_bounds;
     if cache_is_current {
+        crate::events::record_compiled_field_cache_hit();
         return std::sync::Arc::clone(&cache.field);
     }
+    crate::events::record_compiled_field_cache_miss();
 
     let compiled = std::sync::Arc::new(match query_bounds {
         Some(bounds) => {

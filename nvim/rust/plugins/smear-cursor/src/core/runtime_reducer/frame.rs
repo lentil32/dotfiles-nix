@@ -2,7 +2,9 @@ use super::ScrollShift;
 use super::as_delay_ms;
 use crate::core::state::BufferPerfClass;
 use crate::state::RuntimeState;
+use crate::types::ModeClass;
 use crate::types::Particle;
+use crate::types::ParticleScreenCellsMode;
 use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
@@ -19,7 +21,7 @@ fn build_step_input(
     buffer_perf_class: BufferPerfClass,
 ) -> StepInput {
     StepInput {
-        mode: mode.to_string(),
+        mode: ModeClass::from(mode),
         time_interval,
         config_time_interval: time_interval,
         head_response_ms: state.config.head_response_ms,
@@ -64,7 +66,7 @@ pub(crate) fn build_render_frame(
     state: &mut RuntimeState,
     mode: &str,
     render_corners: [Point; 4],
-    step_samples: Vec<RenderStepSample>,
+    mut step_samples: Vec<RenderStepSample>,
     planner_idle_steps: u32,
     target: Point,
     vertical_bar: bool,
@@ -73,12 +75,12 @@ pub(crate) fn build_render_frame(
     let (particle_count, aggregated_particle_cells, particle_screen_cells) =
         if buffer_perf_class.keeps_ornamental_effects() {
             let particle_count = state.particles().len();
-            let aggregated_particle_cells = state.shared_aggregated_particle_cells();
-            let particle_screen_cells = if state.config.particles_over_text {
-                Arc::default()
-            } else {
-                state.shared_particle_screen_cells()
-            };
+            let (aggregated_particle_cells, particle_screen_cells) =
+                if state.config.particles_over_text {
+                    state.shared_particle_artifacts(ParticleScreenCellsMode::Skip)
+                } else {
+                    state.shared_particle_artifacts(ParticleScreenCellsMode::Collect)
+                };
             (
                 particle_count,
                 aggregated_particle_cells,
@@ -87,11 +89,17 @@ pub(crate) fn build_render_frame(
         } else {
             (0, Arc::default(), Arc::default())
         };
+    let shared_step_samples = if step_samples.is_empty() {
+        Arc::default()
+    } else {
+        Arc::from(step_samples.as_slice())
+    };
+    state.reclaim_render_step_samples_scratch(std::mem::take(&mut step_samples));
 
     RenderFrame {
-        mode: mode.to_string(),
+        mode: ModeClass::from(mode),
         corners: render_corners,
-        step_samples: std::sync::Arc::from(step_samples),
+        step_samples: shared_step_samples,
         planner_idle_steps,
         target,
         target_corners: state.target_corners(),

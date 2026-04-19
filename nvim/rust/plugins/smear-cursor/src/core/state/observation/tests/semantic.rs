@@ -140,12 +140,14 @@ fn semantic_classifier_detects_motion_without_text_mutation() {
     let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
     let previous = ObservationSnapshot::new(
         request.clone(),
-        observation_basis(&request, viewport).with_cursor_text_context(Some(text_context(
-            8,
-            7,
-            &["before", "alpha", "after"],
-            None,
-        ))),
+        observation_basis(&request, viewport).with_cursor_text_context_state(
+            CursorTextContextState::Sampled(text_context(
+                8,
+                7,
+                &["before", "alpha", "after"],
+                None,
+            )),
+        ),
         ObservationMotion::default(),
     );
     let current = ObservationSnapshot::new(
@@ -161,7 +163,7 @@ fn semantic_classifier_detects_motion_without_text_mutation() {
             CursorLocation::new(1, 1, 1, 8),
             viewport,
         )
-        .with_cursor_text_context(Some(text_context(
+        .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
             8,
             8,
             &["alpha", "after", "tail"],
@@ -261,27 +263,25 @@ fn semantic_classifier_detects_mode_change() {
 fn semantic_classifier_prioritizes_text_mutation_before_viewport_motion() {
     let request = observation_request(ProbeRequestSet::default());
     let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
-    let previous = ObservationSnapshot::new(
-        request.clone(),
-        ObservationBasis::new(
-            request.observation_id(),
-            Millis::new(10),
-            "n".to_string(),
-            Some(CursorPosition {
-                row: CursorRow(5),
-                col: CursorCol(5),
-            }),
-            CursorLocation::new(1, 1, 1, 9),
-            viewport,
-        )
-        .with_cursor_text_context(Some(text_context(
-            10,
-            9,
-            &["header", "alpha", "tail"],
-            None,
-        ))),
-        ObservationMotion::default(),
-    );
+    let previous =
+        ObservationSnapshot::new(
+            request.clone(),
+            ObservationBasis::new(
+                request.observation_id(),
+                Millis::new(10),
+                "n".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(5),
+                    col: CursorCol(5),
+                }),
+                CursorLocation::new(1, 1, 1, 9),
+                viewport,
+            )
+            .with_cursor_text_context_state(CursorTextContextState::Sampled(
+                text_context(10, 9, &["header", "alpha", "tail"], None),
+            )),
+            ObservationMotion::default(),
+        );
     let current = ObservationSnapshot::new(
         request,
         ObservationBasis::new(
@@ -295,7 +295,7 @@ fn semantic_classifier_prioritizes_text_mutation_before_viewport_motion() {
             CursorLocation::new(1, 1, 4, 10),
             viewport,
         )
-        .with_cursor_text_context(Some(text_context(
+        .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
             11,
             10,
             &["alpha pasted", "block", "tail"],

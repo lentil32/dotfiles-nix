@@ -3,6 +3,7 @@ use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
+use crate::events::ingress::AutocmdIngress;
 use std::cell::RefCell;
 
 mod state;
@@ -133,6 +134,24 @@ pub(super) fn record_ingress_dropped() {
 pub(super) fn record_ingress_applied() {
     with_runtime_metrics(RuntimeBehaviorMetrics::record_ingress_applied);
 }
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_cursor_autocmd_fast_path_dropped(ingress: AutocmdIngress) {
+    with_runtime_metrics(|metrics| metrics.record_cursor_autocmd_fast_path_dropped(ingress));
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[allow(dead_code)]
+pub(super) fn record_cursor_autocmd_fast_path_dropped(_ingress: AutocmdIngress) {}
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_cursor_autocmd_fast_path_continued(ingress: AutocmdIngress) {
+    with_runtime_metrics(|metrics| metrics.record_cursor_autocmd_fast_path_continued(ingress));
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[allow(dead_code)]
+pub(super) fn record_cursor_autocmd_fast_path_continued(_ingress: AutocmdIngress) {}
 
 pub(super) fn record_observation_request_executed() {
     with_runtime_metrics(RuntimeBehaviorMetrics::record_observation_request_executed);
@@ -344,30 +363,90 @@ pub(super) fn record_planner_candidate_cells_built_count(count: usize) {
     );
 }
 
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_projection_reuse_hit() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_projection_reuse_hit);
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[allow(dead_code)]
+pub(super) fn record_projection_reuse_hit() {}
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_projection_reuse_miss() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_projection_reuse_miss);
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[allow(dead_code)]
+pub(super) fn record_projection_reuse_miss() {}
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_compiled_field_cache_hit() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_compiled_field_cache_hit);
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[allow(dead_code)]
+pub(super) fn record_compiled_field_cache_hit() {}
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_compiled_field_cache_miss() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_compiled_field_cache_miss);
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[allow(dead_code)]
+pub(super) fn record_compiled_field_cache_miss() {}
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_planning_preview_invocation() {
+    with_runtime_metrics(RuntimeBehaviorMetrics::record_planning_preview_invocation);
+}
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_planning_preview_copied_particles(particle_count: usize) {
+    with_runtime_metrics(|metrics| {
+        metrics.record_planning_preview_copied_particles(particle_count)
+    });
+}
+
+#[cfg(feature = "perf-counters")]
+pub(super) fn record_planning_preview_copy(particle_count: usize) {
+    with_runtime_metrics(|metrics| metrics.record_planning_preview_copy(particle_count));
+}
+
+#[cfg(feature = "perf-counters")]
 pub(super) fn record_particle_simulation_step(particle_count: usize) {
     with_runtime_metrics(|metrics| metrics.record_particle_simulation_step(particle_count));
 }
 
+#[cfg(feature = "perf-counters")]
 pub(super) fn record_particle_aggregation(particle_count: usize) {
     with_runtime_metrics(|metrics| metrics.record_particle_aggregation(particle_count));
 }
 
+#[cfg(feature = "perf-counters")]
 pub(super) fn record_particle_overlay_refresh(cell_count: usize) {
     with_runtime_metrics(|metrics| metrics.record_particle_overlay_refresh(cell_count));
 }
 
+#[cfg(feature = "perf-counters")]
 pub(super) fn record_buffer_metadata_read() {
     with_runtime_metrics(RuntimeBehaviorMetrics::record_buffer_metadata_read);
 }
 
+#[cfg(feature = "perf-counters")]
 pub(super) fn record_current_buffer_changedtick_read() {
     with_runtime_metrics(RuntimeBehaviorMetrics::record_current_buffer_changedtick_read);
 }
 
+#[cfg(feature = "perf-counters")]
 pub(super) fn record_editor_bounds_read() {
     with_runtime_metrics(RuntimeBehaviorMetrics::record_editor_bounds_read);
 }
 
+#[cfg(feature = "perf-counters")]
 pub(super) fn record_command_row_read() {
     with_runtime_metrics(RuntimeBehaviorMetrics::record_command_row_read);
 }

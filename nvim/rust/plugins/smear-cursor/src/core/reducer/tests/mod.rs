@@ -7,6 +7,7 @@ use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::IngressCursorPresentationRequest;
+use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::ObservationRuntimeContext;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::ProbeQuality;
@@ -35,11 +36,13 @@ use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbeChunk;
 use crate::core::state::BackgroundProbeChunkMask;
 use crate::core::state::BackgroundProbePlan;
+use crate::core::state::BackgroundProbeState;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
 use crate::core::state::CursorColorSample;
 use crate::core::state::CursorPositionSync;
 use crate::core::state::CursorTextContext;
+use crate::core::state::CursorTextContextState;
 use crate::core::state::DegradedApplyMetrics;
 use crate::core::state::DemandQueue;
 use crate::core::state::ExternalDemand;
@@ -121,7 +124,7 @@ impl ObservationScenario {
                 .with_background_probe_plan(BackgroundProbePlan::from_cells(plan_cells));
         let next = observing
             .clone()
-            .with_last_cursor(Some(cursor(7, 8)))
+            .with_latest_exact_cursor_position(Some(cursor(7, 8)))
             .with_active_observation(Some(observation.clone()))
             .expect("observation should stay active");
         let cursor_color_fallback = retained_cursor_color_fallback(&observing);
@@ -193,4 +196,5 @@ mod probe_failure_retention;
 mod probe_refresh_retry_budget;
 mod probe_retry;
 mod protocol_shared_state_constructors;
+mod protocol_workflow_slots;
 mod timer_interleavings;

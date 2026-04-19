@@ -20,8 +20,14 @@ use crate::core::types::ProposalId;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
+enum PreparedObservationRuntime {
+    Preview(crate::state::PreparedRuntimeMotion),
+    Unchanged,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PreparedObservationPlan {
-    prepared_motion: crate::state::PreparedRuntimeMotion,
+    runtime: PreparedObservationRuntime,
     transition: CursorTransition,
 }
 
@@ -31,22 +37,59 @@ impl PreparedObservationPlan {
         transition: CursorTransition,
     ) -> Self {
         Self {
-            prepared_motion,
+            runtime: PreparedObservationRuntime::Preview(prepared_motion),
+            transition,
+        }
+    }
+
+    pub(crate) fn unchanged(transition: CursorTransition) -> Self {
+        Self {
+            runtime: PreparedObservationRuntime::Unchanged,
             transition,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn apply_to_runtime(&self, runtime: &mut crate::state::RuntimeState) {
-        runtime.apply_prepared_motion(self.prepared_motion.clone());
+        if let PreparedObservationRuntime::Preview(prepared_motion) = &self.runtime {
+            runtime.apply_prepared_motion(prepared_motion.clone());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepared_particles_capacity(&self) -> usize {
+        match &self.runtime {
+            PreparedObservationRuntime::Preview(prepared_motion) => {
+                prepared_motion.particles_capacity()
+            }
+            PreparedObservationRuntime::Unchanged => 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retains_preview_motion(&self) -> bool {
+        matches!(&self.runtime, PreparedObservationRuntime::Preview(_))
     }
 
     pub(crate) fn transition(&self) -> &CursorTransition {
         &self.transition
     }
 
-    pub(crate) fn into_parts(self) -> (crate::state::PreparedRuntimeMotion, CursorTransition) {
-        (self.prepared_motion, self.transition)
+    pub(crate) fn reclaim_preview_particles_into(self, runtime: &mut crate::state::RuntimeState) {
+        let PreparedObservationRuntime::Preview(prepared_motion) = self.runtime else {
+            return;
+        };
+        runtime.reclaim_preview_particles_scratch(prepared_motion.into_particles());
+    }
+
+    pub(crate) fn apply_to_runtime_and_take_transition(
+        self,
+        runtime: &mut crate::state::RuntimeState,
+    ) -> CursorTransition {
+        if let PreparedObservationRuntime::Preview(prepared_motion) = self.runtime {
+            runtime.apply_prepared_motion(prepared_motion);
+        }
+        self.transition
     }
 }
 
@@ -81,143 +124,303 @@ impl ProtocolSharedState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ObservationSlotKind {
+    Empty,
+    Retained,
+    Active,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+enum ObservationSlot {
+    #[default]
+    Empty,
+    Retained(ObservationSnapshot),
+    Active(ObservationSnapshot),
+}
+
+impl ObservationSlot {
+    const fn kind(&self) -> ObservationSlotKind {
+        match self {
+            Self::Empty => ObservationSlotKind::Empty,
+            Self::Retained(_) => ObservationSlotKind::Retained,
+            Self::Active(_) => ObservationSlotKind::Active,
+        }
+    }
+
+    const fn active(&self) -> Option<&ObservationSnapshot> {
+        match self {
+            Self::Active(observation) => Some(observation),
+            Self::Empty | Self::Retained(_) => None,
+        }
+    }
+
+    fn active_mut(&mut self) -> Option<&mut ObservationSnapshot> {
+        match self {
+            Self::Active(observation) => Some(observation),
+            Self::Empty | Self::Retained(_) => None,
+        }
+    }
+
+    const fn retained(&self) -> Option<&ObservationSnapshot> {
+        match self {
+            Self::Retained(observation) | Self::Active(observation) => Some(observation),
+            Self::Empty => None,
+        }
+    }
+
+    fn take_retained(&mut self) -> Option<ObservationSnapshot> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Retained(observation) => Some(observation),
+            slot @ (Self::Empty | Self::Active(_)) => {
+                *self = slot;
+                None
+            }
+        }
+    }
+
+    fn set_retained(&mut self, observation: Option<ObservationSnapshot>) {
+        *self = observation.map_or(Self::Empty, Self::Retained);
+    }
+
+    fn into_retained(self) -> Self {
+        match self {
+            Self::Active(observation) | Self::Retained(observation) => Self::Retained(observation),
+            Self::Empty => Self::Empty,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ProtocolWorkflowKind {
+    Idle,
+    Primed,
+    ObservingRequest,
+    ObservingActive,
+    Ready,
+    Planning,
+    Applying,
+    Recovering,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ProtocolState {
-    Idle {
-        shared: ProtocolSharedState,
-    },
+pub(crate) enum ProtocolWorkflow {
+    Idle,
     // initialization now owns only the protocol bootstrap edge; all planning reads
     // enter through the observation shell after the first external demand arrives.
-    Primed {
-        shared: ProtocolSharedState,
-    },
+    Primed,
     ObservingRequest {
-        shared: ProtocolSharedState,
         request: ObservationRequest,
-        retained_observation: Option<ObservationSnapshot>,
         probe_refresh: ProbeRefreshState,
     },
     ObservingActive {
-        shared: ProtocolSharedState,
         request: ObservationRequest,
-        observation: ObservationSnapshot,
         probe_refresh: ProbeRefreshState,
         prepared_plan: Option<Box<PreparedObservationPlan>>,
     },
-    Ready {
-        shared: ProtocolSharedState,
-        observation: ObservationSnapshot,
-    },
+    Ready,
     Planning {
-        shared: ProtocolSharedState,
-        observation: ObservationSnapshot,
         proposal_id: ProposalId,
     },
     Applying {
-        shared: ProtocolSharedState,
-        observation: ObservationSnapshot,
         proposal: Box<InFlightProposal>,
     },
-    Recovering {
-        shared: ProtocolSharedState,
-        observation: Option<ObservationSnapshot>,
-    },
+    Recovering,
 }
 
-impl Default for ProtocolState {
-    fn default() -> Self {
-        Self::Idle {
-            shared: ProtocolSharedState::default(),
-        }
-    }
-}
-
-impl ProtocolState {
-    const fn shared(&self) -> &ProtocolSharedState {
+impl ProtocolWorkflow {
+    pub(crate) const fn kind(&self) -> ProtocolWorkflowKind {
         match self {
-            Self::Idle { shared }
-            | Self::Primed { shared }
-            | Self::ObservingRequest { shared, .. }
-            | Self::ObservingActive { shared, .. }
-            | Self::Ready { shared, .. }
-            | Self::Planning { shared, .. }
-            | Self::Applying { shared, .. }
-            | Self::Recovering { shared, .. } => shared,
-        }
-    }
-
-    fn shared_mut(&mut self) -> &mut ProtocolSharedState {
-        match self {
-            Self::Idle { shared }
-            | Self::Primed { shared }
-            | Self::ObservingRequest { shared, .. }
-            | Self::ObservingActive { shared, .. }
-            | Self::Ready { shared, .. }
-            | Self::Planning { shared, .. }
-            | Self::Applying { shared, .. }
-            | Self::Recovering { shared, .. } => shared,
-        }
-    }
-
-    fn into_shared(self) -> ProtocolSharedState {
-        match self {
-            Self::Idle { shared }
-            | Self::Primed { shared }
-            | Self::ObservingRequest { shared, .. }
-            | Self::ObservingActive { shared, .. }
-            | Self::Ready { shared, .. }
-            | Self::Planning { shared, .. }
-            | Self::Applying { shared, .. }
-            | Self::Recovering { shared, .. } => shared,
-        }
-    }
-
-    fn into_shared_and_retained_observation(
-        self,
-    ) -> (ProtocolSharedState, Option<ObservationSnapshot>) {
-        match self {
-            Self::Idle { shared } | Self::Primed { shared } => (shared, None),
-            Self::ObservingRequest {
-                shared,
-                retained_observation,
-                ..
-            } => (shared, retained_observation),
-            Self::ObservingActive {
-                shared,
-                observation,
-                ..
-            } => (shared, Some(observation)),
-            Self::Recovering {
-                shared,
-                observation,
-            } => (shared, observation),
-            Self::Ready {
-                shared,
-                observation,
-            }
-            | Self::Planning {
-                shared,
-                observation,
-                ..
-            }
-            | Self::Applying {
-                shared,
-                observation,
-                ..
-            } => (shared, Some(observation)),
+            Self::Idle => ProtocolWorkflowKind::Idle,
+            Self::Primed => ProtocolWorkflowKind::Primed,
+            Self::ObservingRequest { .. } => ProtocolWorkflowKind::ObservingRequest,
+            Self::ObservingActive { .. } => ProtocolWorkflowKind::ObservingActive,
+            Self::Ready => ProtocolWorkflowKind::Ready,
+            Self::Planning { .. } => ProtocolWorkflowKind::Planning,
+            Self::Applying { .. } => ProtocolWorkflowKind::Applying,
+            Self::Recovering => ProtocolWorkflowKind::Recovering,
         }
     }
 
     pub(crate) const fn lifecycle(&self) -> Lifecycle {
-        match self {
-            Self::Idle { .. } => Lifecycle::Idle,
-            Self::Primed { .. } => Lifecycle::Primed,
-            Self::ObservingRequest { .. } | Self::ObservingActive { .. } => Lifecycle::Observing,
-            Self::Ready { .. } => Lifecycle::Ready,
-            Self::Planning { .. } => Lifecycle::Planning,
-            Self::Applying { .. } => Lifecycle::Applying,
-            Self::Recovering { .. } => Lifecycle::Recovering,
+        match self.kind() {
+            ProtocolWorkflowKind::Idle => Lifecycle::Idle,
+            ProtocolWorkflowKind::Primed => Lifecycle::Primed,
+            ProtocolWorkflowKind::ObservingRequest | ProtocolWorkflowKind::ObservingActive => {
+                Lifecycle::Observing
+            }
+            ProtocolWorkflowKind::Ready => Lifecycle::Ready,
+            ProtocolWorkflowKind::Planning => Lifecycle::Planning,
+            ProtocolWorkflowKind::Applying => Lifecycle::Applying,
+            ProtocolWorkflowKind::Recovering => Lifecycle::Recovering,
         }
+    }
+}
+
+const fn workflow_allows_observation_slot(
+    workflow: ProtocolWorkflowKind,
+    observation: ObservationSlotKind,
+) -> bool {
+    match workflow {
+        ProtocolWorkflowKind::Idle | ProtocolWorkflowKind::Primed => {
+            matches!(observation, ObservationSlotKind::Empty)
+        }
+        ProtocolWorkflowKind::ObservingRequest | ProtocolWorkflowKind::Recovering => {
+            matches!(
+                observation,
+                ObservationSlotKind::Empty | ObservationSlotKind::Retained
+            )
+        }
+        ProtocolWorkflowKind::ObservingActive
+        | ProtocolWorkflowKind::Ready
+        | ProtocolWorkflowKind::Planning
+        | ProtocolWorkflowKind::Applying => matches!(observation, ObservationSlotKind::Active),
+    }
+}
+
+#[cfg(test)]
+pub(crate) const fn workflow_allows_observation_slot_for_tests(
+    workflow: ProtocolWorkflowKind,
+    observation: ObservationSlotKind,
+) -> bool {
+    workflow_allows_observation_slot(workflow, observation)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProtocolState {
+    shared: ProtocolSharedState,
+    observation: ObservationSlot,
+    workflow: ProtocolWorkflow,
+}
+
+impl Default for ProtocolState {
+    fn default() -> Self {
+        Self::idle()
+    }
+}
+
+impl ProtocolState {
+    // Keep every protocol workflow transition behind named assembly helpers so the
+    // workflow/slot matrix is expressed once instead of via repeated field surgery.
+    fn assemble(
+        shared: ProtocolSharedState,
+        observation: ObservationSlot,
+        workflow: ProtocolWorkflow,
+    ) -> Self {
+        let state = Self {
+            shared,
+            observation,
+            workflow,
+        };
+        state.debug_assert_invariants();
+        state
+    }
+
+    fn idle() -> Self {
+        Self::assemble(
+            ProtocolSharedState::default(),
+            ObservationSlot::Empty,
+            ProtocolWorkflow::Idle,
+        )
+    }
+
+    fn primed(shared: ProtocolSharedState) -> Self {
+        Self::assemble(shared, ObservationSlot::Empty, ProtocolWorkflow::Primed)
+    }
+
+    fn observing_request(
+        shared: ProtocolSharedState,
+        observation: ObservationSlot,
+        request: ObservationRequest,
+        probe_refresh: ProbeRefreshState,
+    ) -> Self {
+        Self::assemble(
+            shared,
+            observation,
+            ProtocolWorkflow::ObservingRequest {
+                request,
+                probe_refresh,
+            },
+        )
+    }
+
+    fn observing_active(
+        shared: ProtocolSharedState,
+        observation: ObservationSnapshot,
+        request: ObservationRequest,
+        probe_refresh: ProbeRefreshState,
+        prepared_plan: Option<Box<PreparedObservationPlan>>,
+    ) -> Self {
+        Self::assemble(
+            shared,
+            ObservationSlot::Active(observation),
+            ProtocolWorkflow::ObservingActive {
+                request,
+                probe_refresh,
+                prepared_plan,
+            },
+        )
+    }
+
+    fn ready(shared: ProtocolSharedState, observation: ObservationSnapshot) -> Self {
+        Self::assemble(
+            shared,
+            ObservationSlot::Active(observation),
+            ProtocolWorkflow::Ready,
+        )
+    }
+
+    fn planning(
+        shared: ProtocolSharedState,
+        observation: ObservationSnapshot,
+        proposal_id: ProposalId,
+    ) -> Self {
+        Self::assemble(
+            shared,
+            ObservationSlot::Active(observation),
+            ProtocolWorkflow::Planning { proposal_id },
+        )
+    }
+
+    fn applying(
+        shared: ProtocolSharedState,
+        observation: ObservationSnapshot,
+        proposal: Box<InFlightProposal>,
+    ) -> Self {
+        Self::assemble(
+            shared,
+            ObservationSlot::Active(observation),
+            ProtocolWorkflow::Applying { proposal },
+        )
+    }
+
+    fn recovering(shared: ProtocolSharedState, observation: ObservationSlot) -> Self {
+        Self::assemble(shared, observation, ProtocolWorkflow::Recovering)
+    }
+
+    const fn shared(&self) -> &ProtocolSharedState {
+        &self.shared
+    }
+
+    fn shared_mut(&mut self) -> &mut ProtocolSharedState {
+        &mut self.shared
+    }
+
+    fn into_parts(self) -> (ProtocolSharedState, ObservationSlot, ProtocolWorkflow) {
+        (self.shared, self.observation, self.workflow)
+    }
+
+    pub(crate) const fn workflow_kind(&self) -> ProtocolWorkflowKind {
+        self.workflow.kind()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn observation_slot_kind(&self) -> ObservationSlotKind {
+        self.observation.kind()
+    }
+
+    pub(crate) const fn lifecycle(&self) -> Lifecycle {
+        self.workflow.lifecycle()
     }
 
     pub(crate) const fn demand(&self) -> &DemandQueue {
@@ -241,47 +444,72 @@ impl ProtocolState {
     }
 
     pub(crate) fn observation(&self) -> Option<&ObservationSnapshot> {
-        match self {
-            Self::Idle { .. } | Self::Primed { .. } => None,
-            Self::ObservingRequest { .. } | Self::Recovering { .. } => None,
-            Self::ObservingActive { observation, .. }
-            | Self::Ready { observation, .. }
-            | Self::Planning { observation, .. }
-            | Self::Applying { observation, .. } => Some(observation),
-        }
+        self.observation.active()
     }
 
     pub(crate) fn observation_mut(&mut self) -> Option<&mut ObservationSnapshot> {
-        match self {
-            Self::Idle { .. } | Self::Primed { .. } => None,
-            Self::ObservingRequest { .. } | Self::Recovering { .. } => None,
-            Self::ObservingActive { observation, .. }
-            | Self::Ready { observation, .. }
-            | Self::Planning { observation, .. }
-            | Self::Applying { observation, .. } => Some(observation),
-        }
+        self.observation.active_mut()
     }
 
     pub(crate) fn retained_observation(&self) -> Option<&ObservationSnapshot> {
-        match self {
-            Self::Idle { .. } | Self::Primed { .. } => None,
-            Self::ObservingRequest {
-                retained_observation,
-                ..
-            } => retained_observation.as_ref(),
-            Self::ObservingActive { observation, .. }
-            | Self::Ready { observation, .. }
-            | Self::Planning { observation, .. }
-            | Self::Applying { observation, .. } => Some(observation),
-            Self::Recovering { observation, .. } => observation.as_ref(),
+        self.observation.retained()
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_invariants(&self) {
+        let workflow_kind = self.workflow.kind();
+        let observation_kind = self.observation.kind();
+        debug_assert!(
+            workflow_allows_observation_slot(workflow_kind, observation_kind),
+            "workflow {workflow_kind:?} does not allow observation slot {observation_kind:?}"
+        );
+
+        match (workflow_kind, observation_kind) {
+            (ProtocolWorkflowKind::Idle, ObservationSlotKind::Empty)
+            | (ProtocolWorkflowKind::Primed, ObservationSlotKind::Empty)
+            | (ProtocolWorkflowKind::ObservingRequest, ObservationSlotKind::Empty)
+            | (ProtocolWorkflowKind::Recovering, ObservationSlotKind::Empty) => {}
+            (ProtocolWorkflowKind::ObservingRequest, ObservationSlotKind::Retained)
+            | (ProtocolWorkflowKind::Recovering, ObservationSlotKind::Retained) => {
+                let Some(observation) = self.retained_observation() else {
+                    unreachable!("retained slot should contain an observation");
+                };
+                observation.debug_assert_invariants();
+            }
+            (ProtocolWorkflowKind::ObservingActive, ObservationSlotKind::Active) => {
+                let Some(observation) = self.observation() else {
+                    unreachable!("active slot should expose an observation");
+                };
+                observation.debug_assert_invariants();
+                let ProtocolWorkflow::ObservingActive { request, .. } = &self.workflow else {
+                    unreachable!("observing-active kind must come from observing-active workflow");
+                };
+                debug_assert_eq!(
+                    observation.request().observation_id(),
+                    request.observation_id(),
+                    "active observation must stay paired with its observation request"
+                );
+            }
+            (ProtocolWorkflowKind::Ready, ObservationSlotKind::Active)
+            | (ProtocolWorkflowKind::Planning, ObservationSlotKind::Active)
+            | (ProtocolWorkflowKind::Applying, ObservationSlotKind::Active) => {
+                let Some(observation) = self.observation() else {
+                    unreachable!("active slot should expose an observation");
+                };
+                observation.debug_assert_invariants();
+            }
+            _ => unreachable!("invalid workflow/slot combination should be rejected above"),
         }
     }
+
+    #[cfg(not(debug_assertions))]
+    fn debug_assert_invariants(&self) {}
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct CoreStatePayload {
     pub(crate) entropy: EntropyState,
-    pub(crate) last_cursor: Option<CursorPosition>,
+    pub(crate) latest_exact_cursor_position: Option<CursorPosition>,
     pub(crate) scene: Rc<SceneState>,
     pub(crate) realization: RealizationLedger,
 }
@@ -304,6 +532,13 @@ impl Default for CoreState {
 }
 
 impl CoreState {
+    fn recycle_staged_prepared_observation_plan(&mut self) {
+        let Some(prepared_plan) = self.take_prepared_observation_plan() else {
+            return;
+        };
+        prepared_plan.reclaim_preview_particles_into(self.runtime_mut());
+    }
+
     fn map_protocol<F>(mut self, map: F) -> Self
     where
         F: FnOnce(ProtocolState) -> ProtocolState,
@@ -334,6 +569,15 @@ impl CoreState {
         self.generation.next()
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_invariants(&self) {
+        self.runtime().debug_assert_invariants();
+        self.protocol.debug_assert_invariants();
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub(crate) fn debug_assert_invariants(&self) {}
+
     pub(crate) const fn lifecycle(&self) -> Lifecycle {
         self.protocol.lifecycle()
     }
@@ -343,11 +587,21 @@ impl CoreState {
     }
 
     pub(crate) const fn needs_initialize(&self) -> bool {
-        matches!(self.protocol, ProtocolState::Idle { .. })
+        matches!(self.protocol.workflow_kind(), ProtocolWorkflowKind::Idle)
     }
 
-    pub(crate) const fn last_cursor(&self) -> Option<CursorPosition> {
-        self.payload.last_cursor
+    pub(crate) const fn latest_exact_cursor_position(&self) -> Option<CursorPosition> {
+        self.payload.latest_exact_cursor_position
+    }
+
+    pub(crate) const fn fallback_cursor_position(
+        &self,
+        observed_cursor_position: Option<CursorPosition>,
+    ) -> Option<CursorPosition> {
+        match observed_cursor_position {
+            Some(cursor_position) => Some(cursor_position),
+            None => self.latest_exact_cursor_position(),
+        }
     }
 
     pub(crate) const fn timers(&self) -> TimerState {
@@ -375,18 +629,28 @@ impl CoreState {
     }
 
     pub(crate) fn active_demand(&self) -> Option<&ExternalDemand> {
-        match &self.protocol {
-            ProtocolState::ObservingRequest { request, .. }
-            | ProtocolState::ObservingActive { request, .. } => Some(request.demand()),
-            _ => None,
+        match &self.protocol.workflow {
+            ProtocolWorkflow::ObservingRequest { request, .. }
+            | ProtocolWorkflow::ObservingActive { request, .. } => Some(request.demand()),
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => None,
         }
     }
 
     pub(crate) fn active_observation_request(&self) -> Option<&ObservationRequest> {
-        match &self.protocol {
-            ProtocolState::ObservingRequest { request, .. }
-            | ProtocolState::ObservingActive { request, .. } => Some(request),
-            _ => None,
+        match &self.protocol.workflow {
+            ProtocolWorkflow::ObservingRequest { request, .. }
+            | ProtocolWorkflow::ObservingActive { request, .. } => Some(request),
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => None,
         }
     }
 
@@ -403,46 +667,34 @@ impl CoreState {
     }
 
     pub(crate) fn take_retained_observation(&mut self) -> Option<ObservationSnapshot> {
-        match &mut self.protocol {
-            ProtocolState::ObservingRequest {
-                retained_observation,
-                ..
+        match self.protocol.workflow_kind() {
+            ProtocolWorkflowKind::ObservingRequest | ProtocolWorkflowKind::Recovering => {
+                self.protocol.observation.take_retained()
             }
-            | ProtocolState::Recovering {
-                observation: retained_observation,
-                ..
-            } => retained_observation.take(),
-            ProtocolState::Idle { .. }
-            | ProtocolState::Primed { .. }
-            | ProtocolState::ObservingActive { .. }
-            | ProtocolState::Ready { .. }
-            | ProtocolState::Planning { .. }
-            | ProtocolState::Applying { .. } => None,
+            ProtocolWorkflowKind::Idle
+            | ProtocolWorkflowKind::Primed
+            | ProtocolWorkflowKind::ObservingActive
+            | ProtocolWorkflowKind::Ready
+            | ProtocolWorkflowKind::Planning
+            | ProtocolWorkflowKind::Applying => None,
         }
     }
 
-    pub(crate) fn set_retained_observation(
+    pub(crate) fn restore_retained_observation(
         &mut self,
         observation: Option<ObservationSnapshot>,
     ) -> bool {
-        match &mut self.protocol {
-            ProtocolState::ObservingRequest {
-                retained_observation,
-                ..
-            }
-            | ProtocolState::Recovering {
-                observation: retained_observation,
-                ..
-            } => {
-                *retained_observation = observation;
+        match self.protocol.workflow_kind() {
+            ProtocolWorkflowKind::ObservingRequest | ProtocolWorkflowKind::Recovering => {
+                self.protocol.observation.set_retained(observation);
                 true
             }
-            ProtocolState::Idle { .. }
-            | ProtocolState::Primed { .. }
-            | ProtocolState::ObservingActive { .. }
-            | ProtocolState::Ready { .. }
-            | ProtocolState::Planning { .. }
-            | ProtocolState::Applying { .. } => false,
+            ProtocolWorkflowKind::Idle
+            | ProtocolWorkflowKind::Primed
+            | ProtocolWorkflowKind::ObservingActive
+            | ProtocolWorkflowKind::Ready
+            | ProtocolWorkflowKind::Planning
+            | ProtocolWorkflowKind::Applying => false,
         }
     }
 
@@ -482,16 +734,28 @@ impl CoreState {
     }
 
     pub(crate) fn pending_proposal(&self) -> Option<&InFlightProposal> {
-        match &self.protocol {
-            ProtocolState::Applying { proposal, .. } => Some(proposal.as_ref()),
-            _ => None,
+        match &self.protocol.workflow {
+            ProtocolWorkflow::Applying { proposal } => Some(proposal.as_ref()),
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::ObservingRequest { .. }
+            | ProtocolWorkflow::ObservingActive { .. }
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Recovering => None,
         }
     }
 
     pub(crate) const fn pending_plan_proposal_id(&self) -> Option<ProposalId> {
-        match &self.protocol {
-            ProtocolState::Planning { proposal_id, .. } => Some(*proposal_id),
-            _ => None,
+        match &self.protocol.workflow {
+            ProtocolWorkflow::Planning { proposal_id } => Some(*proposal_id),
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::ObservingRequest { .. }
+            | ProtocolWorkflow::ObservingActive { .. }
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => None,
         }
     }
 
@@ -520,8 +784,11 @@ impl CoreState {
         self
     }
 
-    pub(crate) fn with_last_cursor(mut self, last_cursor: Option<CursorPosition>) -> Self {
-        self.payload.last_cursor = last_cursor;
+    pub(crate) fn with_latest_exact_cursor_position(
+        mut self,
+        latest_exact_cursor_position: Option<CursorPosition>,
+    ) -> Self {
+        self.payload.latest_exact_cursor_position = latest_exact_cursor_position;
         self
     }
 
@@ -553,15 +820,16 @@ impl CoreState {
         (self, result)
     }
 
-    pub(crate) fn into_observing(self, request: ObservationRequest) -> Self {
+    pub(crate) fn enter_observing_request(mut self, request: ObservationRequest) -> Self {
+        self.recycle_staged_prepared_observation_plan();
         self.map_protocol(|protocol| {
-            let (shared, retained_observation) = protocol.into_shared_and_retained_observation();
-            ProtocolState::ObservingRequest {
+            let (shared, observation, _) = protocol.into_parts();
+            ProtocolState::observing_request(
                 shared,
+                observation.into_retained(),
                 request,
-                retained_observation,
-                probe_refresh: ProbeRefreshState::default(),
-            }
+                ProbeRefreshState::default(),
+            )
         })
     }
 
@@ -571,68 +839,63 @@ impl CoreState {
         observation: Option<ObservationSnapshot>,
     ) -> Option<Self> {
         let mut state = self;
-        state.set_active_observation(observation).then_some(state)
-    }
-
-    pub(crate) const fn probe_refresh_state(&self) -> Option<ProbeRefreshState> {
-        match self.protocol() {
-            ProtocolState::ObservingRequest { probe_refresh, .. }
-            | ProtocolState::ObservingActive { probe_refresh, .. } => Some(*probe_refresh),
-            _ => None,
+        match observation {
+            Some(observation) => state.activate_observation(observation).then_some(state),
+            None => state.clear_active_observation().then_some(state),
         }
     }
 
-    pub(crate) fn set_active_observation(
-        &mut self,
-        observation: Option<ObservationSnapshot>,
-    ) -> bool {
+    pub(crate) const fn probe_refresh_state(&self) -> Option<ProbeRefreshState> {
+        match &self.protocol.workflow {
+            ProtocolWorkflow::ObservingRequest { probe_refresh, .. }
+            | ProtocolWorkflow::ObservingActive { probe_refresh, .. } => Some(*probe_refresh),
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => None,
+        }
+    }
+
+    pub(crate) fn activate_observation(&mut self, observation: ObservationSnapshot) -> bool {
         let protocol = std::mem::take(&mut self.protocol);
         match protocol {
-            ProtocolState::ObservingRequest {
+            ProtocolState {
                 shared,
-                request,
-                probe_refresh,
+                workflow:
+                    ProtocolWorkflow::ObservingRequest {
+                        request,
+                        probe_refresh,
+                    },
                 ..
             } => {
-                self.protocol = match observation {
-                    Some(observation) => ProtocolState::ObservingActive {
-                        shared,
-                        request,
-                        observation,
-                        probe_refresh,
-                        prepared_plan: None,
-                    },
-                    None => ProtocolState::ObservingRequest {
-                        shared,
-                        request,
-                        retained_observation: None,
-                        probe_refresh,
-                    },
-                };
+                self.protocol = ProtocolState::observing_active(
+                    shared,
+                    observation,
+                    request,
+                    probe_refresh,
+                    None,
+                );
                 true
             }
-            ProtocolState::ObservingActive {
+            ProtocolState {
                 shared,
-                request,
-                probe_refresh,
-                prepared_plan,
-                ..
-            } => {
-                self.protocol = match observation {
-                    Some(observation) => ProtocolState::ObservingActive {
-                        shared,
+                workflow:
+                    ProtocolWorkflow::ObservingActive {
                         request,
-                        observation,
                         probe_refresh,
                         prepared_plan,
                     },
-                    None => ProtocolState::ObservingRequest {
-                        shared,
-                        request,
-                        retained_observation: None,
-                        probe_refresh,
-                    },
-                };
+                ..
+            } => {
+                self.protocol = ProtocolState::observing_active(
+                    shared,
+                    observation,
+                    request,
+                    probe_refresh,
+                    prepared_plan,
+                );
                 true
             }
             protocol => {
@@ -642,22 +905,55 @@ impl CoreState {
         }
     }
 
-    pub(crate) fn take_active_observation(&mut self) -> Option<ObservationSnapshot> {
+    pub(crate) fn clear_active_observation(&mut self) -> bool {
+        self.recycle_staged_prepared_observation_plan();
         let protocol = std::mem::take(&mut self.protocol);
         match protocol {
-            ProtocolState::ObservingActive {
+            ProtocolState {
                 shared,
-                request,
-                observation,
-                probe_refresh,
-                ..
+                observation: ObservationSlot::Active(_),
+                workflow:
+                    ProtocolWorkflow::ObservingActive {
+                        request,
+                        probe_refresh,
+                        ..
+                    },
             } => {
-                self.protocol = ProtocolState::ObservingRequest {
+                self.protocol = ProtocolState::observing_request(
                     shared,
+                    ObservationSlot::Empty,
                     request,
-                    retained_observation: None,
                     probe_refresh,
-                };
+                );
+                true
+            }
+            protocol => {
+                self.protocol = protocol;
+                false
+            }
+        }
+    }
+
+    pub(crate) fn take_active_observation_for_completion(&mut self) -> Option<ObservationSnapshot> {
+        self.recycle_staged_prepared_observation_plan();
+        let protocol = std::mem::take(&mut self.protocol);
+        match protocol {
+            ProtocolState {
+                shared,
+                observation: ObservationSlot::Active(observation),
+                workflow:
+                    ProtocolWorkflow::ObservingActive {
+                        request,
+                        probe_refresh,
+                        ..
+                    },
+            } => {
+                self.protocol = ProtocolState::observing_request(
+                    shared,
+                    ObservationSlot::Empty,
+                    request,
+                    probe_refresh,
+                );
                 Some(observation)
             }
             protocol => {
@@ -668,27 +964,38 @@ impl CoreState {
     }
 
     pub(crate) fn set_probe_refresh_state(&mut self, probe_refresh: ProbeRefreshState) -> bool {
-        match &mut self.protocol {
-            ProtocolState::ObservingRequest {
+        match &mut self.protocol.workflow {
+            ProtocolWorkflow::ObservingRequest {
                 probe_refresh: current,
                 ..
             }
-            | ProtocolState::ObservingActive {
+            | ProtocolWorkflow::ObservingActive {
                 probe_refresh: current,
                 ..
             } => {
                 *current = probe_refresh;
                 true
             }
-            _ => false,
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => false,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn prepared_observation_plan(&self) -> Option<&PreparedObservationPlan> {
-        match &self.protocol {
-            ProtocolState::ObservingActive { prepared_plan, .. } => prepared_plan.as_deref(),
-            _ => None,
+        match &self.protocol.workflow {
+            ProtocolWorkflow::ObservingActive { prepared_plan, .. } => prepared_plan.as_deref(),
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::ObservingRequest { .. }
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => None,
         }
     }
 
@@ -696,99 +1003,123 @@ impl CoreState {
         &mut self,
         prepared_plan: Option<PreparedObservationPlan>,
     ) -> bool {
-        match &mut self.protocol {
-            ProtocolState::ObservingActive {
+        self.recycle_staged_prepared_observation_plan();
+        match &mut self.protocol.workflow {
+            ProtocolWorkflow::ObservingActive {
                 prepared_plan: current,
                 ..
             } => {
                 *current = prepared_plan.map(Box::new);
                 true
             }
-            _ => false,
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::ObservingRequest { .. }
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => false,
         }
     }
 
     pub(crate) fn take_prepared_observation_plan(&mut self) -> Option<PreparedObservationPlan> {
-        match &mut self.protocol {
-            ProtocolState::ObservingActive { prepared_plan, .. } => {
+        match &mut self.protocol.workflow {
+            ProtocolWorkflow::ObservingActive { prepared_plan, .. } => {
                 prepared_plan.take().map(|plan| *plan)
             }
-            _ => None,
+            ProtocolWorkflow::Idle
+            | ProtocolWorkflow::Primed
+            | ProtocolWorkflow::ObservingRequest { .. }
+            | ProtocolWorkflow::Ready
+            | ProtocolWorkflow::Planning { .. }
+            | ProtocolWorkflow::Applying { .. }
+            | ProtocolWorkflow::Recovering => None,
         }
     }
 
-    pub(crate) fn into_ready_with_observation(self, observation: ObservationSnapshot) -> Self {
-        self.map_protocol(|protocol| ProtocolState::Ready {
-            shared: protocol.into_shared(),
-            observation,
+    pub(crate) fn enter_ready(mut self, observation: ObservationSnapshot) -> Self {
+        self.recycle_staged_prepared_observation_plan();
+        self.map_protocol(|protocol| {
+            let (shared, _, _) = protocol.into_parts();
+            ProtocolState::ready(shared, observation)
         })
     }
 
-    pub(crate) fn into_planning(self, proposal_id: ProposalId) -> Option<Self> {
+    pub(crate) fn enter_planning(self, proposal_id: ProposalId) -> Option<Self> {
         self.try_map_protocol(|protocol| {
-            let ProtocolState::Ready {
-                shared,
-                observation,
-            } = protocol
-            else {
-                return None;
-            };
-            Some(ProtocolState::Planning {
-                shared,
-                observation,
-                proposal_id,
-            })
+            let (shared, observation, workflow) = protocol.into_parts();
+            match (workflow, observation) {
+                (ProtocolWorkflow::Ready, ObservationSlot::Active(observation)) => {
+                    Some(ProtocolState::planning(shared, observation, proposal_id))
+                }
+                (ProtocolWorkflow::Idle, _)
+                | (ProtocolWorkflow::Primed, _)
+                | (ProtocolWorkflow::ObservingRequest { .. }, _)
+                | (ProtocolWorkflow::ObservingActive { .. }, _)
+                | (
+                    ProtocolWorkflow::Ready,
+                    ObservationSlot::Empty | ObservationSlot::Retained(_),
+                )
+                | (ProtocolWorkflow::Planning { .. }, _)
+                | (ProtocolWorkflow::Applying { .. }, _)
+                | (ProtocolWorkflow::Recovering, _) => None,
+            }
         })
     }
 
-    pub(crate) fn into_primed(self) -> Self {
-        self.map_protocol(|protocol| ProtocolState::Primed {
-            shared: protocol.into_shared(),
+    pub(crate) fn into_primed(mut self) -> Self {
+        self.recycle_staged_prepared_observation_plan();
+        self.map_protocol(|protocol| {
+            let (shared, _, _) = protocol.into_parts();
+            ProtocolState::primed(shared)
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn into_applying(self, proposal: InFlightProposal) -> Option<Self> {
-        self.try_map_protocol(|protocol| match protocol {
-            ProtocolState::ObservingActive {
+    pub(crate) fn enter_applying(mut self, proposal: InFlightProposal) -> Option<Self> {
+        self.recycle_staged_prepared_observation_plan();
+        let proposal = Box::new(proposal);
+        self.try_map_protocol(|protocol| {
+            let ProtocolState {
                 shared,
                 observation,
-                ..
-            }
-            | ProtocolState::Ready {
-                shared,
-                observation,
-            }
-            | ProtocolState::Planning {
-                shared,
-                observation,
-                ..
-            }
-            | ProtocolState::Recovering {
-                shared,
-                observation: Some(observation),
-            } => Some(ProtocolState::Applying {
-                shared,
-                observation,
-                proposal: Box::new(proposal),
-            }),
-            ProtocolState::Idle { .. }
-            | ProtocolState::Primed { .. }
-            | ProtocolState::ObservingRequest { .. }
-            | ProtocolState::Applying { .. }
-            | ProtocolState::Recovering {
-                observation: None, ..
-            } => None,
+                workflow,
+            } = protocol;
+            let workflow_kind = workflow.kind();
+            let observation = match (workflow_kind, observation) {
+                (
+                    ProtocolWorkflowKind::ObservingActive
+                    | ProtocolWorkflowKind::Ready
+                    | ProtocolWorkflowKind::Planning,
+                    ObservationSlot::Active(observation),
+                )
+                | (ProtocolWorkflowKind::Recovering, ObservationSlot::Retained(observation)) => {
+                    observation
+                }
+                (ProtocolWorkflowKind::Idle, _)
+                | (ProtocolWorkflowKind::Primed, _)
+                | (ProtocolWorkflowKind::ObservingRequest, _)
+                | (
+                    ProtocolWorkflowKind::ObservingActive
+                    | ProtocolWorkflowKind::Ready
+                    | ProtocolWorkflowKind::Planning,
+                    ObservationSlot::Empty | ObservationSlot::Retained(_),
+                )
+                | (ProtocolWorkflowKind::Applying, _)
+                | (
+                    ProtocolWorkflowKind::Recovering,
+                    ObservationSlot::Empty | ObservationSlot::Active(_),
+                ) => return None,
+            };
+            Some(ProtocolState::applying(shared, observation, proposal))
         })
     }
 
-    pub(crate) fn into_recovering(self) -> Self {
+    pub(crate) fn enter_recovering(mut self) -> Self {
+        self.recycle_staged_prepared_observation_plan();
         self.map_protocol(|protocol| {
-            let (shared, observation) = protocol.into_shared_and_retained_observation();
-            ProtocolState::Recovering {
-                shared,
-                observation,
-            }
+            let (shared, observation, _) = protocol.into_parts();
+            ProtocolState::recovering(shared, observation.into_retained())
         })
     }
 
@@ -818,15 +1149,12 @@ impl CoreState {
     ) -> Option<InFlightProposal> {
         let protocol = std::mem::take(&mut self.protocol);
         match protocol {
-            ProtocolState::Applying {
+            ProtocolState {
                 shared,
-                observation,
-                proposal,
+                observation: ObservationSlot::Active(observation),
+                workflow: ProtocolWorkflow::Applying { proposal },
             } if proposal.proposal_id() == proposal_id => {
-                self.protocol = ProtocolState::Ready {
-                    shared,
-                    observation,
-                };
+                self.protocol = ProtocolState::ready(shared, observation);
                 Some(*proposal)
             }
             protocol => {
@@ -844,16 +1172,15 @@ impl CoreState {
         let (scene_update, proposal) = planned_render.into_parts();
         let protocol = std::mem::take(&mut self.protocol);
         match protocol {
-            ProtocolState::Planning {
+            ProtocolState {
                 shared,
-                observation,
-                proposal_id: active_proposal_id,
+                observation: ObservationSlot::Active(observation),
+                workflow:
+                    ProtocolWorkflow::Planning {
+                        proposal_id: active_proposal_id,
+                    },
             } if active_proposal_id == proposal_id => {
-                self.protocol = ProtocolState::Applying {
-                    shared,
-                    observation,
-                    proposal: Box::new(proposal),
-                };
+                self.protocol = ProtocolState::applying(shared, observation, Box::new(proposal));
                 Rc::make_mut(&mut self.payload.scene).apply_planned_update(scene_update);
                 true
             }

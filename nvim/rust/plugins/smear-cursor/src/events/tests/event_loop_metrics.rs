@@ -1,5 +1,7 @@
 use super::super::event_loop::EventLoopState;
 use super::super::event_loop::RuntimeBehaviorMetrics;
+use super::super::ingress::AutocmdIngress;
+use pretty_assertions::assert_eq;
 
 struct CounterCase {
     name: &'static str,
@@ -118,6 +120,38 @@ fn event_loop_state_records_counter_updates() {
                 metrics.validation_reads.command_row_reads = 4;
             }),
         },
+        CounterCase {
+            name: "projection_reuse_hit",
+            repeat: 2,
+            record: RuntimeBehaviorMetrics::record_projection_reuse_hit,
+            expected: expected_metrics(|metrics| {
+                metrics.planner.projection_reuse.hits = 2;
+            }),
+        },
+        CounterCase {
+            name: "projection_reuse_miss",
+            repeat: 3,
+            record: RuntimeBehaviorMetrics::record_projection_reuse_miss,
+            expected: expected_metrics(|metrics| {
+                metrics.planner.projection_reuse.misses = 3;
+            }),
+        },
+        CounterCase {
+            name: "compiled_field_cache_hit",
+            repeat: 1,
+            record: RuntimeBehaviorMetrics::record_compiled_field_cache_hit,
+            expected: expected_metrics(|metrics| {
+                metrics.planner.compiled_field_cache.hits = 1;
+            }),
+        },
+        CounterCase {
+            name: "compiled_field_cache_miss",
+            repeat: 2,
+            record: RuntimeBehaviorMetrics::record_compiled_field_cache_miss,
+            expected: expected_metrics(|metrics| {
+                metrics.planner.compiled_field_cache.misses = 2;
+            }),
+        },
     ];
 
     for case in cases {
@@ -128,4 +162,43 @@ fn event_loop_state_records_counter_updates() {
         });
         assert_eq!(metrics, case.expected, "case: {}", case.name);
     }
+}
+
+#[test]
+fn event_loop_state_records_cursor_autocmd_fast_path_outcomes_per_ingress() {
+    let metrics = metrics_after(|metrics| {
+        metrics.record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinEnter);
+        metrics.record_cursor_autocmd_fast_path_continued(AutocmdIngress::WinEnter);
+        metrics.record_cursor_autocmd_fast_path_continued(AutocmdIngress::WinScrolled);
+        metrics.record_cursor_autocmd_fast_path_dropped(AutocmdIngress::BufEnter);
+        metrics.record_cursor_autocmd_fast_path_dropped(AutocmdIngress::BufEnter);
+        metrics.record_cursor_autocmd_fast_path_continued(AutocmdIngress::CursorMoved);
+    });
+
+    assert_eq!(
+        metrics,
+        expected_metrics(|metrics| {
+            metrics.cursor_autocmd_fast_path.win_enter.dropped = 1;
+            metrics.cursor_autocmd_fast_path.win_enter.continued = 1;
+            metrics.cursor_autocmd_fast_path.win_scrolled.continued = 1;
+            metrics.cursor_autocmd_fast_path.buf_enter.dropped = 2;
+        })
+    );
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn event_loop_state_records_planning_preview_copy_metrics() {
+    let metrics = metrics_after(|metrics| {
+        metrics.record_planning_preview_copy(5);
+        metrics.record_planning_preview_copy(3);
+    });
+
+    assert_eq!(
+        metrics,
+        expected_metrics(|metrics| {
+            metrics.planning_preview.calls = 2;
+            metrics.planning_preview.copied_particles = 8;
+        })
+    );
 }

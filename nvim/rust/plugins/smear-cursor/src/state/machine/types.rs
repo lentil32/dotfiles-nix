@@ -25,6 +25,7 @@ impl PluginState {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct MotionClock {
+    pub(super) last_tick_ms: Option<f64>,
     pub(super) next_frame_at_ms: Option<f64>,
     pub(super) simulation_accumulator_ms: f64,
 }
@@ -35,41 +36,15 @@ impl MotionClock {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PendingTarget {
-    pub(crate) position: Point,
-    pub(crate) cursor_location: CursorLocation,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SettlingWindow {
     pub(crate) stable_since_ms: f64,
     pub(crate) settle_deadline_ms: f64,
 }
 
-impl PendingTarget {
-    pub(super) fn new(
-        position: Point,
-        cursor_location: &CursorLocation,
-        stable_since_ms: f64,
-        settle_deadline_ms: f64,
-    ) -> Self {
-        Self {
-            position,
-            cursor_location: cursor_location.clone(),
-            stable_since_ms,
-            settle_deadline_ms,
-        }
-    }
-
-    pub(super) fn matches_observation(
-        &self,
-        position: Point,
-        cursor_location: &CursorLocation,
-    ) -> bool {
-        self.position == position && &self.cursor_location == cursor_location
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct SettlingPhase {
-    pub(super) pending_target: PendingTarget,
+    pub(super) settling_window: SettlingWindow,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -126,7 +101,6 @@ pub(super) struct TransientRuntimeState {
     pub(super) retarget_epoch: u64,
     pub(super) trail_stroke_id: StrokeId,
     pub(super) last_mode_was_cmdline: Option<bool>,
-    pub(super) last_tick_ms: Option<f64>,
     pub(super) tracked_location: Option<CursorLocation>,
     pub(super) color_at_cursor: Option<u32>,
 }
@@ -138,7 +112,6 @@ impl Default for TransientRuntimeState {
             retarget_epoch: 0,
             trail_stroke_id: StrokeId::INITIAL,
             last_mode_was_cmdline: None,
-            last_tick_ms: None,
             tracked_location: None,
             color_at_cursor: None,
         }

@@ -1,6 +1,8 @@
 use super::*;
 use crate::test_support::proptest::stateful_config;
 use crate::test_support::sparse_probe_cells;
+use crate::types::Particle;
+use crate::types::StepOutput;
 use proptest::prelude::*;
 
 #[derive(Clone, Debug)]
@@ -91,8 +93,7 @@ fn allowed_cells_for_chunk(
     background_allowed_mask: &[bool],
 ) -> Vec<(u32, u32)> {
     chunk
-        .cells()
-        .iter()
+        .iter_cells()
         .enumerate()
         .filter_map(|(offset, cell)| {
             background_allowed_mask
@@ -144,11 +145,15 @@ proptest! {
                 .background_progress()
                 .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
                 .expect("background chunk should remain pending after cursor color completion");
+            let background_collecting = matches!(
+                observation.background_probe_state(),
+                BackgroundProbeState::Collecting { .. }
+            );
 
             prop_assert_eq!(after_cursor.next.lifecycle(), Lifecycle::Observing);
             prop_assert!(after_cursor.next.pending_proposal().is_none());
             prop_assert_eq!(observation.cursor_color(), expected_cursor_color);
-            prop_assert!(observation.probes().background().is_pending());
+            prop_assert!(background_collecting);
             prop_assert_eq!(
                 after_cursor.effects,
                 vec![expected_background_probe_effect(
@@ -279,12 +284,10 @@ fn background_ready_probe_report_stores_allowed_cells_and_reuse_state_in_snapsho
         .expect("background probe batch");
     assert!(background.allows_particle(crate::types::ScreenCell::new(7, 8).expect("cell")));
     assert!(!background.allows_particle(crate::types::ScreenCell::new(7, 9).expect("cell")));
-    match observation.probes().background() {
-        ProbeSlot::Requested(ProbeState::Ready { reuse, .. }) => {
-            pretty_assert_eq!(*reuse, ProbeReuse::Exact)
-        }
-        other => panic!("expected ready background probe, got {other:?}"),
-    }
+    pretty_assert_eq!(
+        observation.background_probe_reuse(),
+        Some(ProbeReuse::Exact)
+    );
 }
 
 #[test]
@@ -301,6 +304,75 @@ fn background_probe_preparation_leaves_live_runtime_unchanged_until_completion()
     assert!(
         prepared.next.prepared_observation_plan().is_some(),
         "background probe preparation should cache the reduced runtime motion separately",
+    );
+}
+
+#[test]
+fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
+    let ready = background_probe_ready_state();
+    let mut prepared_runtime = ready.runtime().clone();
+    prepared_runtime.initialize_cursor(
+        Point {
+            row: 19.0,
+            col: 11.0,
+        },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(31, 32, 4, 12),
+    );
+    prepared_runtime.apply_step_output(StepOutput {
+        current_corners: prepared_runtime.current_corners(),
+        velocity_corners: prepared_runtime.velocity_corners(),
+        spring_velocity_corners: prepared_runtime.spring_velocity_corners(),
+        trail_elapsed_ms: prepared_runtime.trail_elapsed_ms(),
+        particles: vec![Particle {
+            position: Point {
+                row: 19.0,
+                col: 12.0,
+            },
+            velocity: Point {
+                row: 0.5,
+                col: 0.25,
+            },
+            lifetime: 120.0,
+        }],
+        previous_center: prepared_runtime.previous_center(),
+        index_head: 0,
+        index_tail: 0,
+        rng_state: prepared_runtime.rng_state(),
+    });
+    let preview_runtime = prepared_runtime.planning_preview();
+    let prepared_plan = crate::core::state::PreparedObservationPlan::new(
+        preview_runtime.into_prepared_motion(),
+        crate::core::runtime_reducer::CursorTransition {
+            render_decision: crate::core::runtime_reducer::RenderDecision {
+                render_action: crate::core::runtime_reducer::RenderAction::Noop,
+                render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+                render_allocation_policy:
+                    crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
+                render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
+            },
+            motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
+            should_schedule_next_animation: false,
+            next_animation_at_ms: None,
+        },
+    );
+    let prepared_particles_capacity = prepared_plan.prepared_particles_capacity();
+
+    let scenario = single_background_probe_scenario();
+    let mut staged = scenario.based.next;
+    assert!(
+        staged.set_prepared_observation_plan(Some(prepared_plan)),
+        "manual observing scenario should accept a cached runtime transition",
+    );
+
+    assert!(
+        staged.clear_active_observation(),
+        "refresh retries should be able to drop the staged observation",
+    );
+    assert_eq!(
+        staged.runtime().preview_particles_scratch_capacity(),
+        prepared_particles_capacity
     );
 }
 

@@ -5,6 +5,8 @@ let
   # Third-party taps: use "owner/tap/pkg" here, but the tap itself must also be
   # declared in flake.nix (flake input + nix-homebrew.taps) since mutableTaps = false.
   packages = [
+    # { formulae = "wordbricks/tap/onequery"; }
+
     # Security
     { cask = "1password"; }
     { cask = "1password-cli"; }

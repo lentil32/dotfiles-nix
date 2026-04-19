@@ -6,7 +6,6 @@ use crate::types::Point;
 use crate::types::Rng32;
 use crate::types::StepInput;
 use crate::types::StepOutput;
-use nvimrs_nvim_utils::mode::is_insert_like_mode;
 
 // Animation pipeline is split by deterministic phases:
 // 1) motion primitives + stop metrics

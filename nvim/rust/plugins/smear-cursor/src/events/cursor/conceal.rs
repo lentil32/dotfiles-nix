@@ -18,10 +18,12 @@ use crate::events::probe_cache::ConcealRegion;
 use crate::events::probe_cache::ConcealScreenCellCacheKey;
 use crate::events::probe_cache::ConcealScreenCellCacheLookup;
 use crate::events::probe_cache::ConcealWindowState;
+use crate::events::runtime::buffer_text_revision;
 use crate::events::runtime::cached_conceal_delta;
 use crate::events::runtime::cached_conceal_regions;
 use crate::events::runtime::cached_conceal_screen_cell;
 use crate::events::runtime::note_conceal_read_boundary;
+use crate::events::runtime::reclaim_conceal_regions_scratch;
 use crate::events::runtime::record_conceal_full_scan;
 use crate::events::runtime::record_conceal_region_cache_hit;
 use crate::events::runtime::record_conceal_region_cache_miss;
@@ -30,6 +32,7 @@ use crate::events::runtime::record_conceal_screen_cell_cache_miss;
 use crate::events::runtime::store_conceal_delta;
 use crate::events::runtime::store_conceal_regions;
 use crate::events::runtime::store_conceal_screen_cell;
+use crate::events::runtime::take_conceal_regions_scratch;
 use crate::lua::i64_from_object_typed;
 use crate::lua::string_from_object_typed;
 use nvim_oxi::Array;
@@ -118,7 +121,7 @@ impl ConcealScreenCellView {
         ConcealScreenCellCacheKey::new(
             window_handle,
             conceal_key.buffer_handle(),
-            conceal_key.changedtick(),
+            conceal_key.text_revision(),
             conceal_key.line(),
             col1,
             self.window_row,
@@ -140,7 +143,7 @@ impl ConcealScreenCellView {
         crate::events::probe_cache::ConcealDeltaCacheKey::new(
             window_handle,
             conceal_key.buffer_handle(),
-            conceal_key.changedtick(),
+            conceal_key.text_revision(),
             conceal_key.line(),
             self.window_row,
             self.window_col,
@@ -309,20 +312,6 @@ fn extend_concealed_regions(
     Ok(())
 }
 
-fn current_buffer_changedtick(buffer_handle: i64) -> CursorResult<u64> {
-    let args = Array::from_iter([Object::from(buffer_handle), Object::from("changedtick")]);
-    let value = api::call_function("getbufvar", args)?;
-    let changedtick = i64_from_object_typed("getbufvar(changedtick)", value)
-        .map_err(|source| cursor_parse_error("getbufvar(changedtick)", source))?;
-    if changedtick < 0 {
-        return Err(
-            nvim_oxi::api::Error::Other("conceal changedtick must be non-negative".into()).into(),
-        );
-    }
-
-    Ok(changedtick as u64)
-}
-
 fn window_buffer_handle(window: &api::Window) -> CursorResult<i64> {
     Ok(i64::from(window.get_buf()?.handle()))
 }
@@ -365,10 +354,12 @@ fn conceal_cache_key(
     window_state: ConcealWindowState,
 ) -> CursorResult<ConcealCacheKey> {
     let buffer_handle = window_buffer_handle(window)?;
-    let changedtick = current_buffer_changedtick(buffer_handle)?;
+    let text_revision = buffer_text_revision(buffer_handle)
+        .map_err(nvim_oxi::Error::from)?
+        .value();
     Ok(ConcealCacheKey::new(
         buffer_handle,
-        changedtick,
+        text_revision,
         line,
         window_state,
     ))
@@ -396,20 +387,37 @@ fn cached_concealed_regions_for_cursor(
     }
     record_conceal_region_cache_miss();
 
-    let mut regions = cached
-        .as_ref()
-        .map_or_else(Vec::new, |cached| cached.regions().to_vec());
+    let mut regions = match take_conceal_regions_scratch() {
+        Ok(mut scratch) => {
+            if let Some(cached) = cached.as_ref() {
+                scratch.extend_from_slice(cached.regions());
+            }
+            scratch
+        }
+        Err(err) => {
+            warn(&format!("conceal region scratch unavailable: {err}"));
+            cached
+                .as_ref()
+                .map_or_else(Vec::new, |cached| cached.regions().to_vec())
+        }
+    };
     let scan_start_col1 = cached
         .as_ref()
         .map_or(1, |cached| cached.scanned_to_col1().saturating_add(1));
-    record_conceal_full_scan();
-    extend_concealed_regions(key.line(), scan_start_col1, required_col1, &mut regions)?;
+    let result = (|| -> CursorResult<Arc<[ConcealRegion]>> {
+        record_conceal_full_scan(key.buffer_handle());
+        extend_concealed_regions(key.line(), scan_start_col1, required_col1, &mut regions)?;
 
-    let regions: Arc<[ConcealRegion]> = regions.into();
-    if let Err(err) = store_conceal_regions(key, required_col1, Arc::clone(&regions)) {
-        warn(&format!("conceal cache write failed: {err}"));
+        let regions: Arc<[ConcealRegion]> = Arc::from(regions.as_slice());
+        if let Err(err) = store_conceal_regions(key, required_col1, Arc::clone(&regions)) {
+            warn(&format!("conceal cache write failed: {err}"));
+        }
+        Ok(regions)
+    })();
+    if let Err(err) = reclaim_conceal_regions_scratch(regions) {
+        warn(&format!("conceal region scratch reclaim failed: {err}"));
     }
-    Ok(regions)
+    result
 }
 
 fn cached_concealed_regions_hint_for_cursor(

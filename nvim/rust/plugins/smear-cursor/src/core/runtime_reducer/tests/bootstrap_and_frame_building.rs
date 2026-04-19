@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::runtime_reducer::reduce_cursor_event_for_perf_class;
 use crate::core::state::BufferPerfClass;
+use pretty_assertions::assert_eq;
 
 #[test]
 fn disabled_state_reduces_to_clear_all() {
@@ -59,6 +60,41 @@ fn build_render_frame_preserves_core_cursor_geometry() {
     assert!(frame.step_samples.is_empty());
     assert_eq!(frame.target, state.target_position());
     assert_eq!(frame.target_corners, state.target_corners());
+}
+
+#[test]
+fn build_render_frame_reclaims_render_step_sample_scratch() {
+    let mut state = RuntimeState::default();
+    let location = CursorLocation::new(10, 20, 1, 1);
+    let shape = CursorShape::new(false, false);
+    let position = Point { row: 5.0, col: 7.0 };
+    state.initialize_cursor(position, shape, 3, &location);
+    let current_corners = state.current_corners();
+    let target_position = state.target_position();
+    let retained_sample = RenderStepSample::new(current_corners, 16.0);
+    let mut step_samples = state.take_render_step_samples_scratch();
+    step_samples.reserve(4);
+    step_samples.push(retained_sample.clone());
+    let scratch_capacity = step_samples.capacity();
+    let scratch_ptr = step_samples.as_ptr();
+
+    let frame = crate::core::runtime_reducer::build_render_frame(
+        &mut state,
+        "n",
+        current_corners,
+        step_samples,
+        0,
+        target_position,
+        false,
+        BufferPerfClass::Full,
+    );
+
+    assert_eq!(frame.step_samples.as_ref(), [retained_sample].as_slice());
+    assert_eq!(
+        state.render_step_samples_scratch_capacity(),
+        scratch_capacity
+    );
+    assert_eq!(state.render_step_samples_scratch_ptr(), scratch_ptr);
 }
 
 #[test]

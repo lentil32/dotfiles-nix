@@ -68,6 +68,46 @@ pub(crate) struct RequestObservationBaseEffect {
     pub(crate) context: ObservationRuntimeContext,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct IngressObservationSurface {
+    window_handle: i64,
+    buffer_handle: i64,
+    cursor_location: Option<CursorLocation>,
+    mode: String,
+}
+
+impl IngressObservationSurface {
+    pub(crate) fn new(
+        window_handle: i64,
+        buffer_handle: i64,
+        cursor_location: Option<CursorLocation>,
+        mode: String,
+    ) -> Self {
+        Self {
+            window_handle,
+            buffer_handle,
+            cursor_location,
+            mode,
+        }
+    }
+
+    pub(crate) const fn window_handle(&self) -> i64 {
+        self.window_handle
+    }
+
+    pub(crate) const fn buffer_handle(&self) -> i64 {
+        self.buffer_handle
+    }
+
+    pub(crate) fn cursor_location(&self) -> Option<CursorLocation> {
+        self.cursor_location.clone()
+    }
+
+    pub(crate) fn mode(&self) -> &str {
+        self.mode.as_str()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct CursorPositionReadPolicy {
     smear_to_cmd: bool,
@@ -270,17 +310,19 @@ pub(crate) struct ObservationRuntimeContext {
     tracked_location: Option<CursorLocation>,
     cursor_text_context_boundary: Option<CursorTextContextBoundary>,
     current_corners: [Point; 4],
+    ingress_observation_surface: Option<IngressObservationSurface>,
     buffer_perf_class: BufferPerfClass,
     probe_policy: ProbePolicy,
 }
 
 impl ObservationRuntimeContext {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         cursor_position_policy: CursorPositionReadPolicy,
         scroll_buffer_space: bool,
         tracked_location: Option<CursorLocation>,
         cursor_text_context_boundary: Option<CursorTextContextBoundary>,
         current_corners: [Point; 4],
+        ingress_observation_surface: Option<IngressObservationSurface>,
         buffer_perf_class: BufferPerfClass,
         probe_policy: ProbePolicy,
     ) -> Self {
@@ -290,6 +332,7 @@ impl ObservationRuntimeContext {
             tracked_location,
             cursor_text_context_boundary,
             current_corners,
+            ingress_observation_surface,
             buffer_perf_class,
             probe_policy,
         }
@@ -313,6 +356,10 @@ impl ObservationRuntimeContext {
 
     pub(crate) const fn current_corners(&self) -> [Point; 4] {
         self.current_corners
+    }
+
+    pub(crate) fn ingress_observation_surface(&self) -> Option<&IngressObservationSurface> {
+        self.ingress_observation_surface.as_ref()
     }
 
     #[cfg(test)]
@@ -366,6 +413,7 @@ impl CursorColorFallback {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ApplyProposalEffect {
     pub(crate) proposal: InFlightProposal,
+    pub(crate) buffer_handle: Option<i64>,
     pub(crate) requested_at: Millis,
 }
 

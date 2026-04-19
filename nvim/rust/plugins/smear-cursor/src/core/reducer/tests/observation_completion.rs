@@ -62,9 +62,9 @@ fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
         &CursorLocation::new(11, 22, 3, 9),
     );
     let ready = ready_state()
-        .with_last_cursor(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .into_ready_with_observation(previous_observation);
+        .enter_ready(previous_observation);
     let observing = reduce(
         &ready,
         external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
@@ -120,9 +120,9 @@ fn observation_completion_with_motion_only_requests_draw_render_plan() {
         &CursorLocation::new(11, 22, 3, 9),
     );
     let ready = ready_state()
-        .with_last_cursor(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .into_ready_with_observation(previous_observation);
+        .enter_ready(previous_observation);
     let observing = reduce(
         &ready,
         external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
@@ -178,9 +178,9 @@ fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all
         &CursorLocation::new(11, 22, 1, 9),
     );
     let ready = ready_state()
-        .with_last_cursor(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .into_ready_with_observation(previous_observation);
+        .enter_ready(previous_observation);
     let observing = reduce(
         &ready,
         external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
@@ -199,7 +199,7 @@ fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all
             CursorLocation::new(11, 22, 4, 10),
             ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
         )
-        .with_cursor_text_context(Some(text_context(
+        .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
             11,
             10,
             &["alpha pasted", "block", "tail"],
@@ -282,4 +282,31 @@ fn observation_completion_moves_runtime_particles_into_render_planning() {
         payload.planning.scene().motion().particles().as_ptr(),
         particles_ptr
     );
+}
+
+#[test]
+fn conceal_deferred_observation_completion_preserves_latest_exact_cursor_anchor() {
+    let ready = ready_state_with_observation(cursor(9, 9));
+    let observing = reduce(
+        &ready,
+        external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
+    )
+    .next;
+    let request = active_request(&observing);
+
+    let transition = collect_observation_base(
+        &observing,
+        &request,
+        observation_basis(&request, Some(cursor(12, 13)), 101),
+        observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+    );
+
+    pretty_assert_eq!(
+        transition.next.latest_exact_cursor_position(),
+        Some(cursor(9, 9))
+    );
+    let Some(observation) = transition.next.observation() else {
+        panic!("expected active observation after base collection");
+    };
+    pretty_assert_eq!(observation.basis().cursor_position(), Some(cursor(12, 13)));
 }

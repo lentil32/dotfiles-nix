@@ -18,13 +18,13 @@ use super::support::retained_cursor_color_fallback;
 use super::support::schedule_timer_with_delay;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
+use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::TimerKind;
 use crate::core::event::ExternalDemandQueuedEvent;
 use crate::core::event::InitializeEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
 use crate::core::event::ProbeReportedEvent;
 use crate::core::runtime_reducer::as_delay_ms;
-use crate::core::state::BackgroundProbeUpdate;
 use crate::core::state::CoreState;
 use crate::core::state::ExternalDemand;
 use crate::core::state::ObservationRequest;
@@ -33,9 +33,29 @@ use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::ProbeState;
 use crate::core::state::QueuedDemand;
+use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
 
-pub(super) fn start_next_observation(state: CoreState) -> (CoreState, Option<Effect>) {
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ImmediateIngressObservation {
+    seq: IngressSeq,
+    surface: Option<IngressObservationSurface>,
+}
+
+impl ImmediateIngressObservation {
+    const fn new(seq: IngressSeq, surface: Option<IngressObservationSurface>) -> Self {
+        Self { seq, surface }
+    }
+
+    fn surface_for(self, demand: &ExternalDemand) -> Option<IngressObservationSurface> {
+        (self.seq == demand.seq()).then_some(self.surface).flatten()
+    }
+}
+
+fn start_next_observation_with_ingress_surface(
+    state: CoreState,
+    ingress_observation: Option<ImmediateIngressObservation>,
+) -> (CoreState, Option<Effect>) {
     let (next_state, next_demand) =
         state.map_demand_queue(crate::core::state::DemandQueue::dequeue_ready);
     let Some(demand) = next_demand else {
@@ -47,36 +67,46 @@ pub(super) fn start_next_observation(state: CoreState) -> (CoreState, Option<Eff
     let buffer_perf_class = demand.buffer_perf_class();
     let request =
         ObservationRequest::new(demand, probe_requests_for(&next_state, buffer_perf_class));
-    let next_state = next_state.into_observing(request.clone());
-    let effect = request_observation_base(&next_state, request);
+    let next_state = next_state.enter_observing_request(request.clone());
+    let effect = request_observation_base(
+        &next_state,
+        request.clone(),
+        ingress_observation.and_then(|observation| observation.surface_for(request.demand())),
+    );
     (next_state, Some(effect))
 }
 
+pub(super) fn start_next_observation(state: CoreState) -> (CoreState, Option<Effect>) {
+    start_next_observation_with_ingress_surface(state, None)
+}
+
 pub(super) fn plan_or_stay(state: CoreState, observed_at: Millis) -> Transition {
-    match state.protocol() {
-        crate::core::state::ProtocolState::Ready { .. } => {
-            plan_ready_state(state, None, observed_at)
-        }
-        crate::core::state::ProtocolState::Idle { .. }
-        | crate::core::state::ProtocolState::Primed { .. }
-        | crate::core::state::ProtocolState::ObservingRequest { .. }
-        | crate::core::state::ProtocolState::ObservingActive { .. }
-        | crate::core::state::ProtocolState::Planning { .. }
-        | crate::core::state::ProtocolState::Applying { .. }
-        | crate::core::state::ProtocolState::Recovering { .. } => {
-            Transition::new(state, Vec::new())
-        }
+    match state.lifecycle() {
+        crate::core::types::Lifecycle::Ready => plan_ready_state(state, None, observed_at),
+        crate::core::types::Lifecycle::Idle
+        | crate::core::types::Lifecycle::Primed
+        | crate::core::types::Lifecycle::Observing
+        | crate::core::types::Lifecycle::Planning
+        | crate::core::types::Lifecycle::Applying
+        | crate::core::types::Lifecycle::Recovering => Transition::new(state, Vec::new()),
     }
 }
 
 pub(super) fn transition_ready_or_observe(state: CoreState) -> Transition {
+    transition_ready_or_observe_with_ingress_surface(state, None)
+}
+
+fn transition_ready_or_observe_with_ingress_surface(
+    state: CoreState,
+    ingress_observation: Option<ImmediateIngressObservation>,
+) -> Transition {
     debug_assert!(matches!(
-        state.protocol(),
-        crate::core::state::ProtocolState::Primed { .. }
-            | crate::core::state::ProtocolState::Ready { .. }
+        state.lifecycle(),
+        crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
     ));
 
-    let (next_state, effect) = start_next_observation(state);
+    let (next_state, effect) =
+        start_next_observation_with_ingress_surface(state, ingress_observation);
     if let Some(effect) = effect {
         return Transition::new(next_state, vec![effect]);
     }
@@ -86,9 +116,8 @@ pub(super) fn transition_ready_or_observe(state: CoreState) -> Transition {
 
 pub(super) fn observe_or_plan(state: CoreState, observed_at: Millis) -> Transition {
     if !matches!(
-        state.protocol(),
-        crate::core::state::ProtocolState::Primed { .. }
-            | crate::core::state::ProtocolState::Ready { .. }
+        state.lifecycle(),
+        crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
     ) {
         return Transition::new(state, Vec::new());
     }
@@ -144,6 +173,7 @@ fn queue_external_demand(
     state: CoreState,
     queued_demand: QueuedDemand,
     observed_at: Millis,
+    ingress_observation: Option<ImmediateIngressObservation>,
 ) -> Transition {
     let should_delay_cursor_ingress = queued_demand.is_cursor();
     let active_cursor_superseded = state
@@ -156,24 +186,26 @@ fn queue_external_demand(
     let (queued_state, hot_cleanup_effects) =
         enter_hot_cleanup_state(queued_state, observed_at, max_kept_windows);
 
-    let mut transition = match queued_state.protocol() {
-        crate::core::state::ProtocolState::Idle { .. } => Transition::stay(&queued_state),
-        crate::core::state::ProtocolState::Primed { .. }
-        | crate::core::state::ProtocolState::Ready { .. } => {
+    let mut transition = match queued_state.lifecycle() {
+        crate::core::types::Lifecycle::Idle => Transition::stay(&queued_state),
+        crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready => {
             if should_delay_cursor_ingress {
-                delayed_cursor_ingress_transition(queued_state.clone(), observed_at)
-                    .unwrap_or_else(|| transition_ready_or_observe(queued_state))
+                delayed_cursor_ingress_transition(queued_state.clone(), observed_at).unwrap_or_else(
+                    || {
+                        transition_ready_or_observe_with_ingress_surface(
+                            queued_state,
+                            ingress_observation,
+                        )
+                    },
+                )
             } else {
-                transition_ready_or_observe(queued_state)
+                transition_ready_or_observe_with_ingress_surface(queued_state, ingress_observation)
             }
         }
-        crate::core::state::ProtocolState::ObservingRequest { .. }
-        | crate::core::state::ProtocolState::ObservingActive { .. }
-        | crate::core::state::ProtocolState::Planning { .. }
-        | crate::core::state::ProtocolState::Applying { .. }
-        | crate::core::state::ProtocolState::Recovering { .. } => {
-            Transition::new(queued_state, Vec::new())
-        }
+        crate::core::types::Lifecycle::Observing
+        | crate::core::types::Lifecycle::Planning
+        | crate::core::types::Lifecycle::Applying
+        | crate::core::types::Lifecycle::Recovering => Transition::new(queued_state, Vec::new()),
     };
 
     if !hot_cleanup_effects.is_empty() {
@@ -204,6 +236,7 @@ pub(super) fn reduce_external_demand_queued(
         requested_target,
         buffer_perf_class,
         ingress_cursor_presentation,
+        ingress_observation_surface,
     } = payload;
     let state_with_policy = if ingress_marks_cursor_autocmd_freshness(kind) {
         let next_ingress_policy = state.ingress_policy().note_cursor_autocmd(observed_at);
@@ -216,8 +249,14 @@ pub(super) fn reduce_external_demand_queued(
         ingress_cursor_presentation_effect(&state_with_policy, ingress_cursor_presentation);
     let (state_with_seq, seq) = state_with_policy.allocate_ingress_seq();
     let demand = ExternalDemand::new(seq, kind, observed_at, requested_target, buffer_perf_class);
-    let mut transition =
-        queue_external_demand(state_with_seq, QueuedDemand::ready(demand), observed_at);
+    let immediate_ingress_observation =
+        ImmediateIngressObservation::new(seq, ingress_observation_surface);
+    let mut transition = queue_external_demand(
+        state_with_seq,
+        QueuedDemand::ready(demand),
+        observed_at,
+        Some(immediate_ingress_observation),
+    );
     if let Some(effect) = ingress_effect {
         transition.effects.insert(0, effect);
     }
@@ -240,7 +279,8 @@ pub(super) fn reduce_observation_base_collected(
         return Transition::stay_owned(state);
     }
 
-    let next_cursor = basis.cursor_position().or_else(|| state.last_cursor());
+    let next_latest_exact_cursor_position =
+        state.fallback_cursor_position(motion.exact_cursor_position(basis.cursor_position()));
     let observed_at = basis.observed_at();
     let cursor_color_fallback = retained_cursor_color_fallback(state.retained_observation());
     let previous_observation = state.take_retained_observation();
@@ -268,7 +308,9 @@ pub(super) fn reduce_observation_base_collected(
         next_observation
     };
     let next_observation = complete_mode_scoped_cursor_color_probe(&state, next_observation);
-    let mut base_state = reset_recovery_attempt(state.with_last_cursor(next_cursor));
+    let mut base_state = reset_recovery_attempt(
+        state.with_latest_exact_cursor_position(next_latest_exact_cursor_position),
+    );
     let next_probe =
         next_pending_probe_effect(&base_state, &next_observation, cursor_color_fallback);
     let Some(next_probe) = next_probe else {
@@ -279,8 +321,8 @@ pub(super) fn reduce_observation_base_collected(
             previous_observation,
         );
     };
-    if !base_state.set_active_observation(Some(next_observation)) {
-        let _ = base_state.set_retained_observation(previous_observation);
+    if !base_state.activate_observation(next_observation) {
+        let _ = base_state.restore_retained_observation(previous_observation);
         return Transition::stay_owned(base_state);
     }
     if !base_state.set_prepared_observation_plan(prepared_plan) {
@@ -375,10 +417,7 @@ fn apply_probe_report(
             reuse,
             batch,
         } => {
-            if *reported_id != observation_id
-                || observation.probes().background().request_id() != Some(*probe_request_id)
-                || !observation.probes().background().is_pending()
-            {
+            if *reported_id != observation_id {
                 return None;
             }
             if *reuse == ProbeReuse::RefreshRequired {
@@ -386,12 +425,12 @@ fn apply_probe_report(
                     ProbeKind::Background,
                 ));
             }
-            if !observation.set_background_probe(ProbeState::ready(
+            if !observation.set_background_probe_ready(
                 *probe_request_id,
                 *reported_id,
                 *reuse,
                 batch.clone(),
-            )) {
+            ) {
                 return None;
             }
             Some(ProbeReportResolution::Updated)
@@ -402,46 +441,23 @@ fn apply_probe_report(
             chunk,
             allowed_mask,
         } => {
-            if *reported_id != observation_id
-                || observation.probes().background().request_id() != Some(*probe_request_id)
-                || !observation.probes().background().is_pending()
-            {
+            if *reported_id != observation_id {
                 return None;
             }
-            let progress = observation.background_progress()?;
-            match progress.apply_chunk(chunk, allowed_mask) {
-                Some(BackgroundProbeUpdate::InProgress(next_progress)) => {
-                    if !observation.set_background_progress(next_progress) {
-                        return None;
-                    }
-                    Some(ProbeReportResolution::Updated)
-                }
-                Some(BackgroundProbeUpdate::Complete(batch)) => {
-                    if !observation.set_background_probe(ProbeState::ready(
-                        *probe_request_id,
-                        *reported_id,
-                        ProbeReuse::Exact,
-                        batch,
-                    )) {
-                        return None;
-                    }
-                    Some(ProbeReportResolution::Updated)
-                }
-                None => None,
+            if !observation.apply_background_probe_chunk(*probe_request_id, chunk, allowed_mask) {
+                return None;
             }
+            Some(ProbeReportResolution::Updated)
         }
         ProbeReportedEvent::BackgroundFailed {
             observation_id: reported_id,
             probe_request_id,
             failure,
         } => {
-            if *reported_id != observation_id
-                || observation.probes().background().request_id() != Some(*probe_request_id)
-                || !observation.probes().background().is_pending()
-            {
+            if *reported_id != observation_id {
                 return None;
             }
-            if !observation.set_background_probe(ProbeState::failed(*probe_request_id, *failure)) {
+            if !observation.set_background_probe_failed(*probe_request_id, *failure) {
                 return None;
             }
             Some(ProbeReportResolution::Updated)
@@ -456,15 +472,13 @@ fn complete_observation(
     previous_observation: Option<ObservationSnapshot>,
 ) -> Transition {
     let observed_at = observation.basis().observed_at();
-    let next_cursor = observation
-        .basis()
-        .cursor_position()
-        .or_else(|| state.last_cursor());
+    let next_latest_exact_cursor_position =
+        state.fallback_cursor_position(observation.exact_cursor_position());
     let prepared_plan = prepared_plan.or_else(|| state.take_prepared_observation_plan());
     let ready = reset_recovery_attempt(
         state
-            .with_last_cursor(next_cursor)
-            .into_ready_with_observation(observation),
+            .with_latest_exact_cursor_position(next_latest_exact_cursor_position)
+            .enter_ready(observation),
     );
     if let Some(prepared_plan) = prepared_plan {
         plan_ready_state_with_observation_plan(ready, observed_at, prepared_plan)
@@ -495,7 +509,7 @@ pub(super) fn reduce_probe_reported(
             // Surprising: the deferred probe no longer matches the captured observation basis.
             // Retry the full base observation instead of fusing mixed-world data.
             let mut cleared_observation = reset_recovery_attempt(state);
-            if !cleared_observation.set_active_observation(None) {
+            if !cleared_observation.clear_active_observation() {
                 return Transition::stay_owned(cleared_observation);
             }
             let Some(current_refresh_state) = cleared_observation.probe_refresh_state() else {
@@ -519,7 +533,7 @@ pub(super) fn reduce_probe_reported(
             if !cleared_observation.set_probe_refresh_state(next_refresh_state) {
                 return Transition::stay_owned(cleared_observation);
             }
-            let effect = request_observation_base(&cleared_observation, active_request);
+            let effect = request_observation_base(&cleared_observation, active_request, None);
             Transition::new(
                 cleared_observation,
                 vec![probe_refresh_retry_metric(kind), effect],
@@ -537,7 +551,7 @@ pub(super) fn reduce_probe_reported(
                 return Transition::new(state, vec![next_probe]);
             }
             let prepared_plan = state.take_prepared_observation_plan();
-            let Some(observation) = state.take_active_observation() else {
+            let Some(observation) = state.take_active_observation_for_completion() else {
                 return Transition::stay_owned(state);
             };
             let previous_observation = state.take_retained_observation();

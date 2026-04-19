@@ -73,9 +73,9 @@ pub(super) fn reduce_timer_signal_with_token(
             if disarmed_state.needs_initialize() {
                 Transition::stay_owned(disarmed_state)
             } else {
-                match disarmed_state.protocol() {
-                    crate::core::state::ProtocolState::Primed { .. }
-                    | crate::core::state::ProtocolState::Ready { .. } => {
+                match disarmed_state.lifecycle() {
+                    crate::core::types::Lifecycle::Primed
+                    | crate::core::types::Lifecycle::Ready => {
                         let (next_state, effect) = start_next_observation(disarmed_state);
                         if let Some(effect) = effect {
                             Transition::new(next_state, vec![effect])
@@ -92,12 +92,11 @@ pub(super) fn reduce_timer_signal_with_token(
                             plan_or_stay(next_state, observed_at)
                         }
                     }
-                    crate::core::state::ProtocolState::Idle { .. }
-                    | crate::core::state::ProtocolState::ObservingRequest { .. }
-                    | crate::core::state::ProtocolState::ObservingActive { .. }
-                    | crate::core::state::ProtocolState::Planning { .. }
-                    | crate::core::state::ProtocolState::Applying { .. }
-                    | crate::core::state::ProtocolState::Recovering { .. } => {
+                    crate::core::types::Lifecycle::Idle
+                    | crate::core::types::Lifecycle::Observing
+                    | crate::core::types::Lifecycle::Planning
+                    | crate::core::types::Lifecycle::Applying
+                    | crate::core::types::Lifecycle::Recovering => {
                         Transition::new(disarmed_state, Vec::new())
                     }
                 }
@@ -110,9 +109,9 @@ pub(super) fn reduce_timer_signal_with_token(
             } else {
                 let mut disarmed_state = disarmed_state;
                 let settled = match disarmed_state.take_retained_observation() {
-                    Some(observation) => reset_recovery_attempt(
-                        disarmed_state.into_ready_with_observation(observation),
-                    ),
+                    Some(observation) => {
+                        reset_recovery_attempt(disarmed_state.enter_ready(observation))
+                    }
                     None => reset_recovery_attempt(disarmed_state.into_primed()),
                 };
                 observe_or_plan(settled, observed_at)

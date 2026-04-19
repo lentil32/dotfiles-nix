@@ -1,4 +1,3 @@
-use super::background_probe::BackgroundProbeBatch;
 use super::snapshot::ObservationRequest;
 use crate::core::types::ObservationId;
 use crate::core::types::ProbeRequestId;
@@ -221,14 +220,12 @@ impl<T> ProbeSlot<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProbeSet {
     cursor_color: ProbeSlot<Option<CursorColorSample>>,
-    pub(super) background: ProbeSlot<BackgroundProbeBatch>,
 }
 
 impl Default for ProbeSet {
     fn default() -> Self {
         Self {
             cursor_color: ProbeSlot::unrequested(),
-            background: ProbeSlot::unrequested(),
         }
     }
 }
@@ -236,10 +233,6 @@ impl Default for ProbeSet {
 impl ProbeSet {
     pub(crate) const fn cursor_color(&self) -> &ProbeSlot<Option<CursorColorSample>> {
         &self.cursor_color
-    }
-
-    pub(crate) const fn background(&self) -> &ProbeSlot<BackgroundProbeBatch> {
-        &self.background
     }
 
     pub(crate) fn from_request(request: &ObservationRequest) -> Self {
@@ -250,7 +243,6 @@ impl ProbeSet {
             } else {
                 ProbeSlot::unrequested()
             },
-            background: ProbeSlot::unrequested(),
         }
     }
 
@@ -267,45 +259,11 @@ impl ProbeSet {
         }
     }
 
-    pub(super) fn set_background_state(
-        &mut self,
-        background: ProbeState<BackgroundProbeBatch>,
-    ) -> bool {
-        match &mut self.background {
-            ProbeSlot::Unrequested => false,
-            ProbeSlot::Requested(current) => {
-                *current = background;
-                true
-            }
-        }
-    }
-
     pub(crate) fn sampled_cursor_color(&self) -> Option<u32> {
         self.cursor_color
             .value()
             .and_then(|sample| sample.as_ref())
             .copied()
             .map(CursorColorSample::value)
-    }
-
-    pub(crate) fn sampled_background(&self) -> Option<&BackgroundProbeBatch> {
-        self.background.value()
-    }
-
-    pub(super) fn with_background_pending(mut self, request_id: ProbeRequestId) -> Self {
-        self.background = ProbeSlot::pending(request_id);
-        self
-    }
-
-    pub(super) fn with_background_ready(
-        mut self,
-        request_id: ProbeRequestId,
-        observed_from: ObservationId,
-        reuse: ProbeReuse,
-        batch: BackgroundProbeBatch,
-    ) -> Self {
-        self.background =
-            ProbeSlot::Requested(ProbeState::ready(request_id, observed_from, reuse, batch));
-        self
     }
 }

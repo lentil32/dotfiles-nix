@@ -12,6 +12,8 @@ fn aggregated_particle_cache_reuses_cached_cells_until_particles_change() {
 
     let initial_aggregates = state.shared_aggregated_particle_cells();
     assert!(!state.aggregated_particle_cells_cache_is_dirty());
+    assert!(state.particle_aggregation_scratch_index_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_cells_capacity() > 0);
 
     let repeated_aggregates = state.shared_aggregated_particle_cells();
     assert!(std::sync::Arc::ptr_eq(
@@ -46,6 +48,9 @@ fn particle_screen_cell_cache_reuses_cached_cells_until_particles_change() {
 
     let initial_screen_cells = state.shared_particle_screen_cells();
     assert!(!state.particle_screen_cells_cache_is_dirty());
+    assert!(state.particle_aggregation_scratch_index_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_cells_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_screen_cells_capacity() > 0);
 
     let repeated_screen_cells = state.shared_particle_screen_cells();
     assert!(std::sync::Arc::ptr_eq(
@@ -65,5 +70,27 @@ fn particle_screen_cell_cache_reuses_cached_cells_until_particles_change() {
     assert_eq!(
         shifted_screen_cells.as_ref(),
         &[crate::types::ScreenCell::new(5, 9).expect("shifted screen cell")]
+    );
+}
+
+#[test]
+fn runtime_state_clone_resets_retained_particle_aggregation_scratch() {
+    let mut state = RuntimeState::default();
+    state.config.particles_over_text = false;
+    let tracked = location(10, 20, 1, 1);
+    state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
+    state.apply_step_output(sample_step_output());
+
+    let _ = state.shared_particle_screen_cells();
+    let cloned = state.clone();
+
+    assert!(state.particle_aggregation_scratch_index_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_cells_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_screen_cells_capacity() > 0);
+    assert_eq!(cloned.particle_aggregation_scratch_index_capacity(), 0);
+    assert_eq!(cloned.particle_aggregation_scratch_cells_capacity(), 0);
+    assert_eq!(
+        cloned.particle_aggregation_scratch_screen_cells_capacity(),
+        0
     );
 }

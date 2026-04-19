@@ -37,6 +37,7 @@ pub(crate) fn diagnostics_report() -> String {
     perf_diagnostics_report()
 }
 
+#[cfg(feature = "perf-counters")]
 pub(crate) fn validation_counters_report() -> String {
     allocation_counters::with_counting_suspended(|| {
         let loop_diag = event_loop_diagnostics();
@@ -52,6 +53,63 @@ pub(crate) fn validation_counters_report() -> String {
             format!(
                 "pap={}",
                 loop_diag.metrics.particle_path.aggregation_particles
+            ),
+            format!("ppi={}", loop_diag.metrics.planning_preview.calls),
+            format!(
+                "ppp={}",
+                loop_diag.metrics.planning_preview.copied_particles
+            ),
+            format!("prh={}", loop_diag.metrics.planner.projection_reuse.hits),
+            format!("prm={}", loop_diag.metrics.planner.projection_reuse.misses),
+            format!(
+                "pch={}",
+                loop_diag.metrics.planner.compiled_field_cache.hits
+            ),
+            format!(
+                "pcm={}",
+                loop_diag.metrics.planner.compiled_field_cache.misses
+            ),
+            format!("pce={}", loop_diag.metrics.planner.compiled_cells_emitted),
+            format!("pcb={}", loop_diag.metrics.planner.candidate_cells_built),
+            format!(
+                "wed={}",
+                loop_diag.metrics.cursor_autocmd_fast_path.win_enter.dropped
+            ),
+            format!(
+                "wec={}",
+                loop_diag
+                    .metrics
+                    .cursor_autocmd_fast_path
+                    .win_enter
+                    .continued
+            ),
+            format!(
+                "wsd={}",
+                loop_diag
+                    .metrics
+                    .cursor_autocmd_fast_path
+                    .win_scrolled
+                    .dropped
+            ),
+            format!(
+                "wsc={}",
+                loop_diag
+                    .metrics
+                    .cursor_autocmd_fast_path
+                    .win_scrolled
+                    .continued
+            ),
+            format!(
+                "bed={}",
+                loop_diag.metrics.cursor_autocmd_fast_path.buf_enter.dropped
+            ),
+            format!(
+                "bec={}",
+                loop_diag
+                    .metrics
+                    .cursor_autocmd_fast_path
+                    .buf_enter
+                    .continued
             ),
             format!("por={}", loop_diag.metrics.particle_path.overlay_refreshes),
             format!(
@@ -82,6 +140,11 @@ pub(crate) fn validation_counters_report() -> String {
         ]
         .join(" ")
     })
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn validation_counters_report() -> String {
+    "smear_cursor_validation unavailable=feature_disabled".to_string()
 }
 
 fn compact_float_value(value: f64) -> String {

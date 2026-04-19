@@ -40,6 +40,7 @@ pub(in crate::core::reducer::tests) fn external_demand_event_with_perf_class(
         requested_target,
         buffer_perf_class,
         ingress_cursor_presentation: None,
+        ingress_observation_surface: None,
     })
 }
 
@@ -131,7 +132,7 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
         CursorLocation::new(11, 22, 3, cursor_line),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
     )
-    .with_cursor_text_context(Some(text_context(
+    .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
         changedtick,
         cursor_line,
         rows,
@@ -154,7 +155,7 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context_bound
         CursorLocation::new(11, 22, 3, cursor_line),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
     )
-    .with_cursor_text_context_boundary(Some(boundary))
+    .with_cursor_text_context_state(CursorTextContextState::BoundaryOnly(boundary))
 }
 
 pub(in crate::core::reducer::tests) fn observation_motion() -> ObservationMotion {
@@ -301,9 +302,9 @@ pub(in crate::core::reducer::tests) fn compatible_cursor_color_ready_state(
     );
     configure_runtime(&mut runtime);
     ready_state()
-        .with_last_cursor(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .into_ready_with_observation(observation_snapshot_with_cursor_color_reuse(
+        .enter_ready(observation_snapshot_with_cursor_color_reuse(
             cursor(9, 9),
             0x00AB_CDEF,
             ProbeReuse::Compatible,
@@ -336,9 +337,9 @@ pub(in crate::core::reducer::tests) fn conceal_deferred_cursor_ready_state(
     );
 
     ready_state()
-        .with_last_cursor(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .into_ready_with_observation(observation)
+        .enter_ready(observation)
 }
 
 pub(in crate::core::reducer::tests) fn observation_runtime_context(
@@ -363,6 +364,7 @@ pub(in crate::core::reducer::tests) fn observation_runtime_context_with_perf_cla
         state.runtime().tracked_location(),
         cursor_text_context_boundary,
         state.runtime().current_corners(),
+        None,
         buffer_perf_class,
         expected_probe_policy(
             demand_kind,
@@ -433,8 +435,7 @@ pub(in crate::core::reducer::tests) fn background_chunk_probe_report(
     allowed_cells: &[(u32, u32)],
 ) -> Event {
     let allowed_mask = chunk
-        .cells()
-        .iter()
+        .iter_cells()
         .map(|cell| {
             let Ok(row) = u32::try_from(cell.row()) else {
                 return false;
@@ -458,12 +459,12 @@ pub(in crate::core::reducer::tests) fn ready_state_with_observation(
     position: CursorPosition,
 ) -> CoreState {
     ready_state()
-        .with_last_cursor(Some(position))
-        .into_ready_with_observation(observation_snapshot(position))
+        .with_latest_exact_cursor_position(Some(position))
+        .enter_ready(observation_snapshot(position))
 }
 
 pub(in crate::core::reducer::tests) fn recovering_state_with_observation(
     position: CursorPosition,
 ) -> CoreState {
-    ready_state_with_observation(position).into_recovering()
+    ready_state_with_observation(position).enter_recovering()
 }

@@ -1,4 +1,7 @@
 use crate::core::realization::LogicalRaster;
+use crate::core::realization::RealizationProjection;
+use crate::core::realization::realize_logical_raster;
+use crate::core::realization::realize_particle_cells;
 use crate::core::runtime_reducer::TargetCellPresentation;
 use crate::core::types::ObservationId;
 use crate::core::types::ProjectorRevision;
@@ -8,11 +11,13 @@ use crate::core::types::StrokeId;
 use crate::core::types::ViewportSnapshot;
 use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
 use crate::state::RuntimeState;
+use crate::types::ModeClass;
+use crate::types::PlannerFrame;
+use crate::types::PlannerRenderConfig;
 use crate::types::Point;
 use crate::types::RenderFrame;
 use crate::types::SharedAggregatedParticleCells;
 use crate::types::SharedRenderStepSamples;
-use crate::types::StaticRenderConfig;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -69,7 +74,7 @@ impl CursorTrailProjectionPolicy {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CursorTrailGeometry {
-    mode: String,
+    mode: ModeClass,
     corners: [Point; 4],
     step_samples: SharedRenderStepSamples,
     planner_idle_steps: u32,
@@ -85,7 +90,7 @@ pub(crate) struct CursorTrailGeometry {
 impl CursorTrailGeometry {
     pub(crate) fn from_render_frame(frame: &RenderFrame) -> Self {
         Self {
-            mode: frame.mode.clone(),
+            mode: frame.mode,
             corners: frame.corners,
             step_samples: frame.step_samples.clone(),
             planner_idle_steps: frame.planner_idle_steps,
@@ -99,14 +104,8 @@ impl CursorTrailGeometry {
         }
     }
 
-    fn planner_static_config(&self, policy: &CursorTrailProjectionPolicy) -> StaticRenderConfig {
-        StaticRenderConfig {
-            cursor_color: None,
-            cursor_color_insert_mode: None,
-            normal_bg: None,
-            transparent_bg_fallback_color: String::new(),
-            cterm_cursor_colors: None,
-            cterm_bg: None,
+    fn planner_config(&self, policy: &CursorTrailProjectionPolicy) -> PlannerRenderConfig {
+        PlannerRenderConfig {
             hide_target_hack: policy.hide_target_hack,
             max_kept_windows: policy.max_kept_windows,
             never_draw_over_target: policy.never_draw_over_target,
@@ -114,7 +113,6 @@ impl CursorTrailGeometry {
             particle_switch_octant_braille: policy.particle_switch_octant_braille,
             particles_over_text: policy.particles_over_text,
             color_levels: policy.color_levels,
-            gamma: 1.0,
             block_aspect_ratio: policy.block_aspect_ratio,
             tail_duration_ms: policy.tail_duration_ms,
             simulation_hz: policy.simulation_hz,
@@ -127,12 +125,12 @@ impl CursorTrailGeometry {
         }
     }
 
-    pub(crate) fn planner_frame(&self, policy: &CursorTrailProjectionPolicy) -> RenderFrame {
+    pub(crate) fn planner_frame(&self, policy: &CursorTrailProjectionPolicy) -> PlannerFrame {
         // phase 3 keeps palette resolution out of semantic identity, so the projector
         // rebuilds a planner-only frame from semantic geometry plus explicit projection policy
         // instead of retaining planner config inside semantic identity.
-        RenderFrame {
-            mode: self.mode.clone(),
+        PlannerFrame {
+            mode: self.mode,
             corners: self.corners,
             step_samples: self.step_samples.clone(),
             planner_idle_steps: self.planner_idle_steps,
@@ -143,9 +141,7 @@ impl CursorTrailGeometry {
             retarget_epoch: self.retarget_epoch,
             particle_count: self.particle_count,
             aggregated_particle_cells: self.aggregated_particle_cells.clone(),
-            particle_screen_cells: Arc::default(),
-            color_at_cursor: None,
-            static_config: Arc::new(self.planner_static_config(policy)),
+            planner_config: self.planner_config(policy),
         }
     }
 
@@ -350,14 +346,25 @@ impl ProjectionReuseKey {
 pub(crate) struct ProjectionSnapshot {
     witness: ProjectionWitness,
     logical_raster: Arc<LogicalRaster>,
+    realization: RealizationProjection,
 }
 
 impl ProjectionSnapshot {
-    pub(crate) fn new(witness: ProjectionWitness, logical_raster: LogicalRaster) -> Self {
+    fn from_parts(
+        witness: ProjectionWitness,
+        logical_raster: Arc<LogicalRaster>,
+        realization: RealizationProjection,
+    ) -> Self {
         Self {
             witness,
-            logical_raster: Arc::new(logical_raster),
+            logical_raster,
+            realization,
         }
+    }
+
+    pub(crate) fn new(witness: ProjectionWitness, logical_raster: LogicalRaster) -> Self {
+        let realization = realize_logical_raster(&logical_raster);
+        Self::from_parts(witness, Arc::new(logical_raster), realization)
     }
 
     pub(crate) const fn witness(&self) -> ProjectionWitness {
@@ -368,6 +375,30 @@ impl ProjectionSnapshot {
         self.logical_raster.as_ref()
     }
 
+    pub(crate) fn realization(&self) -> &RealizationProjection {
+        &self.realization
+    }
+
+    pub(crate) fn rebind_witness(&self, witness: ProjectionWitness) -> Self {
+        Self::from_parts(
+            witness,
+            Arc::clone(&self.logical_raster),
+            self.realization.clone(),
+        )
+    }
+
+    pub(crate) fn with_replaced_particle_cells(
+        &self,
+        witness: ProjectionWitness,
+        particle_cells: Arc<[crate::draw::render_plan::CellOp]>,
+    ) -> Self {
+        let logical_raster = Arc::new(self.logical_raster().replace_particle_cells(particle_cells));
+        let realization = self
+            .realization
+            .replace_particle_spans(realize_particle_cells(logical_raster.particle_cells()));
+        Self::from_parts(witness, logical_raster, realization)
+    }
+
     pub(crate) fn same_render_output_as(&self, other: &Self) -> bool {
         // shell redraw authority is observation-bound, not just raster-bound.
         // If the reducer accepted a new projection witness, the shell must treat that as
@@ -376,7 +407,6 @@ impl ProjectionSnapshot {
         self == other
     }
 
-    #[cfg(test)]
     pub(crate) fn with_witness(mut self, witness: ProjectionWitness) -> Self {
         self.witness = witness;
         self
@@ -604,5 +634,133 @@ impl SceneState {
     pub(crate) fn with_projection(mut self, projection: ProjectionCache) -> Self {
         self.projection = projection;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectionSnapshot;
+    use super::ProjectionWitness;
+    use crate::core::realization::LogicalRaster;
+    use crate::core::realization::realize_logical_raster;
+    use crate::core::types::CursorCol;
+    use crate::core::types::CursorRow;
+    use crate::core::types::IngressSeq;
+    use crate::core::types::ObservationId;
+    use crate::core::types::ProjectorRevision;
+    use crate::core::types::SceneRevision;
+    use crate::core::types::ViewportSnapshot;
+    use crate::draw::render_plan::CellOp;
+    use crate::draw::render_plan::ClearOp;
+    use crate::draw::render_plan::Glyph;
+    use crate::draw::render_plan::HighlightLevel;
+    use crate::draw::render_plan::HighlightRef;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+
+    fn projection_witness() -> ProjectionWitness {
+        ProjectionWitness::new(
+            SceneRevision::INITIAL,
+            ObservationId::from_ingress_seq(IngressSeq::new(7)),
+            ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+            ProjectorRevision::CURRENT,
+        )
+    }
+
+    #[test]
+    fn projection_snapshot_caches_realization_for_the_retained_logical_raster() {
+        let raster = LogicalRaster::new(
+            Some(ClearOp {
+                max_kept_windows: 4,
+            }),
+            Arc::from([
+                CellOp {
+                    row: 3,
+                    col: 5,
+                    zindex: 9,
+                    glyph: Glyph::Static("A"),
+                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(1)),
+                },
+                CellOp {
+                    row: 3,
+                    col: 6,
+                    zindex: 9,
+                    glyph: Glyph::Static("B"),
+                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(2)),
+                },
+                CellOp {
+                    row: 4,
+                    col: 2,
+                    zindex: 1,
+                    glyph: Glyph::BLOCK,
+                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(1)),
+                },
+            ]),
+        );
+        let snapshot = ProjectionSnapshot::new(projection_witness(), raster);
+
+        assert_eq!(
+            snapshot.realization(),
+            &realize_logical_raster(snapshot.logical_raster())
+        );
+    }
+
+    #[test]
+    fn replacing_particle_cells_reuses_the_retained_static_realization_segment() {
+        let snapshot = ProjectionSnapshot::new(
+            projection_witness(),
+            LogicalRaster::from_segments(
+                Some(ClearOp {
+                    max_kept_windows: 4,
+                }),
+                Arc::from([CellOp {
+                    row: 3,
+                    col: 5,
+                    zindex: 9,
+                    glyph: Glyph::Static("P"),
+                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(1)),
+                }]),
+                Arc::from([
+                    CellOp {
+                        row: 4,
+                        col: 2,
+                        zindex: 1,
+                        glyph: Glyph::BLOCK,
+                        highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(2)),
+                    },
+                    CellOp {
+                        row: 4,
+                        col: 3,
+                        zindex: 1,
+                        glyph: Glyph::Static("x"),
+                        highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(3)),
+                    },
+                ]),
+            ),
+        );
+
+        let replaced = snapshot.with_replaced_particle_cells(
+            projection_witness(),
+            Arc::from([CellOp {
+                row: 8,
+                col: 9,
+                zindex: 12,
+                glyph: Glyph::Braille(2),
+                highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(4)),
+            }]),
+        );
+
+        assert_eq!(
+            snapshot.realization().static_spans().as_ptr(),
+            replaced.realization().static_spans().as_ptr(),
+        );
+        assert_ne!(
+            snapshot.realization().particle_spans(),
+            replaced.realization().particle_spans()
+        );
+        assert_eq!(
+            replaced.realization(),
+            &realize_logical_raster(replaced.logical_raster())
+        );
     }
 }

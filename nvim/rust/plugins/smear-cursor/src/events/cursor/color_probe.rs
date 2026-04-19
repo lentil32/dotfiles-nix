@@ -30,6 +30,7 @@ impl CursorColorProbeResult {
 }
 
 fn cursor_color_at_current_position(
+    buffer_handle: i64,
     colorscheme_generation: Generation,
     probe_policy: ProbePolicy,
 ) -> Result<Option<u32>> {
@@ -39,7 +40,7 @@ fn cursor_color_at_current_position(
     )?;
     let probe_result = parse_cursor_color_probe_result(value)?;
     if probe_result.used_extmark_fallback {
-        record_probe_extmark_fallback(ProbeKind::CursorColor);
+        record_probe_extmark_fallback(buffer_handle, ProbeKind::CursorColor);
     }
     Ok(probe_result.color)
 }
@@ -95,10 +96,11 @@ fn parse_cursor_color_host_bridge_color(value: Object) -> Result<u32> {
 }
 
 pub(crate) fn sampled_cursor_color_at_current_position(
+    buffer_handle: i64,
     colorscheme_generation: Generation,
     probe_policy: ProbePolicy,
 ) -> Result<Option<u32>> {
-    cursor_color_at_current_position(colorscheme_generation, probe_policy)
+    cursor_color_at_current_position(buffer_handle, colorscheme_generation, probe_policy)
 }
 
 #[cfg(test)]

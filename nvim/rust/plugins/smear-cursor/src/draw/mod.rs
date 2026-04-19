@@ -1,5 +1,4 @@
 use crate::core::realization::PaletteSpec;
-use crate::core::realization::realize_logical_raster;
 use crate::core::state::ProjectionSnapshot;
 use crate::types::CursorCellShape;
 use crate::types::ScreenCell;
@@ -434,8 +433,8 @@ pub(crate) fn draw_current(
     let tab_handle = apply::current_tab_handle();
     // Surprising: the old shell-local draw ack was keyed by proposal id, so it could not
     // suppress future proposals. The core realization ledger is now the only apply authority.
-    let realization = realize_logical_raster(projection.logical_raster());
-    let prepared_apply = apply::prepare_apply_plan(palette.color_levels(), &realization);
+    let prepared_apply =
+        apply::prepare_apply_plan(palette.color_levels(), projection.realization());
     apply::apply_plan(
         namespace_id,
         tab_handle,
@@ -828,6 +827,7 @@ mod tests {
     use crate::draw::window_pool::WindowPlacement;
     use crate::types::BASE_TIME_INTERVAL;
     use crate::types::CursorCellShape;
+    use crate::types::ModeClass;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
@@ -944,7 +944,7 @@ mod tests {
             },
         ];
         RenderFrame {
-            mode: "n".to_string(),
+            mode: ModeClass::NormalLike,
             corners,
             step_samples: vec![RenderStepSample::new(corners, BASE_TIME_INTERVAL)].into(),
             planner_idle_steps: 0,
@@ -992,11 +992,15 @@ mod tests {
     fn trail_stroke_change_changes_draw_signature() {
         let mut baseline = base_frame();
         baseline.retarget_epoch = 10;
-        let baseline_signature = super::render_plan::frame_draw_signature(&baseline);
+        let baseline_signature = super::render_plan::frame_draw_signature(
+            &crate::types::PlannerFrame::from_render_frame(&baseline),
+        );
 
         let mut retargeted = baseline;
         retargeted.trail_stroke_id = StrokeId::new(2);
-        let retargeted_signature = super::render_plan::frame_draw_signature(&retargeted);
+        let retargeted_signature = super::render_plan::frame_draw_signature(
+            &crate::types::PlannerFrame::from_render_frame(&retargeted),
+        );
 
         assert_ne!(baseline_signature, retargeted_signature);
     }

@@ -104,8 +104,19 @@ pub(crate) struct IngressReadSnapshotTestInput {
 }
 
 impl IngressReadSnapshot {
+    #[cfg(not(test))]
     pub(crate) fn capture() -> EngineAccessResult<Self> {
-        let callback_duration_estimate_ms = super::cursor_callback_duration_estimate_ms();
+        let current_buffer = api::get_current_buf();
+        let current_buffer = current_buffer.is_valid().then_some(current_buffer);
+        Self::capture_with_current_buffer(current_buffer.as_ref())
+    }
+
+    pub(crate) fn capture_with_current_buffer(
+        current_buffer: Option<&api::Buffer>,
+    ) -> EngineAccessResult<Self> {
+        let callback_duration_estimate_ms = super::cursor_callback_duration_estimate_ms(
+            current_buffer.map(api::Buffer::handle).map(i64::from),
+        );
         let mut snapshot = read_engine_state(|state| {
             let runtime = state.core_state.runtime();
             let config = &runtime.config;
@@ -125,7 +136,8 @@ impl IngressReadSnapshot {
             }
         })?;
         if snapshot.enabled {
-            snapshot.current_buffer_event_policy = snapshot.read_current_buffer_event_policy();
+            snapshot.current_buffer_event_policy =
+                snapshot.read_current_buffer_event_policy(current_buffer);
         }
         Ok(snapshot)
     }
@@ -208,13 +220,15 @@ impl IngressReadSnapshot {
         }
     }
 
-    fn read_current_buffer_event_policy(&self) -> Option<BufferEventPolicy> {
-        let buffer = api::get_current_buf();
-        if !buffer.is_valid() {
+    fn read_current_buffer_event_policy(
+        &self,
+        buffer: Option<&api::Buffer>,
+    ) -> Option<BufferEventPolicy> {
+        let Some(buffer) = buffer else {
             return None;
-        }
+        };
 
-        match resolved_current_buffer_event_policy(self, &buffer) {
+        match resolved_current_buffer_event_policy(self, buffer) {
             Ok(policy) => Some(policy),
             Err(err) => {
                 warn(&format!(

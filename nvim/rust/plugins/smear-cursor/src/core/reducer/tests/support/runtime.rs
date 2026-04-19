@@ -156,7 +156,7 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
     };
     (
         state
-            .into_applying(proposal)
+            .enter_applying(proposal)
             .expect("test staging requires a retained observation"),
         proposal_id,
     )

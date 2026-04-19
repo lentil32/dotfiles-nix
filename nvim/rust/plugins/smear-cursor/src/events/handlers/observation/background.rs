@@ -10,7 +10,10 @@ use crate::draw::BRAILLE_CODE_MAX;
 use crate::draw::BRAILLE_CODE_MIN;
 use crate::draw::OCTANT_CODE_MAX;
 use crate::draw::OCTANT_CODE_MIN;
+use crate::events::EngineAccessError;
 use crate::events::host_bridge::installed_host_bridge;
+use crate::events::runtime::reclaim_background_probe_request_scratch;
+use crate::events::runtime::take_background_probe_request_scratch;
 use crate::lua::LuaParseError;
 use crate::lua::parse_indexed_objects_typed;
 use crate::lua::u8_from_object_typed;
@@ -20,6 +23,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 enum BackgroundProbeMaskError {
+    #[error("background probe engine state access failed: {0}")]
+    EngineAccess(#[source] EngineAccessError),
     #[error("background probe host bridge call failed: {0}")]
     BridgeCall(#[source] nvim_oxi::Error),
     #[error("background probe mask shape mismatch: {0}")]
@@ -32,15 +37,46 @@ enum BackgroundProbeMaskError {
     },
 }
 
+fn background_probe_request_len(chunk: &BackgroundProbeChunk) -> usize {
+    4 + chunk.len().saturating_mul(2)
+}
+
+fn populate_background_probe_request(request: &mut Vec<Object>, chunk: &BackgroundProbeChunk) {
+    request.clear();
+    request.reserve(background_probe_request_len(chunk).saturating_sub(request.len()));
+    request.push(Object::from(BRAILLE_CODE_MIN));
+    request.push(Object::from(BRAILLE_CODE_MAX));
+    request.push(Object::from(OCTANT_CODE_MIN));
+    request.push(Object::from(OCTANT_CODE_MAX));
+    for cell in chunk.iter_cells() {
+        request.push(Object::from(cell.row()));
+        request.push(Object::from(cell.col()));
+    }
+}
+
+fn with_background_probe_request_scratch<R>(
+    body: impl FnOnce(&mut Vec<Object>) -> std::result::Result<R, BackgroundProbeMaskError>,
+) -> std::result::Result<R, BackgroundProbeMaskError> {
+    let mut request =
+        take_background_probe_request_scratch().map_err(BackgroundProbeMaskError::EngineAccess)?;
+    let result = body(&mut request);
+    let reclaim = reclaim_background_probe_request_scratch(request)
+        .map_err(BackgroundProbeMaskError::EngineAccess);
+    match (result, reclaim) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), Ok(())) => Err(err),
+        (_, Err(err)) => Err(err),
+    }
+}
+
 fn batch_background_allowed_mask(
     viewport: crate::core::types::ViewportSnapshot,
     chunk: &BackgroundProbeChunk,
 ) -> std::result::Result<BackgroundProbeChunkMask, BackgroundProbeMaskError> {
-    let cells = chunk.cells();
-    if cells.is_empty() {
+    if chunk.len() == 0 {
         return Ok(BackgroundProbeChunkMask::from_allowed_mask(&[]));
     }
-    if cells.iter().any(|cell| {
+    if chunk.iter_cells().any(|cell| {
         let Ok(row) = u32::try_from(cell.row()) else {
             return true;
         };
@@ -57,43 +93,36 @@ fn batch_background_allowed_mask(
         ));
     }
 
-    let expected_len = cells.len();
+    let expected_len = chunk.len();
     let expected_packed_len = expected_len / 8 + usize::from(!expected_len.is_multiple_of(8));
-    let mut request = Vec::with_capacity(4 + expected_len.saturating_mul(2));
-    request.push(Object::from(BRAILLE_CODE_MIN));
-    request.push(Object::from(BRAILLE_CODE_MAX));
-    request.push(Object::from(OCTANT_CODE_MIN));
-    request.push(Object::from(OCTANT_CODE_MAX));
-    for cell in cells {
-        request.push(Object::from(cell.row()));
-        request.push(Object::from(cell.col()));
-    }
+    with_background_probe_request_scratch(|request| {
+        populate_background_probe_request(request, chunk);
+        let request = Array::from_iter(request.drain(..));
+        let host_bridge = installed_host_bridge()
+            .map_err(nvim_oxi::Error::from)
+            .map_err(BackgroundProbeMaskError::BridgeCall)?;
+        let value = host_bridge
+            .background_allowed_mask(request)
+            .map_err(nvim_oxi::Error::from)
+            .map_err(BackgroundProbeMaskError::BridgeCall)?;
+        let values =
+            parse_indexed_objects_typed("background_probe_mask", value, Some(expected_packed_len))
+                .map_err(BackgroundProbeMaskError::Shape)?;
+        let packed = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                u8_from_object_typed("background_probe_mask", value)
+                    .map_err(|source| BackgroundProbeMaskError::ValueDecode { index, source })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    let request = Array::from_iter(request);
-    let host_bridge = installed_host_bridge()
-        .map_err(nvim_oxi::Error::from)
-        .map_err(BackgroundProbeMaskError::BridgeCall)?;
-    let value = host_bridge
-        .background_allowed_mask(request)
-        .map_err(nvim_oxi::Error::from)
-        .map_err(BackgroundProbeMaskError::BridgeCall)?;
-    let values =
-        parse_indexed_objects_typed("background_probe_mask", value, Some(expected_packed_len))
-            .map_err(BackgroundProbeMaskError::Shape)?;
-    let packed = values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            u8_from_object_typed("background_probe_mask", value)
-                .map_err(|source| BackgroundProbeMaskError::ValueDecode { index, source })
+        BackgroundProbeChunkMask::from_packed_bytes(expected_len, packed).ok_or_else(|| {
+            BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
+                "background_probe_mask",
+                "packed byte array",
+            ))
         })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    BackgroundProbeChunkMask::from_packed_bytes(expected_len, packed).ok_or_else(|| {
-        BackgroundProbeMaskError::Shape(crate::lua::invalid_key_error(
-            "background_probe_mask",
-            "packed byte array",
-        ))
     })
 }
 
@@ -146,4 +175,76 @@ pub(super) fn collect_background_report(payload: &RequestProbeEffect) -> CoreEve
         chunk: chunk.clone(),
         allowed_mask,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::state::BackgroundProbePlan;
+    use crate::core::state::BackgroundProbeProgress;
+    use crate::core::types::CursorCol;
+    use crate::core::types::CursorRow;
+    use crate::core::types::ViewportSnapshot;
+    use crate::lua::i64_from_object_typed;
+    use crate::types::ScreenCell;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn populate_background_probe_request_writes_header_and_cell_pairs() {
+        let viewport = ViewportSnapshot::new(CursorRow(10), CursorCol(10));
+        let plan = BackgroundProbePlan::from_cells(vec![
+            ScreenCell::new(7, 8).expect("cell"),
+            ScreenCell::new(9, 10).expect("cell"),
+        ]);
+        let chunk = BackgroundProbeProgress::new(viewport, plan)
+            .next_chunk()
+            .expect("chunk should build");
+        let mut request = Vec::new();
+
+        populate_background_probe_request(&mut request, &chunk);
+
+        let values = request
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                i64_from_object_typed("background_probe_request", value).unwrap_or_else(|err| {
+                    panic!("request value {index} should decode to an integer: {err}")
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![
+                BRAILLE_CODE_MIN,
+                BRAILLE_CODE_MAX,
+                OCTANT_CODE_MIN,
+                OCTANT_CODE_MAX,
+                7,
+                8,
+                9,
+                10,
+            ]
+        );
+    }
+
+    #[test]
+    fn background_probe_request_scratch_reuses_larger_shell_buffer() {
+        let initial_capacity = crate::events::runtime::read_engine_state(|state| {
+            state.shell.background_probe_request_scratch_capacity()
+        })
+        .expect("shell state should be readable");
+        let scratch_capacity = initial_capacity.max(32);
+        let mut scratch =
+            take_background_probe_request_scratch().expect("scratch should be available");
+        scratch.reserve(scratch_capacity.saturating_sub(scratch.len()));
+        let scratch_ptr = scratch.as_ptr();
+        let scratch_capacity = scratch.capacity();
+
+        reclaim_background_probe_request_scratch(scratch).expect("scratch should be reclaimable");
+
+        let scratch = take_background_probe_request_scratch().expect("scratch should be available");
+        assert_eq!(scratch.capacity(), scratch_capacity);
+        assert_eq!(scratch.as_ptr(), scratch_ptr);
+        reclaim_background_probe_request_scratch(scratch).expect("scratch should be reclaimable");
+    }
 }

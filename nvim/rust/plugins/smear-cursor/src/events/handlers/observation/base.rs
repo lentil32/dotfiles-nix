@@ -1,34 +1,33 @@
 use super::cursor_color::current_cursor_color_probe_witness;
 use super::cursor_color::mode_requires_cursor_color_sampling;
-use super::text_context::CurrentCursorTextContext;
 use super::text_context::current_cursor_text_context;
 use crate::core::effect::CursorPositionReadPolicy;
+use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RequestObservationBaseEffect;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
 use crate::core::state::CursorPositionSync;
+use crate::core::state::CursorTextContextState;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationMotion;
 use crate::core::types::CursorCol;
 use crate::core::types::CursorPosition;
 use crate::core::types::CursorRow;
+use crate::core::types::Generation;
 use crate::core::types::ViewportSnapshot;
 use crate::draw::editor_bounds;
 use crate::events::cursor::current_mode;
 use crate::events::cursor::cursor_position_read_for_mode_with_probe_policy;
 use crate::events::handlers::viewport::cursor_location_for_core_render;
 use crate::events::handlers::viewport::maybe_scroll_shift_for_core_event;
+use crate::events::runtime::buffer_text_revision;
 use crate::events::runtime::note_cursor_color_observation_boundary;
 use crate::events::runtime::now_ms;
 use crate::events::runtime::to_core_millis;
-use crate::lua::i64_from_object;
-use nvim_oxi::Array;
-use nvim_oxi::Object;
+use crate::state::CursorLocation;
 use nvim_oxi::Result;
 use nvim_oxi::api;
-use nvim_oxi::api::types::ModeStr;
-use std::borrow::Cow;
 
 fn to_core_coordinate(value: f64) -> Option<u32> {
     if !value.is_finite() || value < 0.0 || value > u32::MAX as f64 {
@@ -50,50 +49,62 @@ pub(super) struct CurrentCoreCursorPosition {
 }
 
 pub(super) struct CurrentEditorSnapshot {
-    mode: ModeStr,
+    mode: String,
     window: Option<api::Window>,
     buffer: Option<api::Buffer>,
-    changedtick: Option<u64>,
+    text_revision: Option<Generation>,
     viewport: Option<ViewportSnapshot>,
+    ingress_cursor_location: Option<CursorLocation>,
 }
 
 impl CurrentEditorSnapshot {
     pub(super) fn capture() -> Result<Self> {
-        Self::capture_with_viewport(false)
+        Self::capture_with_viewport(false, None)
     }
 
-    pub(super) fn capture_for_observation_base() -> Result<Self> {
-        Self::capture_with_viewport(true)
+    pub(super) fn capture_for_observation_base(
+        ingress_observation_surface: Option<&IngressObservationSurface>,
+    ) -> Result<Self> {
+        Self::capture_with_viewport(true, ingress_observation_surface)
     }
 
-    fn capture_with_viewport(include_viewport: bool) -> Result<Self> {
-        let mode = current_mode();
+    fn capture_with_viewport(
+        include_viewport: bool,
+        ingress_observation_surface: Option<&IngressObservationSurface>,
+    ) -> Result<Self> {
+        let mode = ingress_observation_surface
+            .map(IngressObservationSurface::mode)
+            .map(str::to_owned)
+            .unwrap_or_else(|| current_mode().to_string_lossy().into_owned());
         let viewport = include_viewport
             .then(current_viewport_snapshot)
             .transpose()?;
-
-        let window = api::get_current_win();
-        let window = window.is_valid().then_some(window);
-
-        let buffer = api::get_current_buf();
-        let (buffer, changedtick) = if buffer.is_valid() {
-            let changedtick = current_buffer_changedtick(i64::from(buffer.handle()))?;
-            (Some(buffer), Some(changedtick))
-        } else {
-            (None, None)
+        let window = ingress_observation_surface
+            .and_then(window_from_ingress_surface)
+            .or_else(current_window_snapshot);
+        let buffer = ingress_observation_surface
+            .and_then(buffer_from_ingress_surface)
+            .or_else(current_buffer_snapshot);
+        let text_revision = match buffer.as_ref() {
+            Some(buffer) => Some(
+                buffer_text_revision(i64::from(buffer.handle())).map_err(nvim_oxi::Error::from)?,
+            ),
+            None => None,
         };
 
         Ok(Self {
             mode,
             window,
             buffer,
-            changedtick,
+            text_revision,
             viewport,
+            ingress_cursor_location: ingress_observation_surface
+                .and_then(IngressObservationSurface::cursor_location),
         })
     }
 
-    pub(super) fn mode(&self) -> Cow<'_, str> {
-        self.mode.to_string_lossy()
+    pub(super) fn mode(&self) -> &str {
+        self.mode.as_str()
     }
 
     pub(super) fn window(&self) -> Option<&api::Window> {
@@ -114,13 +125,13 @@ impl CurrentEditorSnapshot {
             .ok_or_else(|| nvim_oxi::api::Error::Other("current buffer invalid".into()).into())
     }
 
-    pub(super) fn changedtick(&self) -> Option<u64> {
-        self.changedtick
+    pub(super) fn text_revision(&self) -> Option<Generation> {
+        self.text_revision
     }
 
-    pub(super) fn current_changedtick(&self) -> Result<u64> {
-        self.changedtick().ok_or_else(|| {
-            nvim_oxi::api::Error::Other("current buffer changedtick unavailable".into()).into()
+    pub(super) fn current_text_revision(&self) -> Result<Generation> {
+        self.text_revision().ok_or_else(|| {
+            nvim_oxi::api::Error::Other("current buffer text revision unavailable".into()).into()
         })
     }
 
@@ -133,6 +144,32 @@ impl CurrentEditorSnapshot {
             nvim_oxi::api::Error::Other("current viewport unavailable".into()).into()
         })
     }
+
+    fn ingress_cursor_location(&self) -> Option<CursorLocation> {
+        self.ingress_cursor_location.clone()
+    }
+}
+
+fn current_window_snapshot() -> Option<api::Window> {
+    let window = api::get_current_win();
+    window.is_valid().then_some(window)
+}
+
+fn current_buffer_snapshot() -> Option<api::Buffer> {
+    let buffer = api::get_current_buf();
+    buffer.is_valid().then_some(buffer)
+}
+
+fn window_from_ingress_surface(surface: &IngressObservationSurface) -> Option<api::Window> {
+    let handle = i32::try_from(surface.window_handle()).ok()?;
+    let window = api::Window::from(handle);
+    window.is_valid().then_some(window)
+}
+
+fn buffer_from_ingress_surface(surface: &IngressObservationSurface) -> Option<api::Buffer> {
+    let handle = i32::try_from(surface.buffer_handle()).ok()?;
+    let buffer = api::Buffer::from(handle);
+    buffer.is_valid().then_some(buffer)
 }
 
 pub(super) fn current_core_cursor_position(
@@ -150,7 +187,7 @@ pub(super) fn current_core_cursor_position(
 
     let cursor_read = cursor_position_read_for_mode_with_probe_policy(
         window,
-        mode.as_ref(),
+        mode,
         policy.smear_to_cmd(),
         probe_policy,
     )?;
@@ -191,28 +228,21 @@ pub(super) fn current_viewport_snapshot() -> Result<ViewportSnapshot> {
     ))
 }
 
-pub(super) fn current_buffer_changedtick(buffer_handle: i64) -> Result<u64> {
-    crate::events::runtime::record_current_buffer_changedtick_read();
-    let args = Array::from_iter([Object::from(buffer_handle), Object::from("changedtick")]);
-    let value = api::call_function("getbufvar", args)?;
-    let changedtick = i64_from_object("getbufvar(changedtick)", value)?;
-    if changedtick < 0 {
-        return Err(
-            nvim_oxi::api::Error::Other("buffer changedtick must be non-negative".into()).into(),
-        );
-    }
-
-    Ok(changedtick as u64)
-}
-
 fn collect_observation_basis(
     payload: &RequestObservationBaseEffect,
 ) -> Result<(ObservationBasis, ObservationMotion)> {
     let observed_at = to_core_millis(now_ms());
-    let editor = CurrentEditorSnapshot::capture_for_observation_base()?;
+    let editor = CurrentEditorSnapshot::capture_for_observation_base(
+        payload.context.ingress_observation_surface(),
+    )?;
     let mode = editor.mode();
     let tracked_location = payload.context.tracked_location();
-    let cursor_location = cursor_location_for_core_render(tracked_location.clone());
+    let cursor_location = cursor_location_for_core_render(
+        editor.window(),
+        editor.buffer(),
+        tracked_location.clone(),
+        editor.ingress_cursor_location(),
+    );
     let viewport = editor.current_viewport()?;
     let cursor_position = current_core_cursor_position(
         &editor,
@@ -225,16 +255,14 @@ fn collect_observation_basis(
         tracked_location.as_ref(),
         payload.context.cursor_text_context_boundary(),
     ) {
-        Ok(context) => context,
+        Ok(state) => state,
         Err(err) => {
             crate::events::logging::warn(&format!("cursor text context read failed: {err}"));
-            CurrentCursorTextContext::new(None, None)
+            CursorTextContextState::Unavailable
         }
     };
-    let (cursor_text_context, cursor_text_context_boundary) =
-        current_cursor_text_context.into_parts();
     let cursor_color_witness = if payload.request.probes().cursor_color()
-        && mode_requires_cursor_color_sampling(mode.as_ref())?
+        && mode_requires_cursor_color_sampling(mode)?
     {
         if let Err(err) = note_cursor_color_observation_boundary() {
             crate::events::logging::warn(&format!(
@@ -262,14 +290,13 @@ fn collect_observation_basis(
         ObservationBasis::new(
             payload.request.observation_id(),
             observed_at,
-            mode.into_owned(),
+            mode.to_owned(),
             cursor_position.position,
             cursor_location,
             viewport,
         )
         .with_cursor_color_witness(cursor_color_witness)
-        .with_cursor_text_context_boundary(cursor_text_context_boundary)
-        .with_cursor_text_context(cursor_text_context),
+        .with_cursor_text_context_state(current_cursor_text_context),
         ObservationMotion::new(scroll_shift).with_cursor_position_sync(cursor_position.sync),
     ))
 }

@@ -15,12 +15,20 @@ pub(crate) use transition::Transition;
 /// Reduces a single core event into the next state transition.
 #[cfg(test)]
 pub(crate) fn reduce(state: &CoreState, event: Event) -> Transition {
-    machine::reduce_owned(state.clone(), event)
+    reduce_owned(state.clone(), event)
 }
 
 /// Reduces a single core event by consuming the current state.
 pub(crate) fn reduce_owned(state: CoreState, event: Event) -> Transition {
-    machine::reduce_owned(state, event)
+    #[cfg(debug_assertions)]
+    state.debug_assert_invariants();
+
+    let transition = machine::reduce_owned(state, event);
+
+    #[cfg(debug_assertions)]
+    transition.next.debug_assert_invariants();
+
+    transition
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use crate::core::effect::IngressCursorPresentationRequest;
+use crate::core::effect::IngressObservationSurface;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbeChunk;
@@ -25,13 +26,14 @@ pub(crate) struct InitializeEvent {
     pub(crate) observed_at: Millis,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ExternalDemandQueuedEvent {
     pub(crate) kind: ExternalDemandKind,
     pub(crate) observed_at: Millis,
     pub(crate) requested_target: Option<CursorPosition>,
     pub(crate) buffer_perf_class: BufferPerfClass,
     pub(crate) ingress_cursor_presentation: Option<IngressCursorPresentationRequest>,
+    pub(crate) ingress_observation_surface: Option<IngressObservationSurface>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -32,6 +32,7 @@ fn cursor_autocmd_demands_refresh_ingress_policy_state() {
             requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
+            ingress_observation_surface: None,
         }),
     );
 
@@ -59,6 +60,7 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
                 Some(cell),
                 crate::types::CursorCellShape::Block,
             )),
+            ingress_observation_surface: None,
         }),
     );
 
@@ -86,6 +88,47 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
     );
 }
 
+#[test]
+fn immediate_cursor_observation_request_carries_ingress_surface_snapshot() {
+    let state = ready_state();
+    let ingress_surface = IngressObservationSurface::new(
+        11,
+        22,
+        Some(
+            CursorLocation::new(11, 22, 3, 9)
+                .with_viewport_columns(4, 1)
+                .with_window_origin(5, 6)
+                .with_window_dimensions(80, 20),
+        ),
+        "n".to_string(),
+    );
+
+    let transition = reduce(
+        &state,
+        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+            kind: ExternalDemandKind::ExternalCursor,
+            observed_at: Millis::new(78),
+            requested_target: None,
+            buffer_perf_class: BufferPerfClass::Full,
+            ingress_cursor_presentation: None,
+            ingress_observation_surface: Some(ingress_surface.clone()),
+        }),
+    );
+
+    let Some(Effect::RequestObservationBase(payload)) = transition
+        .effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::RequestObservationBase(_)))
+    else {
+        panic!("expected immediate observation-base request");
+    };
+
+    pretty_assert_eq!(
+        payload.context.ingress_observation_surface(),
+        Some(&ingress_surface)
+    );
+}
+
 proptest! {
     #![proptest_config(pure_config())]
 
@@ -109,6 +152,7 @@ proptest! {
                     Some(cell),
                     shape,
                 )),
+                ingress_observation_surface: None,
             }),
         );
 
@@ -160,9 +204,9 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     runtime.start_tail_drain(2);
     runtime.set_last_tick_ms(Some(100.0));
     let base = ready_state()
-        .with_last_cursor(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .into_ready_with_observation(observation);
+        .enter_ready(observation);
     let (state, token) = timer_armed_state(base);
 
     let transition = reduce(&state, animation_tick_event(token, 116));
@@ -271,9 +315,9 @@ fn animation_timer_preserves_perf_class_across_boundary_refresh() {
     ))
     .expect("cursor color probe should be requested");
     let base = ready_state()
-        .with_last_cursor(Some(cursor(9, 9)))
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .into_ready_with_observation(observation);
+        .enter_ready(observation);
     let (state, token) = timer_armed_state(base);
 
     let transition = reduce(&state, animation_tick_event(token, 116));
@@ -331,6 +375,43 @@ fn animation_timer_requests_boundary_refresh_for_conceal_deferred_cursor_positio
         BufferPerfClass::FastMotion
     );
     pretty_assert_eq!(request.demand().requested_target(), Some(cursor(9, 9)));
+}
+
+#[test]
+fn conceal_deferred_boundary_refresh_uses_latest_exact_cursor_anchor() {
+    let mut runtime = ready_state().runtime().clone();
+    runtime.initialize_cursor(
+        Point { row: 9.0, col: 9.0 },
+        CursorShape::new(false, false),
+        7,
+        &CursorLocation::new(11, 22, 3, 9),
+    );
+    let request = observation_request_with_perf_class(
+        9,
+        ExternalDemandKind::ExternalCursor,
+        90,
+        BufferPerfClass::FastMotion,
+    );
+    let observation = ObservationSnapshot::new(
+        request.clone(),
+        observation_basis(&request, Some(cursor(12, 13)), 91),
+        observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+    );
+    let base = ready_state()
+        .with_latest_exact_cursor_position(Some(cursor(9, 9)))
+        .with_runtime(runtime)
+        .enter_ready(observation);
+    let (state, token) = timer_armed_state(base);
+
+    let transition = reduce(&state, animation_tick_event(token, 116));
+
+    let [Effect::RequestObservationBase(payload)] = transition.effects.as_slice() else {
+        panic!("expected boundary refresh observation after deferred conceal correction");
+    };
+    pretty_assert_eq!(
+        payload.request.demand().requested_target(),
+        Some(cursor(9, 9))
+    );
 }
 
 #[test]

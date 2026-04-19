@@ -96,6 +96,8 @@ raw_results_table="${artifact_dir}/window_switch_compare_raw.txt"
 summary_table="${artifact_dir}/window_switch_compare_summary.txt"
 worst_case_table="${artifact_dir}/window_switch_compare_worst_case.txt"
 planner_telemetry_table="${artifact_dir}/window_switch_compare_planner_telemetry.txt"
+planner_validation_table="${artifact_dir}/window_switch_compare_planner_validation.txt"
+ingress_fast_path_table="${artifact_dir}/window_switch_compare_ingress_fast_path.txt"
 pool_retention_table="${artifact_dir}/window_switch_compare_pool_retention.txt"
 pool_peak_pressure_table="${artifact_dir}/window_switch_compare_pool_peak_pressure.txt"
 particle_isolation_table="${artifact_dir}/window_switch_compare_particle_isolation.txt"
@@ -127,6 +129,7 @@ run_once() {
   local summary_line
   local stress_line
   local diagnostics_line
+  local validation_line
   local baseline_us
   local recovery_ratio
   local stress_max_avg_us
@@ -144,11 +147,23 @@ run_once() {
   local planner_candidate_query_cells
   local planner_compiled_cells_emitted
   local planner_candidate_cells_built
+  local projection_reuse_hits
+  local projection_reuse_misses
+  local planner_cache_hits
+  local planner_cache_misses
+  local planner_validation_compiled_cells_emitted
+  local planner_validation_candidate_cells_built
   local pool_total_windows
   local pool_cached_budget
   local max_kept_windows
   local pool_peak_requested_capacity
   local pool_capacity_cap_hits
+  local win_enter_dropped
+  local win_enter_continued
+  local win_scrolled_dropped
+  local win_scrolled_continued
+  local buf_enter_dropped
+  local buf_enter_continued
   local side_overrides=()
 
   plugin_dir="$(smear_compare_plugin_dir "${side_root}")"
@@ -195,6 +210,7 @@ run_once() {
   summary_line="$(grep 'PERF_SUMMARY' "${log_file}" | tail -n 1)"
   stress_line="$(grep 'PERF_STRESS_SUMMARY' "${log_file}" | tail -n 1)"
   diagnostics_line="$(grep 'PERF_DIAGNOSTICS phase=post_recovery ' "${log_file}" | tail -n 1)"
+  validation_line="$(grep 'PERF_VALIDATION phase=post_recovery ' "${log_file}" | tail -n 1)"
 
   baseline_us="$(smear_extract_field "${summary_line}" "baseline_avg_us")"
   recovery_ratio="$(smear_extract_field "${summary_line}" "recovery_ratio")"
@@ -213,13 +229,25 @@ run_once() {
   planner_candidate_query_cells="$(smear_extract_field "${diagnostics_line}" "planner_candq")"
   planner_compiled_cells_emitted="$(smear_extract_field "${diagnostics_line}" "planner_compiled_cells_emitted")"
   planner_candidate_cells_built="$(smear_extract_field "${diagnostics_line}" "planner_candidate_cells_built")"
+  projection_reuse_hits="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "prh")")"
+  projection_reuse_misses="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "prm")")"
+  planner_cache_hits="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pch")")"
+  planner_cache_misses="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pcm")")"
+  planner_validation_compiled_cells_emitted="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pce")")"
+  planner_validation_candidate_cells_built="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "pcb")")"
+  win_enter_dropped="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wed")")"
+  win_enter_continued="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wec")")"
+  win_scrolled_dropped="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wsd")")"
+  win_scrolled_continued="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "wsc")")"
+  buf_enter_dropped="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "bed")")"
+  buf_enter_continued="$(normalize_optional_field "$(smear_extract_field "${validation_line}" "bec")")"
   pool_total_windows="$(smear_extract_field "${diagnostics_line}" "pool_total_windows")"
   pool_cached_budget="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_cached_budget")")"
   max_kept_windows="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "max_kept_windows")")"
   pool_peak_requested_capacity="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_peak_requested")")"
   pool_capacity_cap_hits="$(normalize_optional_field "$(smear_extract_field "${diagnostics_line}" "pool_cap_hits")")"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${side_label}" \
     "${scenario_name}" \
     "${repeat_index}" \
@@ -240,14 +268,26 @@ run_once() {
     "${planner_candidate_query_cells}" \
     "${planner_compiled_cells_emitted}" \
     "${planner_candidate_cells_built}" \
+    "${projection_reuse_hits}" \
+    "${projection_reuse_misses}" \
+    "${planner_cache_hits}" \
+    "${planner_cache_misses}" \
+    "${planner_validation_compiled_cells_emitted}" \
+    "${planner_validation_candidate_cells_built}" \
     "${pool_total_windows}" \
     "${pool_cached_budget}" \
     "${max_kept_windows}" \
     "${pool_peak_requested_capacity}" \
     "${pool_capacity_cap_hits}" \
+    "${win_enter_dropped}" \
+    "${win_enter_continued}" \
+    "${win_scrolled_dropped}" \
+    "${win_scrolled_continued}" \
+    "${buf_enter_dropped}" \
+    "${buf_enter_continued}" \
     >>"${results_tsv}"
 
-  printf '%s %-24s run=%s baseline=%8sus recovery_ratio=%s stress_max_ratio=%s stress_tail_ratio=%s class=%s extmark=%s conceal=%s planner_maps=%s planner_cells=%s envelope_area=%s local_query=%s compiled_query=%s candidate_query=%s compiled=%s candidates=%s pool_total=%s pool_cached=%s peak_requested=%s cap_hits=%s max=%s\n' \
+  printf '%s %-24s run=%s baseline=%8sus recovery_ratio=%s stress_max_ratio=%s stress_tail_ratio=%s class=%s extmark=%s conceal=%s planner_maps=%s planner_cells=%s envelope_area=%s local_query=%s compiled_query=%s candidate_query=%s compiled=%s candidates=%s reuse_hit=%s reuse_miss=%s cache_hit=%s cache_miss=%s val_compiled=%s val_candidates=%s pool_total=%s pool_cached=%s peak_requested=%s cap_hits=%s max=%s win_enter=%s/%s win_scrolled=%s/%s buf_enter=%s/%s\n' \
     "${side_label}" \
     "${scenario_name}" \
     "${repeat_index}" \
@@ -266,11 +306,23 @@ run_once() {
     "${planner_candidate_query_cells}" \
     "${planner_compiled_cells_emitted}" \
     "${planner_candidate_cells_built}" \
+    "${projection_reuse_hits}" \
+    "${projection_reuse_misses}" \
+    "${planner_cache_hits}" \
+    "${planner_cache_misses}" \
+    "${planner_validation_compiled_cells_emitted}" \
+    "${planner_validation_candidate_cells_built}" \
     "${pool_total_windows}" \
     "${pool_cached_budget}" \
     "${pool_peak_requested_capacity}" \
     "${pool_capacity_cap_hits}" \
-    "${max_kept_windows}"
+    "${max_kept_windows}" \
+    "${win_enter_dropped}" \
+    "${win_enter_continued}" \
+    "${win_scrolled_dropped}" \
+    "${win_scrolled_continued}" \
+    "${buf_enter_dropped}" \
+    "${buf_enter_continued}"
 }
 
 run_side() {
@@ -450,6 +502,168 @@ render_planner_telemetry_table() {
   } | column -t -s $'\t'
 }
 
+render_planner_validation_table() {
+  {
+    printf 'side\tscenario\tavg_projection_reuse_hits\tmax_projection_reuse_hits\tavg_projection_reuse_misses\tmax_projection_reuse_misses\tavg_planner_cache_hits\tmax_planner_cache_hits\tavg_planner_cache_misses\tmax_planner_cache_misses\tavg_validation_planner_compiled_cells_emitted\tmax_validation_planner_compiled_cells_emitted\tavg_validation_planner_candidate_cells_built\tmax_validation_planner_candidate_cells_built\n'
+    for side_label in local base; do
+      for scenario_name in "${scenarios[@]}"; do
+        awk -F '\t' -v side="${side_label}" -v scenario="${scenario_name}" '
+          NR == 1 { next }
+          $1 == side && $2 == scenario {
+            count += 1
+            if ($21 ~ /^[0-9.]+$/) {
+              reuse_hits_sum += $21
+              reuse_hits_count += 1
+              if ($21 > reuse_hits_max) {
+                reuse_hits_max = $21
+              }
+            }
+            if ($22 ~ /^[0-9.]+$/) {
+              reuse_misses_sum += $22
+              reuse_misses_count += 1
+              if ($22 > reuse_misses_max) {
+                reuse_misses_max = $22
+              }
+            }
+            if ($23 ~ /^[0-9.]+$/) {
+              cache_hits_sum += $23
+              cache_hits_count += 1
+              if ($23 > cache_hits_max) {
+                cache_hits_max = $23
+              }
+            }
+            if ($24 ~ /^[0-9.]+$/) {
+              cache_misses_sum += $24
+              cache_misses_count += 1
+              if ($24 > cache_misses_max) {
+                cache_misses_max = $24
+              }
+            }
+            if ($25 ~ /^[0-9.]+$/) {
+              compiled_sum += $25
+              compiled_count += 1
+              if ($25 > compiled_max) {
+                compiled_max = $25
+              }
+            }
+            if ($26 ~ /^[0-9.]+$/) {
+              candidate_sum += $26
+              candidate_count += 1
+              if ($26 > candidate_max) {
+                candidate_max = $26
+              }
+            }
+          }
+          END {
+            if (count > 0) {
+              avg_reuse_hits = reuse_hits_count > 0 ? sprintf("%.2f", reuse_hits_sum / reuse_hits_count) : "na"
+              max_reuse_hits = reuse_hits_count > 0 ? sprintf("%.0f", reuse_hits_max) : "na"
+              avg_reuse_misses = reuse_misses_count > 0 ? sprintf("%.2f", reuse_misses_sum / reuse_misses_count) : "na"
+              max_reuse_misses = reuse_misses_count > 0 ? sprintf("%.0f", reuse_misses_max) : "na"
+              avg_cache_hits = cache_hits_count > 0 ? sprintf("%.2f", cache_hits_sum / cache_hits_count) : "na"
+              max_cache_hits = cache_hits_count > 0 ? sprintf("%.0f", cache_hits_max) : "na"
+              avg_cache_misses = cache_misses_count > 0 ? sprintf("%.2f", cache_misses_sum / cache_misses_count) : "na"
+              max_cache_misses = cache_misses_count > 0 ? sprintf("%.0f", cache_misses_max) : "na"
+              avg_compiled = compiled_count > 0 ? sprintf("%.2f", compiled_sum / compiled_count) : "na"
+              max_compiled = compiled_count > 0 ? sprintf("%.0f", compiled_max) : "na"
+              avg_candidates = candidate_count > 0 ? sprintf("%.2f", candidate_sum / candidate_count) : "na"
+              max_candidates = candidate_count > 0 ? sprintf("%.0f", candidate_max) : "na"
+
+              printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                side,
+                scenario,
+                avg_reuse_hits,
+                max_reuse_hits,
+                avg_reuse_misses,
+                max_reuse_misses,
+                avg_cache_hits,
+                max_cache_hits,
+                avg_cache_misses,
+                max_cache_misses,
+                avg_compiled,
+                max_compiled,
+                avg_candidates,
+                max_candidates
+            }
+          }
+        ' "${results_tsv}"
+      done
+    done
+  } | column -t -s $'\t'
+}
+
+render_ingress_fast_path_table() {
+  {
+    printf 'side\tscenario\tavg_win_enter_dropped\tavg_win_enter_continued\tavg_win_enter_drop_pct\tavg_win_scrolled_dropped\tavg_win_scrolled_continued\tavg_win_scrolled_drop_pct\tavg_buf_enter_dropped\tavg_buf_enter_continued\tavg_buf_enter_drop_pct\n'
+    for side_label in local base; do
+      for scenario_name in "${scenarios[@]}"; do
+        awk -F '\t' -v side="${side_label}" -v scenario="${scenario_name}" '
+          function ratio_text(dropped_sum, continue_sum, count,    total) {
+            total = dropped_sum + continue_sum
+            if (count == 0 || total <= 0) {
+              return "na"
+            }
+
+            return sprintf("%.2f%%", dropped_sum / total * 100.0)
+          }
+
+          NR == 1 { next }
+          $1 == side && $2 == scenario {
+            count += 1
+            if ($32 ~ /^[0-9.]+$/) {
+              win_enter_dropped_sum += $32
+              win_enter_dropped_count += 1
+            }
+            if ($33 ~ /^[0-9.]+$/) {
+              win_enter_continued_sum += $33
+              win_enter_continued_count += 1
+            }
+            if ($34 ~ /^[0-9.]+$/) {
+              win_scrolled_dropped_sum += $34
+              win_scrolled_dropped_count += 1
+            }
+            if ($35 ~ /^[0-9.]+$/) {
+              win_scrolled_continued_sum += $35
+              win_scrolled_continued_count += 1
+            }
+            if ($36 ~ /^[0-9.]+$/) {
+              buf_enter_dropped_sum += $36
+              buf_enter_dropped_count += 1
+            }
+            if ($37 ~ /^[0-9.]+$/) {
+              buf_enter_continued_sum += $37
+              buf_enter_continued_count += 1
+            }
+          }
+          END {
+            if (count > 0) {
+              avg_win_enter_dropped = win_enter_dropped_count > 0 ? sprintf("%.2f", win_enter_dropped_sum / win_enter_dropped_count) : "na"
+              avg_win_enter_continued = win_enter_continued_count > 0 ? sprintf("%.2f", win_enter_continued_sum / win_enter_continued_count) : "na"
+              avg_win_scrolled_dropped = win_scrolled_dropped_count > 0 ? sprintf("%.2f", win_scrolled_dropped_sum / win_scrolled_dropped_count) : "na"
+              avg_win_scrolled_continued = win_scrolled_continued_count > 0 ? sprintf("%.2f", win_scrolled_continued_sum / win_scrolled_continued_count) : "na"
+              avg_buf_enter_dropped = buf_enter_dropped_count > 0 ? sprintf("%.2f", buf_enter_dropped_sum / buf_enter_dropped_count) : "na"
+              avg_buf_enter_continued = buf_enter_continued_count > 0 ? sprintf("%.2f", buf_enter_continued_sum / buf_enter_continued_count) : "na"
+
+              printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                side,
+                scenario,
+                avg_win_enter_dropped,
+                avg_win_enter_continued,
+                ratio_text(win_enter_dropped_sum, win_enter_continued_sum, win_enter_dropped_count + win_enter_continued_count),
+                avg_win_scrolled_dropped,
+                avg_win_scrolled_continued,
+                ratio_text(win_scrolled_dropped_sum, win_scrolled_continued_sum, win_scrolled_dropped_count + win_scrolled_continued_count),
+                avg_buf_enter_dropped,
+                avg_buf_enter_continued,
+                ratio_text(buf_enter_dropped_sum, buf_enter_continued_sum, buf_enter_dropped_count + buf_enter_continued_count)
+            }
+          }
+        ' "${results_tsv}"
+      done
+    done
+  } | column -t -s $'\t'
+}
+
 render_pool_retention_table() {
   {
     printf 'side\tscenario\tavg_pool_total_windows\tavg_pool_cached_budget\tmax_kept_windows\tavg_pool_total_pct_of_max\tavg_pool_cached_budget_pct_of_max\n'
@@ -459,16 +673,16 @@ render_pool_retention_table() {
           NR == 1 { next }
           $1 == side && $2 == scenario {
             count += 1
-            if ($21 ~ /^[0-9.]+$/) {
-              pool_total_sum += $21
+            if ($27 ~ /^[0-9.]+$/) {
+              pool_total_sum += $27
               pool_total_count += 1
             }
-            if ($22 ~ /^[0-9.]+$/) {
-              pool_cached_sum += $22
+            if ($28 ~ /^[0-9.]+$/) {
+              pool_cached_sum += $28
               pool_cached_count += 1
             }
-            if ($23 ~ /^[0-9.]+$/ && ($23 + 0) > 0) {
-              max_kept_windows = $23 + 0
+            if ($29 ~ /^[0-9.]+$/ && ($29 + 0) > 0) {
+              max_kept_windows = $29 + 0
             }
           }
           END {
@@ -528,15 +742,15 @@ render_pool_peak_pressure_table() {
           NR == 1 { next }
           $1 == side && $2 == scenario {
             count += 1
-            if ($24 ~ /^[0-9.]+$/) {
-              peak_requested_sum += $24
+            if ($30 ~ /^[0-9.]+$/) {
+              peak_requested_sum += $30
               peak_requested_count += 1
             }
-            if ($25 ~ /^[0-9.]+$/ && ($25 + 0) > max_cap_hits) {
-              max_cap_hits = $25 + 0
+            if ($31 ~ /^[0-9.]+$/ && ($31 + 0) > max_cap_hits) {
+              max_cap_hits = $31 + 0
             }
-            if ($23 ~ /^[0-9.]+$/ && ($23 + 0) > 0) {
-              max_kept_windows = $23 + 0
+            if ($29 ~ /^[0-9.]+$/ && ($29 + 0) > 0) {
+              max_kept_windows = $29 + 0
             }
           }
           END {
@@ -710,6 +924,10 @@ write_report() {
     cat "${worst_case_table}"
     printf '```\n\n## Planner Telemetry\n\n```text\n'
     cat "${planner_telemetry_table}"
+    printf '```\n\n## Planner Validation Counters\n\n```text\n'
+    cat "${planner_validation_table}"
+    printf '```\n\n## Ingress Fast-Path Counters\n\n```text\n'
+    cat "${ingress_fast_path_table}"
     printf '```\n\n## Pool Retention vs max_kept_windows\n\n```text\n'
     cat "${pool_retention_table}"
     printf '```\n\n## Pool Peak Pressure vs max_kept_windows\n\n```text\n'
@@ -726,7 +944,7 @@ write_report() {
   } >"${output_file}"
 }
 
-printf 'side\tscenario\trun\tbaseline_us\trecovery_ratio\tstress_max_avg_us\tstress_max_ratio\tstress_tail_ratio\tperf_class\tline_count\textmark_fallback_calls\tconceal_full_scan_calls\tplanner_bucket_maps_scanned\tplanner_bucket_cells_scanned\tplanner_local_query_envelope_area_cells\tplanner_local_query_cells\tplanner_compiled_query_cells\tplanner_candidate_query_cells\tplanner_compiled_cells_emitted\tplanner_candidate_cells_built\tpool_total_windows\tpool_cached_budget\tmax_kept_windows\tpool_peak_requested_capacity\tpool_capacity_cap_hits\n' >"${results_tsv}"
+printf 'side\tscenario\trun\tbaseline_us\trecovery_ratio\tstress_max_avg_us\tstress_max_ratio\tstress_tail_ratio\tperf_class\tline_count\textmark_fallback_calls\tconceal_full_scan_calls\tplanner_bucket_maps_scanned\tplanner_bucket_cells_scanned\tplanner_local_query_envelope_area_cells\tplanner_local_query_cells\tplanner_compiled_query_cells\tplanner_candidate_query_cells\tplanner_compiled_cells_emitted\tplanner_candidate_cells_built\tprojection_reuse_hits\tprojection_reuse_misses\tplanner_cache_hits\tplanner_cache_misses\tvalidation_planner_compiled_cells_emitted\tvalidation_planner_candidate_cells_built\tpool_total_windows\tpool_cached_budget\tmax_kept_windows\tpool_peak_requested_capacity\tpool_capacity_cap_hits\twin_enter_dropped\twin_enter_continued\twin_scrolled_dropped\twin_scrolled_continued\tbuf_enter_dropped\tbuf_enter_continued\n' >"${results_tsv}"
 
 echo "base_ref=${base_ref}"
 echo "local_root=${repo_root}"
@@ -755,6 +973,14 @@ render_worst_case_table | tee "${worst_case_table}"
 echo
 echo "== Planner Telemetry =="
 render_planner_telemetry_table | tee "${planner_telemetry_table}"
+
+echo
+echo "== Planner Validation Counters =="
+render_planner_validation_table | tee "${planner_validation_table}"
+
+echo
+echo "== Ingress Fast-Path Counters =="
+render_ingress_fast_path_table | tee "${ingress_fast_path_table}"
 
 echo
 echo "== Pool Retention vs max_kept_windows =="

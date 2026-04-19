@@ -31,6 +31,7 @@ use crate::core::state::CursorColorSample;
 use crate::core::state::CursorTextContext;
 use crate::core::types::Generation;
 use crate::draw::recover_all_namespaces;
+use nvim_oxi::Object;
 use nvim_oxi::Result;
 use nvim_oxi::api;
 use std::panic::AssertUnwindSafe;
@@ -68,8 +69,15 @@ pub(crate) fn mutate_engine_state<R>(
     with_engine_state_access(mutator)
 }
 
+#[cfg(not(test))]
 pub(crate) fn ingress_read_snapshot() -> EngineAccessResult<IngressReadSnapshot> {
     IngressReadSnapshot::capture()
+}
+
+pub(crate) fn ingress_read_snapshot_with_current_buffer(
+    current_buffer: Option<&api::Buffer>,
+) -> EngineAccessResult<IngressReadSnapshot> {
+    IngressReadSnapshot::capture_with_current_buffer(current_buffer)
 }
 
 pub(crate) fn editor_viewport_for_bounds() -> Result<EditorViewport> {
@@ -85,6 +93,15 @@ pub(crate) fn editor_viewport_for_command_row() -> Result<EditorViewport> {
 pub(crate) fn refresh_editor_viewport_cache() -> Result<()> {
     mutate_engine_state(|state| state.shell.editor_viewport_cache.refresh())
         .map_err(nvim_oxi::Error::from)?
+}
+
+pub(crate) fn buffer_text_revision(buffer_handle: i64) -> EngineAccessResult<Generation> {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .buffer_text_revision_cache
+            .current(buffer_handle)
+    })
 }
 
 pub(crate) fn resolved_current_buffer_event_policy(
@@ -267,6 +284,32 @@ pub(crate) fn note_cursor_color_colorscheme_change() -> EngineAccessResult<()> {
             .probe_cache
             .note_cursor_color_colorscheme_change();
         state.shell.clear_real_cursor_visibility();
+    })
+}
+
+pub(crate) fn take_background_probe_request_scratch() -> EngineAccessResult<Vec<Object>> {
+    mutate_engine_state(|state| state.shell.take_background_probe_request_scratch())
+}
+
+pub(crate) fn reclaim_background_probe_request_scratch(
+    scratch: Vec<Object>,
+) -> EngineAccessResult<()> {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .reclaim_background_probe_request_scratch(scratch);
+    })
+}
+
+pub(crate) fn take_conceal_regions_scratch() -> EngineAccessResult<Vec<ConcealRegion>> {
+    mutate_engine_state(|state| state.shell.take_conceal_regions_scratch())
+}
+
+pub(crate) fn reclaim_conceal_regions_scratch(
+    scratch: Vec<ConcealRegion>,
+) -> EngineAccessResult<()> {
+    mutate_engine_state(|state| {
+        state.shell.reclaim_conceal_regions_scratch(scratch);
     })
 }
 

@@ -35,21 +35,20 @@ proptest! {
         state.velocity_corners = [velocity; 4];
         state.spring_velocity_corners = [spring_velocity; 4];
         state.trail_elapsed_ms = [trail_elapsed; 4];
-        state.particles = std::sync::Arc::new(
-            particles
+        state.particles = particles
             .iter()
             .map(|(position, velocity, lifetime)| Particle {
                 position: *position,
                 velocity: *velocity,
                 lifetime: *lifetime,
             })
-            .collect(),
-        );
-        state.set_last_tick_ms(last_tick_ms);
-
+            .collect();
         match setup_phase {
             TransitionSetupPhase::Idle => {}
-            TransitionSetupPhase::Running => state.start_animation(),
+            TransitionSetupPhase::Running => {
+                state.start_animation();
+                state.set_last_tick_ms(last_tick_ms);
+            }
             TransitionSetupPhase::Settling => {
                 state.begin_settling(
                     pending_position,
@@ -144,6 +143,6 @@ proptest! {
         prop_assert_eq!(state.trail_stroke_id(), baseline_stroke.next());
         prop_assert_eq!(state.retarget_epoch(), expected_epoch);
         prop_assert_eq!(state.tracked_location_ref(), Some(&transition_location));
-        prop_assert!(state.pending_target().is_none());
+        prop_assert!(state.settling_window().is_none());
     }
 }

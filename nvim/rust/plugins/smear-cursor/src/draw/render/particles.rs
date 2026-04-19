@@ -1,8 +1,8 @@
 use super::PlanResources;
+use super::RenderFrame;
 use super::cell_draw::draw_braille_character;
 use super::cell_draw::draw_octant_character;
 use super::geometry::level_from_shade;
-use crate::types::RenderFrame;
 
 pub(super) fn draw_particles(
     resources: &mut PlanResources<'_>,

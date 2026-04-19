@@ -3,6 +3,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use thiserror::Error;
 
+mod buffer_text_revision;
 mod cursor;
 mod event_loop;
 mod handlers;
@@ -18,9 +19,12 @@ mod runtime;
 mod timers;
 mod trace;
 
+use buffer_text_revision::BufferTextRevisionCache;
 use cursor::BufferMetadataCache;
+use nvim_oxi::Object;
 use policy::BufferEventPolicyCache;
 use policy::BufferPerfTelemetryCache;
+use probe_cache::ConcealRegion;
 use probe_cache::ProbeCacheState;
 use runtime::EditorViewportCache;
 
@@ -36,8 +40,8 @@ pub(crate) use lifecycle::toggle;
 pub(crate) use lifecycle::validation_counters;
 pub(crate) use logging::warn;
 pub(crate) use runtime::editor_viewport_for_bounds;
-pub(crate) use runtime::record_command_row_read;
-pub(crate) use runtime::record_editor_bounds_read;
+pub(crate) use runtime::record_compiled_field_cache_hit;
+pub(crate) use runtime::record_compiled_field_cache_miss;
 pub(crate) use runtime::record_effect_failure;
 pub(crate) use runtime::record_particle_aggregation;
 pub(crate) use runtime::record_particle_overlay_refresh;
@@ -50,6 +54,12 @@ pub(crate) use runtime::record_planner_local_query;
 pub(crate) use runtime::record_planner_local_query_compile;
 pub(crate) use runtime::record_planner_local_query_envelope_area_cells;
 pub(crate) use runtime::record_planner_reference_compile;
+pub(crate) use runtime::record_planning_preview_copied_particles;
+#[cfg(feature = "perf-counters")]
+pub(crate) use runtime::record_planning_preview_copy;
+pub(crate) use runtime::record_planning_preview_invocation;
+pub(crate) use runtime::record_projection_reuse_hit;
+pub(crate) use runtime::record_projection_reuse_miss;
 pub(crate) use timers::on_core_timer_event;
 pub(crate) use timers::on_core_timer_slot_event;
 pub(crate) use timers::schedule_guarded;
@@ -107,6 +117,9 @@ struct ShellState {
     namespace_id: Option<u32>,
     host_bridge_state: HostBridgeState,
     probe_cache: ProbeCacheState,
+    background_probe_request_scratch: Vec<Object>,
+    conceal_regions_scratch: Vec<ConcealRegion>,
+    buffer_text_revision_cache: BufferTextRevisionCache,
     editor_viewport_cache: EditorViewportCache,
     buffer_metadata_cache: BufferMetadataCache,
     buffer_perf_policy_cache: BufferEventPolicyCache,
@@ -129,6 +142,37 @@ impl ShellState {
 
     fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
         self.host_bridge_state = HostBridgeState::Verified { revision };
+    }
+
+    fn take_background_probe_request_scratch(&mut self) -> Vec<Object> {
+        std::mem::take(&mut self.background_probe_request_scratch)
+    }
+
+    fn reclaim_background_probe_request_scratch(&mut self, mut scratch: Vec<Object>) {
+        scratch.clear();
+        if self.background_probe_request_scratch.capacity() < scratch.capacity() {
+            self.background_probe_request_scratch = scratch;
+        } else {
+            self.background_probe_request_scratch.clear();
+        }
+    }
+
+    fn take_conceal_regions_scratch(&mut self) -> Vec<ConcealRegion> {
+        std::mem::take(&mut self.conceal_regions_scratch)
+    }
+
+    fn reclaim_conceal_regions_scratch(&mut self, mut scratch: Vec<ConcealRegion>) {
+        scratch.clear();
+        if self.conceal_regions_scratch.capacity() < scratch.capacity() {
+            self.conceal_regions_scratch = scratch;
+        } else {
+            self.conceal_regions_scratch.clear();
+        }
+    }
+
+    #[cfg(test)]
+    fn background_probe_request_scratch_capacity(&self) -> usize {
+        self.background_probe_request_scratch.capacity()
     }
 
     const fn real_cursor_visibility(&self) -> Option<RealCursorVisibility> {

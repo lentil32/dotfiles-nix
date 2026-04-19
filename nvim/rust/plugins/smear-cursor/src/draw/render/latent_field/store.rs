@@ -1,5 +1,6 @@
 use super::CellRect;
 use super::MICRO_TILE_SAMPLES;
+use super::MaterializedTile;
 use super::MicroTile;
 use super::TailBand;
 use super::spatial_index::CellRows;
@@ -20,6 +21,7 @@ pub(in super::super) struct DepositedSlice {
     pub(in super::super) band: TailBand,
     pub(in super::super) support_steps: usize,
     pub(in super::super) intensity_q16: u32,
+    #[cfg(test)]
     pub(in super::super) microtiles: BTreeMap<(i64, i64), MicroTile>,
 }
 
@@ -31,12 +33,17 @@ pub(super) struct WeightCurveKey {
 }
 
 impl WeightCurveKey {
-    pub(super) fn from_slice(slice: &DepositedSlice) -> Self {
+    fn new(support_steps: usize, intensity_q16: u32, dt_ms_q16: u32) -> Self {
         Self {
-            support_steps: slice.support_steps.max(1),
-            intensity_q16: slice.intensity_q16,
-            dt_ms_q16: slice.dt_ms_q16,
+            support_steps: support_steps.max(1),
+            intensity_q16,
+            dt_ms_q16,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_slice(slice: &DepositedSlice) -> Self {
+        Self::new(slice.support_steps, slice.intensity_q16, slice.dt_ms_q16)
     }
 }
 
@@ -200,12 +207,18 @@ impl LatentFieldCache {
         self.latest_step = latest_step;
     }
 
-    pub(in super::super) fn insert_slice(&mut self, slice: &DepositedSlice) {
-        let key = WeightCurveKey::from_slice(slice);
-        let age_steps = self
-            .latest_step
-            .value()
-            .saturating_sub(slice.step_index.value());
+    fn insert_tiles<'a, I>(
+        &mut self,
+        step_index: StepIndex,
+        dt_ms_q16: u32,
+        support_steps: usize,
+        intensity_q16: u32,
+        tiles: I,
+    ) where
+        I: IntoIterator<Item = ((i64, i64), &'a MicroTile)>,
+    {
+        let key = WeightCurveKey::new(support_steps, intensity_q16, dt_ms_q16);
+        let age_steps = self.latest_step.value().saturating_sub(step_index.value());
         let buckets = self
             .curves
             .entry(key)
@@ -214,10 +227,42 @@ impl LatentFieldCache {
             return;
         };
 
-        for (coord, tile) in &slice.microtiles {
-            bucket.entry_mut(*coord).add_tile(tile);
+        let mut changed = false;
+        for (coord, tile) in tiles {
+            bucket.entry_mut(coord).add_tile(tile);
+            changed = true;
         }
-        self.revision = self.revision.saturating_add(1);
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+    }
+
+    pub(in super::super) fn insert_materialized_slice(
+        &mut self,
+        step_index: StepIndex,
+        dt_ms_q16: u32,
+        support_steps: usize,
+        intensity_q16: u32,
+        tiles: &[MaterializedTile],
+    ) {
+        self.insert_tiles(
+            step_index,
+            dt_ms_q16,
+            support_steps,
+            intensity_q16,
+            tiles.iter().map(|tile| (tile.coord, &tile.tile)),
+        );
+    }
+
+    #[cfg(test)]
+    pub(in super::super) fn insert_slice(&mut self, slice: &DepositedSlice) {
+        self.insert_tiles(
+            slice.step_index,
+            slice.dt_ms_q16,
+            slice.support_steps,
+            slice.intensity_q16,
+            slice.microtiles.iter().map(|(&coord, tile)| (coord, tile)),
+        );
     }
 
     #[cfg(test)]
@@ -275,6 +320,7 @@ pub(super) fn prune_history(
 mod tests {
     use super::super::CellRect;
     use super::super::MICRO_TILE_SAMPLES;
+    use super::super::MaterializedTile;
     use super::super::MicroTile;
     use super::super::SAMPLE_Q12_SCALE;
     use super::super::TailBand;
@@ -396,5 +442,60 @@ mod tests {
             compile_field_reference(&cache),
             compile_field(&history, StepIndex::new(5))
         );
+    }
+
+    #[test]
+    fn insert_materialized_slice_matches_slice_replay() {
+        let tile = fully_covered_tile();
+        let bbox = CellRect::new(4, 6, 5, 7);
+        let step_index = StepIndex::new(3);
+        let dt_ms_q16 = q16_from_non_negative(simulation_step_ms(120.0));
+        let support_steps = 4;
+        let intensity_q16 = intensity_q16(1.0);
+        let materialized_tiles = [
+            MaterializedTile {
+                coord: (4, 5),
+                tile,
+            },
+            MaterializedTile {
+                coord: (4, 7),
+                tile,
+            },
+            MaterializedTile {
+                coord: (6, 6),
+                tile,
+            },
+        ];
+        let slice = DepositedSlice {
+            stroke_id: StrokeId::new(1),
+            step_index,
+            dt_ms_q16,
+            arc_len_q16: ArcLenQ16::ZERO,
+            bbox,
+            band: TailBand::Core,
+            support_steps,
+            intensity_q16,
+            microtiles: BTreeMap::from(materialized_tiles.map(|tile| (tile.coord, tile.tile))),
+        };
+
+        let mut materialized_cache = LatentFieldCache::default();
+        materialized_cache.advance_to(step_index);
+        materialized_cache.insert_materialized_slice(
+            step_index,
+            dt_ms_q16,
+            support_steps,
+            intensity_q16,
+            &materialized_tiles,
+        );
+
+        let mut replay_cache = LatentFieldCache::default();
+        replay_cache.advance_to(step_index);
+        replay_cache.insert_slice(&slice);
+
+        assert_eq!(
+            compile_field_reference(&materialized_cache),
+            compile_field_reference(&replay_cache)
+        );
+        assert_eq!(materialized_cache.revision(), replay_cache.revision());
     }
 }

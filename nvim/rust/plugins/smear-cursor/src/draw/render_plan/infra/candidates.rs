@@ -122,7 +122,7 @@ pub(crate) fn build_glyph_bucket_layout() -> GlyphBucketLayout {
 pub(crate) fn build_shade_profiles_into(color_levels: u32, shades: &mut Vec<ShadeProfile>) {
     shades.clear();
     let capacity = usize::try_from(color_levels).unwrap_or(0);
-    shades.reserve(capacity.saturating_sub(shades.capacity()));
+    shades.reserve(capacity.saturating_sub(shades.len()));
     for raw_level in 1..=color_levels {
         let Some(level) = HighlightLevel::try_new(raw_level) else {
             continue;
@@ -518,7 +518,7 @@ pub(crate) fn cell_candidates_for_patch_into(
         output.push(empty_candidate);
         return;
     }
-    output.reserve((1 + keep_non_empty).saturating_sub(output.capacity()));
+    output.reserve((1 + keep_non_empty).saturating_sub(output.len()));
     let non_empty_context = NonEmptyCandidateContext {
         empty_residual,
         age,

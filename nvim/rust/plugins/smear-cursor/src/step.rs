@@ -335,7 +335,7 @@ impl RawStepInput {
         let rng_state = parse_rng_state(self.rng_state)?;
 
         Ok(StepInput {
-            mode,
+            mode: mode.as_str().into(),
             time_interval,
             config_time_interval,
             head_response_ms,
@@ -547,7 +547,7 @@ mod tests {
     fn parse_step_input_parses_valid_fixture_dictionary() {
         let args = valid_step_args();
         let parsed = parse_step_input(&args).expect("expected valid step args");
-        assert_eq!(parsed.mode, "n");
+        assert_eq!(parsed.mode, crate::types::ModeClass::NormalLike);
         assert_eq!(parsed.particle_max_num, 100);
         assert_eq!(parsed.rng_state, DEFAULT_RNG_STATE);
         assert_eq!(parsed.particles.len(), 1);

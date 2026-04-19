@@ -596,7 +596,7 @@ mod tests {
     fn draw_plan() -> RealizationDraw {
         RealizationDraw::new(
             crate::core::realization::PaletteSpec::from_frame(&crate::types::RenderFrame {
-                mode: "n".to_string(),
+                mode: crate::types::ModeClass::NormalLike,
                 corners: [crate::types::Point { row: 1.0, col: 1.0 }; 4],
                 step_samples: Vec::new().into(),
                 planner_idle_steps: 0,

@@ -40,6 +40,9 @@ pub(super) fn reduce_render_plan_computed(
 
     let planned_render = *payload.planned_render;
     let proposal = planned_render.proposal().clone();
+    let buffer_handle = state
+        .observation()
+        .map(|observation| observation.basis().cursor_location().buffer_handle);
     if !state.accept_planned_render_mut(planned_render) {
         return Transition::new(
             state,
@@ -49,7 +52,11 @@ pub(super) fn reduce_render_plan_computed(
 
     Transition::new(
         state,
-        vec![apply_proposal_effect(proposal, payload.observed_at)],
+        vec![apply_proposal_effect(
+            proposal,
+            buffer_handle,
+            payload.observed_at,
+        )],
     )
 }
 

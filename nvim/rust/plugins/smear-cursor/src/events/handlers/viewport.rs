@@ -73,27 +73,33 @@ fn cursor_location_from_live_window_state(
     .with_window_dimensions(metrics.window_width, metrics.window_height)
 }
 
-pub(crate) fn cursor_location_for_ingress_fast_path() -> Option<CursorLocation> {
-    let window = api::get_current_win();
-    let buffer = api::get_current_buf();
+pub(crate) fn cursor_location_for_ingress_fast_path_with_handles(
+    window: &api::Window,
+    buffer: &api::Buffer,
+) -> Option<CursorLocation> {
     if !window.is_valid() || !buffer.is_valid() {
         return None;
     }
 
     let top_row = line_value("w0").ok()?;
     let line = line_value(".").ok()?;
-    let metrics = current_window_surface_metrics(&window)?;
+    let metrics = current_window_surface_metrics(window)?;
     Some(cursor_location_from_live_window_state(
-        &window, &buffer, top_row, line, metrics,
+        window, buffer, top_row, line, metrics,
     ))
 }
 
 pub(crate) fn cursor_location_for_core_render(
+    window: Option<&api::Window>,
+    buffer: Option<&api::Buffer>,
     tracked_location: Option<CursorLocation>,
+    ingress_cursor_location: Option<CursorLocation>,
 ) -> CursorLocation {
-    let window = api::get_current_win();
-    let buffer = api::get_current_buf();
-    if window.is_valid() && buffer.is_valid() {
+    if let Some(cursor_location) = ingress_cursor_location {
+        return cursor_location;
+    }
+
+    if let (Some(window), Some(buffer)) = (window, buffer) {
         let default_top_row = tracked_location
             .as_ref()
             .map_or(0_i64, |location| location.top_row);
@@ -122,7 +128,7 @@ pub(crate) fn cursor_location_for_core_render(
         );
         let top_row = line_value("w0").unwrap_or(default_top_row);
         let line = line_value(".").unwrap_or(default_line);
-        let metrics = current_window_surface_metrics(&window).unwrap_or(WindowSurfaceMetrics {
+        let metrics = current_window_surface_metrics(window).unwrap_or(WindowSurfaceMetrics {
             left_col: default_left_col,
             text_offset: default_text_offset,
             window_row: default_window_row,
@@ -130,7 +136,7 @@ pub(crate) fn cursor_location_for_core_render(
             window_width: default_window_width,
             window_height: default_window_height,
         });
-        return cursor_location_from_live_window_state(&window, &buffer, top_row, line, metrics);
+        return cursor_location_from_live_window_state(window, buffer, top_row, line, metrics);
     }
 
     tracked_location.unwrap_or(CursorLocation::new(0, 0, 0, 0))
@@ -255,6 +261,7 @@ pub(super) fn maybe_scroll_shift_for_core_event(
 #[cfg(test)]
 mod tests {
     use super::SurfaceTranslationDelta;
+    use super::cursor_location_for_core_render;
     use super::surface_translation_delta;
     use crate::state::CursorLocation;
     use pretty_assertions::assert_eq;
@@ -348,5 +355,39 @@ mod tests {
         let current = CursorLocation::new(10, 20, 4, 13).with_viewport_columns(2, 1);
 
         assert_eq!(surface_translation_delta(&previous, &current), None);
+    }
+
+    #[test]
+    fn cursor_location_for_core_render_falls_back_to_tracked_location_without_live_handles() {
+        let tracked = CursorLocation::new(10, 20, 4, 12)
+            .with_viewport_columns(2, 1)
+            .with_window_origin(3, 4)
+            .with_window_dimensions(80, 20);
+        let expected = CursorLocation::new(10, 20, 4, 12)
+            .with_viewport_columns(2, 1)
+            .with_window_origin(3, 4)
+            .with_window_dimensions(80, 20);
+
+        assert_eq!(
+            cursor_location_for_core_render(None, None, Some(tracked), None),
+            expected
+        );
+    }
+
+    #[test]
+    fn cursor_location_for_core_render_prefers_ingress_snapshot_over_tracked_location() {
+        let tracked = CursorLocation::new(10, 20, 4, 12)
+            .with_viewport_columns(2, 1)
+            .with_window_origin(3, 4)
+            .with_window_dimensions(80, 20);
+        let ingress = CursorLocation::new(10, 20, 6, 14)
+            .with_viewport_columns(5, 2)
+            .with_window_origin(8, 9)
+            .with_window_dimensions(72, 18);
+
+        assert_eq!(
+            cursor_location_for_core_render(None, None, Some(tracked), Some(ingress.clone())),
+            ingress
+        );
     }
 }

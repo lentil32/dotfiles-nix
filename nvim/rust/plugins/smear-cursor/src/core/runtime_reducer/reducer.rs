@@ -109,7 +109,8 @@ fn jump_bridge_step_samples(
     to_position: Point,
     vertical_bar: bool,
     horizontal_bar: bool,
-) -> Vec<RenderStepSample> {
+    samples: &mut Vec<RenderStepSample>,
+) {
     let display_distance =
         from_position.display_distance(to_position, state.config.block_aspect_ratio);
     let raw_segments = if display_distance.is_finite() {
@@ -121,7 +122,8 @@ fn jump_bridge_step_samples(
     let dt_ms = (DISCONTINUOUS_JUMP_BRIDGE_DURATION_MS / segment_count as f64)
         .max(state.config.simulation_step_interval_ms().max(1.0))
         .max(1.0);
-    let mut samples = Vec::with_capacity(segment_count + 1);
+    samples.clear();
+    samples.reserve((segment_count + 1).saturating_sub(samples.len()));
     for step_index in 0..=segment_count {
         let t = step_index as f64 / segment_count as f64;
         let position = lerp_point(from_position, to_position, t);
@@ -130,7 +132,6 @@ fn jump_bridge_step_samples(
             dt_ms,
         ));
     }
-    samples
 }
 
 #[derive(Clone, Copy)]
@@ -150,12 +151,14 @@ fn draw_discontinuous_jump_frame(
     buffer_perf_class: BufferPerfClass,
 ) -> CursorTransition {
     let current_corners = state.current_corners();
-    let step_samples = jump_bridge_step_samples(
+    let mut step_samples = state.take_render_step_samples_scratch();
+    jump_bridge_step_samples(
         state,
         spec.from_position,
         spec.to_position,
         spec.vertical_bar,
         spec.horizontal_bar,
+        &mut step_samples,
     );
     let frame = build_render_frame(
         state,
@@ -168,7 +171,7 @@ fn draw_discontinuous_jump_frame(
         buffer_perf_class,
     );
     state.start_tail_drain(planner_tail_drain_steps(state));
-    state.set_last_tick_ms(Some(spec.event_now_ms));
+    state.record_animation_tick(spec.event_now_ms);
     let next_animation_at_ms = Some(next_animation_deadline_from_clock(state, spec.event_now_ms));
     CursorTransitions::draw(
         mode,
@@ -190,9 +193,8 @@ fn apply_event_scroll_shift(
     target_position.row = clamp_row_to_window(target_position.row, scroll_shift);
 }
 
-fn promote_settled_target(state: &mut RuntimeState, now_ms: f64) {
+fn promote_settled_target(state: &mut RuntimeState) {
     state.start_animation_towards_target();
-    state.set_last_tick_ms(Some(now_ms));
     state.reset_settle_probe();
 }
 
@@ -222,12 +224,7 @@ fn draw_drain_frame(
     let allow_real_cursor_updates = !state.config.hide_target_hack;
     let keeps_ornamental_effects = buffer_perf_class.keeps_ornamental_effects();
     let configured_interval = state.config.time_interval.max(1.0);
-    let elapsed_ms = state
-        .last_tick_ms()
-        .map_or(configured_interval, |previous| {
-            (event_now_ms - previous).max(0.0)
-        });
-    state.set_last_tick_ms(Some(event_now_ms));
+    let elapsed_ms = state.take_animation_elapsed_ms(event_now_ms, configured_interval);
     state.push_simulation_elapsed(elapsed_ms);
 
     let simulation_step_ms = state.config.simulation_step_interval_ms().max(1.0);
@@ -319,70 +316,203 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
     source: EventSource,
     buffer_perf_class: BufferPerfClass,
 ) -> CursorTransition {
-    let event = event.borrow();
-    let allow_real_cursor_updates = !state.config.hide_target_hack;
-    if !state.is_enabled() {
-        state.clear_pending_target();
-        state.stop_animation();
-        reset_animation_timing(state);
-        return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
-            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
-    }
+    #[cfg(debug_assertions)]
+    state.debug_assert_invariants();
 
-    let keeps_ornamental_effects = buffer_perf_class.keeps_ornamental_effects();
-    if !keeps_ornamental_effects {
-        state.clear_particles();
-    }
+    let transition = (|| {
+        let event = event.borrow();
+        let allow_real_cursor_updates = !state.config.hide_target_hack;
+        if !state.is_enabled() {
+            state.clear_pending_target();
+            state.stop_animation();
+            reset_animation_timing(state);
+            return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+                .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+        }
 
-    let vertical_bar = state.config.cursor_is_vertical_bar(mode);
-    let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
-    let cursor_shape = CursorShape::new(vertical_bar, horizontal_bar);
-    let event_target = Point {
-        row: event.row,
-        col: event.col,
-    };
-    let in_cmdline_mode = is_cmdline_mode(mode);
-    let transitioned_to_or_from_cmdline = state
-        .last_mode_was_cmdline()
-        .is_some_and(|was_cmdline| was_cmdline != in_cmdline_mode);
-    state.set_last_mode_was_cmdline(in_cmdline_mode);
-    let tick_retarget = matches!(source, EventSource::AnimationTick)
-        && (state.is_animating() || state.is_settling() || state.is_draining())
-        && state.target_position().distance_squared(event_target) > EPSILON;
-    let mut target_position = match source {
-        EventSource::AnimationTick if tick_retarget => event_target,
-        EventSource::AnimationTick => state.target_position(),
-        EventSource::External => event_target,
-    };
-    let (window_changed, buffer_changed, window_dimensions_changed) = state
-        .tracked_location_ref()
-        .map_or((false, false, false), |tracked| {
-            (
-                tracked.window_handle != event.cursor_location.window_handle,
-                tracked.buffer_handle != event.cursor_location.buffer_handle,
-                tracked.window_dimensions_changed(&event.cursor_location),
+        let keeps_ornamental_effects = buffer_perf_class.keeps_ornamental_effects();
+        if !keeps_ornamental_effects {
+            state.clear_particles();
+        }
+
+        let vertical_bar = state.config.cursor_is_vertical_bar(mode);
+        let horizontal_bar = state.config.cursor_is_horizontal_bar(mode);
+        let cursor_shape = CursorShape::new(vertical_bar, horizontal_bar);
+        let event_target = Point {
+            row: event.row,
+            col: event.col,
+        };
+        let in_cmdline_mode = is_cmdline_mode(mode);
+        let transitioned_to_or_from_cmdline = state
+            .last_mode_was_cmdline()
+            .is_some_and(|was_cmdline| was_cmdline != in_cmdline_mode);
+        state.set_last_mode_was_cmdline(in_cmdline_mode);
+        let tick_retarget = matches!(source, EventSource::AnimationTick)
+            && (state.is_animating() || state.is_settling() || state.is_draining())
+            && state.target_position().distance_squared(event_target) > EPSILON;
+        let mut target_position = match source {
+            EventSource::AnimationTick if tick_retarget => event_target,
+            EventSource::AnimationTick => state.target_position(),
+            EventSource::External => event_target,
+        };
+        let (window_changed, buffer_changed, window_dimensions_changed) = state
+            .tracked_location_ref()
+            .map_or((false, false, false), |tracked| {
+                (
+                    tracked.window_handle != event.cursor_location.window_handle,
+                    tracked.buffer_handle != event.cursor_location.buffer_handle,
+                    tracked.window_dimensions_changed(&event.cursor_location),
+                )
+            });
+        let mut motion_class = MotionClass::Continuous;
+
+        match source {
+            EventSource::External => {
+                if external_mode_ignores_cursor(&state.config, mode) {
+                    return CursorTransitions::noop(mode, allow_real_cursor_updates)
+                        .with_cursor_visibility(CursorVisibilityEffect::Show)
+                        .with_render_cleanup_action(RenderCleanupAction::Schedule);
+                }
+                if event.semantic_event == SemanticEvent::TextMutatedAtCursorContext {
+                    state.jump_and_stop_animation(
+                        target_position,
+                        cursor_shape,
+                        &event.cursor_location,
+                    );
+                    return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+                        .with_render_cleanup_action(RenderCleanupAction::Schedule);
+                }
+                if window_dimensions_changed && !window_changed && !buffer_changed {
+                    motion_class = MotionClass::SurfaceRetarget;
+                    state.jump_and_stop_animation(
+                        target_position,
+                        cursor_shape,
+                        &event.cursor_location,
+                    );
+                    return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+                        .with_motion_class(motion_class)
+                        .with_render_cleanup_action(RenderCleanupAction::Schedule);
+                }
+                if external_mode_requires_immediate_movement(
+                    &state.config,
+                    mode,
+                    transitioned_to_or_from_cmdline,
+                ) {
+                    if state.is_initialized()
+                        && let Some(scroll_shift) = event.scroll_shift
+                    {
+                        apply_event_scroll_shift(state, &mut target_position, scroll_shift);
+                    }
+                    motion_class = MotionClass::DiscontinuousJump;
+                    let jump_origin = state.current_visual_cursor_anchor();
+                    state.jump_and_stop_animation(
+                        target_position,
+                        cursor_shape,
+                        &event.cursor_location,
+                    );
+                    return draw_discontinuous_jump_frame(
+                        state,
+                        mode,
+                        JumpFrameSpec {
+                            event_now_ms: event.now_ms,
+                            from_position: jump_origin,
+                            to_position: target_position,
+                            vertical_bar,
+                            horizontal_bar,
+                            motion_class,
+                        },
+                        buffer_perf_class,
+                    );
+                }
+                if external_mode_requires_jump(&state.config, mode) {
+                    if state.is_initialized()
+                        && let Some(scroll_shift) = event.scroll_shift
+                    {
+                        apply_event_scroll_shift(state, &mut target_position, scroll_shift);
+                    }
+                    // Mode-forced jumps update position/target but preserve in-flight motion.
+                    motion_class = MotionClass::DiscontinuousJump;
+                    let jump_origin = state.current_visual_cursor_anchor();
+                    state.jump_preserving_motion(
+                        target_position,
+                        cursor_shape,
+                        &event.cursor_location,
+                    );
+                    return draw_discontinuous_jump_frame(
+                        state,
+                        mode,
+                        JumpFrameSpec {
+                            event_now_ms: event.now_ms,
+                            from_position: jump_origin,
+                            to_position: target_position,
+                            vertical_bar,
+                            horizontal_bar,
+                            motion_class,
+                        },
+                        buffer_perf_class,
+                    );
+                }
+            }
+            EventSource::AnimationTick => {}
+        }
+
+        if !state.is_initialized() {
+            state.initialize_cursor(
+                target_position,
+                cursor_shape,
+                event.seed,
+                &event.cursor_location,
+            );
+            let current_corners = state.current_corners();
+            let bootstrap_step_sample =
+                RenderStepSample::new(current_corners, state.config.simulation_step_interval_ms());
+            let mut step_samples = state.take_render_step_samples_scratch();
+            step_samples.clear();
+            step_samples.push(bootstrap_step_sample);
+            let frame = build_render_frame(
+                state,
+                mode,
+                current_corners,
+                // Bootstrap the planner with a stationary head sample so the first frame renders
+                // visible occupancy before the animation loop has emitted fixed-step samples.
+                step_samples,
+                0,
+                target_position,
+                vertical_bar,
+                buffer_perf_class,
+            );
+            return CursorTransitions::draw(
+                mode,
+                frame,
+                false,
+                RenderAllocationPolicy::BootstrapIfPoolEmpty,
             )
-        });
-    let mut motion_class = MotionClass::Continuous;
+            .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        }
 
-    match source {
-        EventSource::External => {
-            if external_mode_ignores_cursor(&state.config, mode) {
-                return CursorTransitions::noop(mode, allow_real_cursor_updates)
-                    .with_cursor_visibility(CursorVisibilityEffect::Show)
-                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
+        let should_update_target = matches!(source, EventSource::External) || tick_retarget;
+        let mut settling_target_unchanged = state.target_position() == target_position
+            && state.tracked_location_ref() == Some(&event.cursor_location);
+        if should_update_target {
+            if let Some(scroll_shift) = event.scroll_shift {
+                apply_event_scroll_shift(state, &mut target_position, scroll_shift);
             }
-            if event.semantic_event == SemanticEvent::TextMutatedAtCursorContext {
-                state.jump_and_stop_animation(
-                    target_position,
-                    cursor_shape,
-                    &event.cursor_location,
-                );
-                return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
-                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
-            }
-            if window_dimensions_changed && !window_changed && !buffer_changed {
-                motion_class = MotionClass::SurfaceRetarget;
+
+            settling_target_unchanged = state.target_position() == target_position
+                && state.tracked_location_ref() == Some(&event.cursor_location);
+
+            let path_segmentation = classify_target_transition(
+                state,
+                window_changed,
+                buffer_changed,
+                target_position.row,
+                target_position.col,
+            );
+            motion_class = path_segmentation.motion_class;
+            // large discontinuous moves still reset trail semantics, but they should
+            // stay on the regular spring/comet pipeline unless policy requires an actual snap.
+
+            if path_segmentation.should_jump {
                 state.jump_and_stop_animation(
                     target_position,
                     cursor_shape,
@@ -392,161 +522,89 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     .with_motion_class(motion_class)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
-            if external_mode_requires_immediate_movement(
-                &state.config,
-                mode,
-                transitioned_to_or_from_cmdline,
-            ) {
-                if state.is_initialized()
-                    && let Some(scroll_shift) = event.scroll_shift
-                {
-                    apply_event_scroll_shift(state, &mut target_position, scroll_shift);
-                }
-                motion_class = MotionClass::DiscontinuousJump;
-                let jump_origin = state.current_visual_cursor_anchor();
-                state.jump_and_stop_animation(
-                    target_position,
-                    cursor_shape,
-                    &event.cursor_location,
-                );
-                return draw_discontinuous_jump_frame(
-                    state,
-                    mode,
-                    JumpFrameSpec {
-                        event_now_ms: event.now_ms,
-                        from_position: jump_origin,
-                        to_position: target_position,
-                        vertical_bar,
-                        horizontal_bar,
-                        motion_class,
-                    },
-                    buffer_perf_class,
-                );
+
+            if path_segmentation.starts_new_trail_stroke {
+                state.start_new_trail_stroke();
             }
-            if external_mode_requires_jump(&state.config, mode) {
-                if state.is_initialized()
-                    && let Some(scroll_shift) = event.scroll_shift
-                {
-                    apply_event_scroll_shift(state, &mut target_position, scroll_shift);
+            state.set_target(target_position, cursor_shape);
+            state.update_tracking(&event.cursor_location);
+        }
+
+        let mut just_started = false;
+        if matches!(source, EventSource::External) && !state.is_animating() {
+            let metrics = stop_metrics(
+                &state.current_corners(),
+                &state.target_corners(),
+                &state.velocity_corners(),
+                state.config.block_aspect_ratio,
+                state.particles(),
+            );
+            if outside_stop_exit(&state.config, metrics) {
+                if state.is_settling() {
+                    state.refresh_settling_target_with_match(
+                        target_position,
+                        cursor_shape,
+                        &event.cursor_location,
+                        event.now_ms,
+                        settling_target_unchanged,
+                    );
+                } else {
+                    state.begin_settling(
+                        target_position,
+                        cursor_shape,
+                        &event.cursor_location,
+                        event.now_ms,
+                    );
                 }
-                // Mode-forced jumps update position/target but preserve in-flight motion.
-                motion_class = MotionClass::DiscontinuousJump;
-                let jump_origin = state.current_visual_cursor_anchor();
-                state.jump_preserving_motion(target_position, cursor_shape, &event.cursor_location);
-                return draw_discontinuous_jump_frame(
-                    state,
-                    mode,
-                    JumpFrameSpec {
-                        event_now_ms: event.now_ms,
-                        from_position: jump_origin,
-                        to_position: target_position,
-                        vertical_bar,
-                        horizontal_bar,
-                        motion_class,
-                    },
-                    buffer_perf_class,
-                );
-            }
-        }
-        EventSource::AnimationTick => {}
-    }
 
-    if !state.is_initialized() {
-        state.initialize_cursor(
-            target_position,
-            cursor_shape,
-            event.seed,
-            &event.cursor_location,
-        );
-        let current_corners = state.current_corners();
-        let bootstrap_step_sample =
-            RenderStepSample::new(current_corners, state.config.simulation_step_interval_ms());
-        let frame = build_render_frame(
-            state,
-            mode,
-            current_corners,
-            // Bootstrap the planner with a stationary head sample so the first frame renders
-            // visible occupancy before the animation loop has emitted fixed-step samples.
-            vec![bootstrap_step_sample],
-            0,
-            target_position,
-            vertical_bar,
-            buffer_perf_class,
-        );
-        return CursorTransitions::draw(
-            mode,
-            frame,
-            false,
-            RenderAllocationPolicy::BootstrapIfPoolEmpty,
-        )
-        .with_render_cleanup_action(RenderCleanupAction::Schedule);
-    }
-
-    let should_update_target = matches!(source, EventSource::External) || tick_retarget;
-    if should_update_target {
-        if let Some(scroll_shift) = event.scroll_shift {
-            apply_event_scroll_shift(state, &mut target_position, scroll_shift);
-        }
-
-        let path_segmentation = classify_target_transition(
-            state,
-            window_changed,
-            buffer_changed,
-            target_position.row,
-            target_position.col,
-        );
-        motion_class = path_segmentation.motion_class;
-        // large discontinuous moves still reset trail semantics, but they should
-        // stay on the regular spring/comet pipeline unless policy requires an actual snap.
-
-        if path_segmentation.should_jump {
-            state.jump_and_stop_animation(target_position, cursor_shape, &event.cursor_location);
-            return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
-                .with_motion_class(motion_class)
-                .with_render_cleanup_action(RenderCleanupAction::Schedule);
-        }
-
-        if path_segmentation.starts_new_trail_stroke {
-            state.start_new_trail_stroke();
-        }
-        state.set_target(target_position, cursor_shape);
-        state.update_tracking(&event.cursor_location);
-    }
-
-    let mut just_started = false;
-    if matches!(source, EventSource::External) && !state.is_animating() {
-        let metrics = stop_metrics(
-            &state.current_corners(),
-            &state.target_corners(),
-            &state.velocity_corners(),
-            state.config.block_aspect_ratio,
-            state.particles(),
-        );
-        if outside_stop_exit(&state.config, metrics) {
-            if state.is_settling() {
-                state.refresh_settling_target(
-                    target_position,
-                    cursor_shape,
-                    &event.cursor_location,
+                if state.should_promote_settled_target(
                     event.now_ms,
-                );
+                    target_position,
+                    &event.cursor_location,
+                ) {
+                    promote_settled_target(state);
+                    just_started = true;
+                } else {
+                    return waiting_for_settled_target(
+                        state,
+                        mode,
+                        allow_real_cursor_updates,
+                        motion_class,
+                        event.now_ms,
+                    );
+                }
             } else {
-                state.begin_settling(
-                    target_position,
-                    cursor_shape,
-                    &event.cursor_location,
-                    event.now_ms,
-                );
+                state.clear_pending_target();
+                state.settle_at_target();
+                state.stop_animation();
+                reset_animation_timing(state);
+                // a same-target external ingress after drain does not supersede the last
+                // rendered trail. Keep cleanup intent alive so the final smear frame still clears.
+                return CursorTransitions::noop(mode, allow_real_cursor_updates)
+                    .with_motion_class(motion_class)
+                    .with_cursor_visibility(CursorVisibilityEffect::Show)
+                    .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
+        }
 
-            if state.should_promote_settled_target(
-                event.now_ms,
-                target_position,
-                &event.cursor_location,
-            ) {
-                promote_settled_target(state, event.now_ms);
+        if matches!(source, EventSource::AnimationTick) && state.is_settling() {
+            if settling_target_unchanged
+                && state.should_promote_settled_target(
+                    event.now_ms,
+                    target_position,
+                    &event.cursor_location,
+                )
+            {
+                promote_settled_target(state);
                 just_started = true;
             } else {
+                state.refresh_settling_target_with_match(
+                    target_position,
+                    cursor_shape,
+                    &event.cursor_location,
+                    event.now_ms,
+                    settling_target_unchanged,
+                );
                 return waiting_for_settled_target(
                     state,
                     mode,
@@ -555,158 +613,141 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     event.now_ms,
                 );
             }
-        } else {
-            state.clear_pending_target();
-            state.settle_at_target();
-            state.stop_animation();
-            reset_animation_timing(state);
-            // a same-target external ingress after drain does not supersede the last
-            // rendered trail. Keep cleanup intent alive so the final smear frame still clears.
-            return CursorTransitions::noop(mode, allow_real_cursor_updates)
-                .with_motion_class(motion_class)
-                .with_cursor_visibility(CursorVisibilityEffect::Show)
-                .with_render_cleanup_action(RenderCleanupAction::Schedule);
         }
-    }
 
-    if matches!(source, EventSource::AnimationTick) && state.is_settling() {
-        if state.should_promote_settled_target(
-            event.now_ms,
-            target_position,
-            &event.cursor_location,
-        ) {
-            promote_settled_target(state, event.now_ms);
-            just_started = true;
-        } else {
-            state.refresh_settling_target(
+        if matches!(source, EventSource::AnimationTick) && state.is_draining() {
+            return draw_drain_frame(
+                state,
+                mode,
+                event.now_ms,
                 target_position,
-                cursor_shape,
-                &event.cursor_location,
-                event.now_ms,
-            );
-            return waiting_for_settled_target(
-                state,
-                mode,
-                allow_real_cursor_updates,
-                motion_class,
-                event.now_ms,
+                vertical_bar,
+                buffer_perf_class,
             );
         }
-    }
 
-    if matches!(source, EventSource::AnimationTick) && state.is_draining() {
-        return draw_drain_frame(
-            state,
-            mode,
-            event.now_ms,
-            target_position,
-            vertical_bar,
-            buffer_perf_class,
-        );
-    }
-
-    match source {
-        EventSource::AnimationTick if !state.is_animating() => {
-            return CursorTransitions::noop(mode, allow_real_cursor_updates)
-                .with_motion_class(motion_class)
-                .with_cursor_visibility(CursorVisibilityEffect::Show);
+        match source {
+            EventSource::AnimationTick if !state.is_animating() => {
+                return CursorTransitions::noop(mode, allow_real_cursor_updates)
+                    .with_motion_class(motion_class)
+                    .with_cursor_visibility(CursorVisibilityEffect::Show);
+            }
+            EventSource::AnimationTick | EventSource::External => {}
         }
-        EventSource::AnimationTick | EventSource::External => {}
-    }
 
-    let should_advance = match source {
-        EventSource::AnimationTick => state.is_animating(),
-        // External retargets while animating should still advance the simulation so
-        // high-frequency cursor streams do not appear frozen between timer ticks.
-        EventSource::External => just_started || state.is_animating(),
-    };
-
-    if should_advance {
-        let configured_interval = state.config.time_interval.max(1.0);
-        let step_interval = if just_started {
-            configured_interval
-        } else {
-            state
-                .last_tick_ms()
-                .map_or(configured_interval, |previous| {
-                    (event.now_ms - previous).max(0.0)
-                })
+        let should_advance = match source {
+            EventSource::AnimationTick => state.is_animating(),
+            // External retargets while animating should still advance the simulation so
+            // high-frequency cursor streams do not appear frozen between timer ticks.
+            EventSource::External => just_started || state.is_animating(),
         };
-        state.set_last_tick_ms(Some(event.now_ms));
 
-        state.push_simulation_elapsed(step_interval);
-        let simulation_step_ms = state.config.simulation_step_interval_ms().max(1.0);
-        let max_simulation_steps =
-            usize::try_from(state.config.max_simulation_steps_per_frame).unwrap_or(usize::MAX);
-        let mut executed_steps = 0_usize;
-        let mut step_samples = Vec::<RenderStepSample>::with_capacity(max_simulation_steps);
+        if should_advance {
+            let configured_interval = state.config.time_interval.max(1.0);
+            let step_interval = state.take_animation_elapsed_ms(event.now_ms, configured_interval);
 
-        while executed_steps < max_simulation_steps
-            && state.consume_simulation_step(simulation_step_ms)
-        {
-            let particles = if keeps_ornamental_effects {
-                state.take_particles()
-            } else {
-                Vec::new()
-            };
-            let step_input = step_input(
-                state,
-                mode,
-                simulation_step_ms,
-                vertical_bar,
-                horizontal_bar,
-                particles,
-                buffer_perf_class,
-            );
-            crate::events::record_particle_simulation_step(step_input.particles.len());
-            let step_output = simulate_step(step_input);
-            state.apply_step_output(step_output);
+            state.push_simulation_elapsed(step_interval);
+            let simulation_step_ms = state.config.simulation_step_interval_ms().max(1.0);
+            let max_simulation_steps =
+                usize::try_from(state.config.max_simulation_steps_per_frame).unwrap_or(usize::MAX);
+            let mut executed_steps = 0_usize;
+            let mut step_samples = state.take_render_step_samples_scratch();
+            step_samples.clear();
+            step_samples.reserve(max_simulation_steps.saturating_sub(step_samples.len()));
+
+            while executed_steps < max_simulation_steps
+                && state.consume_simulation_step(simulation_step_ms)
+            {
+                let particles = if keeps_ornamental_effects {
+                    state.take_particles()
+                } else {
+                    Vec::new()
+                };
+                let step_input = step_input(
+                    state,
+                    mode,
+                    simulation_step_ms,
+                    vertical_bar,
+                    horizontal_bar,
+                    particles,
+                    buffer_perf_class,
+                );
+                crate::events::record_particle_simulation_step(step_input.particles.len());
+                let step_output = simulate_step(step_input);
+                state.apply_step_output(step_output);
+                let current_corners = state.current_corners();
+                let target_corners = state.target_corners();
+                let render_corners =
+                    corners_for_render(&state.config, &current_corners, &target_corners);
+                step_samples.push(RenderStepSample::new(render_corners, simulation_step_ms));
+                executed_steps = executed_steps.saturating_add(1);
+            }
+
+            if executed_steps == 0 && just_started {
+                let particles = if keeps_ornamental_effects {
+                    state.take_particles()
+                } else {
+                    Vec::new()
+                };
+                let step_input = step_input(
+                    state,
+                    mode,
+                    simulation_step_ms,
+                    vertical_bar,
+                    horizontal_bar,
+                    particles,
+                    buffer_perf_class,
+                );
+                crate::events::record_particle_simulation_step(step_input.particles.len());
+                let step_output = simulate_step(step_input);
+                state.apply_step_output(step_output);
+                let current_corners = state.current_corners();
+                let target_corners = state.target_corners();
+                let render_corners =
+                    corners_for_render(&state.config, &current_corners, &target_corners);
+                step_samples.push(RenderStepSample::new(render_corners, simulation_step_ms));
+            }
+
             let current_corners = state.current_corners();
             let target_corners = state.target_corners();
-            let render_corners =
-                corners_for_render(&state.config, &current_corners, &target_corners);
-            step_samples.push(RenderStepSample::new(render_corners, simulation_step_ms));
-            executed_steps = executed_steps.saturating_add(1);
-        }
-
-        if executed_steps == 0 && just_started {
-            let particles = if keeps_ornamental_effects {
-                state.take_particles()
-            } else {
-                Vec::new()
-            };
-            let step_input = step_input(
-                state,
-                mode,
-                simulation_step_ms,
-                vertical_bar,
-                horizontal_bar,
-                particles,
-                buffer_perf_class,
+            let velocity_corners = state.velocity_corners();
+            let metrics = stop_metrics(
+                &current_corners,
+                &target_corners,
+                &velocity_corners,
+                state.config.block_aspect_ratio,
+                state.particles(),
             );
-            crate::events::record_particle_simulation_step(step_input.particles.len());
-            let step_output = simulate_step(step_input);
-            state.apply_step_output(step_output);
-            let current_corners = state.current_corners();
-            let target_corners = state.target_corners();
-            let render_corners =
-                corners_for_render(&state.config, &current_corners, &target_corners);
-            step_samples.push(RenderStepSample::new(render_corners, simulation_step_ms));
-        }
+            if state.note_settle_probe(within_stop_enter(&state.config, metrics)) {
+                state.settle_at_target();
+                state.start_tail_drain(planner_tail_drain_steps(state));
+                let current_corners = state.current_corners();
+                let target_corners = state.target_corners();
+                let render_corners =
+                    corners_for_render(&state.config, &current_corners, &target_corners);
+                let frame = build_render_frame(
+                    state,
+                    mode,
+                    render_corners,
+                    step_samples,
+                    0,
+                    target_position,
+                    vertical_bar,
+                    buffer_perf_class,
+                );
+                let next_animation_at_ms =
+                    Some(next_animation_deadline_from_clock(state, event.now_ms));
+                return CursorTransitions::draw(
+                    mode,
+                    frame,
+                    true,
+                    RenderAllocationPolicy::ReuseOnly,
+                )
+                .with_motion_class(motion_class)
+                .with_next_animation_at_ms(next_animation_at_ms)
+                .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+            }
 
-        let current_corners = state.current_corners();
-        let target_corners = state.target_corners();
-        let velocity_corners = state.velocity_corners();
-        let metrics = stop_metrics(
-            &current_corners,
-            &target_corners,
-            &velocity_corners,
-            state.config.block_aspect_ratio,
-            state.particles(),
-        );
-        if state.note_settle_probe(within_stop_enter(&state.config, metrics)) {
-            state.settle_at_target();
-            state.start_tail_drain(planner_tail_drain_steps(state));
             let current_corners = state.current_corners();
             let target_corners = state.target_corners();
             let render_corners =
@@ -729,73 +770,59 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 .with_render_cleanup_action(RenderCleanupAction::Invalidate);
         }
 
-        let current_corners = state.current_corners();
-        let target_corners = state.target_corners();
-        let render_corners = corners_for_render(&state.config, &current_corners, &target_corners);
-        let frame = build_render_frame(
-            state,
-            mode,
-            render_corners,
-            step_samples,
-            0,
-            target_position,
-            vertical_bar,
-            buffer_perf_class,
-        );
-        let next_animation_at_ms = Some(next_animation_deadline_from_clock(state, event.now_ms));
-        return CursorTransitions::draw(mode, frame, true, RenderAllocationPolicy::ReuseOnly)
-            .with_motion_class(motion_class)
-            .with_next_animation_at_ms(next_animation_at_ms)
-            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
-    }
-
-    match source {
-        EventSource::External => {
-            let should_schedule_next_animation = state.is_animating() || state.is_settling();
-            let next_animation_at_ms = if state.is_settling() {
-                next_animation_deadline_from_settling(state, event.now_ms)
-            } else if state.is_animating() && should_schedule_next_animation {
-                Some(next_animation_deadline_from_clock(state, event.now_ms))
-            } else {
-                None
-            };
-            let cleanup_action = if should_schedule_next_animation {
-                RenderCleanupAction::Invalidate
-            } else {
-                // Surprising: a quiescent external noop can be the last lifecycle edge after
-                // ingress. Keep cleanup intent alive here so `Hot` can still converge to
-                // `Cooling` and `Cold` without waiting for unrelated future ingress.
-                RenderCleanupAction::Schedule
-            };
-            CursorTransitions::noop(mode, allow_real_cursor_updates)
-                .with_motion_class(motion_class)
-                .with_schedule_next_animation(should_schedule_next_animation)
-                .with_next_animation_at_ms(next_animation_at_ms)
-                .with_cursor_visibility(if state.is_animating() {
-                    CursorVisibilityEffect::Keep
+        match source {
+            EventSource::External => {
+                let should_schedule_next_animation = state.is_animating() || state.is_settling();
+                let next_animation_at_ms = if state.is_settling() {
+                    next_animation_deadline_from_settling(state, event.now_ms)
+                } else if state.is_animating() && should_schedule_next_animation {
+                    Some(next_animation_deadline_from_clock(state, event.now_ms))
                 } else {
-                    CursorVisibilityEffect::Show
-                })
-                .with_render_cleanup_action(cleanup_action)
+                    None
+                };
+                let cleanup_action = if should_schedule_next_animation {
+                    RenderCleanupAction::Invalidate
+                } else {
+                    // Surprising: a quiescent external noop can be the last lifecycle edge after
+                    // ingress. Keep cleanup intent alive here so `Hot` can still converge to
+                    // `Cooling` and `Cold` without waiting for unrelated future ingress.
+                    RenderCleanupAction::Schedule
+                };
+                CursorTransitions::noop(mode, allow_real_cursor_updates)
+                    .with_motion_class(motion_class)
+                    .with_schedule_next_animation(should_schedule_next_animation)
+                    .with_next_animation_at_ms(next_animation_at_ms)
+                    .with_cursor_visibility(if state.is_animating() {
+                        CursorVisibilityEffect::Keep
+                    } else {
+                        CursorVisibilityEffect::Show
+                    })
+                    .with_render_cleanup_action(cleanup_action)
+            }
+            EventSource::AnimationTick => {
+                let current_corners = state.current_corners();
+                let target_corners = state.target_corners();
+                let render_corners =
+                    corners_for_render(&state.config, &current_corners, &target_corners);
+                let frame = build_render_frame(
+                    state,
+                    mode,
+                    render_corners,
+                    Vec::new(),
+                    0,
+                    target_position,
+                    vertical_bar,
+                    buffer_perf_class,
+                );
+                CursorTransitions::draw(mode, frame, false, RenderAllocationPolicy::ReuseOnly)
+                    .with_motion_class(motion_class)
+                    .with_render_cleanup_action(RenderCleanupAction::NoAction)
+            }
         }
-        EventSource::AnimationTick => {
-            let current_corners = state.current_corners();
-            let target_corners = state.target_corners();
-            let render_corners =
-                corners_for_render(&state.config, &current_corners, &target_corners);
-            let frame = build_render_frame(
-                state,
-                mode,
-                render_corners,
-                Vec::new(),
-                0,
-                target_position,
-                vertical_bar,
-                buffer_perf_class,
-            );
-            CursorTransitions::draw(mode, frame, false, RenderAllocationPolicy::ReuseOnly)
-                .with_motion_class(motion_class)
-                .with_render_cleanup_action(RenderCleanupAction::NoAction)
-        }
-    }
+    })();
+
+    #[cfg(debug_assertions)]
+    state.debug_assert_invariants();
+
+    transition
 }

@@ -118,7 +118,11 @@ smear_build_release() {
   local plugin_dir="$1"
   (
     cd "${plugin_dir}"
-    cargo build --release >/dev/null
+    if [[ -n "${SMEAR_CARGO_FEATURES:-}" ]]; then
+      cargo build --release --features "${SMEAR_CARGO_FEATURES}" >/dev/null
+    else
+      cargo build --release >/dev/null
+    fi
   )
 }
 

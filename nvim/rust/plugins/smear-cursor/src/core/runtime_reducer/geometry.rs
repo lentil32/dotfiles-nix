@@ -108,6 +108,7 @@ mod tests {
     use crate::test_support::proptest::CursorShapeCase;
     use crate::test_support::proptest::cursor_rectangle;
     use crate::test_support::proptest::pure_config;
+    use crate::types::ModeClass;
     use crate::types::RenderStepSample;
     use crate::types::StaticRenderConfig;
     use proptest::prelude::*;
@@ -143,7 +144,7 @@ mod tests {
         static_config.hide_target_hack = hide_target_hack;
 
         RenderFrame {
-            mode: "n".to_string(),
+            mode: ModeClass::NormalLike,
             corners,
             step_samples: Vec::<RenderStepSample>::new().into(),
             planner_idle_steps: 0,

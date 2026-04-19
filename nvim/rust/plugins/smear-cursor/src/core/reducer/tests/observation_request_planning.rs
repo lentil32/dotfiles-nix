@@ -60,7 +60,7 @@ fn ready_state_for_observation_request_case(
     });
 
     if retain_cursor_color {
-        ready.into_ready_with_observation(observation_snapshot_with_cursor_color(
+        ready.enter_ready(observation_snapshot_with_cursor_color(
             cursor(7, 8),
             0x00AB_CDEF,
         ))
@@ -169,7 +169,7 @@ fn retained_cursor_text_context_boundary_is_carried_into_observation_runtime_con
         ),
         observation_motion(),
     );
-    let ready = ready_state().into_ready_with_observation(retained);
+    let ready = ready_state().enter_ready(retained);
 
     let transition = reduce(
         &ready,
@@ -204,7 +204,7 @@ fn retained_cursor_text_context_boundary_survives_without_sampled_rows() {
         ),
         observation_motion(),
     );
-    let ready = ready_state().into_ready_with_observation(retained);
+    let ready = ready_state().enter_ready(retained);
 
     let transition = reduce(
         &ready,

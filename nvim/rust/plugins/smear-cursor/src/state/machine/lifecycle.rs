@@ -4,9 +4,9 @@ use super::RuntimeState;
 use super::types::AnimationPhase;
 use super::types::DrainingPhase;
 use super::types::MotionClock;
-use super::types::PendingTarget;
 use super::types::RunningPhase;
 use super::types::SettlingPhase;
+use super::types::SettlingWindow;
 use crate::animation::center;
 use crate::animation::initial_velocity;
 use crate::animation::zero_velocity_corners;
@@ -39,6 +39,16 @@ fn row_translation_to_clamp_window(corners: &[Point; 4], min_row: f64, max_row: 
 }
 
 impl RuntimeState {
+    fn motion_clock(&self) -> Option<&MotionClock> {
+        match &self.animation_phase {
+            AnimationPhase::Running(phase) => Some(&phase.clock),
+            AnimationPhase::Draining(phase) => Some(&phase.clock),
+            AnimationPhase::Uninitialized | AnimationPhase::Idle | AnimationPhase::Settling(_) => {
+                None
+            }
+        }
+    }
+
     fn motion_clock_mut(&mut self) -> Option<&mut MotionClock> {
         match &mut self.animation_phase {
             AnimationPhase::Running(phase) => Some(&mut phase.clock),
@@ -96,11 +106,13 @@ impl RuntimeState {
         now_ms: f64,
     ) {
         let delay_ms = self.config.delay_event_to_smear.max(0.0);
-        let pending = PendingTarget::new(position, location, now_ms, now_ms + delay_ms);
         self.set_target(position, shape);
         self.update_tracking(location);
         self.animation_phase = AnimationPhase::Settling(SettlingPhase {
-            pending_target: pending,
+            settling_window: SettlingWindow {
+                stable_since_ms: now_ms,
+                settle_deadline_ms: now_ms + delay_ms,
+            },
         });
     }
 
@@ -111,20 +123,39 @@ impl RuntimeState {
         location: &CursorLocation,
         now_ms: f64,
     ) {
+        let preserve_stable_since =
+            self.target_position() == position && self.tracked_location_ref() == Some(location);
+        self.refresh_settling_target_with_match(
+            position,
+            shape,
+            location,
+            now_ms,
+            preserve_stable_since,
+        );
+    }
+
+    pub(crate) fn refresh_settling_target_with_match(
+        &mut self,
+        position: Point,
+        shape: CursorShape,
+        location: &CursorLocation,
+        now_ms: f64,
+        preserve_stable_since: bool,
+    ) {
         let delay_ms = self.config.delay_event_to_smear.max(0.0);
-        let pending = match self.pending_target() {
-            Some(existing) if existing.matches_observation(position, location) => PendingTarget {
-                position: existing.position,
-                cursor_location: existing.cursor_location.clone(),
-                stable_since_ms: existing.stable_since_ms,
-                settle_deadline_ms: now_ms + delay_ms,
-            },
-            _ => PendingTarget::new(position, location, now_ms, now_ms + delay_ms),
+        let stable_since_ms = if preserve_stable_since {
+            self.settling_window()
+                .map_or(now_ms, |existing| existing.stable_since_ms)
+        } else {
+            now_ms
         };
         self.set_target(position, shape);
         self.update_tracking(location);
         self.animation_phase = AnimationPhase::Settling(SettlingPhase {
-            pending_target: pending,
+            settling_window: SettlingWindow {
+                stable_since_ms,
+                settle_deadline_ms: now_ms + delay_ms,
+            },
         });
     }
 
@@ -134,12 +165,13 @@ impl RuntimeState {
         observed_position: Point,
         observed_location: &CursorLocation,
     ) -> bool {
-        let Some(pending) = self.pending_target() else {
+        let Some(settling_window) = self.settling_window() else {
             return false;
         };
-        pending.matches_observation(observed_position, observed_location)
-            && pending.settle_deadline_ms >= pending.stable_since_ms
-            && now_ms >= pending.settle_deadline_ms
+        self.target_position() == observed_position
+            && self.tracked_location_ref() == Some(observed_location)
+            && settling_window.settle_deadline_ms >= settling_window.stable_since_ms
+            && now_ms >= settling_window.settle_deadline_ms
     }
 
     pub(crate) fn note_settle_probe(&mut self, within_enter_threshold: bool) -> bool {
@@ -208,16 +240,51 @@ impl RuntimeState {
     }
 
     pub(crate) fn last_tick_ms(&self) -> Option<f64> {
-        self.transient.last_tick_ms
+        self.motion_clock().and_then(|clock| clock.last_tick_ms)
     }
 
     pub(crate) fn set_last_tick_ms(&mut self, value: Option<f64>) {
-        self.transient.last_tick_ms = value;
+        let Some(clock) = self.motion_clock_mut() else {
+            debug_assert!(
+                value.is_none(),
+                "animation tick timing only exists while running or draining"
+            );
+            return;
+        };
+        clock.last_tick_ms = value;
+    }
+
+    pub(crate) fn record_animation_tick(&mut self, now_ms: f64) {
+        self.set_last_tick_ms(Some(now_ms));
+    }
+
+    pub(crate) fn take_animation_elapsed_ms(
+        &mut self,
+        now_ms: f64,
+        fallback_elapsed_ms: f64,
+    ) -> f64 {
+        let clamped_fallback = if fallback_elapsed_ms.is_finite() {
+            fallback_elapsed_ms.max(0.0)
+        } else {
+            0.0
+        };
+        let Some(clock) = self.motion_clock_mut() else {
+            debug_assert!(
+                false,
+                "animation elapsed time should only be sampled while running or draining"
+            );
+            return clamped_fallback;
+        };
+        let elapsed_ms = clock
+            .last_tick_ms
+            .map_or(clamped_fallback, |previous| (now_ms - previous).max(0.0));
+        clock.last_tick_ms = Some(now_ms);
+        elapsed_ms
     }
 
     pub(crate) fn settle_deadline_ms(&self) -> Option<f64> {
-        self.pending_target()
-            .map(|pending| pending.settle_deadline_ms)
+        self.settling_window()
+            .map(|window| window.settle_deadline_ms)
     }
 
     pub(crate) fn advance_next_frame_deadline(&mut self, now_ms: f64) -> f64 {
@@ -274,7 +341,6 @@ impl RuntimeState {
     }
 
     pub(crate) fn reset_animation_timing(&mut self) {
-        self.transient.last_tick_ms = None;
         if let Some(clock) = self.motion_clock_mut() {
             clock.reset();
         }
@@ -315,9 +381,12 @@ impl RuntimeState {
         }
         self.previous_center = center(&self.current_corners);
         translate_corners(&mut self.trail_origin_corners, -row_shift, -col_shift);
-        for particle in std::sync::Arc::make_mut(&mut self.particles) {
-            particle.position.row -= row_shift;
-            particle.position.col -= col_shift;
+        if !self.particles().is_empty() {
+            self.materialize_preview_particles();
+            for particle in &mut self.particles {
+                particle.position.row -= row_shift;
+                particle.position.col -= col_shift;
+            }
         }
         self.invalidate_cached_particle_artifacts();
     }
@@ -329,7 +398,7 @@ impl RuntimeState {
         self.trail_elapsed_ms = output.trail_elapsed_ms;
         self.previous_center = output.previous_center;
         self.rng_state = output.rng_state;
-        self.set_shared_particles(std::sync::Arc::new(output.particles));
+        self.set_particles_vec(output.particles);
     }
 
     pub(crate) fn settle_at_target(&mut self) {

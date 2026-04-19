@@ -1,9 +1,12 @@
+use super::BackgroundProbeBatch;
 use super::BackgroundProbeChunkMask;
 use super::BackgroundProbePlan;
 use super::BackgroundProbeProgress;
+use super::BackgroundProbeState;
 use super::BackgroundProbeUpdate;
 use super::CursorColorSample;
 use super::CursorTextContext;
+use super::CursorTextContextState;
 use super::ObservationBasis;
 use super::ObservationMotion;
 use super::ObservationRequest;
@@ -93,42 +96,38 @@ fn assert_text_mutation_classification(
 ) {
     let request = observation_request(ProbeRequestSet::default());
     let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
-    let previous = ObservationSnapshot::new(
-        request.clone(),
-        ObservationBasis::new(
-            ObservationId::from_ingress_seq(IngressSeq::new(1)),
-            Millis::new(10),
-            "n".to_string(),
-            Some(previous_position),
-            CursorLocation::new(1, 1, 1, previous_line),
-            viewport,
-        )
-        .with_cursor_text_context(Some(text_context(
-            4,
-            previous_line,
-            previous_rows,
-            None,
-        ))),
-        ObservationMotion::default(),
-    );
-    let current = ObservationSnapshot::new(
-        request,
-        ObservationBasis::new(
-            ObservationId::from_ingress_seq(IngressSeq::new(1)),
-            Millis::new(11),
-            "n".to_string(),
-            Some(current_position),
-            CursorLocation::new(1, 1, 1, current_line),
-            viewport,
-        )
-        .with_cursor_text_context(Some(text_context(
-            5,
-            current_line,
-            current_rows,
-            current_tracked_rows,
-        ))),
-        ObservationMotion::default(),
-    );
+    let previous =
+        ObservationSnapshot::new(
+            request.clone(),
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                Millis::new(10),
+                "n".to_string(),
+                Some(previous_position),
+                CursorLocation::new(1, 1, 1, previous_line),
+                viewport,
+            )
+            .with_cursor_text_context_state(CursorTextContextState::Sampled(
+                text_context(4, previous_line, previous_rows, None),
+            )),
+            ObservationMotion::default(),
+        );
+    let current =
+        ObservationSnapshot::new(
+            request,
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(1)),
+                Millis::new(11),
+                "n".to_string(),
+                Some(current_position),
+                CursorLocation::new(1, 1, 1, current_line),
+                viewport,
+            )
+            .with_cursor_text_context_state(CursorTextContextState::Sampled(
+                text_context(5, current_line, current_rows, current_tracked_rows),
+            )),
+            ObservationMotion::default(),
+        );
 
     pretty_assertions::assert_eq!(
         classify_semantic_event(Some(&previous), &current),

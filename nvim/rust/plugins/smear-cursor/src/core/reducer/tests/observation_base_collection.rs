@@ -36,7 +36,7 @@ fn ready_state_for_observation_base_case(
     });
 
     if retain_cursor_color {
-        ready.into_ready_with_observation(observation_snapshot_with_cursor_color(
+        ready.enter_ready(observation_snapshot_with_cursor_color(
             cursor(7, 8),
             0x00AB_CDEF,
         ))
@@ -188,6 +188,7 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
             requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
+            ingress_observation_surface: None,
         }),
     )
     .next;

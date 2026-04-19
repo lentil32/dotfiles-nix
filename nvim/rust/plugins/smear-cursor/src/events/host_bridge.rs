@@ -282,9 +282,8 @@ mod tests {
                     "uv.new_timer()",
                     "slot.handle:start(timeout, 0, function()",
                     "require(\"nvimrs_smear_cursor\").on_core_timer_slot(slot_id, token_generation)",
-                    "vim.schedule(function()",
                 ],
-                &[],
+                &["vim.schedule(function()"],
             ),
             (
                 "runtime-module loading shape",

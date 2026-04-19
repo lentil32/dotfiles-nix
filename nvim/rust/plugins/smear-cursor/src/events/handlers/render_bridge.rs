@@ -22,6 +22,7 @@ use crate::core::state::RealizationDivergence;
 pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -> Vec<CoreEvent> {
     let observed_at = to_core_millis(now_ms());
     let proposal = payload.proposal;
+    let buffer_handle = payload.buffer_handle;
     let proposal_id = proposal.proposal_id();
     let proposal_trace = proposal_summary(&proposal);
     super::super::logging::trace_lazy(|| {
@@ -60,8 +61,8 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
         let apply_result = apply_render_action(namespace_id, &proposal);
 
         let apply_duration_ms = (now_ms() - apply_started_ms).max(0.0);
-        record_cursor_callback_duration(apply_duration_ms);
-        let apply_duration_estimate_ms = cursor_callback_duration_estimate_ms();
+        record_cursor_callback_duration(buffer_handle, apply_duration_ms);
+        let apply_duration_estimate_ms = cursor_callback_duration_estimate_ms(buffer_handle);
         let should_log_apply_perf = should_log_slow_callback(apply_duration_ms);
 
         match apply_result {

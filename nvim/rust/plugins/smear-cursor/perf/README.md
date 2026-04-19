@@ -4,6 +4,11 @@ These files are point-in-time measurements captured from the local smear-cursor 
 They are not cross-machine golden numbers. They exist so we can diff behavior on the exact tree
 that shipped and see which perf class or planner path the runtime selected at capture time.
 
+Measurement-only validation and allocation counters now live behind the
+crate-local `perf-counters` cargo feature. The dedicated capture scripts that
+need those counters opt into that feature automatically when they build the
+release cdylib.
+
 Regenerate the checked-in reports whenever the corresponding behavior changes:
 
 - Adaptive policy or probe-path changes: `adaptive-buffer-policy-current.md`

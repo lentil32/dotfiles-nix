@@ -1,22 +1,34 @@
-use std::alloc::GlobalAlloc;
-use std::alloc::Layout;
-use std::alloc::System;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-
+#[cfg(feature = "perf-counters")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AllocationCountersSnapshot {
     pub(crate) allocation_ops: u64,
     pub(crate) allocation_bytes: u64,
 }
 
+#[cfg(feature = "perf-counters")]
 pub(crate) struct CountingAllocator;
 
+#[cfg(feature = "perf-counters")]
+use std::alloc::GlobalAlloc;
+#[cfg(feature = "perf-counters")]
+use std::alloc::Layout;
+#[cfg(feature = "perf-counters")]
+use std::alloc::System;
+#[cfg(feature = "perf-counters")]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "perf-counters")]
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "perf-counters")]
+use std::sync::atomic::Ordering;
+
+#[cfg(feature = "perf-counters")]
 static ALLOCATION_COUNTING_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "perf-counters")]
 static ALLOCATION_OPS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "perf-counters")]
 static ALLOCATION_BYTES: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(feature = "perf-counters")]
 impl CountingAllocator {
     fn record_allocation(size: usize) {
         if !ALLOCATION_COUNTING_ENABLED.load(Ordering::Relaxed) {
@@ -28,6 +40,7 @@ impl CountingAllocator {
     }
 }
 
+#[cfg(feature = "perf-counters")]
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };
@@ -58,16 +71,19 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 }
 
+#[cfg(feature = "perf-counters")]
 struct CountingStateGuard {
     was_enabled: bool,
 }
 
+#[cfg(feature = "perf-counters")]
 impl Drop for CountingStateGuard {
     fn drop(&mut self) {
         ALLOCATION_COUNTING_ENABLED.store(self.was_enabled, Ordering::Relaxed);
     }
 }
 
+#[cfg(feature = "perf-counters")]
 pub(crate) fn configure_from_env() {
     let enabled = std::env::var("SMEAR_ENABLE_ALLOCATION_COUNTERS")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -76,6 +92,10 @@ pub(crate) fn configure_from_env() {
     ALLOCATION_COUNTING_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn configure_from_env() {}
+
+#[cfg(feature = "perf-counters")]
 pub(crate) fn snapshot() -> AllocationCountersSnapshot {
     AllocationCountersSnapshot {
         allocation_ops: ALLOCATION_OPS.load(Ordering::Relaxed),
@@ -83,6 +103,7 @@ pub(crate) fn snapshot() -> AllocationCountersSnapshot {
     }
 }
 
+#[cfg(feature = "perf-counters")]
 pub(crate) fn with_counting_suspended<T>(callback: impl FnOnce() -> T) -> T {
     let guard = CountingStateGuard {
         was_enabled: ALLOCATION_COUNTING_ENABLED.swap(false, Ordering::Relaxed),
@@ -92,21 +113,28 @@ pub(crate) fn with_counting_suspended<T>(callback: impl FnOnce() -> T) -> T {
     result
 }
 
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn with_counting_suspended<T>(callback: impl FnOnce() -> T) -> T {
+    callback()
+}
+
+#[cfg(feature = "perf-counters")]
 fn reset() {
     ALLOCATION_OPS.store(0, Ordering::Relaxed);
     ALLOCATION_BYTES.store(0, Ordering::Relaxed);
 }
 
+#[cfg(feature = "perf-counters")]
 fn size_to_u64(size: usize) -> u64 {
     u64::try_from(size).unwrap_or(u64::MAX)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "perf-counters"))]
 pub(crate) fn reset_for_test() {
     reset();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "perf-counters"))]
 pub(crate) fn set_enabled_for_test(enabled: bool) {
     ALLOCATION_COUNTING_ENABLED.store(enabled, Ordering::Relaxed);
 }

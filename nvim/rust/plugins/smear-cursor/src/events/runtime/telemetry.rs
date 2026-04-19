@@ -1,4 +1,5 @@
 use super::super::event_loop;
+use super::super::ingress::AutocmdIngress;
 use super::super::policy::BufferPerfTelemetry;
 use super::engine::mutate_engine_state;
 use super::engine::read_engine_state;
@@ -8,15 +9,12 @@ use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
-use nvim_oxi::api;
 
-fn current_buffer_handle() -> Option<i64> {
-    let buffer = api::get_current_buf();
-    buffer.is_valid().then(|| i64::from(buffer.handle()))
-}
-
-fn record_current_buffer_perf_telemetry(update: impl FnOnce(&mut super::super::ShellState, i64)) {
-    let Some(buffer_handle) = current_buffer_handle() else {
+fn record_buffer_perf_telemetry(
+    buffer_handle: Option<i64>,
+    update: impl FnOnce(&mut super::super::ShellState, i64),
+) {
+    let Some(buffer_handle) = buffer_handle else {
         return;
     };
     let _ = mutate_engine_state(|state| update(&mut state.shell, buffer_handle));
@@ -54,9 +52,9 @@ pub(crate) fn clear_observation_request_timestamp() {
     event_loop::clear_observation_request_timestamp();
 }
 
-pub(crate) fn record_cursor_callback_duration(duration_ms: f64) {
+pub(crate) fn record_cursor_callback_duration(buffer_handle: Option<i64>, duration_ms: f64) {
     event_loop::record_cursor_callback_duration(duration_ms);
-    record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+    record_buffer_perf_telemetry(buffer_handle, |shell, buffer_handle| {
         shell
             .buffer_perf_telemetry_cache
             .record_callback_duration(buffer_handle, duration_ms);
@@ -67,8 +65,8 @@ pub(crate) fn clear_cursor_callback_duration_estimate() {
     event_loop::clear_cursor_callback_duration_estimate();
 }
 
-pub(crate) fn cursor_callback_duration_estimate_ms() -> f64 {
-    let local_estimate = current_buffer_handle().and_then(|buffer_handle| {
+pub(crate) fn cursor_callback_duration_estimate_ms(buffer_handle: Option<i64>) -> f64 {
+    let local_estimate = buffer_handle.and_then(|buffer_handle| {
         read_engine_state(|state| {
             state
                 .shell
@@ -109,6 +107,22 @@ pub(crate) fn record_ingress_dropped() {
 pub(crate) fn record_ingress_applied() {
     event_loop::record_ingress_applied();
 }
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_cursor_autocmd_fast_path_dropped(ingress: AutocmdIngress) {
+    event_loop::record_cursor_autocmd_fast_path_dropped(ingress);
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_cursor_autocmd_fast_path_dropped(_ingress: AutocmdIngress) {}
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_cursor_autocmd_fast_path_continued(ingress: AutocmdIngress) {
+    event_loop::record_cursor_autocmd_fast_path_continued(ingress);
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_cursor_autocmd_fast_path_continued(_ingress: AutocmdIngress) {}
 
 pub(crate) fn record_observation_request_executed() {
     event_loop::record_observation_request_executed();
@@ -189,10 +203,10 @@ pub(crate) fn record_probe_refresh_budget_exhausted_count(kind: ProbeKind, count
     event_loop::record_probe_refresh_budget_exhausted_count(kind, count);
 }
 
-pub(crate) fn record_probe_extmark_fallback(kind: ProbeKind) {
+pub(crate) fn record_probe_extmark_fallback(buffer_handle: i64, kind: ProbeKind) {
     event_loop::record_probe_extmark_fallback(kind);
     let observed_at_ms = now_ms();
-    record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+    record_buffer_perf_telemetry(Some(buffer_handle), |shell, buffer_handle| {
         record_probe_extmark_fallback_for_buffer(shell, buffer_handle, kind, observed_at_ms);
     });
 }
@@ -225,18 +239,18 @@ pub(crate) fn record_conceal_screen_cell_cache_miss() {
     event_loop::record_conceal_screen_cell_cache_miss();
 }
 
-pub(crate) fn record_conceal_full_scan() {
+pub(crate) fn record_conceal_full_scan(buffer_handle: i64) {
     event_loop::record_conceal_full_scan();
-    record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+    record_buffer_perf_telemetry(Some(buffer_handle), |shell, buffer_handle| {
         shell
             .buffer_perf_telemetry_cache
             .record_conceal_full_scan(buffer_handle, now_ms());
     });
 }
 
-pub(crate) fn record_conceal_raw_screenpos_fallback() {
+pub(crate) fn record_conceal_raw_screenpos_fallback(buffer_handle: i64) {
     event_loop::record_conceal_raw_screenpos_fallback();
-    record_current_buffer_perf_telemetry(|shell, buffer_handle| {
+    record_buffer_perf_telemetry(Some(buffer_handle), |shell, buffer_handle| {
         shell
             .buffer_perf_telemetry_cache
             .record_conceal_raw_screenpos_fallback(buffer_handle, now_ms());
@@ -283,33 +297,116 @@ pub(crate) fn record_planner_candidate_cells_built_count(count: usize) {
     event_loop::record_planner_candidate_cells_built_count(count);
 }
 
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_projection_reuse_hit() {
+    event_loop::record_projection_reuse_hit();
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_projection_reuse_hit() {}
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_projection_reuse_miss() {
+    event_loop::record_projection_reuse_miss();
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_projection_reuse_miss() {}
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_compiled_field_cache_hit() {
+    event_loop::record_compiled_field_cache_hit();
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_compiled_field_cache_hit() {}
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_compiled_field_cache_miss() {
+    event_loop::record_compiled_field_cache_miss();
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_compiled_field_cache_miss() {}
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_planning_preview_invocation() {
+    event_loop::record_planning_preview_invocation();
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_planning_preview_invocation() {}
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_planning_preview_copied_particles(particle_count: usize) {
+    event_loop::record_planning_preview_copied_particles(particle_count);
+}
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_planning_preview_copied_particles(_particle_count: usize) {}
+
+#[cfg(feature = "perf-counters")]
+pub(crate) fn record_planning_preview_copy(particle_count: usize) {
+    event_loop::record_planning_preview_copy(particle_count);
+}
+
+#[cfg(feature = "perf-counters")]
 pub(crate) fn record_particle_simulation_step(particle_count: usize) {
     event_loop::record_particle_simulation_step(particle_count);
 }
 
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_particle_simulation_step(_particle_count: usize) {}
+
+#[cfg(feature = "perf-counters")]
 pub(crate) fn record_particle_aggregation(particle_count: usize) {
     event_loop::record_particle_aggregation(particle_count);
 }
 
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_particle_aggregation(_particle_count: usize) {}
+
+#[cfg(feature = "perf-counters")]
 pub(crate) fn record_particle_overlay_refresh(cell_count: usize) {
     event_loop::record_particle_overlay_refresh(cell_count);
 }
 
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_particle_overlay_refresh(_cell_count: usize) {}
+
+#[cfg(feature = "perf-counters")]
 pub(crate) fn record_buffer_metadata_read() {
     event_loop::record_buffer_metadata_read();
 }
 
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_buffer_metadata_read() {}
+
+#[cfg(feature = "perf-counters")]
+#[allow(dead_code)]
 pub(crate) fn record_current_buffer_changedtick_read() {
     event_loop::record_current_buffer_changedtick_read();
 }
 
+#[cfg(not(feature = "perf-counters"))]
+#[allow(dead_code)]
+pub(crate) fn record_current_buffer_changedtick_read() {}
+
+#[cfg(feature = "perf-counters")]
 pub(crate) fn record_editor_bounds_read() {
     event_loop::record_editor_bounds_read();
 }
 
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_editor_bounds_read() {}
+
+#[cfg(feature = "perf-counters")]
 pub(crate) fn record_command_row_read() {
     event_loop::record_command_row_read();
 }
+
+#[cfg(not(feature = "perf-counters"))]
+pub(crate) fn record_command_row_read() {}
 
 #[cfg(test)]
 mod tests {

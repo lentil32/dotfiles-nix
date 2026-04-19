@@ -1,38 +1,21 @@
 /// Hashes the stable frame inputs that decide whether planner output can be
 /// reused across draw passes.
 pub(crate) fn frame_draw_signature(frame: &RenderFrame) -> Option<u64> {
+    // Projection reuse already gates on policy equality and planner clock continuity.
+    // The residual signature only needs the cheap dynamic inputs that can change the
+    // retained trail raster when the planner itself is not advancing.
     let mut hasher = DefaultHasher::new();
     frame.mode.hash(&mut hasher);
     frame.vertical_bar.hash(&mut hasher);
     frame.trail_stroke_id.hash(&mut hasher);
     frame.retarget_epoch.hash(&mut hasher);
-    frame.never_draw_over_target.hash(&mut hasher);
-    frame.color_levels.hash(&mut hasher);
-    frame.windows_zindex.hash(&mut hasher);
-    hash_f64(&mut hasher, frame.block_aspect_ratio);
-    hash_f64(&mut hasher, frame.tail_duration_ms);
-    hash_f64(&mut hasher, frame.simulation_hz);
-    hash_f64(&mut hasher, frame.trail_thickness);
-    hash_f64(&mut hasher, frame.trail_thickness_x);
-    hash_f64(&mut hasher, frame.spatial_coherence_weight);
-    hash_f64(&mut hasher, frame.temporal_stability_weight);
-    frame.top_k_per_cell.hash(&mut hasher);
 
     hash_f64(&mut hasher, frame.target.row);
     hash_f64(&mut hasher, frame.target.col);
 
-    frame.planner_idle_steps.hash(&mut hasher);
     for corner in &frame.corners {
         hash_f64(&mut hasher, corner.row);
         hash_f64(&mut hasher, corner.col);
-    }
-    frame.step_samples.len().hash(&mut hasher);
-    for sample in frame.step_samples.iter() {
-        hash_f64(&mut hasher, sample.dt_ms);
-        for corner in &sample.corners {
-            hash_f64(&mut hasher, corner.row);
-            hash_f64(&mut hasher, corner.col);
-        }
     }
 
     Some(hasher.finish())
@@ -45,22 +28,11 @@ pub(crate) fn frame_particle_overlay_signature(frame: &RenderFrame) -> Option<u6
         return None;
     }
 
+    // Policy equality already validates the particle rendering configuration. The
+    // overlay refresh key only needs the retained shared aggregate identity so reuse
+    // can avoid walking every packed sample on each projection.
     let mut hasher = DefaultHasher::new();
-    hash_f64(&mut hasher, frame.particle_max_lifetime);
-    hash_f64(&mut hasher, frame.particle_switch_octant_braille);
-    frame.particles_over_text.hash(&mut hasher);
-    frame.color_levels.hash(&mut hasher);
-    frame.windows_zindex.hash(&mut hasher);
-    frame.aggregated_particle_cells().len().hash(&mut hasher);
-    for aggregate in frame.aggregated_particle_cells() {
-        aggregate.row().hash(&mut hasher);
-        aggregate.col().hash(&mut hasher);
-        for sample_row in aggregate.cell() {
-            for sample in sample_row {
-                hash_f64(&mut hasher, *sample);
-            }
-        }
-    }
+    std::ptr::hash(std::sync::Arc::as_ptr(&frame.aggregated_particle_cells), &mut hasher);
 
     Some(hasher.finish())
 }

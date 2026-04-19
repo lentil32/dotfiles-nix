@@ -127,8 +127,8 @@ fn handle_stroke_transition(state: &mut PlannerState, frame: &RenderFrame) {
 }
 
 #[cfg(test)]
-fn record_history_slice(state: &mut PlannerState, slice: &DepositedSlice) {
-    state.history.push_back(slice.clone());
+fn record_history_slice(state: &mut PlannerState, slice: DepositedSlice) {
+    state.history.push_back(slice);
 }
 
 #[cfg(test)]
@@ -151,7 +151,7 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
     handle_stroke_transition(state, frame);
 
     let mut latest_pose = state.last_pose;
-    let mut sweep_scratch = latent_field::SweepMaterializeScratch::default();
+    let mut sweep_scratch = std::mem::take(&mut state.sweep_scratch);
 
     for (sample, current_pose) in frame.step_samples.iter().zip(frame_sample_poses(frame)) {
         let start_pose = latest_pose.unwrap_or(current_pose);
@@ -171,16 +171,18 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
             frame.block_aspect_ratio,
             sample.dt_ms,
         );
+        let dt_ms_q16 = latent_field::q16_from_non_negative(sample.dt_ms);
         let tail_profiles = latent_field::comet_tail_profiles(frame.tail_duration_ms);
         let max_width_scale = tail_profiles
             .iter()
             .fold(0.0_f64, |max, profile| max.max(profile.width_scale));
-        let sweep_geometry = latent_field::prepare_swept_occupancy_geometry(
+        latent_field::prepare_swept_occupancy_geometry(
             start_pose,
             current_pose,
             frame.block_aspect_ratio,
             frame.trail_thickness * max_width_scale,
             frame.trail_thickness_x * max_width_scale,
+            &mut sweep_scratch,
         );
         for profile in tail_profiles {
             let band_gain = match profile.band {
@@ -194,34 +196,43 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
                 continue;
             }
 
-            let microtiles = latent_field::materialize_swept_occupancy_with_scratch(
-                &sweep_geometry,
+            let Some(bbox) = latent_field::materialize_swept_occupancy_with_scratch(
                 frame.trail_thickness * profile.width_scale,
                 frame.trail_thickness_x * profile.width_scale,
                 &mut sweep_scratch,
-            );
-            if microtiles.is_empty() {
-                continue;
-            }
-            let Some(bbox) = latent_field::CellRect::from_microtiles(&microtiles) else {
+            ) else {
                 continue;
             };
-
-            let slice = DepositedSlice {
-                stroke_id: frame.trail_stroke_id,
-                step_index: state.step_index,
-                dt_ms_q16: latent_field::q16_from_non_negative(sample.dt_ms),
-                arc_len_q16: state.arc_len_q16,
-                bbox,
-                band: profile.band,
-                support_steps: profile.support_steps(frame.simulation_hz),
+            let support_steps = profile.support_steps(frame.simulation_hz);
+            let step_index = state.step_index;
+            let arc_len_q16 = state.arc_len_q16;
+            state.latent_cache_mut().insert_materialized_slice(
+                step_index,
+                dt_ms_q16,
+                support_steps,
                 intensity_q16,
-                microtiles,
-            };
-            state.latent_cache_mut().insert_slice(&slice);
+                sweep_scratch.materialized_tiles(),
+            );
             #[cfg(test)]
             {
-                record_history_slice(state, &slice);
+                record_history_slice(
+                    state,
+                    DepositedSlice {
+                        stroke_id: frame.trail_stroke_id,
+                        step_index,
+                        dt_ms_q16,
+                        arc_len_q16,
+                        bbox,
+                        band: profile.band,
+                        support_steps,
+                        intensity_q16,
+                        microtiles: sweep_scratch
+                            .materialized_tiles()
+                            .iter()
+                            .map(|tile| (tile.coord, tile.tile))
+                            .collect(),
+                    },
+                );
             }
         }
         let step_index = state.step_index;
@@ -245,6 +256,8 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
     {
         prune_debug_history(state);
     }
+
+    state.sweep_scratch = sweep_scratch;
 
     let support_steps =
         latent_field::max_comet_support_steps(frame.tail_duration_ms, frame.simulation_hz);

@@ -6,6 +6,7 @@ use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::IngressCursorPresentationRequest;
+use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::ObservationRuntimeContext;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RenderCleanupExecution;
@@ -90,7 +91,7 @@ pub(super) fn enter_recovering_with_backoff(
     observed_at: Millis,
 ) -> (CoreState, Effect) {
     let attempt = next_recovery_attempt(&state);
-    let recovering = with_recovery_attempt(state.into_recovering(), attempt);
+    let recovering = with_recovery_attempt(state.enter_recovering(), attempt);
     let delay = recovery_backoff_delay(attempt);
     schedule_timer_with_delay(recovering, TimerKind::Recovery, delay, observed_at)
 }
@@ -164,7 +165,7 @@ pub(super) fn retained_cursor_color_fallback(
 fn retained_cursor_text_context_boundary(
     observation: Option<&ObservationSnapshot>,
 ) -> Option<CursorTextContextBoundary> {
-    observation.and_then(|snapshot| snapshot.basis().cursor_text_context_boundary())
+    observation.and_then(|snapshot| snapshot.basis().cursor_text_context_state().boundary())
 }
 
 pub(super) fn exact_boundary_refresh_required(state: &CoreState) -> bool {
@@ -196,8 +197,8 @@ pub(super) fn start_boundary_refresh_observation(
 
     let requested_target = state
         .retained_observation()
-        .and_then(|observation| observation.basis().cursor_position())
-        .or_else(|| state.last_cursor());
+        .and_then(ObservationSnapshot::exact_cursor_position);
+    let requested_target = state.fallback_cursor_position(requested_target);
     let buffer_perf_class = state
         .retained_observation()
         .map_or(BufferPerfClass::Full, |observation| {
@@ -212,14 +213,15 @@ pub(super) fn start_boundary_refresh_observation(
         buffer_perf_class,
     );
     let request = ObservationRequest::new(demand, probe_requests_for(&state, buffer_perf_class));
-    let next_state = state.into_observing(request.clone());
-    let effect = request_observation_base(&next_state, request);
+    let next_state = state.enter_observing_request(request.clone());
+    let effect = request_observation_base(&next_state, request, None);
     Some((next_state, effect))
 }
 
 fn observation_runtime_context(
     state: &CoreState,
     request: &ObservationRequest,
+    ingress_observation_surface: Option<IngressObservationSurface>,
 ) -> ObservationRuntimeContext {
     let cursor_color_fallback = retained_cursor_color_fallback(state.retained_observation());
     let cursor_text_context_boundary =
@@ -236,14 +238,19 @@ fn observation_runtime_context(
         state.runtime().tracked_location(),
         cursor_text_context_boundary,
         state.runtime().current_corners(),
+        ingress_observation_surface,
         buffer_perf_class,
         probe_policy,
     )
 }
 
-pub(super) fn request_observation_base(state: &CoreState, request: ObservationRequest) -> Effect {
+pub(super) fn request_observation_base(
+    state: &CoreState,
+    request: ObservationRequest,
+    ingress_observation_surface: Option<IngressObservationSurface>,
+) -> Effect {
     Effect::RequestObservationBase(RequestObservationBaseEffect {
-        context: observation_runtime_context(state, &request),
+        context: observation_runtime_context(state, &request, ingress_observation_surface),
         request,
     })
 }
@@ -331,17 +338,17 @@ pub(super) fn next_pending_probe_effect(
         ));
     }
 
-    if let crate::core::state::ProbeSlot::Requested(ProbeState::Pending { request_id }) =
-        observation.probes().background()
+    if let crate::core::state::BackgroundProbeState::Collecting {
+        request_id,
+        progress,
+    } = observation.background_probe_state()
     {
         return Some(request_probe(
             state,
             basis.clone(),
             *request_id,
             ProbeKind::Background,
-            observation
-                .background_progress()
-                .and_then(crate::core::state::BackgroundProbeProgress::next_chunk),
+            progress.next_chunk(),
             demand_kind,
             buffer_perf_class,
             cursor_color_fallback,
@@ -351,9 +358,14 @@ pub(super) fn next_pending_probe_effect(
     None
 }
 
-pub(super) fn apply_proposal_effect(proposal: InFlightProposal, requested_at: Millis) -> Effect {
+pub(super) fn apply_proposal_effect(
+    proposal: InFlightProposal,
+    buffer_handle: Option<i64>,
+    requested_at: Millis,
+) -> Effect {
     Effect::ApplyProposal(Box::new(ApplyProposalEffect {
         proposal,
+        buffer_handle,
         requested_at,
     }))
 }

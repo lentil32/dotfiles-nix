@@ -11,6 +11,8 @@ pub(super) enum AutocmdIngress {
     CursorMovedInsert,
     ModeChanged,
     OptionSet,
+    TextChanged,
+    TextChangedInsert,
     VimResized,
     WinEnter,
     WinScrolled,
@@ -25,7 +27,7 @@ struct AutocmdIngressMapping {
     ingress: AutocmdIngress,
 }
 
-const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 11] = [
+const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 13] = [
     AutocmdIngressMapping {
         event_name: "BufWipeout",
         ingress: AutocmdIngress::BufWipeout,
@@ -49,6 +51,14 @@ const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 11] = [
     AutocmdIngressMapping {
         event_name: "OptionSet",
         ingress: AutocmdIngress::OptionSet,
+    },
+    AutocmdIngressMapping {
+        event_name: "TextChanged",
+        ingress: AutocmdIngress::TextChanged,
+    },
+    AutocmdIngressMapping {
+        event_name: "TextChangedI",
+        ingress: AutocmdIngress::TextChangedInsert,
     },
     AutocmdIngressMapping {
         event_name: "VimResized",
@@ -107,14 +117,7 @@ impl AutocmdIngress {
     }
 
     pub(super) const fn supports_unchanged_fast_path(self) -> bool {
-        matches!(
-            self,
-            Self::CursorMoved
-                | Self::CursorMovedInsert
-                | Self::WinEnter
-                | Self::WinScrolled
-                | Self::BufEnter
-        )
+        matches!(self, Self::WinEnter | Self::WinScrolled | Self::BufEnter)
     }
 
     pub(super) const fn is_colorscheme(self) -> bool {
@@ -142,5 +145,23 @@ mod tests {
             parse_autocmd_ingress("DefinitelyNotReal"),
             AutocmdIngress::Unknown
         );
+    }
+
+    #[test]
+    fn unchanged_fast_path_stays_limited_to_window_surface_events() {
+        for (ingress, expected) in [
+            (AutocmdIngress::CursorMoved, false),
+            (AutocmdIngress::CursorMovedInsert, false),
+            (AutocmdIngress::ModeChanged, false),
+            (AutocmdIngress::WinEnter, true),
+            (AutocmdIngress::WinScrolled, true),
+            (AutocmdIngress::BufEnter, true),
+        ] {
+            assert_eq!(
+                ingress.supports_unchanged_fast_path(),
+                expected,
+                "unexpected unchanged-fast-path support for {ingress:?}"
+            );
+        }
     }
 }

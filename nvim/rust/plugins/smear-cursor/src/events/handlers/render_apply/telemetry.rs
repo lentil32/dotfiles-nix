@@ -1,4 +1,3 @@
-use crate::core::realization::realize_logical_raster;
 use crate::core::state::DegradedApplyMetrics;
 use crate::core::state::ProjectionSnapshot;
 use crate::draw::ApplyMetrics;
@@ -158,13 +157,13 @@ pub(super) fn draw_projection_debug_summary(projection: &ProjectionSnapshot) -> 
         logical_sample_cells.join(",")
     };
 
-    let realized = realize_logical_raster(projection.logical_raster());
-    let span_sample = if realized.spans().is_empty() {
+    let realized = projection.realization();
+    let span_count = realized.span_count();
+    let span_sample = if span_count == 0 {
         "none".to_string()
     } else {
         realized
             .spans()
-            .iter()
             .take(8)
             .map(|span| {
                 format!(
@@ -180,11 +179,7 @@ pub(super) fn draw_projection_debug_summary(projection: &ProjectionSnapshot) -> 
     };
 
     format!(
-        "logical_cells={} logical_sample=[{}] realized_spans={} span_sample=[{}]",
-        logical_cell_count,
-        logical_sample,
-        realized.spans().len(),
-        span_sample,
+        "logical_cells={logical_cell_count} logical_sample=[{logical_sample}] realized_spans={span_count} span_sample=[{span_sample}]",
     )
 }
 

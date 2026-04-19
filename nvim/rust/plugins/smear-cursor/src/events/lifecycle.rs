@@ -57,7 +57,7 @@ fn jump_to_current_cursor() -> Result<()> {
         return Ok(());
     };
 
-    let location = cursor_location_for_core_render(None);
+    let location = cursor_location_for_core_render(Some(&window), Some(&buffer), None, None);
 
     let hide_target_hack = mutate_engine_state(|state| {
         state.shell.set_namespace_id(namespace_id);

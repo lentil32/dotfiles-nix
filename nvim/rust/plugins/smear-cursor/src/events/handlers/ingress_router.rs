@@ -6,12 +6,14 @@ use super::super::ingress::Ingress;
 use super::super::ingress::parse_autocmd_ingress;
 use super::super::logging::warn;
 use super::super::runtime::IngressReadSnapshot;
-use super::super::runtime::ingress_read_snapshot;
+use super::super::runtime::ingress_read_snapshot_with_current_buffer;
 use super::super::runtime::mutate_engine_state;
 use super::super::runtime::note_autocmd_event_now;
 use super::super::runtime::note_cursor_color_colorscheme_change;
 use super::super::runtime::now_ms;
 use super::super::runtime::read_engine_state;
+use super::super::runtime::record_cursor_autocmd_fast_path_continued;
+use super::super::runtime::record_cursor_autocmd_fast_path_dropped;
 use super::super::runtime::record_ingress_applied;
 use super::super::runtime::record_ingress_coalesced;
 use super::super::runtime::record_ingress_dropped;
@@ -20,8 +22,9 @@ use super::super::runtime::refresh_editor_viewport_cache;
 use super::super::runtime::to_core_millis;
 use super::core_dispatch::dispatch_core_events_with_default_scheduler;
 use super::source_selection::should_request_observation_for_autocmd;
-use super::viewport::cursor_location_for_ingress_fast_path;
+use super::viewport::cursor_location_for_ingress_fast_path_with_handles;
 use crate::core::effect::IngressCursorPresentationRequest;
+use crate::core::effect::IngressObservationSurface;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ExternalDemandQueuedEvent;
 use crate::core::event::InitializeEvent;
@@ -50,6 +53,22 @@ enum CursorAutocmdPreflight {
     Continue { buffer_perf_class: BufferPerfClass },
 }
 
+#[derive(Debug)]
+enum CursorAutocmdFastPathResult {
+    Dropped,
+    Continue {
+        current_location: Option<CursorLocation>,
+        window: api::Window,
+        buffer: api::Buffer,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum CursorAutocmdFastPathOutcome {
+    Dropped,
+    Continue,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CursorAutocmdFastPathSnapshot {
     enabled: bool,
@@ -73,16 +92,38 @@ fn cursor_autocmd_fast_path_snapshot()
     })
 }
 
+fn record_cursor_autocmd_fast_path_outcome(
+    ingress: AutocmdIngress,
+    outcome: CursorAutocmdFastPathOutcome,
+) {
+    match outcome {
+        CursorAutocmdFastPathOutcome::Dropped => {
+            record_cursor_autocmd_fast_path_dropped(ingress);
+        }
+        CursorAutocmdFastPathOutcome::Continue => {
+            record_cursor_autocmd_fast_path_continued(ingress);
+        }
+    }
+}
+
 fn current_cursor_position_for_fast_path(
     window: &api::Window,
     smear_to_cmd: bool,
+    mode: &str,
 ) -> Option<Point> {
-    let mode = current_mode();
-    let mode = mode.to_string_lossy();
-    cursor_position_for_mode(window, mode.as_ref(), smear_to_cmd)
+    cursor_position_for_mode(window, mode, smear_to_cmd)
         .ok()
         .flatten()
         .map(|(row, col)| Point { row, col })
+}
+
+fn tracked_location_matches_live_surface_handles(
+    tracked_location: &CursorLocation,
+    current_window_handle: i64,
+    current_buffer_handle: i64,
+) -> bool {
+    tracked_location.window_handle == current_window_handle
+        && tracked_location.buffer_handle == current_buffer_handle
 }
 
 fn should_drop_unchanged_cursor_autocmd(
@@ -116,6 +157,7 @@ fn build_cursor_autocmd_events(
     needs_initialize: bool,
     buffer_perf_class: BufferPerfClass,
     ingress_cursor_presentation: Option<IngressCursorPresentationRequest>,
+    ingress_observation_surface: Option<IngressObservationSurface>,
 ) -> Vec<CoreEvent> {
     let should_request_observation = should_request_observation_for_autocmd(ingress);
     let mut events =
@@ -137,6 +179,7 @@ fn build_cursor_autocmd_events(
             } else {
                 None
             },
+            ingress_observation_surface,
         }));
     }
 
@@ -153,11 +196,10 @@ fn demand_kind_for_autocmd(ingress: AutocmdIngress) -> ExternalDemandKind {
 
 fn collect_ingress_cursor_presentation_request(
     snapshot: &IngressReadSnapshot,
+    mode: &str,
 ) -> Result<IngressCursorPresentationRequest> {
-    let mode = current_mode();
-    let mode = mode.to_string_lossy();
     let current_corners = snapshot.current_corners();
-    let mode_allowed = snapshot.mode_allowed(mode.as_ref());
+    let mode_allowed = snapshot.mode_allowed(mode);
 
     Ok(IngressCursorPresentationRequest::new(
         mode_allowed,
@@ -202,28 +244,84 @@ fn cursor_autocmd_preflight(
 
 fn maybe_drop_unchanged_cursor_autocmd(
     ingress: AutocmdIngress,
-) -> Result<Option<IngressDispatchOutcome>> {
+) -> Result<CursorAutocmdFastPathResult> {
+    let window = api::get_current_win();
+    let buffer = api::get_current_buf();
+
     if !ingress.supports_unchanged_fast_path() {
-        return Ok(None);
+        let result = CursorAutocmdFastPathResult::Continue {
+            current_location: None,
+            window,
+            buffer,
+        };
+        record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Continue);
+        return Ok(result);
     }
 
     let fast_path_snapshot = cursor_autocmd_fast_path_snapshot()?;
-    if !fast_path_snapshot.enabled
-        || fast_path_snapshot.needs_initialize
-        || fast_path_snapshot.tracked_location.is_none()
-    {
-        return Ok(None);
+    if !fast_path_snapshot.enabled || fast_path_snapshot.needs_initialize {
+        let result = CursorAutocmdFastPathResult::Continue {
+            current_location: None,
+            window,
+            buffer,
+        };
+        record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Continue);
+        return Ok(result);
     }
 
-    let Some(current_location) = cursor_location_for_ingress_fast_path() else {
-        return Ok(None);
+    let Some(tracked_location) = fast_path_snapshot.tracked_location.as_ref() else {
+        let result = CursorAutocmdFastPathResult::Continue {
+            current_location: None,
+            window,
+            buffer,
+        };
+        record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Continue);
+        return Ok(result);
     };
-    let window = api::get_current_win();
-    if !window.is_valid() {
-        return Ok(None);
+    if !window.is_valid() || i64::from(window.handle()) != tracked_location.window_handle {
+        let result = CursorAutocmdFastPathResult::Continue {
+            current_location: None,
+            window,
+            buffer,
+        };
+        record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Continue);
+        return Ok(result);
     }
-    let current_target_position =
-        current_cursor_position_for_fast_path(&window, fast_path_snapshot.smear_to_cmd);
+
+    if !buffer.is_valid()
+        || !tracked_location_matches_live_surface_handles(
+            tracked_location,
+            i64::from(window.handle()),
+            i64::from(buffer.handle()),
+        )
+    {
+        let result = CursorAutocmdFastPathResult::Continue {
+            current_location: None,
+            window,
+            buffer,
+        };
+        record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Continue);
+        return Ok(result);
+    }
+
+    let Some(current_location) =
+        cursor_location_for_ingress_fast_path_with_handles(&window, &buffer)
+    else {
+        let result = CursorAutocmdFastPathResult::Continue {
+            current_location: None,
+            window,
+            buffer,
+        };
+        record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Continue);
+        return Ok(result);
+    };
+    let mode = current_mode();
+    let mode = mode.to_string_lossy();
+    let current_target_position = current_cursor_position_for_fast_path(
+        &window,
+        fast_path_snapshot.smear_to_cmd,
+        mode.as_ref(),
+    );
 
     if should_drop_unchanged_cursor_autocmd(
         ingress,
@@ -232,35 +330,63 @@ fn maybe_drop_unchanged_cursor_autocmd(
         current_target_position,
     ) {
         note_autocmd_event_now();
-        return Ok(Some(IngressDispatchOutcome::Dropped));
+        record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Dropped);
+        return Ok(CursorAutocmdFastPathResult::Dropped);
     }
 
-    Ok(None)
+    record_cursor_autocmd_fast_path_outcome(ingress, CursorAutocmdFastPathOutcome::Continue);
+    Ok(CursorAutocmdFastPathResult::Continue {
+        current_location: Some(current_location),
+        window,
+        buffer,
+    })
+}
+
+fn ingress_observation_surface(
+    window: &api::Window,
+    buffer: &api::Buffer,
+    current_location: Option<CursorLocation>,
+    mode: String,
+) -> Option<IngressObservationSurface> {
+    if !window.is_valid() || !buffer.is_valid() {
+        return None;
+    }
+
+    Some(IngressObservationSurface::new(
+        i64::from(window.handle()),
+        i64::from(buffer.handle()),
+        current_location,
+        mode,
+    ))
 }
 
 fn on_cursor_event_core_for_autocmd(ingress: AutocmdIngress) -> Result<IngressDispatchOutcome> {
-    if let Some(outcome) = maybe_drop_unchanged_cursor_autocmd(ingress)? {
-        return Ok(outcome);
-    }
-    let snapshot = ingress_read_snapshot()?;
-    let window = api::get_current_win();
-    let buffer = api::get_current_buf();
-    let buffer_perf_class =
-        match cursor_autocmd_preflight(&snapshot, window.is_valid(), buffer.is_valid()) {
-            CursorAutocmdPreflight::Dropped => return Ok(IngressDispatchOutcome::Dropped),
-            CursorAutocmdPreflight::MissingPerfClass => {
-                warn("core cursor buffer policy snapshot missing perf class");
-                return Ok(IngressDispatchOutcome::Dropped);
-            }
-            CursorAutocmdPreflight::Continue { buffer_perf_class } => buffer_perf_class,
-        };
+    let (current_location, window, buffer) = match maybe_drop_unchanged_cursor_autocmd(ingress)? {
+        CursorAutocmdFastPathResult::Dropped => return Ok(IngressDispatchOutcome::Dropped),
+        CursorAutocmdFastPathResult::Continue {
+            current_location,
+            window,
+            buffer,
+        } => (current_location, window, buffer),
+    };
+    let window_valid = window.is_valid();
+    let buffer_valid = buffer.is_valid();
+    let snapshot = ingress_read_snapshot_with_current_buffer(buffer_valid.then_some(&buffer))?;
+    let buffer_perf_class = match cursor_autocmd_preflight(&snapshot, window_valid, buffer_valid) {
+        CursorAutocmdPreflight::Dropped => return Ok(IngressDispatchOutcome::Dropped),
+        CursorAutocmdPreflight::MissingPerfClass => {
+            warn("core cursor buffer policy snapshot missing perf class");
+            return Ok(IngressDispatchOutcome::Dropped);
+        }
+        CursorAutocmdPreflight::Continue { buffer_perf_class } => buffer_perf_class,
+    };
     note_autocmd_event_now();
     if should_coalesce_window_follow_up_autocmd(ingress, &snapshot, i64::from(window.handle())) {
         return Ok(IngressDispatchOutcome::Coalesced);
     }
-
+    let mode = current_mode().to_string_lossy().into_owned();
     let ingress_cursor_presentation = if demand_kind_for_autocmd(ingress).is_cursor() {
-        match collect_ingress_cursor_presentation_request(&snapshot) {
+        match collect_ingress_cursor_presentation_request(&snapshot, &mode) {
             Ok(request) => Some(request),
             Err(err) => {
                 warn(&format!(
@@ -272,6 +398,10 @@ fn on_cursor_event_core_for_autocmd(ingress: AutocmdIngress) -> Result<IngressDi
     } else {
         None
     };
+    let current_location = current_location
+        .or_else(|| cursor_location_for_ingress_fast_path_with_handles(&window, &buffer));
+    let ingress_observation_surface =
+        ingress_observation_surface(&window, &buffer, current_location, mode);
 
     let observed_at = to_core_millis(now_ms());
     let events = build_cursor_autocmd_events(
@@ -280,6 +410,7 @@ fn on_cursor_event_core_for_autocmd(ingress: AutocmdIngress) -> Result<IngressDi
         snapshot.needs_initialize(),
         buffer_perf_class,
         ingress_cursor_presentation,
+        ingress_observation_surface,
     );
 
     if events.is_empty() {
@@ -304,12 +435,11 @@ fn should_refresh_editor_viewport_for_option(option_name: &str) -> bool {
     matches!(option_name, "cmdheight" | "lines" | "columns")
 }
 
-fn invalidate_buffer_metadata_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
-    if !should_invalidate_buffer_metadata_for_option(args.r#match.as_str()) {
-        return Ok(());
-    }
+fn should_invalidate_conceal_probe_cache_for_option(option_name: &str) -> bool {
+    matches!(option_name, "conceallevel" | "concealcursor")
+}
 
-    let buffer_handle = i64::from(args.buffer.handle());
+fn invalidate_buffer_metadata(buffer_handle: i64) -> Result<()> {
     mutate_engine_state(|state| {
         state
             .shell
@@ -320,12 +450,58 @@ fn invalidate_buffer_metadata_for_option_set(args: &AutocmdCallbackArgs) -> Resu
     Ok(())
 }
 
+fn invalidate_buffer_metadata_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
+    if !should_invalidate_buffer_metadata_for_option(args.r#match.as_str()) {
+        return Ok(());
+    }
+
+    invalidate_buffer_metadata(i64::from(args.buffer.handle()))
+}
+
 fn refresh_editor_viewport_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
     if !should_refresh_editor_viewport_for_option(args.r#match.as_str()) {
         return Ok(());
     }
 
     refresh_editor_viewport_cache()
+}
+
+fn invalidate_buffer_local_probe_caches(buffer_handle: i64) -> Result<()> {
+    mutate_engine_state(|state| {
+        state.shell.probe_cache.invalidate_buffer(buffer_handle);
+    })
+    .map_err(nvim_oxi::Error::from)?;
+    Ok(())
+}
+
+fn advance_buffer_text_revision(buffer_handle: i64) -> Result<()> {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .buffer_text_revision_cache
+            .advance(buffer_handle);
+    })
+    .map_err(nvim_oxi::Error::from)?;
+    Ok(())
+}
+
+fn invalidate_conceal_probe_caches(buffer_handle: i64) -> Result<()> {
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .probe_cache
+            .invalidate_conceal_buffer(buffer_handle);
+    })
+    .map_err(nvim_oxi::Error::from)?;
+    Ok(())
+}
+
+fn invalidate_conceal_probe_caches_for_option_set(args: &AutocmdCallbackArgs) -> Result<()> {
+    if !should_invalidate_conceal_probe_cache_for_option(args.r#match.as_str()) {
+        return Ok(());
+    }
+
+    invalidate_conceal_probe_caches(i64::from(args.buffer.handle()))
 }
 
 fn invalidate_buffer_local_caches(buffer_handle: i64) -> Result<()> {
@@ -342,6 +518,11 @@ fn invalidate_buffer_local_caches(buffer_handle: i64) -> Result<()> {
             .shell
             .buffer_perf_telemetry_cache
             .invalidate_buffer(buffer_handle);
+        state.shell.probe_cache.invalidate_buffer(buffer_handle);
+        state
+            .shell
+            .buffer_text_revision_cache
+            .clear_buffer(buffer_handle);
     })
     .map_err(nvim_oxi::Error::from)?;
     Ok(())
@@ -365,7 +546,17 @@ fn on_autocmd_ingress(
         AutocmdIngress::OptionSet => {
             if let Some(args) = args {
                 invalidate_buffer_metadata_for_option_set(args)?;
+                invalidate_conceal_probe_caches_for_option_set(args)?;
                 refresh_editor_viewport_for_option_set(args)?;
+            }
+            Ok(IngressDispatchOutcome::Dropped)
+        }
+        AutocmdIngress::TextChanged | AutocmdIngress::TextChangedInsert => {
+            if let Some(args) = args {
+                let buffer_handle = i64::from(args.buffer.handle());
+                advance_buffer_text_revision(buffer_handle)?;
+                invalidate_buffer_metadata(buffer_handle)?;
+                invalidate_buffer_local_probe_caches(buffer_handle)?;
             }
             Ok(IngressDispatchOutcome::Dropped)
         }
@@ -417,29 +608,50 @@ pub(in crate::events) fn on_autocmd_callback(args: AutocmdCallbackArgs) -> Resul
 mod tests {
     use super::CursorAutocmdFastPathSnapshot;
     use super::CursorAutocmdPreflight;
+    use super::advance_buffer_text_revision;
     use super::build_cursor_autocmd_events;
     use super::cursor_autocmd_preflight;
     use super::demand_kind_for_autocmd;
+    use super::invalidate_buffer_local_caches;
+    use super::invalidate_buffer_local_probe_caches;
+    use super::invalidate_buffer_metadata;
+    use super::invalidate_conceal_probe_caches;
     use super::should_coalesce_window_follow_up_autocmd;
     use super::should_drop_unchanged_cursor_autocmd;
     use super::should_invalidate_buffer_metadata_for_option;
+    use super::should_invalidate_conceal_probe_cache_for_option;
     use super::should_refresh_editor_viewport_for_option;
+    use super::tracked_location_matches_live_surface_handles;
     use crate::config::BufferPerfMode;
     use crate::core::effect::IngressCursorPresentationRequest;
     use crate::core::event::Event as CoreEvent;
     use crate::core::event::ExternalDemandQueuedEvent;
     use crate::core::event::InitializeEvent;
     use crate::core::state::BufferPerfClass;
+    use crate::core::state::CursorTextContext;
+    use crate::core::types::Generation;
     use crate::core::types::Millis;
+    use crate::events::cursor::BufferMetadata;
+    use crate::events::handlers::should_request_observation_for_autocmd;
     use crate::events::ingress::AutocmdIngress;
+    use crate::events::policy::BufferEventPolicy;
+    use crate::events::probe_cache::CachedConcealRegions;
+    use crate::events::probe_cache::ConcealCacheLookup;
+    use crate::events::probe_cache::CursorTextContextCacheKey;
+    use crate::events::probe_cache::CursorTextContextCacheLookup;
     use crate::events::runtime::IngressReadSnapshot;
     use crate::events::runtime::IngressReadSnapshotTestInput;
+    use crate::events::runtime::mutate_engine_state;
+    use crate::events::runtime::read_engine_state;
     use crate::state::CursorLocation;
+    use crate::test_support::conceal_key;
+    use crate::test_support::conceal_region;
     use crate::test_support::proptest::pure_config;
     use crate::types::CursorCellShape;
     use crate::types::Point;
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
+    use std::sync::Arc;
 
     fn presentation() -> IngressCursorPresentationRequest {
         IngressCursorPresentationRequest::new(true, true, None, CursorCellShape::Block)
@@ -503,6 +715,17 @@ mod tests {
         }
     }
 
+    fn reset_buffer_local_cache_state() {
+        mutate_engine_state(|state| {
+            state.shell.buffer_metadata_cache.clear();
+            state.shell.buffer_perf_policy_cache.clear();
+            state.shell.buffer_perf_telemetry_cache.clear();
+            state.shell.buffer_text_revision_cache.clear();
+            state.shell.probe_cache.reset();
+        })
+        .expect("engine state access should succeed");
+    }
+
     proptest! {
         #![proptest_config(pure_config())]
 
@@ -536,6 +759,7 @@ mod tests {
                 } else {
                     None
                 },
+                ingress_observation_surface: None,
             }));
 
             prop_assert_eq!(
@@ -545,6 +769,7 @@ mod tests {
                     needs_initialize,
                     buffer_perf_class,
                     ingress_cursor_presentation,
+                    None,
                 ),
                 expected
             );
@@ -621,6 +846,358 @@ mod tests {
     }
 
     #[test]
+    fn conceal_probe_cache_invalidation_only_tracks_conceal_window_options() {
+        for (option_name, expected) in [
+            ("conceallevel", true),
+            ("concealcursor", true),
+            ("filetype", false),
+            ("number", false),
+        ] {
+            assert_eq!(
+                should_invalidate_conceal_probe_cache_for_option(option_name),
+                expected,
+                "unexpected conceal probe invalidation result for {option_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_mutation_autocmds_invalidate_metadata_without_requesting_observation() {
+        for ingress in [
+            AutocmdIngress::TextChanged,
+            AutocmdIngress::TextChangedInsert,
+        ] {
+            assert!(!should_request_observation_for_autocmd(ingress));
+            assert!(!ingress.supports_unchanged_fast_path());
+        }
+    }
+
+    #[test]
+    fn option_set_metadata_invalidation_drops_only_the_target_buffer_entry() {
+        const TARGET_BUFFER_HANDLE: i64 = 11;
+        const OTHER_BUFFER_HANDLE: i64 = 29;
+
+        reset_buffer_local_cache_state();
+
+        let target_metadata = BufferMetadata::new_for_test("lua", "", true, 42);
+        let other_metadata = BufferMetadata::new_for_test("rust", "terminal", false, 99);
+        mutate_engine_state(|state| {
+            state
+                .shell
+                .buffer_metadata_cache
+                .store_for_test(TARGET_BUFFER_HANDLE, target_metadata.clone());
+            state
+                .shell
+                .buffer_metadata_cache
+                .store_for_test(OTHER_BUFFER_HANDLE, other_metadata.clone());
+        })
+        .expect("engine state access should succeed");
+
+        invalidate_buffer_metadata(TARGET_BUFFER_HANDLE)
+            .expect("metadata invalidation should succeed");
+
+        let cached_entries = read_engine_state(|state| {
+            (
+                state
+                    .shell
+                    .buffer_metadata_cache
+                    .cached_entry_for_test(TARGET_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_metadata_cache
+                    .cached_entry_for_test(OTHER_BUFFER_HANDLE),
+            )
+        })
+        .expect("engine state access should succeed");
+
+        assert_eq!(cached_entries, (None, Some(other_metadata)));
+    }
+
+    #[test]
+    fn buffer_churn_invalidation_clears_all_target_buffer_local_caches() {
+        const TARGET_BUFFER_HANDLE: i64 = 13;
+        const OTHER_BUFFER_HANDLE: i64 = 31;
+
+        reset_buffer_local_cache_state();
+
+        let target_metadata = BufferMetadata::new_for_test("lua", "", true, 120);
+        let other_metadata = BufferMetadata::new_for_test("rust", "terminal", false, 14);
+        let target_policy = BufferEventPolicy::from_buffer_metadata("", true, 120, 0.0);
+        let other_policy = BufferEventPolicy::from_buffer_metadata("terminal", false, 14, 0.0);
+        let (target_telemetry, other_telemetry) = mutate_engine_state(|state| {
+            state
+                .shell
+                .buffer_metadata_cache
+                .store_for_test(TARGET_BUFFER_HANDLE, target_metadata.clone());
+            state
+                .shell
+                .buffer_metadata_cache
+                .store_for_test(OTHER_BUFFER_HANDLE, other_metadata.clone());
+            state
+                .shell
+                .buffer_perf_policy_cache
+                .store_policy(TARGET_BUFFER_HANDLE, target_policy);
+            state
+                .shell
+                .buffer_perf_policy_cache
+                .store_policy(OTHER_BUFFER_HANDLE, other_policy);
+            (
+                state
+                    .shell
+                    .buffer_perf_telemetry_cache
+                    .record_conceal_full_scan(TARGET_BUFFER_HANDLE, 1_000.0),
+                state
+                    .shell
+                    .buffer_perf_telemetry_cache
+                    .record_cursor_color_extmark_fallback(OTHER_BUFFER_HANDLE, 1_500.0),
+            )
+        })
+        .expect("engine state access should succeed");
+
+        invalidate_buffer_local_caches(TARGET_BUFFER_HANDLE)
+            .expect("buffer-local cache invalidation should succeed");
+
+        let cached_entries = read_engine_state(|state| {
+            (
+                state
+                    .shell
+                    .buffer_metadata_cache
+                    .cached_entry_for_test(TARGET_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_metadata_cache
+                    .cached_entry_for_test(OTHER_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_perf_policy_cache
+                    .cached_policy(TARGET_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_perf_policy_cache
+                    .cached_policy(OTHER_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_perf_telemetry_cache
+                    .telemetry(TARGET_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_perf_telemetry_cache
+                    .telemetry(OTHER_BUFFER_HANDLE),
+            )
+        })
+        .expect("engine state access should succeed");
+
+        assert_eq!(
+            cached_entries,
+            (
+                None,
+                Some(other_metadata),
+                None,
+                Some(other_policy),
+                None,
+                Some(other_telemetry),
+            )
+        );
+
+        assert_eq!(target_telemetry.callback_duration_estimate_ms(), 0.0);
+    }
+
+    #[test]
+    fn text_mutation_invalidation_clears_only_the_target_buffer_probe_entries() {
+        const TARGET_BUFFER_HANDLE: i64 = 17;
+        const OTHER_BUFFER_HANDLE: i64 = 37;
+
+        reset_buffer_local_cache_state();
+
+        let target_context_key =
+            CursorTextContextCacheKey::new(TARGET_BUFFER_HANDLE, 14, 7, Some(6));
+        let other_context_key = CursorTextContextCacheKey::new(OTHER_BUFFER_HANDLE, 14, 7, Some(6));
+        let target_context = Some(CursorTextContext::new(
+            TARGET_BUFFER_HANDLE,
+            14,
+            7,
+            vec![],
+            None,
+        ));
+        let other_context = Some(CursorTextContext::new(
+            OTHER_BUFFER_HANDLE,
+            14,
+            7,
+            vec![],
+            None,
+        ));
+        let target_conceal_key = conceal_key(TARGET_BUFFER_HANDLE, 14, 7, 2, "n");
+        let other_conceal_key = conceal_key(OTHER_BUFFER_HANDLE, 14, 7, 2, "n");
+        let target_regions: Arc<[_]> = vec![conceal_region(3, 4, 11, 1)].into();
+        let other_regions: Arc<[_]> = vec![conceal_region(8, 9, 12, 2)].into();
+
+        mutate_engine_state(|state| {
+            state
+                .shell
+                .probe_cache
+                .store_cursor_text_context(target_context_key.clone(), target_context.clone());
+            state
+                .shell
+                .probe_cache
+                .store_cursor_text_context(other_context_key.clone(), other_context.clone());
+            state.shell.probe_cache.store_conceal_regions(
+                target_conceal_key.clone(),
+                18,
+                Arc::clone(&target_regions),
+            );
+            state.shell.probe_cache.store_conceal_regions(
+                other_conceal_key.clone(),
+                18,
+                Arc::clone(&other_regions),
+            );
+        })
+        .expect("engine state access should succeed");
+
+        invalidate_buffer_local_probe_caches(TARGET_BUFFER_HANDLE)
+            .expect("probe invalidation should succeed");
+
+        let cached_entries = mutate_engine_state(|state| {
+            (
+                state
+                    .shell
+                    .probe_cache
+                    .cached_cursor_text_context(&target_context_key),
+                state
+                    .shell
+                    .probe_cache
+                    .cached_cursor_text_context(&other_context_key),
+                state
+                    .shell
+                    .probe_cache
+                    .cached_conceal_regions(&target_conceal_key),
+                state
+                    .shell
+                    .probe_cache
+                    .cached_conceal_regions(&other_conceal_key),
+            )
+        })
+        .expect("engine state access should succeed");
+
+        assert_eq!(
+            cached_entries,
+            (
+                CursorTextContextCacheLookup::Miss,
+                CursorTextContextCacheLookup::Hit(other_context),
+                ConcealCacheLookup::Miss,
+                ConcealCacheLookup::Hit(CachedConcealRegions::new(18, other_regions)),
+            )
+        );
+    }
+
+    #[test]
+    fn conceal_option_invalidation_clears_only_the_target_buffer_conceal_entries() {
+        const TARGET_BUFFER_HANDLE: i64 = 19;
+        const OTHER_BUFFER_HANDLE: i64 = 41;
+
+        reset_buffer_local_cache_state();
+
+        let target_context_key =
+            CursorTextContextCacheKey::new(TARGET_BUFFER_HANDLE, 14, 7, Some(6));
+        let target_context = Some(CursorTextContext::new(
+            TARGET_BUFFER_HANDLE,
+            14,
+            7,
+            vec![],
+            None,
+        ));
+        let target_conceal_key = conceal_key(TARGET_BUFFER_HANDLE, 14, 7, 2, "n");
+        let other_conceal_key = conceal_key(OTHER_BUFFER_HANDLE, 14, 7, 2, "n");
+        let target_regions: Arc<[_]> = vec![conceal_region(3, 4, 11, 1)].into();
+        let other_regions: Arc<[_]> = vec![conceal_region(8, 9, 12, 2)].into();
+
+        mutate_engine_state(|state| {
+            state
+                .shell
+                .probe_cache
+                .store_cursor_text_context(target_context_key.clone(), target_context.clone());
+            state.shell.probe_cache.store_conceal_regions(
+                target_conceal_key.clone(),
+                18,
+                Arc::clone(&target_regions),
+            );
+            state.shell.probe_cache.store_conceal_regions(
+                other_conceal_key.clone(),
+                18,
+                Arc::clone(&other_regions),
+            );
+        })
+        .expect("engine state access should succeed");
+
+        invalidate_conceal_probe_caches(TARGET_BUFFER_HANDLE)
+            .expect("conceal option invalidation should succeed");
+
+        let cached_entries = mutate_engine_state(|state| {
+            (
+                state
+                    .shell
+                    .probe_cache
+                    .cached_cursor_text_context(&target_context_key),
+                state
+                    .shell
+                    .probe_cache
+                    .cached_conceal_regions(&target_conceal_key),
+                state
+                    .shell
+                    .probe_cache
+                    .cached_conceal_regions(&other_conceal_key),
+            )
+        })
+        .expect("engine state access should succeed");
+
+        assert_eq!(
+            cached_entries,
+            (
+                CursorTextContextCacheLookup::Hit(target_context),
+                ConcealCacheLookup::Miss,
+                ConcealCacheLookup::Hit(CachedConcealRegions::new(18, other_regions)),
+            )
+        );
+    }
+
+    #[test]
+    fn text_mutation_revision_advances_only_for_the_target_buffer() {
+        const TARGET_BUFFER_HANDLE: i64 = 23;
+        const OTHER_BUFFER_HANDLE: i64 = 47;
+
+        reset_buffer_local_cache_state();
+
+        mutate_engine_state(|state| {
+            state
+                .shell
+                .buffer_text_revision_cache
+                .advance(OTHER_BUFFER_HANDLE);
+        })
+        .expect("engine state access should succeed");
+
+        advance_buffer_text_revision(TARGET_BUFFER_HANDLE)
+            .expect("text revision advance should succeed");
+
+        let revisions = mutate_engine_state(|state| {
+            (
+                state
+                    .shell
+                    .buffer_text_revision_cache
+                    .cached_entry_for_test(TARGET_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_text_revision_cache
+                    .cached_entry_for_test(OTHER_BUFFER_HANDLE),
+            )
+        })
+        .expect("engine state access should succeed");
+
+        assert_eq!(
+            revisions,
+            (Some(Generation::new(1)), Some(Generation::new(1)))
+        );
+    }
+
+    #[test]
     fn editor_viewport_refresh_tracks_only_global_viewport_inputs() {
         for (option_name, expected) in [
             ("cmdheight", true),
@@ -652,20 +1229,20 @@ mod tests {
 
         for (label, ingress, snapshot, current_location, current_target, expected) in [
             (
-                "cursor moved repeat",
+                "cursor moved always stays live",
                 AutocmdIngress::CursorMoved,
                 matching_snapshot.clone(),
                 Some(tracked_location.clone()),
                 Some(matching_target),
-                true,
+                false,
             ),
             (
-                "insert repeat",
+                "insert repeat always stays live",
                 AutocmdIngress::CursorMovedInsert,
                 matching_snapshot.clone(),
                 Some(tracked_location.clone()),
                 Some(matching_target),
-                true,
+                false,
             ),
             (
                 "window scrolled repeat",
@@ -762,6 +1339,28 @@ mod tests {
                     &snapshot,
                     current_location.as_ref(),
                     current_target,
+                ),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_only_fast_path_precheck_requires_matching_window_and_buffer_handles() {
+        let tracked_location = CursorLocation::new(10, 20, 4, 12);
+
+        for (label, current_window_handle, current_buffer_handle, expected) in [
+            ("matching handles", 10, 20, true),
+            ("window drift", 11, 20, false),
+            ("buffer drift", 10, 21, false),
+            ("both drift", 11, 21, false),
+        ] {
+            assert_eq!(
+                tracked_location_matches_live_surface_handles(
+                    &tracked_location,
+                    current_window_handle,
+                    current_buffer_handle,
                 ),
                 expected,
                 "{label}"

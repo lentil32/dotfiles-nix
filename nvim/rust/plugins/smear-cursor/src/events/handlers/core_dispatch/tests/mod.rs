@@ -211,6 +211,7 @@ fn external_cursor_demand(observed_at: u64) -> CoreEvent {
         requested_target: None,
         buffer_perf_class: BufferPerfClass::Full,
         ingress_cursor_presentation: None,
+        ingress_observation_surface: None,
     })
 }
 
@@ -244,7 +245,7 @@ fn install_background_probe_plan(request: &ObservationRequest, basis: &Observati
                 2050,
             )));
     let next = current_core_state()
-        .with_last_cursor(Some(cursor(7, 8)))
+        .with_latest_exact_cursor_position(Some(cursor(7, 8)))
         .with_active_observation(Some(observation))
         .expect("active observation state");
     replace_core_state(next);

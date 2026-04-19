@@ -3,6 +3,7 @@ use super::support::request_render_plan_effect;
 use crate::core::effect::RenderPlanningContext;
 use crate::core::effect::RenderPlanningObservation;
 use crate::core::realization::PaletteSpec;
+use crate::core::realization::project_particle_overlay_cells;
 use crate::core::realization::project_render_plan;
 use crate::core::runtime_reducer::CursorEventContext;
 use crate::core::runtime_reducer::EventSource;
@@ -52,8 +53,8 @@ use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
 use crate::draw::render_plan::Viewport;
 use crate::draw::render_plan::{self};
 use crate::types::DEFAULT_RNG_STATE;
+use crate::types::PlannerFrame;
 use crate::types::Point;
-use crate::types::RenderFrame;
 use std::cell::OnceCell;
 
 fn point_from_cursor_position(position: crate::core::types::CursorPosition) -> Point {
@@ -61,6 +62,11 @@ fn point_from_cursor_position(position: crate::core::types::CursorPosition) -> P
         row: f64::from(position.row.0),
         col: f64::from(position.col.0),
     }
+}
+
+struct PlannedRuntimeTransition {
+    transition: crate::core::runtime_reducer::CursorTransition,
+    runtime_changed: bool,
 }
 
 fn deterministic_event_seed(observation: &ObservationSnapshot) -> u32 {
@@ -133,12 +139,12 @@ fn planner_clock(planner_state: &ProjectionPlannerState) -> ProjectionPlannerClo
     ProjectionPlannerClock::new(planner_state.step_index(), planner_state.history_revision())
 }
 
-fn frame_advances_planner(frame: &RenderFrame) -> bool {
+fn frame_advances_planner(frame: &PlannerFrame) -> bool {
     !frame.step_samples.is_empty() || frame.planner_idle_steps > 0
 }
 
 fn projection_reuse_planner_clock(
-    frame: &RenderFrame,
+    frame: &PlannerFrame,
     planner_state: &ProjectionPlannerState,
 ) -> Option<ProjectionPlannerClock> {
     // planner aging is projection-owned, not semantic-geometry-owned. Advancing frames
@@ -191,7 +197,7 @@ fn frame_requires_background_probe(
 struct PreparedProjection<'a> {
     witness: ProjectionWitness,
     viewport: Viewport,
-    planner_frame: RenderFrame,
+    planner_frame: PlannerFrame,
     trail_signature: OnceCell<Option<u64>>,
     particle_overlay_signature: OnceCell<Option<u64>>,
     planner_state: ProjectionPlannerState,
@@ -336,22 +342,19 @@ fn reusable_prepared_projection_entry(
         != prepared.particle_overlay_signature()
         || (prepared.background_probe.is_some()
             && entry.snapshot().witness().observation_id() != prepared.witness.observation_id());
-    let logical_raster = if refresh_particle_overlay {
-        let particle_cells = project_render_plan(
-            &render_plan::particle_overlay_plan(&prepared.planner_frame, prepared.viewport),
+    let snapshot = if refresh_particle_overlay {
+        let particle_cells = project_particle_overlay_cells(
+            &prepared.planner_frame,
             prepared.viewport,
             prepared.background_probe,
-        )
-        .into_particle_cells();
+        );
         crate::events::record_particle_overlay_refresh(particle_cells.len());
         entry
             .snapshot()
-            .logical_raster()
-            .replace_particle_cells(particle_cells)
+            .with_replaced_particle_cells(prepared.witness, particle_cells)
     } else {
-        entry.snapshot().logical_raster().clone()
+        entry.snapshot().rebind_witness(prepared.witness)
     };
-    let snapshot = ProjectionSnapshot::new(prepared.witness, logical_raster);
 
     Some(ProjectionCacheEntry::new(
         entry.planner_state().clone(),
@@ -456,6 +459,7 @@ fn update_scene_from_render_decision_with_context(
                 &policy,
                 render_decision.render_side_effects.target_cell_presentation,
             ) {
+                crate::events::record_projection_reuse_hit();
                 let snapshot = reused.snapshot().clone();
                 let next_scene = PlannedSceneUpdate::new(
                     next_revision,
@@ -469,6 +473,7 @@ fn update_scene_from_render_decision_with_context(
                 );
                 return (next_scene, Some(snapshot), None);
             }
+            crate::events::record_projection_reuse_miss();
 
             let entry = project_prepared_frame(
                 prepared,
@@ -556,27 +561,32 @@ fn realization_plan_for_render_decision(
 
 fn plan_runtime_transition_for_runtime(
     runtime: &mut crate::state::RuntimeState,
-    last_cursor: Option<crate::core::types::CursorPosition>,
+    latest_exact_cursor_position: Option<crate::core::types::CursorPosition>,
     previous_observation: Option<&ObservationSnapshot>,
     observation: &ObservationSnapshot,
     observed_at: Millis,
-) -> crate::core::runtime_reducer::CursorTransition {
+) -> PlannedRuntimeTransition {
     runtime.set_color_at_cursor(observation.cursor_color());
 
     let mode = observation.basis().mode();
     let cursor_location = observation.basis().cursor_location();
-    let requested_target = last_cursor.map(point_from_cursor_position);
+    let requested_target = latest_exact_cursor_position.map(point_from_cursor_position);
     let observed_target = observation
         .basis()
         .cursor_position()
         .map(point_from_cursor_position);
     let fallback_target = runtime.target_position();
+    // The exact cursor slot is a boundary-refresh anchor and fallback, not the primary motion
+    // target. When an observation carries a newer cursor sample whose exactness is deferred
+    // (for example while conceal correction is still pending), motion must follow that observed
+    // position or repeated hjkl ingress appears frozen at the stale exact anchor.
+    let motion_target = observed_target.or(requested_target);
     let semantic_event = classify_semantic_event(previous_observation, observation);
     let source = select_event_source(
         mode,
         runtime,
         semantic_event,
-        requested_target,
+        motion_target,
         &cursor_location,
     );
     let event_now_ms = match source {
@@ -588,14 +598,7 @@ fn plan_runtime_transition_for_runtime(
             observed_at.value() as f64
         }
     };
-    let event_target = match source {
-        EventSource::External => observed_target
-            .or(requested_target)
-            .unwrap_or(fallback_target),
-        EventSource::AnimationTick => requested_target
-            .or(observed_target)
-            .unwrap_or(fallback_target),
-    };
+    let event_target = motion_target.unwrap_or(fallback_target);
 
     let event = CursorEventContext {
         row: event_target.row,
@@ -606,32 +609,43 @@ fn plan_runtime_transition_for_runtime(
         scroll_shift: observation.scroll_shift(),
         semantic_event,
     };
-    crate::core::runtime_reducer::reduce_cursor_event_for_perf_class(
+    let transition = crate::core::runtime_reducer::reduce_cursor_event_for_perf_class(
         runtime,
         mode,
         &event,
         source,
         observation.request().demand().buffer_perf_class(),
-    )
+    );
+    PlannedRuntimeTransition {
+        transition,
+        runtime_changed: runtime.runtime_changed_since_preview(),
+    }
 }
 
 fn prepare_observation_plan_with_runtime(
     mut runtime: crate::state::RuntimeState,
-    last_cursor: Option<crate::core::types::CursorPosition>,
+    latest_exact_cursor_position: Option<crate::core::types::CursorPosition>,
     previous_observation: Option<&ObservationSnapshot>,
     observation: &ObservationSnapshot,
     observed_at: Millis,
 ) -> (crate::state::RuntimeState, PreparedObservationPlan) {
-    let retained_motion = runtime.prepared_motion();
-    let transition = plan_runtime_transition_for_runtime(
-        &mut runtime,
-        last_cursor,
+    let mut preview_runtime = runtime.planning_preview();
+    let planned_transition = plan_runtime_transition_for_runtime(
+        &mut preview_runtime,
+        latest_exact_cursor_position,
         previous_observation,
         observation,
         observed_at,
     );
-    let prepared_plan = PreparedObservationPlan::new(runtime.prepared_motion(), transition);
-    runtime.apply_prepared_motion(retained_motion);
+    let prepared_plan = if !planned_transition.runtime_changed {
+        runtime.reclaim_preview_particles_scratch(preview_runtime.into_preview_particle_storage());
+        PreparedObservationPlan::unchanged(planned_transition.transition)
+    } else {
+        PreparedObservationPlan::new(
+            preview_runtime.into_prepared_motion(),
+            planned_transition.transition,
+        )
+    };
     (runtime, prepared_plan)
 }
 
@@ -643,7 +657,7 @@ pub(super) fn prepare_observation_plan(
 ) -> (CoreState, PreparedObservationPlan) {
     let (runtime, prepared_plan) = prepare_observation_plan_with_runtime(
         state.take_runtime(),
-        state.last_cursor(),
+        state.latest_exact_cursor_position(),
         previous_observation,
         observation,
         observed_at,
@@ -669,8 +683,7 @@ fn plan_ready_state_with_prepared(
     observed_at: Millis,
     prepared_plan: PreparedObservationPlan,
 ) -> Transition {
-    let (prepared_motion, cursor_transition) = prepared_plan.into_parts();
-    state.runtime_mut().apply_prepared_motion(prepared_motion);
+    let cursor_transition = prepared_plan.apply_to_runtime_and_take_transition(state.runtime_mut());
     plan_ready_state_with_transition(state, observed_at, cursor_transition)
 }
 
@@ -699,10 +712,7 @@ fn plan_ready_state_with_transition(
         should_schedule_next_animation,
         next_animation_at_ms.map(Millis::new),
     );
-    if !matches!(
-        state.protocol(),
-        crate::core::state::ProtocolState::Ready { .. }
-    ) {
+    if state.lifecycle() != crate::core::types::Lifecycle::Ready {
         // Surprising: `plan_ready_state` was invoked outside the ready lifecycle boundary.
         return Transition::stay(&state);
     }
@@ -715,7 +725,7 @@ fn plan_ready_state_with_transition(
             .cloned(),
         state.runtime().config.max_kept_windows,
     );
-    let Some(next_state) = state.into_planning(proposal_id) else {
+    let Some(next_state) = state.enter_planning(proposal_id) else {
         unreachable!("ready lifecycle checked above")
     };
 
@@ -737,20 +747,20 @@ pub(super) fn plan_ready_state(
     previous_observation: Option<&ObservationSnapshot>,
     observed_at: Millis,
 ) -> Transition {
-    let last_cursor = state.last_cursor();
-    let cursor_transition = {
+    let latest_exact_cursor_position = state.latest_exact_cursor_position();
+    let planned_transition = {
         let Some((runtime, observation)) = state.runtime_mut_with_observation() else {
             return Transition::stay_owned(state);
         };
         plan_runtime_transition_for_runtime(
             runtime,
-            last_cursor,
+            latest_exact_cursor_position,
             previous_observation,
             observation,
             observed_at,
         )
     };
-    plan_ready_state_with_transition(state, observed_at, cursor_transition)
+    plan_ready_state_with_transition(state, observed_at, planned_transition.transition)
 }
 
 pub(super) fn plan_ready_state_with_observation_plan(
@@ -858,6 +868,7 @@ mod tests {
     use crate::core::state::BackgroundProbeUpdate;
     use crate::core::state::BufferPerfClass;
     use crate::core::state::CoreState;
+    use crate::core::state::CursorPositionSync;
     use crate::core::state::CursorTrailGeometry;
     use crate::core::state::CursorTrailProjectionPolicy;
     use crate::core::state::CursorTrailSemantic;
@@ -871,7 +882,6 @@ mod tests {
     use crate::core::state::ProbeKind;
     use crate::core::state::ProbeRequestSet;
     use crate::core::state::ProbeReuse;
-    use crate::core::state::ProbeState;
     use crate::core::state::ProjectionCache;
     use crate::core::state::RealizationClear;
     use crate::core::state::RealizationDivergence;
@@ -896,8 +906,11 @@ mod tests {
     use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
     use crate::state::CursorLocation;
+    use crate::state::CursorShape;
+    use crate::state::RuntimeState;
     use crate::test_support::proptest::pure_config;
     use crate::types::CursorCellShape;
+    use crate::types::ModeClass;
     use crate::types::Particle;
     use crate::types::Point;
     use crate::types::RenderFrame;
@@ -929,7 +942,7 @@ mod tests {
             },
         ];
         RenderFrame {
-            mode: "n".to_string(),
+            mode: ModeClass::NormalLike,
             corners,
             step_samples: vec![RenderStepSample::new(corners, 1.0)].into(),
             planner_idle_steps: 0,
@@ -1015,6 +1028,202 @@ mod tests {
         ObservationSnapshot::new(request, basis, ObservationMotion::default())
     }
 
+    #[test]
+    fn prepare_observation_plan_reclaims_preview_scratch_when_runtime_is_unchanged() {
+        let mut runtime = RuntimeState::default();
+        runtime.initialize_cursor(
+            Point {
+                row: 10.0,
+                col: 10.0,
+            },
+            CursorShape::new(false, false),
+            7,
+            &CursorLocation::new(1, 1, 1, 1),
+        );
+        runtime.set_last_mode_was_cmdline(false);
+        runtime.reclaim_preview_particles_scratch(Vec::with_capacity(8));
+
+        let expected_scratch_capacity = runtime.preview_particles_scratch_capacity();
+        let expected_scratch_ptr = runtime.preview_particles_scratch_ptr();
+
+        let (returned_runtime, prepared_plan) = super::prepare_observation_plan_with_runtime(
+            runtime,
+            None,
+            None,
+            &observation(1),
+            Millis::new(1),
+        );
+
+        assert_eq!(prepared_plan.prepared_particles_capacity(), 0);
+        assert!(!prepared_plan.retains_preview_motion());
+        assert_eq!(
+            returned_runtime.preview_particles_scratch_capacity(),
+            expected_scratch_capacity
+        );
+        assert_eq!(
+            returned_runtime.preview_particles_scratch_ptr(),
+            expected_scratch_ptr
+        );
+    }
+
+    #[test]
+    fn prepare_observation_plan_keeps_preview_motion_when_runtime_changes() {
+        let mut runtime = RuntimeState::default();
+        runtime.reclaim_preview_particles_scratch(Vec::with_capacity(8));
+
+        let (_returned_runtime, prepared_plan) = super::prepare_observation_plan_with_runtime(
+            runtime,
+            None,
+            None,
+            &observation(1),
+            Millis::new(1),
+        );
+
+        assert!(prepared_plan.retains_preview_motion());
+    }
+
+    #[test]
+    fn conceal_deferred_motion_prefers_observed_cursor_over_stale_exact_anchor() {
+        let mut runtime = RuntimeState::default();
+        runtime.config.delay_event_to_smear = 24.0;
+        runtime.initialize_cursor(
+            Point {
+                row: 10.0,
+                col: 10.0,
+            },
+            CursorShape::new(false, false),
+            7,
+            &CursorLocation::new(1, 1, 1, 1),
+        );
+        runtime.set_last_mode_was_cmdline(false);
+
+        let request = ObservationRequest::new(
+            ExternalDemand::new(
+                IngressSeq::new(2),
+                ExternalDemandKind::ExternalCursor,
+                Millis::new(2),
+                None,
+                BufferPerfClass::Full,
+            ),
+            ProbeRequestSet::default(),
+        );
+        let observation = ObservationSnapshot::new(
+            request,
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(2)),
+                Millis::new(2),
+                "n".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(9),
+                    col: CursorCol(10),
+                }),
+                CursorLocation::new(1, 1, 1, 1),
+                ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+            ),
+            ObservationMotion::default()
+                .with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+        );
+
+        let planned = super::plan_runtime_transition_for_runtime(
+            &mut runtime,
+            Some(CursorPosition {
+                row: CursorRow(10),
+                col: CursorCol(10),
+            }),
+            None,
+            &observation,
+            Millis::new(16),
+        );
+
+        assert_eq!(
+            runtime.target_position(),
+            Point {
+                row: 9.0,
+                col: 10.0
+            }
+        );
+        assert!(runtime.is_settling() || runtime.is_animating());
+        assert!(planned.transition.should_schedule_next_animation);
+    }
+
+    #[test]
+    fn conceal_deferred_retarget_while_animating_uses_observed_cursor_over_stale_exact_anchor() {
+        let mut runtime = RuntimeState::default();
+        let shape = CursorShape::new(false, false);
+        let location = CursorLocation::new(1, 1, 1, 1);
+        runtime.initialize_cursor(
+            Point {
+                row: 10.0,
+                col: 10.0,
+            },
+            shape,
+            7,
+            &location,
+        );
+        runtime.set_last_mode_was_cmdline(false);
+        runtime.set_target(
+            Point {
+                row: 9.0,
+                col: 10.0,
+            },
+            shape,
+        );
+        runtime.start_animation_towards_target();
+        runtime.record_animation_tick(100.0);
+
+        let request = ObservationRequest::new(
+            ExternalDemand::new(
+                IngressSeq::new(3),
+                ExternalDemandKind::ExternalCursor,
+                Millis::new(3),
+                None,
+                BufferPerfClass::Full,
+            ),
+            ProbeRequestSet::default(),
+        );
+        let observation = ObservationSnapshot::new(
+            request,
+            ObservationBasis::new(
+                ObservationId::from_ingress_seq(IngressSeq::new(3)),
+                Millis::new(3),
+                "n".to_string(),
+                Some(CursorPosition {
+                    row: CursorRow(8),
+                    col: CursorCol(10),
+                }),
+                location,
+                ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
+            ),
+            ObservationMotion::default()
+                .with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
+        );
+
+        let planned = super::plan_runtime_transition_for_runtime(
+            &mut runtime,
+            Some(CursorPosition {
+                row: CursorRow(9),
+                col: CursorCol(10),
+            }),
+            None,
+            &observation,
+            Millis::new(116),
+        );
+
+        assert_eq!(
+            runtime.target_position(),
+            Point {
+                row: 8.0,
+                col: 10.0
+            }
+        );
+        assert!(runtime.is_animating());
+        assert!(matches!(
+            planned.transition.render_decision.render_action,
+            RenderAction::Draw(_)
+        ));
+        assert!(planned.transition.should_schedule_next_animation);
+    }
+
     fn observation_with_background_probe(
         seq: u64,
         allowed_cells: &[ScreenCell],
@@ -1045,8 +1254,9 @@ mod tests {
                 .with_background_probe_plan(BackgroundProbePlan::from_cells(
                     allowed_cells.to_vec(),
                 ));
-        let progress = snapshot
+        let mut progress = snapshot
             .background_progress()
+            .cloned()
             .expect("background probe plan should remain pending until sampled");
         let chunk = progress
             .next_chunk()
@@ -1059,12 +1269,12 @@ mod tests {
             panic!("single chunk sparse probe should complete immediately");
         };
         snapshot
-            .with_background_probe(ProbeState::ready(
+            .with_background_probe_ready(
                 ProbeKind::Background.request_id(request.observation_id()),
                 request.observation_id(),
                 ProbeReuse::Exact,
                 batch,
-            ))
+            )
             .expect("requested background probe should accept the sampled batch")
     }
 
@@ -1460,6 +1670,16 @@ mod tests {
         .expect("full particle reprojection should succeed");
 
         assert_eq!(reused.snapshot(), fully_reprojected.snapshot());
+        assert_eq!(
+            reused.snapshot().realization().static_spans().as_ptr(),
+            current_scene
+                .projection_entry()
+                .expect("cached projection entry")
+                .snapshot()
+                .realization()
+                .static_spans()
+                .as_ptr(),
+        );
         assert_eq!(
             reused.reuse_key().trail_signature(),
             fully_reprojected.reuse_key().trail_signature()

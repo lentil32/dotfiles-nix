@@ -51,7 +51,7 @@ fn start_animation_towards_target_seeds_velocity_and_enters_animating_phase() {
 }
 
 #[test]
-fn start_animation_discards_settling_payload_and_arms_motion_clock() {
+fn start_animation_discards_settling_window_and_arms_motion_clock() {
     let mut state = RuntimeState::default();
     let tracked = location(1, 2, 3, 4);
     state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
@@ -60,7 +60,7 @@ fn start_animation_discards_settling_payload_and_arms_motion_clock() {
     state.start_animation();
 
     assert!(state.is_animating());
-    assert!(state.pending_target().is_none());
+    assert!(state.settling_window().is_none());
     assert!(state.has_motion_clock());
 }
 
@@ -112,6 +112,7 @@ fn reset_transient_state_restores_default_transient_fields() {
     state.set_target(point(4.0, 9.0), default_shape());
     state.update_tracking(&location(11, 22, 33, 44));
     state.set_color_at_cursor(Some(0x00FF_FFFF));
+    state.start_animation();
     state.set_last_tick_ms(Some(99.0));
     let mut expected = state.clone();
     expected.transient = Default::default();

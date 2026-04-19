@@ -74,24 +74,25 @@ pub(crate) fn on_core_timer_event(timer_id: i64) {
 }
 
 pub(crate) fn on_core_timer_slot_event(timer_id: i64, generation: u64) {
-    let timer_id = match NvimTimerId::try_new(timer_id) {
-        Ok(timer_id) => timer_id,
-        Err(err) => {
-            warn(&format!(
-                "core timer callback received invalid timer id: {err}"
-            ));
-            return;
-        }
-    };
-
-    trace_lazy(|| {
-        format!(
-            "shell_timer_callback shell_timer_id={} generation={} result=queued",
-            timer_id.get(),
-            generation,
-        )
-    });
+    let timer_id = NvimTimerId::try_new(timer_id);
     schedule_guarded("core timer dispatch", move || {
+        let timer_id = match timer_id {
+            Ok(timer_id) => timer_id,
+            Err(err) => {
+                warn(&format!(
+                    "core timer callback received invalid timer id: {err}"
+                ));
+                return;
+            }
+        };
+
+        trace_lazy(|| {
+            format!(
+                "shell_timer_callback shell_timer_id={} generation={} result=queued",
+                timer_id.get(),
+                generation,
+            )
+        });
         super::runtime::dispatch_shell_timer_fired(timer_id, generation);
     });
 }

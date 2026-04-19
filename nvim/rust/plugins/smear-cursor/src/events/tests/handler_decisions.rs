@@ -37,6 +37,8 @@ fn autocmd_ingress_strategy() -> BoxedStrategy<AutocmdIngress> {
         Just(AutocmdIngress::CursorMoved),
         Just(AutocmdIngress::CursorMovedInsert),
         Just(AutocmdIngress::ModeChanged),
+        Just(AutocmdIngress::TextChanged),
+        Just(AutocmdIngress::TextChangedInsert),
         Just(AutocmdIngress::WinEnter),
         Just(AutocmdIngress::WinScrolled),
         Just(AutocmdIngress::BufEnter),

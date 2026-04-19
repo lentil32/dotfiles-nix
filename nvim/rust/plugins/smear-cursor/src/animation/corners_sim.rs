@@ -28,7 +28,7 @@ fn update_corners(
     let mut index_head = 0_usize;
     let mut index_tail = 0_usize;
 
-    let max_length = if is_insert_like_mode(&input.mode) {
+    let max_length = if input.mode.is_insert_like() {
         input.max_length_insert_mode
     } else {
         input.max_length

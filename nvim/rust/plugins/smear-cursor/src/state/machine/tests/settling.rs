@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 
 fn setup_phase(
@@ -54,16 +55,16 @@ proptest! {
             observed_position,
             &observed_location,
         );
-        let pending = state
-            .pending_target()
-            .expect("begin_settling should install a pending target");
+        let expected_window = SettlingWindow {
+            stable_since_ms: start_ms,
+            settle_deadline_ms: expected_deadline,
+        };
 
         prop_assert!(state.is_settling());
-        prop_assert_eq!(pending.position, target);
-        prop_assert_eq!(&pending.cursor_location, &tracked);
-        prop_assert_eq!(pending.stable_since_ms, start_ms);
-        prop_assert_eq!(pending.settle_deadline_ms, expected_deadline);
-        prop_assert!(pending.settle_deadline_ms >= pending.stable_since_ms);
+        prop_assert_eq!(state.target_position(), target);
+        prop_assert_eq!(state.tracked_location_ref(), Some(&tracked));
+        prop_assert_eq!(state.settling_window().copied(), Some(expected_window));
+        prop_assert!(expected_window.settle_deadline_ms >= expected_window.stable_since_ms);
         prop_assert_eq!(
             should_promote,
             matching_position && matching_location && start_ms + elapsed_ms >= expected_deadline
@@ -122,7 +123,7 @@ proptest! {
             TransitionSetupPhase::Settling => {
                 prop_assert!(state.is_initialized());
                 prop_assert!(!state.is_settling());
-                prop_assert!(state.pending_target().is_none());
+                prop_assert!(state.settling_window().is_none());
                 prop_assert_eq!(state.target_position(), baseline.target_position());
                 prop_assert_eq!(state.target_corners(), baseline.target_corners());
                 prop_assert_eq!(state.tracked_location_ref(), baseline.tracked_location_ref());
@@ -132,4 +133,67 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn settling_window_uses_runtime_owned_target_and_tracking_for_promotion() {
+    let original_location = location(1, 2, 3, 4);
+    let retargeted_location = location(5, 6, 7, 8);
+    let mut state = RuntimeState::default();
+    state.config.delay_event_to_smear = 20.0;
+    state.mark_initialized();
+    state.begin_settling(point(8.0, 9.0), default_shape(), &original_location, 100.0);
+
+    assert_eq!(
+        state.settling_window().copied(),
+        Some(SettlingWindow {
+            stable_since_ms: 100.0,
+            settle_deadline_ms: 120.0,
+        })
+    );
+
+    state.set_target(point(12.0, 13.0), default_shape());
+    state.update_tracking(&retargeted_location);
+
+    assert!(!state.should_promote_settled_target(120.0, point(8.0, 9.0), &original_location,));
+    assert!(state.should_promote_settled_target(120.0, point(12.0, 13.0), &retargeted_location,));
+}
+
+#[test]
+fn refresh_settling_target_preserves_stable_since_until_runtime_owner_changes() {
+    let original_location = location(1, 2, 3, 4);
+    let retargeted_location = location(5, 6, 7, 8);
+    let mut state = RuntimeState::default();
+    state.config.delay_event_to_smear = 20.0;
+    state.mark_initialized();
+    state.begin_settling(point(8.0, 9.0), default_shape(), &original_location, 100.0);
+
+    state.refresh_settling_target(point(8.0, 9.0), default_shape(), &original_location, 110.0);
+
+    assert_eq!(state.target_position(), point(8.0, 9.0));
+    assert_eq!(state.tracked_location_ref(), Some(&original_location));
+    assert_eq!(
+        state.settling_window().copied(),
+        Some(SettlingWindow {
+            stable_since_ms: 100.0,
+            settle_deadline_ms: 130.0,
+        })
+    );
+
+    state.refresh_settling_target(
+        point(12.0, 13.0),
+        default_shape(),
+        &retargeted_location,
+        115.0,
+    );
+
+    assert_eq!(state.target_position(), point(12.0, 13.0));
+    assert_eq!(state.tracked_location_ref(), Some(&retargeted_location));
+    assert_eq!(
+        state.settling_window().copied(),
+        Some(SettlingWindow {
+            stable_since_ms: 115.0,
+            settle_deadline_ms: 135.0,
+        })
+    );
 }

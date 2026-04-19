@@ -31,6 +31,7 @@ use nvim_oxi::Dictionary;
 use nvim_oxi::Function;
 use nvim_oxi::Result;
 
+#[cfg(feature = "perf-counters")]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: allocation_counters::CountingAllocator =
     allocation_counters::CountingAllocator;

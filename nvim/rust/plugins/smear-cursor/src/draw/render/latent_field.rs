@@ -1,4 +1,5 @@
 use crate::types::Point;
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 #[path = "latent_field/materialize.rs"]
@@ -73,6 +74,12 @@ impl MicroTile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MaterializedTile {
+    pub(super) coord: (i64, i64),
+    pub(super) tile: MicroTile,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Pose {
     pub(super) center: Point,
@@ -98,6 +105,7 @@ impl CellRect {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn from_microtiles(tiles: &BTreeMap<(i64, i64), MicroTile>) -> Option<Self> {
         let mut coords = tiles.keys().copied();
         let (first_row, first_col) = coords.next()?;

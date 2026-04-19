@@ -155,7 +155,7 @@ pub(super) fn populate_resampled_centerline_with_scratch(
         return;
     }
 
-    centerline_points.reserve(history.len().saturating_sub(centerline_points.capacity()));
+    centerline_points.reserve(history.len().saturating_sub(centerline_points.len()));
     for sample in history {
         let should_push = centerline_points.last().is_none_or(|last| {
             aspect_metric_distance(*last, sample.pos, block_aspect_ratio) > 1.0e-3
@@ -180,7 +180,7 @@ pub(super) fn populate_resampled_centerline_with_scratch(
     centerline_cumulative.reserve(
         centerline_points
             .len()
-            .saturating_sub(centerline_cumulative.capacity()),
+            .saturating_sub(centerline_cumulative.len()),
     );
     centerline_cumulative.push(0.0);
     for pair in centerline_points.windows(2) {
@@ -206,7 +206,7 @@ pub(super) fn populate_resampled_centerline_with_scratch(
     };
     let sample_count = (total_len / safe_spacing).ceil() as usize + 1;
 
-    centerline.reserve(sample_count.saturating_sub(centerline.capacity()));
+    centerline.reserve(sample_count.saturating_sub(centerline.len()));
     let mut segment = 0_usize;
     for sample_index in 0..sample_count {
         let target_arc = (sample_index as f64 * safe_spacing).min(total_len);

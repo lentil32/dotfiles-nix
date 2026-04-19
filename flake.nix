@@ -65,6 +65,10 @@
       url = "github:supabase/homebrew-tap";
       flake = false;
     };
+    homebrew-wordbricks = {
+      url = "github:wordbricks/homebrew-tap";
+      flake = false;
+    };
     homebrew-peonping = {
       url = "github:PeonPing/homebrew-tap";
       flake = false;
@@ -95,6 +99,7 @@
       homebrew-services,
       homebrew-pear,
       homebrew-anomalyco,
+      homebrew-wordbricks,
       homebrew-supabase,
       homebrew-peonping,
       homebrew-steipete,
@@ -264,6 +269,7 @@
                   "homebrew/homebrew-services" = homebrew-services;
                   "pear-devs/homebrew-pear" = homebrew-pear;
                   "anomalyco/homebrew-tap" = homebrew-anomalyco;
+                  "wordbricks/homebrew-tap" = homebrew-wordbricks;
                   "supabase/homebrew-tap" = homebrew-supabase;
                   "peonping/homebrew-tap" = homebrew-peonping;
                   "steipete/homebrew-tap" = homebrew-steipete;

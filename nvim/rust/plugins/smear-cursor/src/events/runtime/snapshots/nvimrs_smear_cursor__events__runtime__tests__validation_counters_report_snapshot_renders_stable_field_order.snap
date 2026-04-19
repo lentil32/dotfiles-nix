@@ -2,4 +2,4 @@
 source: plugins/smear-cursor/src/events/runtime/tests.rs
 expression: test_validation_counters_report()
 ---
-smear_cursor_validation pss=0 psp=0 pac=0 pap=0 por=0 poc=0 alc=0 alb=0 bmr=0 cbtr=0 ebr=0 crr=0
+smear_cursor_validation pss=0 psp=0 pac=0 pap=0 ppi=0 ppp=0 prh=0 prm=0 pch=0 pcm=0 pce=0 pcb=0 wed=0 wec=0 wsd=0 wsc=0 bed=0 bec=0 por=0 poc=0 alc=0 alb=0 bmr=0 cbtr=0 ebr=0 crr=0

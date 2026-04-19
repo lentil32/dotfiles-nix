@@ -72,17 +72,21 @@ proptest! {
             ExternalDemandKind::ExternalCursor,
             observed_at,
         );
-        let observation = observation_snapshot(cursor(cursor_row, cursor_col));
+        let observation = ObservationSnapshot::new(
+            request.clone(),
+            observation_basis(&request, Some(cursor(cursor_row, cursor_col)), observed_at),
+            observation_motion(),
+        );
         let observing = primed
             .clone()
             .with_demand_queue(DemandQueue::default())
-            .into_observing(request);
+            .enter_observing_request(request);
         let ready = observing
             .clone()
             .with_active_observation(Some(observation.clone()))
             .expect("observation staging should succeed")
-            .into_ready_with_observation(observation);
-        let recovering = ready.clone().into_recovering();
+            .enter_ready(observation);
+        let recovering = ready.clone().enter_recovering();
         let expected = (expected_timers, recovery_policy, ingress_policy);
 
         prop_assert_eq!(shared_protocol_snapshot(&ready), expected);

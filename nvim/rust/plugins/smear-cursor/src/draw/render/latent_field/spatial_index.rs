@@ -161,7 +161,7 @@ impl<T> BorrowedCellRowsScratch<T> {
         self.rows.clear();
         self.entries.clear();
         self.entries
-            .reserve(cells.len().saturating_sub(self.entries.capacity()));
+            .reserve(cells.len().saturating_sub(self.entries.len()));
 
         let mut active_row = None;
         let mut row_start = 0_usize;

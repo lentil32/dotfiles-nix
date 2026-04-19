@@ -83,8 +83,8 @@ pub(crate) fn classify_semantic_event(
         return SemanticEvent::ModeChanged;
     }
     if text_mutated_at_cursor_context(
-        previous_basis.cursor_text_context(),
-        current_basis.cursor_text_context(),
+        previous_basis.cursor_text_context_state().sampled(),
+        current_basis.cursor_text_context_state().sampled(),
     ) {
         return SemanticEvent::TextMutatedAtCursorContext;
     }

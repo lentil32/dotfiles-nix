@@ -12,7 +12,6 @@ use nvim_oxi::api;
 use nvim_oxi::api::opts::GetHighlightOpts;
 use nvim_oxi::api::opts::SetHighlightOpts;
 use nvim_oxi::api::types::GetHlInfos;
-use nvimrs_nvim_utils::mode::is_insert_like_mode;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -298,7 +297,7 @@ fn resolve_cursor_color_setting(setting: Option<&str>) -> Option<ResolvedCursorC
 }
 
 fn resolve_mode_cursor_color_for_spec(spec: &PaletteSpec) -> u32 {
-    let setting = if is_insert_like_mode(spec.mode()) {
+    let setting = if spec.mode().is_insert_like() {
         spec.cursor_color_insert_mode()
     } else {
         spec.cursor_color()
@@ -329,7 +328,7 @@ fn resolve_transparent_fallback_for_spec(spec: &PaletteSpec) -> u32 {
 }
 
 fn effective_cursor_color_setting_for_spec(spec: &PaletteSpec) -> Option<&str> {
-    if is_insert_like_mode(spec.mode()) {
+    if spec.mode().is_insert_like() {
         spec.cursor_color_insert_mode()
     } else {
         spec.cursor_color()
@@ -622,6 +621,7 @@ mod tests {
     use crate::test_support::proptest::cache_key_mutation_axis;
     use crate::test_support::proptest::mode_case;
     use crate::test_support::proptest::pure_config;
+    use crate::types::ModeClass;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::StaticRenderConfig;
@@ -635,7 +635,7 @@ mod tests {
 
     fn test_frame() -> RenderFrame {
         RenderFrame {
-            mode: "n".to_string(),
+            mode: ModeClass::NormalLike,
             corners: [Point::ZERO; 4],
             step_samples: Vec::new().into(),
             planner_idle_steps: 0,
@@ -686,7 +686,7 @@ mod tests {
     }
 
     fn set_active_cursor_color_setting(frame: &mut RenderFrame, setting: &str) {
-        let insert_like = nvimrs_nvim_utils::mode::is_insert_like_mode(&frame.mode);
+        let insert_like = frame.mode.is_insert_like();
         mutate_static_config(frame, |config| {
             if insert_like {
                 config.cursor_color_insert_mode = Some(setting.to_string());
@@ -697,7 +697,7 @@ mod tests {
     }
 
     fn set_inactive_cursor_color_setting(frame: &mut RenderFrame, setting: &str) {
-        let insert_like = nvimrs_nvim_utils::mode::is_insert_like_mode(&frame.mode);
+        let insert_like = frame.mode.is_insert_like();
         mutate_static_config(frame, |config| {
             if insert_like {
                 config.cursor_color = Some(setting.to_string());
@@ -709,7 +709,7 @@ mod tests {
 
     fn frame_for_raw_key_properties(mode: &ModeCase, depends_on_cursor_text: bool) -> RenderFrame {
         let mut frame = test_frame();
-        frame.mode = mode.mode().to_string();
+        frame.mode = mode.mode().into();
         set_active_cursor_color_setting(
             &mut frame,
             if depends_on_cursor_text {

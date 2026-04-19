@@ -311,7 +311,7 @@ fn screen_cursor_position(
     // the raw `screenpos()` sample, while exact edges pay for conceal correction to re-sync.
     trace_screen_cursor_read(window, &buffer_read, probe_policy);
     if buffer_read.uses_raw_screenpos_fallback(probe_policy) {
-        record_conceal_raw_screenpos_fallback();
+        record_conceal_raw_screenpos_fallback(i64::from(window.get_buf()?.handle()));
     }
     Ok(buffer_read.selected_read_for_probe_policy(probe_policy))
 }

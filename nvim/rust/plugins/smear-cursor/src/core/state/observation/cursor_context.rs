@@ -21,6 +21,47 @@ impl CursorTextContextBoundary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) enum CursorTextContextState {
+    #[default]
+    Unavailable,
+    BoundaryOnly(CursorTextContextBoundary),
+    Sampled(CursorTextContext),
+}
+
+impl CursorTextContextState {
+    pub(crate) fn from_parts(
+        sampled: Option<CursorTextContext>,
+        boundary: Option<CursorTextContextBoundary>,
+    ) -> Self {
+        if let Some(sampled) = sampled {
+            Self::Sampled(sampled)
+        } else if let Some(boundary) = boundary {
+            Self::BoundaryOnly(boundary)
+        } else {
+            Self::Unavailable
+        }
+    }
+
+    pub(crate) const fn boundary(&self) -> Option<CursorTextContextBoundary> {
+        match self {
+            Self::Unavailable => None,
+            Self::BoundaryOnly(boundary) => Some(*boundary),
+            Self::Sampled(context) => Some(CursorTextContextBoundary::new(
+                context.buffer_handle(),
+                context.changedtick(),
+            )),
+        }
+    }
+
+    pub(crate) fn sampled(&self) -> Option<&CursorTextContext> {
+        match self {
+            Self::Sampled(context) => Some(context),
+            Self::Unavailable | Self::BoundaryOnly(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct CursorColorProbeWitness {
     window_handle: i64,
@@ -158,5 +199,54 @@ impl CursorTextContext {
 
     pub(crate) fn tracked_nearby_rows(&self) -> Option<&[ObservedTextRow]> {
         self.tracked_nearby_rows.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CursorTextContext;
+    use super::CursorTextContextBoundary;
+    use super::CursorTextContextState;
+    use super::ObservedTextRow;
+    use pretty_assertions::assert_eq;
+
+    fn sample_context() -> CursorTextContext {
+        CursorTextContext::new(
+            22,
+            14,
+            7,
+            vec![
+                ObservedTextRow::new("before".to_string()),
+                ObservedTextRow::new("cursor".to_string()),
+                ObservedTextRow::new("after".to_string()),
+            ],
+            None,
+        )
+    }
+
+    #[test]
+    fn cursor_text_context_state_accessors_follow_the_single_owned_variant() {
+        let boundary = CursorTextContextBoundary::new(22, 14);
+        let sampled = sample_context();
+
+        assert_eq!(
+            CursorTextContextState::from_parts(None, None),
+            CursorTextContextState::Unavailable
+        );
+        assert_eq!(
+            CursorTextContextState::from_parts(None, Some(boundary)),
+            CursorTextContextState::BoundaryOnly(boundary)
+        );
+
+        let sampled_state =
+            CursorTextContextState::from_parts(Some(sampled.clone()), Some(boundary));
+        assert_eq!(
+            sampled_state.boundary(),
+            Some(CursorTextContextBoundary::new(
+                sampled.buffer_handle(),
+                sampled.changedtick(),
+            ))
+        );
+        assert_eq!(sampled_state.sampled(), Some(&sampled));
     }
 }

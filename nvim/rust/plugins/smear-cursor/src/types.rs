@@ -1,5 +1,9 @@
 use crate::core::types::StrokeId;
-use std::cell::RefCell;
+use nvimrs_nvim_utils::mode::is_cmdline_mode;
+use nvimrs_nvim_utils::mode::is_insert_like_mode;
+use nvimrs_nvim_utils::mode::is_replace_like_mode;
+use nvimrs_nvim_utils::mode::is_terminal_like_mode;
+use nvimrs_nvim_utils::mode::is_visual_like_mode;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -7,6 +11,50 @@ use std::sync::Arc;
 pub(crate) const BASE_TIME_INTERVAL: f64 = 1000.0 / 120.0;
 pub(crate) const EPSILON: f64 = 1.0e-9;
 pub(crate) const DEFAULT_RNG_STATE: u32 = 0xA341_316C;
+
+// Keep only the mode family in the simulation/render hot path; observation
+// state retains the raw editor mode string where exact values still matter.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ModeClass {
+    NormalLike,
+    InsertLike,
+    ReplaceLike,
+    Cmdline,
+    TerminalLike,
+    VisualLike,
+    Other,
+}
+
+impl ModeClass {
+    pub(crate) fn from_mode(mode: &str) -> Self {
+        if is_insert_like_mode(mode) {
+            Self::InsertLike
+        } else if is_replace_like_mode(mode) {
+            Self::ReplaceLike
+        } else if is_cmdline_mode(mode) {
+            Self::Cmdline
+        } else if is_terminal_like_mode(mode) {
+            Self::TerminalLike
+        } else if is_visual_like_mode(mode) {
+            Self::VisualLike
+        } else if mode.starts_with('n') {
+            Self::NormalLike
+        } else {
+            Self::Other
+        }
+    }
+
+    pub(crate) const fn is_insert_like(self) -> bool {
+        matches!(self, Self::InsertLike)
+    }
+}
+
+impl From<&str> for ModeClass {
+    fn from(mode: &str) -> Self {
+        Self::from_mode(mode)
+    }
+}
 
 pub(crate) fn display_metric_row_scale(block_aspect_ratio: f64) -> f64 {
     if block_aspect_ratio.is_finite() {
@@ -185,9 +233,40 @@ pub(crate) struct AggregatedParticleCell {
 
 pub(crate) type SharedAggregatedParticleCells = Arc<[AggregatedParticleCell]>;
 
-thread_local! {
-    static PARTICLE_CELL_SCRATCH: RefCell<HashMap<(i64, i64), AggregatedParticleCell>> =
-        RefCell::new(HashMap::new());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ParticleScreenCellsMode {
+    Skip,
+    Collect,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ParticleAggregationScratch {
+    cell_index: HashMap<(i64, i64), usize>,
+    aggregated_cells: Vec<AggregatedParticleCell>,
+    particle_screen_cells: Vec<ScreenCell>,
+}
+
+impl ParticleAggregationScratch {
+    #[cfg(test)]
+    pub(crate) fn cell_index_capacity(&self) -> usize {
+        self.cell_index.capacity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn aggregated_cells_capacity(&self) -> usize {
+        self.aggregated_cells.capacity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn particle_screen_cells_capacity(&self) -> usize {
+        self.particle_screen_cells.capacity()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ParticleAggregationArtifacts {
+    pub(crate) aggregated_particle_cells: SharedAggregatedParticleCells,
+    pub(crate) particle_screen_cells: SharedParticleScreenCells,
 }
 
 impl AggregatedParticleCell {
@@ -251,35 +330,91 @@ fn round_lua(value: f64) -> i64 {
     (value + 0.5).floor() as i64
 }
 
-pub(crate) fn aggregate_particle_cells(particles: &[Particle]) -> SharedAggregatedParticleCells {
+pub(crate) fn aggregate_particle_artifacts(
+    particles: &[Particle],
+    screen_cells_mode: ParticleScreenCellsMode,
+) -> ParticleAggregationArtifacts {
+    let mut scratch = ParticleAggregationScratch::default();
+    aggregate_particle_artifacts_with_scratch(particles, screen_cells_mode, &mut scratch)
+}
+
+pub(crate) fn aggregate_particle_artifacts_with_scratch(
+    particles: &[Particle],
+    screen_cells_mode: ParticleScreenCellsMode,
+    scratch: &mut ParticleAggregationScratch,
+) -> ParticleAggregationArtifacts {
     if particles.is_empty() {
-        return Arc::default();
+        scratch.cell_index.clear();
+        scratch.aggregated_cells.clear();
+        scratch.particle_screen_cells.clear();
+        return ParticleAggregationArtifacts {
+            aggregated_particle_cells: Arc::default(),
+            particle_screen_cells: Arc::default(),
+        };
     }
 
-    PARTICLE_CELL_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
-        scratch.clear();
+    scratch.cell_index.clear();
+    scratch.aggregated_cells.clear();
 
-        for particle in particles {
-            let row = particle.position.row.floor() as i64;
-            let col = particle.position.col.floor() as i64;
-            let sub_row = round_lua(4.0 * frac01(particle.position.row) + 0.5).clamp(1, 4);
-            let sub_col = round_lua(2.0 * frac01(particle.position.col) + 0.5).clamp(1, 2);
+    for particle in particles {
+        let row = particle.position.row.floor() as i64;
+        let col = particle.position.col.floor() as i64;
+        let sub_row = round_lua(4.0 * frac01(particle.position.row) + 0.5).clamp(1, 4);
+        let sub_col = round_lua(2.0 * frac01(particle.position.col) + 0.5).clamp(1, 2);
 
-            scratch
-                .entry((row, col))
-                .or_insert_with(|| AggregatedParticleCell::new(row, col))
-                .add_lifetime(
-                    (sub_row.saturating_sub(1)) as usize,
-                    (sub_col.saturating_sub(1)) as usize,
-                    particle.lifetime,
-                );
+        let index = match scratch.cell_index.entry((row, col)) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let index = scratch.aggregated_cells.len();
+                scratch
+                    .aggregated_cells
+                    .push(AggregatedParticleCell::new(row, col));
+                entry.insert(index);
+                index
+            }
+        };
+
+        scratch.aggregated_cells[index].add_lifetime(
+            (sub_row.saturating_sub(1)) as usize,
+            (sub_col.saturating_sub(1)) as usize,
+            particle.lifetime,
+        );
+    }
+
+    scratch
+        .aggregated_cells
+        .sort_unstable_by_key(|cell| (cell.row(), cell.col()));
+
+    let particle_screen_cells = match screen_cells_mode {
+        ParticleScreenCellsMode::Skip => {
+            scratch.particle_screen_cells.clear();
+            Arc::default()
         }
+        ParticleScreenCellsMode::Collect => {
+            scratch.particle_screen_cells.clear();
+            scratch.particle_screen_cells.extend(
+                scratch
+                    .aggregated_cells
+                    .iter()
+                    .filter_map(AggregatedParticleCell::screen_cell),
+            );
 
-        let mut ordered = scratch.values().cloned().collect::<Vec<_>>();
-        ordered.sort_unstable_by_key(|cell| (cell.row(), cell.col()));
-        Arc::from(ordered)
-    })
+            if scratch.particle_screen_cells.is_empty() {
+                Arc::default()
+            } else {
+                Arc::from(scratch.particle_screen_cells.as_slice())
+            }
+        }
+    };
+
+    ParticleAggregationArtifacts {
+        aggregated_particle_cells: Arc::from(scratch.aggregated_cells.as_slice()),
+        particle_screen_cells,
+    }
+}
+
+pub(crate) fn aggregate_particle_cells(particles: &[Particle]) -> SharedAggregatedParticleCells {
+    aggregate_particle_artifacts(particles, ParticleScreenCellsMode::Skip).aggregated_particle_cells
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -319,6 +454,49 @@ pub(crate) fn aggregate_particle_screen_cells(
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlannerRenderConfig {
+    pub(crate) hide_target_hack: bool,
+    pub(crate) max_kept_windows: usize,
+    pub(crate) never_draw_over_target: bool,
+    pub(crate) particle_max_lifetime: f64,
+    pub(crate) particle_switch_octant_braille: f64,
+    pub(crate) particles_over_text: bool,
+    pub(crate) color_levels: u32,
+    pub(crate) block_aspect_ratio: f64,
+    pub(crate) tail_duration_ms: f64,
+    pub(crate) simulation_hz: f64,
+    pub(crate) trail_thickness: f64,
+    pub(crate) trail_thickness_x: f64,
+    pub(crate) spatial_coherence_weight: f64,
+    pub(crate) temporal_stability_weight: f64,
+    pub(crate) top_k_per_cell: u8,
+    pub(crate) windows_zindex: u32,
+}
+
+impl From<&StaticRenderConfig> for PlannerRenderConfig {
+    fn from(config: &StaticRenderConfig) -> Self {
+        Self {
+            hide_target_hack: config.hide_target_hack,
+            max_kept_windows: config.max_kept_windows,
+            never_draw_over_target: config.never_draw_over_target,
+            particle_max_lifetime: config.particle_max_lifetime,
+            particle_switch_octant_braille: config.particle_switch_octant_braille,
+            particles_over_text: config.particles_over_text,
+            color_levels: config.color_levels,
+            block_aspect_ratio: config.block_aspect_ratio,
+            tail_duration_ms: config.tail_duration_ms,
+            simulation_hz: config.simulation_hz,
+            trail_thickness: config.trail_thickness,
+            trail_thickness_x: config.trail_thickness_x,
+            spatial_coherence_weight: config.spatial_coherence_weight,
+            temporal_stability_weight: config.temporal_stability_weight,
+            top_k_per_cell: config.top_k_per_cell,
+            windows_zindex: config.windows_zindex,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StaticRenderConfig {
     pub(crate) cursor_color: Option<String>,
     pub(crate) cursor_color_insert_mode: Option<String>,
@@ -346,8 +524,91 @@ pub(crate) struct StaticRenderConfig {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlannerFrame {
+    pub(crate) mode: ModeClass,
+    pub(crate) corners: [Point; 4],
+    pub(crate) step_samples: SharedRenderStepSamples,
+    pub(crate) planner_idle_steps: u32,
+    pub(crate) target: Point,
+    pub(crate) target_corners: [Point; 4],
+    pub(crate) vertical_bar: bool,
+    pub(crate) trail_stroke_id: StrokeId,
+    pub(crate) retarget_epoch: u64,
+    pub(crate) particle_count: usize,
+    pub(crate) aggregated_particle_cells: SharedAggregatedParticleCells,
+    pub(crate) planner_config: PlannerRenderConfig,
+}
+
+impl Deref for PlannerFrame {
+    type Target = PlannerRenderConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.planner_config
+    }
+}
+
+fn particle_artifacts_for_shared_particles(
+    particles: SharedParticles,
+    particles_over_text: bool,
+) -> (
+    usize,
+    SharedAggregatedParticleCells,
+    SharedParticleScreenCells,
+) {
+    let particle_count = particles.len();
+    let artifacts = aggregate_particle_artifacts(
+        particles.as_slice(),
+        if particles_over_text {
+            ParticleScreenCellsMode::Skip
+        } else {
+            ParticleScreenCellsMode::Collect
+        },
+    );
+    (
+        particle_count,
+        artifacts.aggregated_particle_cells,
+        artifacts.particle_screen_cells,
+    )
+}
+
+impl PlannerFrame {
+    pub(crate) fn from_render_frame(frame: &RenderFrame) -> Self {
+        Self {
+            mode: frame.mode,
+            corners: frame.corners,
+            step_samples: frame.step_samples.clone(),
+            planner_idle_steps: frame.planner_idle_steps,
+            target: frame.target,
+            target_corners: frame.target_corners,
+            vertical_bar: frame.vertical_bar,
+            trail_stroke_id: frame.trail_stroke_id,
+            retarget_epoch: frame.retarget_epoch,
+            particle_count: frame.particle_count,
+            aggregated_particle_cells: frame.aggregated_particle_cells.clone(),
+            planner_config: PlannerRenderConfig::from(frame.static_config.as_ref()),
+        }
+    }
+
+    pub(crate) const fn has_particles(&self) -> bool {
+        self.particle_count > 0
+    }
+
+    pub(crate) fn aggregated_particle_cells(&self) -> &[AggregatedParticleCell] {
+        &self.aggregated_particle_cells
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_particles(&mut self, particles: SharedParticles) {
+        let (particle_count, aggregated_particle_cells, _) =
+            particle_artifacts_for_shared_particles(particles, self.particles_over_text);
+        self.particle_count = particle_count;
+        self.aggregated_particle_cells = aggregated_particle_cells;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RenderFrame {
-    pub(crate) mode: String,
+    pub(crate) mode: ModeClass,
     pub(crate) corners: [Point; 4],
     pub(crate) step_samples: SharedRenderStepSamples,
     pub(crate) planner_idle_steps: u32,
@@ -380,21 +641,18 @@ impl RenderFrame {
         &self.aggregated_particle_cells
     }
 
-    pub(crate) fn particle_screen_cells(&self) -> &[ScreenCell] {
-        &self.particle_screen_cells
-    }
-
     pub(crate) fn set_particles(&mut self, particles: SharedParticles) {
-        self.particle_count = particles.len();
-        self.aggregated_particle_cells = aggregate_particle_cells(particles.as_slice());
-        self.particle_screen_cells =
-            aggregate_particle_screen_cells(&self.aggregated_particle_cells);
+        let (particle_count, aggregated_particle_cells, particle_screen_cells) =
+            particle_artifacts_for_shared_particles(particles, self.particles_over_text);
+        self.particle_count = particle_count;
+        self.aggregated_particle_cells = aggregated_particle_cells;
+        self.particle_screen_cells = particle_screen_cells;
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct StepInput {
-    pub(crate) mode: String,
+    pub(crate) mode: ModeClass,
     pub(crate) time_interval: f64,
     pub(crate) config_time_interval: f64,
     pub(crate) head_response_ms: f64,
@@ -478,6 +736,7 @@ impl Rng32 {
 
 #[cfg(test)]
 mod tests {
+    use super::ModeClass;
     use super::Particle;
     use super::Point;
     use super::ScreenCell;
@@ -615,4 +874,24 @@ mod tests {
         assert_eq!(aggregated[0].lifetime_average(), Some(3.0));
         assert_eq!(aggregated[1].lifetime_average(), Some(3.0));
     }
+
+    #[test]
+    fn mode_class_groups_relevant_editor_mode_families() {
+        assert_eq!(ModeClass::from_mode("n"), ModeClass::NormalLike);
+        assert_eq!(ModeClass::from_mode("niI"), ModeClass::NormalLike);
+        assert_eq!(ModeClass::from_mode("i"), ModeClass::InsertLike);
+        assert_eq!(ModeClass::from_mode("ix"), ModeClass::InsertLike);
+        assert_eq!(ModeClass::from_mode("R"), ModeClass::ReplaceLike);
+        assert_eq!(ModeClass::from_mode("Rc"), ModeClass::ReplaceLike);
+        assert_eq!(ModeClass::from_mode("c"), ModeClass::Cmdline);
+        assert_eq!(ModeClass::from_mode("cv"), ModeClass::Cmdline);
+        assert_eq!(ModeClass::from_mode("nt"), ModeClass::TerminalLike);
+        assert_eq!(ModeClass::from_mode("t"), ModeClass::TerminalLike);
+        assert_eq!(ModeClass::from_mode("v"), ModeClass::VisualLike);
+        assert_eq!(ModeClass::from_mode("\u{16}"), ModeClass::VisualLike);
+        assert_eq!(ModeClass::from_mode("s"), ModeClass::Other);
+    }
 }
+
+#[cfg(test)]
+mod particle_aggregation_tests;

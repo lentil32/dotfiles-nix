@@ -55,7 +55,7 @@ impl ConcealWindowState {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct ConcealCacheKey {
     buffer_handle: i64,
-    changedtick: u64,
+    text_revision: u64,
     line: usize,
     window_state: ConcealWindowState,
 }
@@ -63,13 +63,13 @@ pub(crate) struct ConcealCacheKey {
 impl ConcealCacheKey {
     pub(crate) fn new(
         buffer_handle: i64,
-        changedtick: u64,
+        text_revision: u64,
         line: usize,
         window_state: ConcealWindowState,
     ) -> Self {
         Self {
             buffer_handle,
-            changedtick,
+            text_revision,
             line,
             window_state,
         }
@@ -79,8 +79,8 @@ impl ConcealCacheKey {
         self.buffer_handle
     }
 
-    pub(super) const fn changedtick(&self) -> u64 {
-        self.changedtick
+    pub(super) const fn text_revision(&self) -> u64 {
+        self.text_revision
     }
 
     pub(super) const fn line(&self) -> usize {
@@ -96,7 +96,7 @@ impl ConcealCacheKey {
 pub(super) struct ConcealScreenCellCacheKey {
     window_handle: i64,
     buffer_handle: i64,
-    changedtick: u64,
+    text_revision: u64,
     line: usize,
     col1: i64,
     window_row: i64,
@@ -114,7 +114,7 @@ impl ConcealScreenCellCacheKey {
     pub(super) fn new(
         window_handle: i64,
         buffer_handle: i64,
-        changedtick: u64,
+        text_revision: u64,
         line: usize,
         col1: i64,
         window_row: i64,
@@ -129,7 +129,7 @@ impl ConcealScreenCellCacheKey {
         Self {
             window_handle,
             buffer_handle,
-            changedtick,
+            text_revision,
             line,
             col1,
             window_row,
@@ -142,13 +142,17 @@ impl ConcealScreenCellCacheKey {
             window_state,
         }
     }
+
+    pub(super) const fn buffer_handle(&self) -> i64 {
+        self.buffer_handle
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(super) struct ConcealDeltaCacheKey {
     window_handle: i64,
     buffer_handle: i64,
-    changedtick: u64,
+    text_revision: u64,
     line: usize,
     window_row: i64,
     window_col: i64,
@@ -165,7 +169,7 @@ impl ConcealDeltaCacheKey {
     pub(super) fn new(
         window_handle: i64,
         buffer_handle: i64,
-        changedtick: u64,
+        text_revision: u64,
         line: usize,
         window_row: i64,
         window_col: i64,
@@ -179,7 +183,7 @@ impl ConcealDeltaCacheKey {
         Self {
             window_handle,
             buffer_handle,
-            changedtick,
+            text_revision,
             line,
             window_row,
             window_col,
@@ -190,6 +194,10 @@ impl ConcealDeltaCacheKey {
             textoff,
             window_state,
         }
+    }
+
+    pub(super) const fn buffer_handle(&self) -> i64 {
+        self.buffer_handle
     }
 }
 
@@ -214,6 +222,10 @@ impl CursorTextContextCacheKey {
             cursor_line,
             tracked_line,
         }
+    }
+
+    pub(super) const fn buffer_handle(&self) -> i64 {
+        self.buffer_handle
     }
 }
 
@@ -370,6 +382,12 @@ impl ProbeCacheState {
         self.cursor_text_context.insert(key, context);
     }
 
+    pub(super) fn invalidate_buffer(&mut self, buffer_handle: i64) {
+        self.cursor_text_context
+            .remove_where(|key, _| key.buffer_handle() == buffer_handle);
+        self.invalidate_conceal_buffer(buffer_handle);
+    }
+
     pub(super) fn cached_conceal_regions(&mut self, key: &ConcealCacheKey) -> ConcealCacheLookup {
         self.conceal_lines
             .get_cloned(key)
@@ -421,6 +439,15 @@ impl ProbeCacheState {
     ) {
         self.conceal_deltas
             .insert(key, CachedConcealDelta::new(current_col1, delta));
+    }
+
+    pub(super) fn invalidate_conceal_buffer(&mut self, buffer_handle: i64) {
+        self.conceal_lines
+            .remove_where(|key, _| key.buffer_handle() == buffer_handle);
+        self.conceal_deltas
+            .remove_where(|key, _| key.buffer_handle() == buffer_handle);
+        self.conceal_screen_cells
+            .remove_where(|key, _| key.buffer_handle() == buffer_handle);
     }
 
     pub(super) fn note_cursor_color_colorscheme_change(&mut self) {

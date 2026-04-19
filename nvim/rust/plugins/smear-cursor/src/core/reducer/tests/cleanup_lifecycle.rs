@@ -18,7 +18,7 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
-        .into_applying(proposal)
+        .enter_applying(proposal)
         .expect("staging clear proposal requires retained observation");
 
     let completed = reduce(
@@ -140,7 +140,7 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
-        .into_applying(proposal)
+        .enter_applying(proposal)
         .expect("staging clear proposal requires retained observation");
 
     let completed = reduce(
@@ -253,7 +253,7 @@ fn fresh_ingress_promotes_cooling_cleanup_state_back_to_hot() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
-        .into_applying(proposal)
+        .enter_applying(proposal)
         .expect("staging clear proposal requires retained observation");
 
     let completed = reduce(

@@ -6,6 +6,7 @@ use crate::test_support::proptest::positive_aspect_ratio;
 use crate::test_support::proptest::positive_scale;
 use crate::test_support::proptest::pure_config;
 use crate::types::DEFAULT_RNG_STATE;
+use crate::types::ModeClass;
 use crate::types::Particle;
 use crate::types::StepInput;
 use proptest::prelude::*;
@@ -13,7 +14,7 @@ use std::f64::consts::PI;
 
 fn make_input() -> StepInput {
     StepInput {
-        mode: "n".to_string(),
+        mode: ModeClass::NormalLike,
         time_interval: BASE_TIME_INTERVAL,
         config_time_interval: BASE_TIME_INTERVAL,
         head_response_ms: 110.0,

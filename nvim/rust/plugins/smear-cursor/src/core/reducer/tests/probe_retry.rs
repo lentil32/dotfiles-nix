@@ -13,6 +13,7 @@ fn refresh_required_probe_report_retries_base_observation() {
             requested_target: None,
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: None,
+            ingress_observation_surface: None,
         }),
     )
     .next;

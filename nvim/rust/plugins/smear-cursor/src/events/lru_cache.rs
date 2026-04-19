@@ -48,6 +48,23 @@ impl<K: Eq + Hash, V> LruCache<K, V> {
         self.remove_node(index).map(|node| node.value)
     }
 
+    pub(super) fn remove_where(&mut self, mut should_remove: impl FnMut(&K, &V) -> bool) -> usize {
+        let indices_to_remove = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                let node = node.as_ref()?;
+                should_remove(&node.key, &node.value).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let removed = indices_to_remove.len();
+        for index in indices_to_remove {
+            let _ = self.remove_node(index);
+        }
+        removed
+    }
+
     fn detach(&mut self, index: usize) {
         let Some(node) = self.nodes.get(index).and_then(Option::as_ref) else {
             return;
@@ -297,6 +314,19 @@ mod tests {
 
         assert_eq!(cache.get_copy(&2), Some(20));
         assert_eq!(snapshot(&cache), vec![(2, 20), (3, 30), (1, 10)]);
+    }
+
+    #[test]
+    fn remove_where_removes_only_matching_entries() {
+        let mut cache = LruCache::new(5);
+        cache.insert(1, 10);
+        cache.insert(2, 20);
+        cache.insert(3, 30);
+        cache.insert(4, 40);
+
+        assert_eq!(cache.remove_where(|key, _| key % 2 == 0), 2);
+        assert_eq!(snapshot(&cache), vec![(3, 30), (1, 10)]);
+        assert_eq!(cache.remove_where(|_, value| *value > 100), 0);
     }
 
     proptest! {

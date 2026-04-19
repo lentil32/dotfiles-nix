@@ -2,6 +2,8 @@ use super::EventLoopDiagnostics;
 use super::EventLoopState;
 use super::RuntimeBehaviorMetrics;
 use super::diagnostics_snapshot;
+use super::record_compiled_field_cache_hit;
+use super::record_compiled_field_cache_miss;
 use super::record_conceal_full_scan;
 use super::record_conceal_raw_screenpos_fallback;
 use super::record_conceal_region_cache_hit;
@@ -27,6 +29,8 @@ use super::record_probe_duration;
 use super::record_probe_extmark_fallback;
 use super::record_probe_refresh_budget_exhausted_count;
 use super::record_probe_refresh_retried_count;
+use super::record_projection_reuse_hit;
+use super::record_projection_reuse_miss;
 use super::record_scheduled_drain_items;
 use super::record_scheduled_drain_items_for_thermal;
 use super::record_scheduled_drain_reschedule;
@@ -46,6 +50,8 @@ use crate::test_support::proptest::pure_config;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 use proptest::prelude::*;
+
+const PERF_COUNTERS_ENABLED: bool = cfg!(feature = "perf-counters");
 
 fn reset_event_loop_state() {
     with_event_loop_state_for_test(|state| *state = EventLoopState::new());
@@ -137,6 +143,10 @@ enum TelemetryOp {
     },
     PlannerReferenceCompile,
     PlannerLocalQueryCompile,
+    ProjectionReuseHit,
+    ProjectionReuseMiss,
+    CompiledFieldCacheHit,
+    CompiledFieldCacheMiss,
     PostBurstConvergence {
         started_at_ms: u64,
         converged_at_ms: u64,
@@ -380,6 +390,42 @@ impl TelemetryModel {
                 self.metrics.planner.local_query_compiles =
                     self.metrics.planner.local_query_compiles.saturating_add(1);
             }
+            TelemetryOp::ProjectionReuseHit => {
+                if PERF_COUNTERS_ENABLED {
+                    self.metrics.planner.projection_reuse.hits =
+                        self.metrics.planner.projection_reuse.hits.saturating_add(1);
+                }
+            }
+            TelemetryOp::ProjectionReuseMiss => {
+                if PERF_COUNTERS_ENABLED {
+                    self.metrics.planner.projection_reuse.misses = self
+                        .metrics
+                        .planner
+                        .projection_reuse
+                        .misses
+                        .saturating_add(1);
+                }
+            }
+            TelemetryOp::CompiledFieldCacheHit => {
+                if PERF_COUNTERS_ENABLED {
+                    self.metrics.planner.compiled_field_cache.hits = self
+                        .metrics
+                        .planner
+                        .compiled_field_cache
+                        .hits
+                        .saturating_add(1);
+                }
+            }
+            TelemetryOp::CompiledFieldCacheMiss => {
+                if PERF_COUNTERS_ENABLED {
+                    self.metrics.planner.compiled_field_cache.misses = self
+                        .metrics
+                        .planner
+                        .compiled_field_cache
+                        .misses
+                        .saturating_add(1);
+                }
+            }
             TelemetryOp::PostBurstConvergence {
                 started_at_ms,
                 converged_at_ms,
@@ -571,6 +617,10 @@ fn telemetry_op_strategy() -> impl Strategy<Value = TelemetryOp> {
             .prop_map(|count| TelemetryOp::PlannerCandidateCellsBuiltCount { count }),
         Just(TelemetryOp::PlannerReferenceCompile),
         Just(TelemetryOp::PlannerLocalQueryCompile),
+        Just(TelemetryOp::ProjectionReuseHit),
+        Just(TelemetryOp::ProjectionReuseMiss),
+        Just(TelemetryOp::CompiledFieldCacheHit),
+        Just(TelemetryOp::CompiledFieldCacheMiss),
         (0_u64..512_u64, 0_u64..512_u64).prop_map(|(started_at_ms, extra_ms)| {
             TelemetryOp::PostBurstConvergence {
                 started_at_ms,
@@ -653,6 +703,10 @@ fn apply_telemetry_op(op: TelemetryOp) {
         }
         TelemetryOp::PlannerReferenceCompile => record_planner_reference_compile(),
         TelemetryOp::PlannerLocalQueryCompile => record_planner_local_query_compile(),
+        TelemetryOp::ProjectionReuseHit => record_projection_reuse_hit(),
+        TelemetryOp::ProjectionReuseMiss => record_projection_reuse_miss(),
+        TelemetryOp::CompiledFieldCacheHit => record_compiled_field_cache_hit(),
+        TelemetryOp::CompiledFieldCacheMiss => record_compiled_field_cache_miss(),
         TelemetryOp::PostBurstConvergence {
             started_at_ms,
             converged_at_ms,

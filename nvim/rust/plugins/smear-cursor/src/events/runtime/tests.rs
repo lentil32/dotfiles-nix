@@ -4,8 +4,12 @@ use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::events::RealCursorVisibility;
 use crate::events::cursor::BufferMetadata;
+#[cfg(feature = "perf-counters")]
+use crate::events::ingress::AutocmdIngress;
 use crate::events::policy::BufferEventPolicy;
+use crate::events::policy::BufferPerfTelemetry;
 use insta::assert_snapshot;
+use nvim_oxi::api;
 use pretty_assertions::assert_eq;
 
 fn shell_timer_id(value: i64) -> super::super::timers::NvimTimerId {
@@ -201,6 +205,7 @@ fn perf_diagnostics_report_snapshot_renders_stable_field_order() {
     assert_snapshot!(test_perf_diagnostics_report());
 }
 
+#[cfg(feature = "perf-counters")]
 #[test]
 fn validation_counters_report_renders_particle_counter_summary() {
     super::reset_event_loop_for_test();
@@ -209,13 +214,29 @@ fn validation_counters_report_renders_particle_counter_summary() {
     crate::events::record_particle_simulation_step(5);
     crate::events::record_particle_simulation_step(3);
     crate::events::record_particle_aggregation(7);
+    crate::events::record_planning_preview_copy(5);
+    crate::events::record_planning_preview_copy(3);
+    crate::events::record_projection_reuse_hit();
+    crate::events::record_projection_reuse_miss();
+    crate::events::record_projection_reuse_miss();
+    crate::events::record_compiled_field_cache_hit();
+    crate::events::record_compiled_field_cache_hit();
+    crate::events::record_compiled_field_cache_miss();
+    crate::events::record_planner_compiled_cells_emitted_count(11);
+    crate::events::record_planner_compiled_cells_emitted_count(5);
+    crate::events::record_planner_candidate_cells_built_count(13);
+    crate::events::record_planner_candidate_cells_built_count(2);
+    super::telemetry::record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinEnter);
+    super::telemetry::record_cursor_autocmd_fast_path_continued(AutocmdIngress::WinEnter);
+    super::telemetry::record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinScrolled);
+    super::telemetry::record_cursor_autocmd_fast_path_continued(AutocmdIngress::BufEnter);
     crate::events::record_particle_overlay_refresh(4);
     crate::events::runtime::record_buffer_metadata_read();
     crate::events::runtime::record_current_buffer_changedtick_read();
     crate::events::runtime::record_current_buffer_changedtick_read();
-    crate::events::record_editor_bounds_read();
-    crate::events::record_editor_bounds_read();
-    crate::events::record_command_row_read();
+    super::telemetry::record_editor_bounds_read();
+    super::telemetry::record_editor_bounds_read();
+    super::telemetry::record_command_row_read();
 
     let report = test_validation_counters_report();
     assert!(report.starts_with("smear_cursor_validation "));
@@ -223,6 +244,20 @@ fn validation_counters_report_renders_particle_counter_summary() {
     assert!(report.contains("psp=8"));
     assert!(report.contains("pac=1"));
     assert!(report.contains("pap=7"));
+    assert!(report.contains("ppi=2"));
+    assert!(report.contains("ppp=8"));
+    assert!(report.contains("prh=1"));
+    assert!(report.contains("prm=2"));
+    assert!(report.contains("pch=2"));
+    assert!(report.contains("pcm=1"));
+    assert!(report.contains("pce=16"));
+    assert!(report.contains("pcb=15"));
+    assert!(report.contains("wed=1"));
+    assert!(report.contains("wec=1"));
+    assert!(report.contains("wsd=1"));
+    assert!(report.contains("wsc=0"));
+    assert!(report.contains("bed=0"));
+    assert!(report.contains("bec=1"));
     assert!(report.contains("por=1"));
     assert!(report.contains("poc=4"));
     assert!(report.contains("alc=0"));
@@ -233,12 +268,43 @@ fn validation_counters_report_renders_particle_counter_summary() {
     assert!(report.contains("crr=1"));
 }
 
+#[cfg(feature = "perf-counters")]
 #[test]
 fn validation_counters_report_snapshot_renders_stable_field_order() {
     super::reset_event_loop_for_test();
     crate::allocation_counters::reset_for_test();
     crate::allocation_counters::set_enabled_for_test(false);
     assert_snapshot!(test_validation_counters_report());
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[test]
+fn validation_counters_report_marks_the_feature_as_disabled() {
+    assert_eq!(
+        test_validation_counters_report(),
+        "smear_cursor_validation unavailable=feature_disabled"
+    );
+}
+
+#[cfg(not(feature = "perf-counters"))]
+#[test]
+fn investigation_counters_are_noops_without_the_perf_counter_feature() {
+    use crate::events::ingress::AutocmdIngress;
+
+    super::reset_event_loop_for_test();
+
+    crate::events::record_projection_reuse_hit();
+    crate::events::record_projection_reuse_miss();
+    crate::events::record_compiled_field_cache_hit();
+    crate::events::record_compiled_field_cache_miss();
+    super::telemetry::record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinEnter);
+    super::telemetry::record_cursor_autocmd_fast_path_continued(AutocmdIngress::BufEnter);
+
+    let diagnostics = super::diagnostics::event_loop_diagnostics();
+    assert_eq!(
+        diagnostics.metrics,
+        super::super::event_loop::RuntimeBehaviorMetrics::new()
+    );
 }
 
 fn reset_buffer_event_policy_state() {
@@ -248,6 +314,105 @@ fn reset_buffer_event_policy_state() {
         state.shell.buffer_perf_telemetry_cache.clear();
     })
     .expect("engine state access should succeed");
+}
+
+#[test]
+fn callback_duration_telemetry_uses_the_supplied_buffer_handle() {
+    const TARGET_BUFFER_HANDLE: i64 = 41;
+    const OTHER_BUFFER_HANDLE: i64 = 77;
+
+    super::reset_event_loop_for_test();
+    clear_cursor_callback_duration_estimate();
+    mutate_engine_state(|state| {
+        state.shell.buffer_perf_telemetry_cache.clear();
+    })
+    .expect("engine state access should succeed");
+
+    record_cursor_callback_duration(Some(TARGET_BUFFER_HANDLE), 12.0);
+
+    let telemetry = read_engine_state(|state| {
+        (
+            state
+                .shell
+                .buffer_perf_telemetry_cache
+                .telemetry(TARGET_BUFFER_HANDLE),
+            state
+                .shell
+                .buffer_perf_telemetry_cache
+                .telemetry(OTHER_BUFFER_HANDLE),
+        )
+    })
+    .expect("engine state access should succeed");
+
+    assert_eq!(
+        telemetry
+            .0
+            .map(BufferPerfTelemetry::callback_duration_estimate_ms),
+        Some(12.0)
+    );
+    assert_eq!(telemetry.1, None);
+    assert_eq!(
+        cursor_callback_duration_estimate_ms(Some(TARGET_BUFFER_HANDLE)),
+        12.0
+    );
+}
+
+#[test]
+fn conceal_region_scratch_reuses_the_largest_returned_buffer() {
+    let mut scratch =
+        take_conceal_regions_scratch().expect("conceal region scratch should be available");
+    let scratch_capacity = scratch.capacity().max(32);
+    scratch.reserve(scratch_capacity.saturating_sub(scratch.len()));
+    scratch.push(crate::test_support::conceal_region(3, 4, 11, 1));
+    let scratch_ptr = scratch.as_ptr();
+    let scratch_capacity = scratch.capacity();
+
+    reclaim_conceal_regions_scratch(scratch).expect("conceal region scratch should be reclaimable");
+
+    let scratch =
+        take_conceal_regions_scratch().expect("conceal region scratch should be available");
+    assert_eq!(scratch.capacity(), scratch_capacity);
+    assert_eq!(scratch.as_ptr(), scratch_ptr);
+    assert!(scratch.is_empty());
+
+    reclaim_conceal_regions_scratch(scratch).expect("conceal region scratch should be reclaimable");
+}
+
+#[test]
+fn ingress_snapshot_capture_with_current_buffer_uses_the_supplied_handle_for_callback_telemetry() {
+    const TARGET_BUFFER_HANDLE: i32 = 41;
+    const OTHER_BUFFER_HANDLE: i64 = 77;
+
+    let previous_core_state = core_state().expect("core state read should succeed");
+    super::reset_event_loop_for_test();
+    clear_cursor_callback_duration_estimate();
+    record_cursor_callback_duration(None, 3.0);
+
+    let mut runtime = crate::state::RuntimeState::default();
+    runtime.set_enabled(false);
+    set_core_state(crate::core::state::CoreState::default().with_runtime(runtime))
+        .expect("core state write should succeed");
+    mutate_engine_state(|state| {
+        state.shell.buffer_perf_telemetry_cache.clear();
+        state
+            .shell
+            .buffer_perf_telemetry_cache
+            .record_callback_duration(i64::from(TARGET_BUFFER_HANDLE), 12.0);
+        state
+            .shell
+            .buffer_perf_telemetry_cache
+            .record_callback_duration(OTHER_BUFFER_HANDLE, 5.0);
+    })
+    .expect("engine state access should succeed");
+
+    let buffer = api::Buffer::from(TARGET_BUFFER_HANDLE);
+    let snapshot = IngressReadSnapshot::capture_with_current_buffer(Some(&buffer))
+        .expect("ingress snapshot capture should succeed");
+
+    assert_eq!(snapshot.callback_duration_estimate_ms(), 12.0);
+    assert_eq!(snapshot.current_buffer_event_policy(), None);
+
+    set_core_state(previous_core_state).expect("core state restore should succeed");
 }
 
 fn snapshot_for_perf_mode(perf_mode: BufferPerfMode) -> IngressReadSnapshot {

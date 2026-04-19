@@ -152,7 +152,7 @@ pub(crate) struct PreparedApplyPlan<'a> {
     group_names: HighlightGroupNames,
     planned_ops: usize,
     clears_existing_frame: bool,
-    spans: &'a [RealizationSpan],
+    projection: &'a RealizationProjection,
 }
 
 impl PreparedApplyPlan<'_> {
@@ -168,8 +168,8 @@ impl PreparedApplyPlan<'_> {
         self.clears_existing_frame
     }
 
-    fn spans(&self) -> &[RealizationSpan] {
-        self.spans
+    fn spans(&self) -> impl Iterator<Item = &RealizationSpan> + Clone {
+        self.projection.spans()
     }
 }
 
@@ -178,13 +178,12 @@ pub(crate) fn prepare_apply_plan<'a>(
     projection: &'a RealizationProjection,
 ) -> PreparedApplyPlan<'a> {
     let group_names = highlight_group_names(color_levels.max(1));
-    let spans = projection.spans();
 
     PreparedApplyPlan {
         group_names,
-        planned_ops: spans.len(),
+        planned_ops: projection.span_count(),
         clears_existing_frame: projection.clear().is_some(),
-        spans,
+        projection,
     }
 }
 
@@ -512,15 +511,18 @@ mod tests {
                 },
             ]),
         ));
-        let span = &projection.spans()[0];
-
         let prepared = prepare_apply_plan(4, &projection);
+        let prepared_spans = prepared.spans().collect::<Vec<_>>();
+        let projection_spans = projection.spans().collect::<Vec<_>>();
 
         assert_eq!(prepared.planned_ops(), 1);
         assert!(prepared.clears_existing_frame());
-        assert_eq!(prepared.spans().len(), 1);
-        assert_eq!(&prepared.spans()[0], span);
-        assert_eq!(prepared.spans()[0].payload_hash(), span.payload_hash());
+        assert_eq!(prepared_spans.len(), 1);
+        assert_eq!(prepared_spans, projection_spans);
+        assert_eq!(
+            prepared_spans[0].payload_hash(),
+            projection_spans[0].payload_hash()
+        );
         assert_eq!(
             prepared
                 .group_names()
