@@ -607,7 +607,7 @@ fn ready_state_with_cleanup_thermal(thermal: RenderThermalState) -> CoreState {
 }
 
 fn render_cleanup_for_thermal(thermal: RenderThermalState) -> RenderCleanupState {
-    let scheduled = RenderCleanupState::scheduled(Millis::new(40), 25, 90, 12);
+    let scheduled = RenderCleanupState::scheduled(Millis::new(40), 25, 90);
     match thermal {
         RenderThermalState::Hot => scheduled,
         RenderThermalState::Cooling => scheduled.enter_cooling(Millis::new(65)),

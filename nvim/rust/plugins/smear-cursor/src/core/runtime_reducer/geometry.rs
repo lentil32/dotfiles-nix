@@ -103,6 +103,7 @@ pub(super) fn render_side_effects_for_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DerivedConfigCache;
     use crate::config::RuntimeConfig;
     use crate::core::types::StrokeId;
     use crate::test_support::proptest::CursorShapeCase;
@@ -110,7 +111,6 @@ mod tests {
     use crate::test_support::proptest::pure_config;
     use crate::types::ModeClass;
     use crate::types::RenderStepSample;
-    use crate::types::StaticRenderConfig;
     use proptest::prelude::*;
     use std::sync::Arc;
 
@@ -140,8 +140,11 @@ mod tests {
         target_corners: [Point; 4],
         hide_target_hack: bool,
     ) -> RenderFrame {
-        let mut static_config = StaticRenderConfig::from(&RuntimeConfig::default());
-        static_config.hide_target_hack = hide_target_hack;
+        let config = RuntimeConfig {
+            hide_target_hack,
+            ..RuntimeConfig::default()
+        };
+        let static_config = DerivedConfigCache::new(&config).static_render_config();
 
         RenderFrame {
             mode: ModeClass::NormalLike,
@@ -160,6 +163,7 @@ mod tests {
             aggregated_particle_cells: Arc::default(),
             particle_screen_cells: Arc::default(),
             color_at_cursor: None,
+            projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
             static_config: Arc::new(static_config),
         }
     }

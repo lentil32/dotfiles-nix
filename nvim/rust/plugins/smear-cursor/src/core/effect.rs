@@ -1,18 +1,21 @@
+use crate::config::RuntimeConfig;
 use crate::core::runtime_reducer::RenderDecision;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbeChunk;
 use crate::core::state::BufferPerfClass;
+use crate::core::state::CursorColorProbeGenerations;
 use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
 use crate::core::state::CursorTextContextBoundary;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ObservationBasis;
-use crate::core::state::ObservationRequest;
+use crate::core::state::PendingObservation;
 use crate::core::state::ProbeKind;
-use crate::core::state::ProjectionSnapshot;
+use crate::core::state::ProjectionHandle;
 use crate::core::state::SceneState;
+use crate::core::state::derive_cursor_color_probe_witness;
 use crate::core::types::DelayBudgetMs;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
@@ -25,7 +28,7 @@ use crate::state::CursorLocation;
 use crate::types::CursorCellShape;
 use crate::types::Point;
 use crate::types::ScreenCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) enum TimerKind {
@@ -64,7 +67,7 @@ pub(crate) struct ScheduleTimerEffect {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RequestObservationBaseEffect {
-    pub(crate) request: ObservationRequest,
+    pub(crate) request: PendingObservation,
     pub(crate) context: ObservationRuntimeContext,
 }
 
@@ -304,6 +307,18 @@ impl ProbePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ObservationRuntimeContextArgs {
+    pub(crate) cursor_position_policy: CursorPositionReadPolicy,
+    pub(crate) scroll_buffer_space: bool,
+    pub(crate) tracked_location: Option<CursorLocation>,
+    pub(crate) cursor_text_context_boundary: Option<CursorTextContextBoundary>,
+    pub(crate) current_corners: [Point; 4],
+    pub(crate) ingress_observation_surface: Option<IngressObservationSurface>,
+    pub(crate) buffer_perf_class: BufferPerfClass,
+    pub(crate) probe_policy: ProbePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObservationRuntimeContext {
     cursor_position_policy: CursorPositionReadPolicy,
     scroll_buffer_space: bool,
@@ -316,16 +331,17 @@ pub(crate) struct ObservationRuntimeContext {
 }
 
 impl ObservationRuntimeContext {
-    pub(crate) fn new(
-        cursor_position_policy: CursorPositionReadPolicy,
-        scroll_buffer_space: bool,
-        tracked_location: Option<CursorLocation>,
-        cursor_text_context_boundary: Option<CursorTextContextBoundary>,
-        current_corners: [Point; 4],
-        ingress_observation_surface: Option<IngressObservationSurface>,
-        buffer_perf_class: BufferPerfClass,
-        probe_policy: ProbePolicy,
-    ) -> Self {
+    pub(crate) fn new(args: ObservationRuntimeContextArgs) -> Self {
+        let ObservationRuntimeContextArgs {
+            cursor_position_policy,
+            scroll_buffer_space,
+            tracked_location,
+            cursor_text_context_boundary,
+            current_corners,
+            ingress_observation_surface,
+            buffer_perf_class,
+            probe_policy,
+        } = args;
         Self {
             cursor_position_policy,
             scroll_buffer_space,
@@ -374,8 +390,9 @@ impl ObservationRuntimeContext {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RequestProbeEffect {
+    pub(crate) observation_id: ObservationId,
     pub(crate) observation_basis: Box<ObservationBasis>,
-    pub(crate) probe_request_id: ProbeRequestId,
+    pub(crate) cursor_color_probe_generations: Option<CursorColorProbeGenerations>,
     pub(crate) kind: ProbeKind,
     pub(crate) cursor_position_policy: CursorPositionReadPolicy,
     pub(crate) buffer_perf_class: BufferPerfClass,
@@ -387,6 +404,16 @@ pub(crate) struct RequestProbeEffect {
 impl RequestProbeEffect {
     pub(crate) const fn probe_policy(&self) -> ProbePolicy {
         self.probe_policy
+    }
+
+    pub(crate) fn cursor_color_probe_witness(&self) -> Option<CursorColorProbeWitness> {
+        self.cursor_color_probe_generations.and_then(|generations| {
+            derive_cursor_color_probe_witness(self.observation_basis.as_ref(), generations)
+        })
+    }
+
+    pub(crate) const fn probe_request_id(&self) -> ProbeRequestId {
+        self.kind.request_id(self.observation_id)
     }
 }
 
@@ -452,33 +479,27 @@ impl RenderPlanningObservation {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RenderPlanningContext {
-    scene: Rc<SceneState>,
+    scene: SceneState,
     observation: Option<RenderPlanningObservation>,
-    acknowledged_projection: Option<ProjectionSnapshot>,
-    clear_all_max_kept_windows: usize,
+    acknowledged_projection: Option<ProjectionHandle>,
+    config: Arc<RuntimeConfig>,
 }
 
 impl RenderPlanningContext {
     pub(crate) fn new(
-        scene: Rc<SceneState>,
+        scene: SceneState,
         observation: Option<RenderPlanningObservation>,
-        acknowledged_projection: Option<ProjectionSnapshot>,
-        clear_all_max_kept_windows: usize,
+        acknowledged_projection: Option<ProjectionHandle>,
+        config: Arc<RuntimeConfig>,
     ) -> Self {
         Self {
             scene,
             observation,
             acknowledged_projection,
-            clear_all_max_kept_windows,
+            config,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn scene(&self) -> &SceneState {
-        self.scene.as_ref()
-    }
-
-    #[cfg(test)]
     pub(crate) fn observation(&self) -> Option<&RenderPlanningObservation> {
         self.observation.as_ref()
     }
@@ -486,16 +507,16 @@ impl RenderPlanningContext {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        Rc<SceneState>,
+        SceneState,
         Option<RenderPlanningObservation>,
-        Option<ProjectionSnapshot>,
-        usize,
+        Option<ProjectionHandle>,
+        Arc<RuntimeConfig>,
     ) {
         (
             self.scene,
             self.observation,
             self.acknowledged_projection,
-            self.clear_all_max_kept_windows,
+            self.config,
         )
     }
 }
@@ -504,7 +525,6 @@ impl RenderPlanningContext {
 pub(crate) struct RequestRenderPlanEffect {
     pub(crate) proposal_id: ProposalId,
     pub(crate) planning: RenderPlanningContext,
-    pub(crate) observation_id: ObservationId,
     pub(crate) render_decision: RenderDecision,
     pub(crate) animation_schedule: AnimationSchedule,
     pub(crate) requested_at: Millis,

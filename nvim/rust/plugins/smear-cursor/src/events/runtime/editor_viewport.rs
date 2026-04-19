@@ -102,12 +102,12 @@ impl EditorViewportCache {
     }
 
     #[cfg(test)]
-    fn store_for_test(&mut self, viewport: EditorViewport) {
+    pub(in crate::events) fn store_for_test(&mut self, viewport: EditorViewport) {
         self.cached = Some(viewport);
     }
 
     #[cfg(test)]
-    fn cached_for_test(&self) -> Option<EditorViewport> {
+    pub(in crate::events) fn cached_for_test(&self) -> Option<EditorViewport> {
         self.cached
     }
 }

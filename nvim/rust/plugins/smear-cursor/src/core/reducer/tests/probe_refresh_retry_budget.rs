@@ -1,6 +1,6 @@
 use super::*;
 
-fn exhausted_refresh_transition() -> (ObservationRequest, Transition) {
+fn exhausted_refresh_transition() -> (PendingObservation, Transition) {
     let scenario = ObservationScenario::new(cursor_color_probe_ready_state());
     let queued_newer = reduce(
         &scenario.based.next,
@@ -15,7 +15,7 @@ fn exhausted_refresh_transition() -> (ObservationRequest, Transition) {
     let retry_once_based = collect_observation_base(
         &retry_once.next,
         &scenario.request,
-        observation_basis(&scenario.request, Some(cursor(7, 9)), 28),
+        observation_basis(Some(cursor(7, 9)), 28),
         observation_motion(),
     );
     let retry_twice = reduce(
@@ -25,7 +25,7 @@ fn exhausted_refresh_transition() -> (ObservationRequest, Transition) {
     let retry_twice_based = collect_observation_base(
         &retry_twice.next,
         &scenario.request,
-        observation_basis(&scenario.request, Some(cursor(7, 10)), 29),
+        observation_basis(Some(cursor(7, 10)), 29),
         observation_motion(),
     );
     let exhausted = reduce(
@@ -41,7 +41,7 @@ fn refresh_budget_exhaustion_promotes_the_newer_ingress_request() {
 
     let replacement_request = exhausted
         .next
-        .active_observation_request()
+        .pending_observation()
         .cloned()
         .expect("newer ingress should take over after retry budget exhaustion");
     assert_ne!(replacement_request, request);
@@ -57,7 +57,7 @@ fn refresh_budget_exhaustion_requests_a_new_base_for_the_replacement_ingress() {
     let (_request, exhausted) = exhausted_refresh_transition();
     let replacement_request = exhausted
         .next
-        .active_observation_request()
+        .pending_observation()
         .cloned()
         .expect("replacement request after retry exhaustion");
 

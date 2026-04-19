@@ -160,9 +160,6 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
     let (enabled, setup_warning) = mutate_engine_state(|state| {
         state.shell.set_namespace_id(namespace_id);
         let runtime = state.core_state_mut().runtime_mut();
-        // Surprising: setup errors used to return before teardown, leaving stale callbacks alive.
-        // We disable+clear first, then re-enable only after options parse/apply succeeds.
-        // Setup defaults to enabled=true when the option is omitted.
         if !has_enabled_option {
             runtime.set_enabled(true);
         }

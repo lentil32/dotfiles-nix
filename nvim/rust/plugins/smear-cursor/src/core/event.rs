@@ -5,11 +5,11 @@ use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbeChunk;
 use crate::core::state::BackgroundProbeChunkMask;
 use crate::core::state::BufferPerfClass;
+use crate::core::state::CursorColorProbeGenerations;
 use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationMotion;
-use crate::core::state::ObservationRequest;
 use crate::core::state::PlannedRender;
 use crate::core::state::ProbeFailure;
 use crate::core::state::ProbeReuse;
@@ -17,7 +17,6 @@ use crate::core::state::RealizationDivergence;
 use crate::core::types::CursorPosition;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
-use crate::core::types::ProbeRequestId;
 use crate::core::types::ProposalId;
 use crate::core::types::TimerToken;
 
@@ -38,8 +37,9 @@ pub(crate) struct ExternalDemandQueuedEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObservationBaseCollectedEvent {
-    pub(crate) request: ObservationRequest,
+    pub(crate) observation_id: ObservationId,
     pub(crate) basis: ObservationBasis,
+    pub(crate) cursor_color_probe_generations: Option<CursorColorProbeGenerations>,
     pub(crate) motion: ObservationMotion,
 }
 
@@ -47,30 +47,25 @@ pub(crate) struct ObservationBaseCollectedEvent {
 pub(crate) enum ProbeReportedEvent {
     CursorColorReady {
         observation_id: ObservationId,
-        probe_request_id: ProbeRequestId,
         reuse: ProbeReuse,
         sample: Option<CursorColorSample>,
     },
     CursorColorFailed {
         observation_id: ObservationId,
-        probe_request_id: ProbeRequestId,
         failure: ProbeFailure,
     },
     BackgroundReady {
         observation_id: ObservationId,
-        probe_request_id: ProbeRequestId,
         reuse: ProbeReuse,
         batch: BackgroundProbeBatch,
     },
     BackgroundChunkReady {
         observation_id: ObservationId,
-        probe_request_id: ProbeRequestId,
         chunk: BackgroundProbeChunk,
         allowed_mask: BackgroundProbeChunkMask,
     },
     BackgroundFailed {
         observation_id: ObservationId,
-        probe_request_id: ProbeRequestId,
         failure: ProbeFailure,
     },
 }
@@ -98,7 +93,6 @@ pub(crate) enum ApplyReport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RenderPlanComputedEvent {
-    pub(crate) proposal_id: ProposalId,
     pub(crate) planned_render: Box<PlannedRender>,
     pub(crate) observed_at: Millis,
 }
@@ -146,10 +140,6 @@ pub(crate) struct EffectFailedEvent {
     pub(crate) observed_at: Millis,
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Reducer events stay fully typed values; boxing the largest payload would spread allocation through the state machine hot path."
-)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Event {
     Initialize(InitializeEvent),

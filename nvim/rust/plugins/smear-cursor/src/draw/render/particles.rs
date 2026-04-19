@@ -22,7 +22,6 @@ pub(super) fn draw_particles(
     let switch_ratio = if frame.particle_switch_octant_braille.is_finite() {
         frame.particle_switch_octant_braille.clamp(0.0, 1.0)
     } else {
-        // Surprising: invalid switch values are normalized in-band to keep rendering total.
         0.0
     };
     let lifetime_switch_octant_braille = switch_ratio * particle_max_lifetime;

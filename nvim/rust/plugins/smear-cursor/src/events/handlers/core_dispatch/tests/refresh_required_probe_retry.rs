@@ -3,7 +3,7 @@ use pretty_assertions::assert_eq;
 
 fn setup_refresh_required_retry() -> (
     CoreDispatchTestContext,
-    ObservationRequest,
+    PendingObservation,
     CoreState,
     CoreEvent,
     RecordingExecutor,
@@ -61,7 +61,7 @@ fn retry_edge_keeps_the_active_request_authoritative() {
 
     let retried_state = current_core_state();
     assert_eq!(retried_state.lifecycle(), Lifecycle::Observing);
-    assert_eq!(retried_state.active_observation_request(), Some(&request));
+    assert_eq!(retried_state.pending_observation(), Some(&request));
 }
 
 #[test]

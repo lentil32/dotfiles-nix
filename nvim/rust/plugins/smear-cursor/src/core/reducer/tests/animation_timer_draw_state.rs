@@ -5,25 +5,24 @@ fn staged_draw_state() -> CoreState {
 }
 
 #[test]
-fn animation_timer_draw_advances_scene_revision_and_marks_the_trail_dirty() {
+fn animation_timer_draw_advances_render_revisions_when_semantics_change() {
+    let previous_state = ready_state_with_observation(cursor(9, 9));
     let state = staged_draw_state();
     let scene = state.scene();
 
-    pretty_assert_eq!(scene.revision().value(), 1);
-    pretty_assert_eq!(
-        scene.dirty().entities(),
-        &std::collections::BTreeSet::from([SemanticEntityId::CursorTrail])
-    );
+    pretty_assert_eq!(scene.semantic_revision().value(), 1);
+    pretty_assert_eq!(scene.motion_revision().value(), 1);
+    assert_ne!(previous_state.scene().cursor_trail(), scene.cursor_trail());
+    assert!(scene.cursor_trail().is_some());
 }
 
 #[test]
-fn animation_timer_draw_populates_projection_cache_from_the_retained_observation() {
+fn animation_timer_draw_populates_retained_projection_from_the_retained_observation() {
     let state = staged_draw_state();
     let projection = state
         .scene()
-        .projection_entry()
-        .expect("projection cache after draw render")
-        .snapshot()
+        .retained_projection()
+        .expect("retained projection after draw render")
         .clone();
 
     pretty_assert_eq!(projection.witness().observation_id().value(), 9);
@@ -33,7 +32,7 @@ fn animation_timer_draw_populates_projection_cache_from_the_retained_observation
     );
     pretty_assert_eq!(
         projection
-            .logical_raster()
+            .cached_logical_raster()
             .clear()
             .map(|clear| clear.max_kept_windows),
         Some(state.runtime().config.max_kept_windows)
@@ -41,13 +40,12 @@ fn animation_timer_draw_populates_projection_cache_from_the_retained_observation
 }
 
 #[test]
-fn animation_timer_draw_stages_a_draw_proposal_against_the_projection_cache_target() {
+fn animation_timer_draw_stages_a_draw_proposal_against_the_retained_projection_target() {
     let state = staged_draw_state();
     let scene = state.scene();
     let projection = scene
-        .projection_entry()
-        .expect("projection cache entry after draw render")
-        .snapshot()
+        .retained_projection()
+        .expect("retained projection after draw render")
         .clone();
     let Some(proposal) = state.pending_proposal() else {
         panic!("expected staged render proposal");
@@ -58,8 +56,8 @@ fn animation_timer_draw_stages_a_draw_proposal_against_the_projection_cache_targ
 
     pretty_assert_eq!(
         scene
-            .projection_entry()
-            .expect("projection cache entry after draw render")
+            .retained_projection()
+            .expect("retained projection after draw render")
             .reuse_key()
             .target_cell_presentation(),
         proposal.side_effects().target_cell_presentation

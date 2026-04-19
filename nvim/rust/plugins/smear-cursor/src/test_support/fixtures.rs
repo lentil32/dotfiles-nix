@@ -124,25 +124,6 @@ pub(crate) fn cursor(row: u32, col: u32) -> CursorPosition {
     }
 }
 
-pub(crate) fn cursor_color_probe_witness(
-    window_handle: i64,
-    buffer_handle: i64,
-    changedtick: u64,
-    mode: &str,
-    cursor_position: Option<CursorPosition>,
-    colorscheme_generation: u64,
-) -> CursorColorProbeWitness {
-    cursor_color_probe_witness_with_cache_generation(
-        window_handle,
-        buffer_handle,
-        changedtick,
-        mode,
-        cursor_position,
-        colorscheme_generation,
-        0,
-    )
-}
-
 pub(crate) fn cursor_color_probe_witness_with_cache_generation(
     window_handle: i64,
     buffer_handle: i64,

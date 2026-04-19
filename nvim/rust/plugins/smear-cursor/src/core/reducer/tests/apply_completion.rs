@@ -12,12 +12,9 @@ fn render_plan_completion_threads_observation_buffer_handle_into_apply_effect() 
     else {
         panic!("expected render plan request after animation tick");
     };
-    let proposal_id = payload.proposal_id;
-
     let computed = reduce(
         &transition.next,
         Event::RenderPlanComputed(RenderPlanComputedEvent {
-            proposal_id,
             planned_render: Box::new(
                 crate::core::reducer::build_planned_render(
                     payload.planning,
@@ -53,7 +50,7 @@ fn apply_completed_advances_acknowledged_projection() {
         planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 62);
     let acknowledged = staged
         .pending_proposal()
-        .and_then(|proposal| proposal.patch().basis().target().cloned())
+        .and_then(|proposal| proposal.patch().basis().target_handle().cloned())
         .expect("target projection for apply completion");
 
     let completed = reduce(
@@ -68,7 +65,17 @@ fn apply_completed_advances_acknowledged_projection() {
     pretty_assert_eq!(completed.next.lifecycle(), Lifecycle::Ready);
     pretty_assert_eq!(
         completed.next.realization(),
-        &RealizationLedger::Consistent { acknowledged }
+        &RealizationLedger::Consistent {
+            acknowledged: acknowledged.clone(),
+        }
+    );
+    assert!(
+        completed
+            .next
+            .realization()
+            .trusted_acknowledged_for_patch()
+            .expect("acknowledged realization handle after apply completion")
+            .ptr_eq(&acknowledged)
     );
 }
 
@@ -78,7 +85,7 @@ fn render_cleanup_applied_clears_trusted_realization_basis() {
         planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 64);
     let acknowledged = staged
         .pending_proposal()
-        .and_then(|proposal| proposal.patch().basis().target().cloned())
+        .and_then(|proposal| proposal.patch().basis().target_handle().cloned())
         .expect("target projection for cleanup");
     let ready = reduce(
         &staged,
@@ -122,7 +129,7 @@ fn untrusted_target_basis_derives_replace_patch() {
         planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 67);
     let target = staged
         .pending_proposal()
-        .and_then(|proposal| proposal.patch().basis().target().cloned())
+        .and_then(|proposal| proposal.patch().basis().target_handle().cloned())
         .expect("target projection for cleanup noop regression");
     let ready = reduce(
         &staged,
@@ -174,8 +181,10 @@ fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
+        .enter_planning(proposal_id)
+        .expect("staging clear proposal requires a ready observation")
         .enter_applying(proposal)
-        .expect("staging clear proposal requires retained observation");
+        .expect("staging clear proposal requires the matching planning proposal");
 
     let completed = reduce(
         &staged,

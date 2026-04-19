@@ -2,7 +2,9 @@ use super::RuntimeOptionsEffects;
 use super::RuntimeOptionsPatch;
 use super::RuntimeState;
 use super::types::AnimationPhase;
+use super::types::CachedParticleArtifacts;
 use super::types::SettlingWindow;
+use crate::config::DerivedConfigCache;
 use crate::core::types::StrokeId;
 use crate::types::Particle;
 use crate::types::ParticleScreenCellsMode;
@@ -17,48 +19,22 @@ use crate::types::current_visual_cursor_anchor;
 use std::sync::Arc;
 
 impl RuntimeState {
-    fn active_particles(&self) -> &[Particle] {
-        if let Some(source) = self.preview_particles_source.as_ref()
-            && !self.preview_particles_materialized
-        {
-            return source.as_slice();
-        }
-        self.particles.as_slice()
-    }
-
-    pub(super) fn materialize_preview_particles(&mut self) {
-        let Some(source) = self.preview_particles_source.as_ref() else {
-            return;
-        };
-        if self.preview_particles_materialized {
-            return;
-        }
-        let source_particles = source.as_slice();
-        crate::events::record_planning_preview_copied_particles(source_particles.len());
-        self.particles.clear();
-        self.particles.extend_from_slice(source_particles);
-        self.preview_particles_materialized = true;
-    }
-
     pub(super) fn set_particles_vec(&mut self, particles: Vec<Particle>) {
-        if self.preview_particles_source.is_some() {
-            self.preview_particles_materialized = true;
-        }
         self.particles = particles;
-        self.invalidate_cached_particle_artifacts();
+        self.purge_cached_particle_artifacts();
     }
 
     pub(crate) fn reclaim_preview_particles_scratch(&mut self, mut scratch: Vec<Particle>) {
         scratch.clear();
-        if self.preview_particles_scratch.capacity() < scratch.capacity() {
-            self.preview_particles_scratch = scratch;
+        if self.caches.scratch_buffers.preview_particles.capacity() < scratch.capacity() {
+            self.caches.scratch_buffers.preview_particles = scratch;
         } else {
-            self.preview_particles_scratch.clear();
+            self.caches.scratch_buffers.preview_particles.clear();
         }
     }
 
     pub(crate) fn take_render_step_samples_scratch(&mut self) -> Vec<RenderStepSample> {
-        std::mem::take(&mut self.render_step_samples_scratch)
+        std::mem::take(&mut self.caches.scratch_buffers.render_step_samples)
     }
 
     pub(crate) fn reclaim_render_step_samples_scratch(
@@ -66,26 +42,35 @@ impl RuntimeState {
         mut scratch: Vec<RenderStepSample>,
     ) {
         scratch.clear();
-        if self.render_step_samples_scratch.capacity() < scratch.capacity() {
-            self.render_step_samples_scratch = scratch;
+        if self.caches.scratch_buffers.render_step_samples.capacity() < scratch.capacity() {
+            self.caches.scratch_buffers.render_step_samples = scratch;
         } else {
-            self.render_step_samples_scratch.clear();
+            self.caches.scratch_buffers.render_step_samples.clear();
         }
     }
 
-    pub(super) fn invalidate_cached_particle_artifacts(&mut self) {
-        self.aggregated_particle_cells = Arc::default();
-        self.aggregated_particle_cells_dirty = !self.particles.is_empty();
-        self.particle_screen_cells = Arc::default();
-        self.particle_screen_cells_dirty = !self.particles.is_empty();
+    pub(crate) fn purge_cached_particle_artifacts(&mut self) {
+        self.caches.particle_artifacts.cached = None;
     }
 
-    pub(crate) fn render_static_config(&self) -> Arc<StaticRenderConfig> {
-        Arc::clone(&self.render_static_config)
+    pub(crate) fn static_render_config(&self) -> Arc<StaticRenderConfig> {
+        Arc::new(self.derived_config.static_render_config())
     }
 
-    pub(crate) fn refresh_render_static_config(&mut self) {
-        self.render_static_config = Arc::new(StaticRenderConfig::from(&self.config));
+    pub(crate) fn projection_policy(&self) -> super::ProjectionPolicySnapshot {
+        self.projection_policy
+    }
+
+    pub(crate) fn commit_runtime_config_update(&mut self) {
+        let config_revision = self.config_revision.next();
+        let derived_config = DerivedConfigCache::new(&self.config);
+        self.projection_policy = self
+            .projection_policy
+            .refreshed(&self.derived_config, &derived_config);
+        // Derived config is cache-only; downstream freshness keys from the
+        // authoritative runtime revision instead of a cache-local mirror.
+        self.config_revision = config_revision;
+        self.derived_config = derived_config;
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -144,31 +129,28 @@ impl RuntimeState {
     }
 
     pub(crate) fn trail_origin_corners(&self) -> [Point; 4] {
-        self.trail_origin_corners
+        self.trail.origin_corners
     }
 
     pub(crate) fn target_corners(&self) -> [Point; 4] {
-        self.target_corners
+        self.target.corners()
     }
 
     pub(crate) fn target_position(&self) -> Point {
-        self.transient.target_position
+        self.target.position
     }
 
     pub(crate) fn current_visual_cursor_anchor(&self) -> Point {
-        current_visual_cursor_anchor(
-            &self.current_corners,
-            &self.target_corners,
-            self.transient.target_position,
-        )
+        let target_corners = self.target_corners();
+        current_visual_cursor_anchor(&self.current_corners, &target_corners, self.target.position)
     }
 
     pub(crate) fn retarget_epoch(&self) -> u64 {
-        self.transient.retarget_epoch
+        self.target.retarget_epoch
     }
 
     pub(crate) fn trail_stroke_id(&self) -> StrokeId {
-        self.transient.trail_stroke_id
+        self.trail.stroke_id
     }
 
     #[cfg(test)]
@@ -180,15 +162,18 @@ impl RuntimeState {
     }
 
     pub(crate) fn start_new_trail_stroke(&mut self) {
-        self.transient.trail_stroke_id = self.transient.trail_stroke_id.next();
+        self.trail.stroke_id = self.trail.stroke_id.next();
     }
 
-    pub(crate) fn last_mode_was_cmdline(&self) -> Option<bool> {
-        self.transient.last_mode_was_cmdline
+    pub(crate) fn crossed_cmdline_boundary(&self, current_is_cmdline: bool) -> bool {
+        self.transient.last_observed_mode.crossed_cmdline_boundary(
+            super::types::LastObservedMode::from_cmdline(current_is_cmdline),
+        )
     }
 
-    pub(crate) fn set_last_mode_was_cmdline(&mut self, value: bool) {
-        self.transient.last_mode_was_cmdline = Some(value);
+    pub(crate) fn record_observed_mode(&mut self, current_is_cmdline: bool) {
+        self.transient.last_observed_mode =
+            super::types::LastObservedMode::from_cmdline(current_is_cmdline);
     }
 
     pub(crate) fn velocity_corners(&self) -> [Point; 4] {
@@ -200,26 +185,15 @@ impl RuntimeState {
     }
 
     pub(crate) fn trail_elapsed_ms(&self) -> [f64; 4] {
-        self.trail_elapsed_ms
+        self.trail.elapsed_ms
     }
 
     pub(crate) fn particles(&self) -> &[Particle] {
-        self.active_particles()
+        self.particles.as_slice()
     }
 
     #[cfg(debug_assertions)]
     pub(crate) fn debug_assert_invariants(&self) {
-        debug_assert_eq!(
-            self.preview_particles_source.is_some(),
-            self.preview_baseline.is_some(),
-            "preview particle source and baseline must be present together"
-        );
-        if self.preview_particles_source.is_none() {
-            debug_assert!(
-                !self.preview_particles_materialized,
-                "preview particles cannot be materialized without a preview source"
-            );
-        }
         if matches!(
             self.animation_phase,
             AnimationPhase::Uninitialized | AnimationPhase::Idle | AnimationPhase::Settling(_)
@@ -231,7 +205,7 @@ impl RuntimeState {
         }
         if let AnimationPhase::Settling(phase) = &self.animation_phase {
             debug_assert!(
-                self.transient.tracked_location.is_some(),
+                self.target.tracked_location.is_some(),
                 "settling requires transient tracking ownership"
             );
             debug_assert!(
@@ -248,73 +222,100 @@ impl RuntimeState {
         &mut self,
         screen_cells_mode: ParticleScreenCellsMode,
     ) -> (SharedAggregatedParticleCells, SharedParticleScreenCells) {
-        match screen_cells_mode {
-            ParticleScreenCellsMode::Skip => {
-                if self.aggregated_particle_cells_dirty {
-                    crate::events::record_particle_aggregation(self.particles().len());
-                    let mut scratch = std::mem::take(&mut self.particle_aggregation_scratch);
-                    let artifacts = {
-                        let particles = self.particles();
-                        aggregate_particle_artifacts_with_scratch(
-                            particles,
-                            ParticleScreenCellsMode::Skip,
-                            &mut scratch,
-                        )
-                    };
-                    self.particle_aggregation_scratch = scratch;
-                    self.aggregated_particle_cells = artifacts.aggregated_particle_cells;
-                    self.aggregated_particle_cells_dirty = false;
+        if self.caches.particle_artifacts.cached.is_none() {
+            let cached = if self.particles.is_empty() {
+                CachedParticleArtifacts {
+                    aggregated_particle_cells: Arc::default(),
+                    particle_screen_cells: match screen_cells_mode {
+                        ParticleScreenCellsMode::Skip => None,
+                        ParticleScreenCellsMode::Collect => Some(Arc::default()),
+                    },
                 }
-
-                (Arc::clone(&self.aggregated_particle_cells), Arc::default())
-            }
-            ParticleScreenCellsMode::Collect => {
-                if self.particle_screen_cells_dirty {
-                    if self.aggregated_particle_cells_dirty {
-                        crate::events::record_particle_aggregation(self.particles().len());
-                        let mut scratch = std::mem::take(&mut self.particle_aggregation_scratch);
-                        let artifacts = {
-                            let particles = self.particles();
-                            aggregate_particle_artifacts_with_scratch(
-                                particles,
-                                ParticleScreenCellsMode::Collect,
-                                &mut scratch,
-                            )
-                        };
-                        self.particle_aggregation_scratch = scratch;
-                        self.aggregated_particle_cells = artifacts.aggregated_particle_cells;
-                        self.aggregated_particle_cells_dirty = false;
-                        self.particle_screen_cells = artifacts.particle_screen_cells;
-                    } else {
-                        self.particle_screen_cells =
-                            aggregate_particle_screen_cells(&self.aggregated_particle_cells);
+            } else {
+                crate::events::record_particle_aggregation(self.particles().len());
+                let mut scratch =
+                    std::mem::take(&mut self.caches.scratch_buffers.particle_aggregation);
+                let cached = {
+                    let particles = self.particles();
+                    let artifacts = aggregate_particle_artifacts_with_scratch(
+                        particles,
+                        screen_cells_mode,
+                        &mut scratch,
+                    );
+                    CachedParticleArtifacts {
+                        aggregated_particle_cells: artifacts.aggregated_particle_cells,
+                        particle_screen_cells: match screen_cells_mode {
+                            ParticleScreenCellsMode::Skip => None,
+                            ParticleScreenCellsMode::Collect => {
+                                Some(artifacts.particle_screen_cells)
+                            }
+                        },
                     }
-                    self.particle_screen_cells_dirty = false;
-                }
+                };
+                self.caches.scratch_buffers.particle_aggregation = scratch;
+                cached
+            };
+            self.caches.particle_artifacts.cached = Some(cached);
+        }
 
+        if matches!(screen_cells_mode, ParticleScreenCellsMode::Collect)
+            && self
+                .caches
+                .particle_artifacts
+                .cached
+                .as_ref()
+                .is_some_and(|cached| cached.particle_screen_cells.is_none())
+        {
+            let particle_screen_cells = {
+                let Some(cached) = self.caches.particle_artifacts.cached.as_ref() else {
+                    unreachable!("particle artifact cache must exist before deriving screen cells");
+                };
+                aggregate_particle_screen_cells(&cached.aggregated_particle_cells)
+            };
+            let Some(cached) = self.caches.particle_artifacts.cached.as_mut() else {
+                unreachable!("particle artifact cache must exist before storing screen cells");
+            };
+            cached.particle_screen_cells = Some(particle_screen_cells);
+        }
+
+        let Some(cached) = self.caches.particle_artifacts.cached.as_ref() else {
+            unreachable!("particle artifact cache must be materialized before sharing");
+        };
+
+        match screen_cells_mode {
+            ParticleScreenCellsMode::Skip => (
+                Arc::clone(&cached.aggregated_particle_cells),
+                Arc::default(),
+            ),
+            ParticleScreenCellsMode::Collect => {
+                let Some(particle_screen_cells) = cached.particle_screen_cells.as_ref() else {
+                    unreachable!(
+                        "particle screen cells must be materialized before collect-mode access"
+                    );
+                };
                 (
-                    Arc::clone(&self.aggregated_particle_cells),
-                    Arc::clone(&self.particle_screen_cells),
+                    Arc::clone(&cached.aggregated_particle_cells),
+                    Arc::clone(particle_screen_cells),
                 )
             }
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn shared_aggregated_particle_cells(&mut self) -> SharedAggregatedParticleCells {
         self.shared_particle_artifacts(ParticleScreenCellsMode::Skip)
             .0
     }
 
+    #[cfg(test)]
     pub(crate) fn shared_particle_screen_cells(&mut self) -> SharedParticleScreenCells {
         self.shared_particle_artifacts(ParticleScreenCellsMode::Collect)
             .1
     }
 
     pub(crate) fn take_particles(&mut self) -> Vec<Particle> {
-        self.materialize_preview_particles();
         let particles = std::mem::take(&mut self.particles);
-        self.preview_particles_materialized = self.preview_particles_source.is_some();
-        self.invalidate_cached_particle_artifacts();
+        self.purge_cached_particle_artifacts();
         particles
     }
 
@@ -324,63 +325,59 @@ impl RuntimeState {
 
     #[cfg(test)]
     pub(crate) fn preview_particles_scratch_capacity(&self) -> usize {
-        self.preview_particles_scratch.capacity()
+        self.caches.scratch_buffers.preview_particles.capacity()
     }
 
     #[cfg(test)]
     pub(crate) fn preview_particles_scratch_ptr(&self) -> *const Particle {
-        self.preview_particles_scratch.as_ptr()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn particles_storage_capacity(&self) -> usize {
-        self.particles.capacity()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn particles_storage_ptr(&self) -> *const Particle {
-        self.particles.as_ptr()
+        self.caches.scratch_buffers.preview_particles.as_ptr()
     }
 
     #[cfg(test)]
     pub(crate) fn render_step_samples_scratch_capacity(&self) -> usize {
-        self.render_step_samples_scratch.capacity()
+        self.caches.scratch_buffers.render_step_samples.capacity()
     }
 
     #[cfg(test)]
     pub(crate) fn render_step_samples_scratch_ptr(&self) -> *const RenderStepSample {
-        self.render_step_samples_scratch.as_ptr()
+        self.caches.scratch_buffers.render_step_samples.as_ptr()
     }
 
     #[cfg(test)]
-    pub(crate) fn preview_particles_are_materialized(&self) -> bool {
-        self.preview_particles_materialized
+    pub(crate) fn has_cached_aggregated_particle_cells(&self) -> bool {
+        self.caches.particle_artifacts.cached.is_some()
     }
 
     #[cfg(test)]
-    pub(crate) fn aggregated_particle_cells_cache_is_dirty(&self) -> bool {
-        self.aggregated_particle_cells_dirty
-    }
-
-    #[cfg(test)]
-    pub(crate) fn particle_screen_cells_cache_is_dirty(&self) -> bool {
-        self.particle_screen_cells_dirty
+    pub(crate) fn has_cached_particle_screen_cells(&self) -> bool {
+        self.caches
+            .particle_artifacts
+            .cached
+            .as_ref()
+            .is_some_and(|cached| cached.particle_screen_cells.is_some())
     }
 
     #[cfg(test)]
     pub(crate) fn particle_aggregation_scratch_index_capacity(&self) -> usize {
-        self.particle_aggregation_scratch.cell_index_capacity()
+        self.caches
+            .scratch_buffers
+            .particle_aggregation
+            .cell_index_capacity()
     }
 
     #[cfg(test)]
     pub(crate) fn particle_aggregation_scratch_cells_capacity(&self) -> usize {
-        self.particle_aggregation_scratch
+        self.caches
+            .scratch_buffers
+            .particle_aggregation
             .aggregated_cells_capacity()
     }
 
     #[cfg(test)]
     pub(crate) fn particle_aggregation_scratch_screen_cells_capacity(&self) -> usize {
-        self.particle_aggregation_scratch
+        self.caches
+            .scratch_buffers
+            .particle_aggregation
             .particle_screen_cells_capacity()
     }
 

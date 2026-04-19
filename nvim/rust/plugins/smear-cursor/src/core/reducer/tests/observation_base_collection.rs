@@ -36,10 +36,12 @@ fn ready_state_for_observation_base_case(
     });
 
     if retain_cursor_color {
-        ready.enter_ready(observation_snapshot_with_cursor_color(
-            cursor(7, 8),
-            0x00AB_CDEF,
-        ))
+        ready
+            .with_ready_observation(observation_snapshot_with_cursor_color(
+                cursor(7, 8),
+                0x00AB_CDEF,
+            ))
+            .expect("primed state should accept a retained ready observation")
     } else {
         ready
     }
@@ -78,7 +80,7 @@ proptest! {
         )
         .next;
         let request = active_request(&observing);
-        let basis = observation_basis_in_mode(&request, Some(cursor(7, 8)), 26, mode.mode());
+        let basis = observation_basis_in_mode(Some(cursor(7, 8)), 26, mode.mode());
         let based =
             collect_observation_base(&observing, &request, basis.clone(), observation_motion());
         let observation = based
@@ -93,7 +95,7 @@ proptest! {
         let expected_probe_policy = expected_probe_policy(
             request.demand().kind(),
             request.demand().buffer_perf_class(),
-            retained_cursor_color_fallback(&observing).as_ref(),
+            observation_cursor_color_fallback(&observing).as_ref(),
         );
 
         if request_needs_cursor_color && mode_needs_cursor_color {
@@ -101,15 +103,16 @@ proptest! {
             prop_assert_eq!(
                 based.effects,
                 vec![Effect::RequestProbe(RequestProbeEffect {
+                    observation_id: request.observation_id(),
                     observation_basis: Box::new(basis),
-                    probe_request_id: ProbeKind::CursorColor
-                        .request_id(request.observation_id()),
+                    cursor_color_probe_generations: observation
+                        .cursor_color_probe_generations(),
                     kind: ProbeKind::CursorColor,
                     cursor_position_policy: cursor_position_policy(&observing),
                     buffer_perf_class: request.demand().buffer_perf_class(),
                     probe_policy: expected_probe_policy,
                     background_chunk: None,
-                    cursor_color_fallback: retained_cursor_color_fallback(&observing),
+                    cursor_color_fallback: observation_cursor_color_fallback(&observing),
                 })],
             );
             prop_assert!(observation.probes().cursor_color().is_pending());
@@ -118,25 +121,21 @@ proptest! {
 
         match based.effects.as_slice() {
             [Effect::RequestProbe(RequestProbeEffect {
+                observation_id,
                 observation_basis,
-                probe_request_id,
                 kind: ProbeKind::Background,
                 cursor_position_policy: effect_cursor_position_policy,
                 buffer_perf_class: effect_perf_class,
                 probe_policy,
                 background_chunk,
                 cursor_color_fallback,
+                ..
             })] => {
-                let expected_background_chunk = observation
-                    .background_progress()
-                    .and_then(crate::core::state::BackgroundProbeProgress::next_chunk);
+                let expected_background_chunk = observation.probes().background().next_chunk();
                 prop_assert_eq!(based.next.lifecycle(), Lifecycle::Observing);
                 prop_assert!(request.probes().background());
+                prop_assert_eq!(observation_id, &request.observation_id());
                 prop_assert_eq!(observation_basis.as_ref(), &basis);
-                prop_assert_eq!(
-                    probe_request_id,
-                    &ProbeKind::Background.request_id(request.observation_id()),
-                );
                 prop_assert_eq!(
                     effect_cursor_position_policy,
                     &cursor_position_policy(&observing)
@@ -193,14 +192,15 @@ fn compatible_probe_report_stores_cursor_color_probe_in_snapshot() {
     )
     .next;
     let request = observing
-        .active_observation_request()
+        .pending_observation()
         .cloned()
         .expect("active observation");
     let based = reduce(
         &observing,
         Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: observation_basis(&request, Some(cursor(7, 8)), 26),
+            observation_id: request.observation_id(),
+            basis: observation_basis(Some(cursor(7, 8)), 26),
+            cursor_color_probe_generations: Some(cursor_color_probe_generations()),
             motion: observation_motion(),
         }),
     );

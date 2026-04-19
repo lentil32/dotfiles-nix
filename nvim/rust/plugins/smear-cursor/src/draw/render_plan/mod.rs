@@ -1,8 +1,8 @@
 use crate::core::types::ArcLenQ16;
 use crate::draw::PARTICLE_ZINDEX_OFFSET;
 use crate::octant_chars::OCTANT_CHARACTERS;
-use crate::types::PlannerFrame as RenderFrame;
 use crate::types::Point;
+use crate::types::RenderFrame;
 use crate::types::smoothstep01;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

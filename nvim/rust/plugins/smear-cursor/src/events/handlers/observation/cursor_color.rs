@@ -6,11 +6,11 @@ use crate::core::effect::ProbePolicy;
 use crate::core::effect::RequestProbeEffect;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ProbeReportedEvent;
+use crate::core::state::CursorColorProbeGenerations;
 use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
 use crate::core::state::ProbeFailure;
 use crate::core::state::ProbeReuse;
-use crate::core::types::CursorPosition;
 use crate::events::cursor::sampled_cursor_color_at_current_position;
 use crate::events::runtime::cached_cursor_color_sample_for_probe;
 use crate::events::runtime::cursor_color_cache_generation;
@@ -22,28 +22,10 @@ use crate::events::runtime::record_cursor_color_probe_reuse;
 use crate::events::runtime::store_cursor_color_sample;
 use nvim_oxi::Result;
 
-pub(super) fn current_cursor_color_probe_witness(
-    editor: &CurrentEditorSnapshot,
-    cursor_position: Option<CursorPosition>,
-) -> Result<CursorColorProbeWitness> {
-    let window = editor.current_window()?;
-    let buffer = editor.current_buffer()?;
-    let mode = editor.mode();
-    let window_handle = i64::from(window.handle());
-    let buffer_handle = i64::from(buffer.handle());
-    let text_revision = editor.current_text_revision()?.value();
-    let colorscheme_generation = cursor_color_colorscheme_generation()?;
-    let cache_generation = cursor_color_cache_generation()?;
-    // Cursor-color reuse stays observation-scoped until the plugin has a true highlight
-    // invalidation signal that covers extmarks, semantic tokens, and ad-hoc highlight writes.
-    Ok(CursorColorProbeWitness::new(
-        window_handle,
-        buffer_handle,
-        text_revision,
-        mode.to_owned(),
-        cursor_position,
-        colorscheme_generation,
-        cache_generation,
+pub(super) fn current_cursor_color_probe_generations() -> Result<CursorColorProbeGenerations> {
+    Ok(CursorColorProbeGenerations::new(
+        cursor_color_colorscheme_generation()?,
+        cursor_color_cache_generation()?,
     ))
 }
 
@@ -184,8 +166,7 @@ fn cursor_color_ready_event(
     sample: Option<CursorColorSample>,
 ) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorReady {
-        observation_id: payload.observation_basis.observation_id(),
-        probe_request_id: payload.probe_request_id,
+        observation_id: payload.observation_id,
         reuse,
         sample,
     })
@@ -193,8 +174,7 @@ fn cursor_color_ready_event(
 
 fn cursor_color_failed_event(payload: &RequestProbeEffect) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorFailed {
-        observation_id: payload.observation_basis.observation_id(),
-        probe_request_id: payload.probe_request_id,
+        observation_id: payload.observation_id,
         failure: ProbeFailure::ShellReadFailed,
     })
 }
@@ -203,8 +183,8 @@ pub(super) fn collect_cursor_color_report(
     payload: &RequestProbeEffect,
     same_reducer_wave: bool,
 ) -> CoreEvent {
-    let Some(expected_witness) = payload.observation_basis.cursor_color_witness() else {
-        crate::events::logging::warn("cursor color probe missing witness");
+    let Some(expected_witness) = payload.cursor_color_probe_witness() else {
+        crate::events::logging::warn("cursor color probe missing boundary-derived witness");
         return cursor_color_failed_event(payload);
     };
     let probe_policy = payload.probe_policy();
@@ -212,7 +192,7 @@ pub(super) fn collect_cursor_color_report(
         CursorColorProbeValidation::Exact(expected_witness.clone())
     } else {
         match current_cursor_color_probe_validation(
-            expected_witness,
+            &expected_witness,
             payload.cursor_position_policy,
             probe_policy,
         ) {

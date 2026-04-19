@@ -1,5 +1,5 @@
 use super::PatchBasis;
-use super::ProjectionSnapshot;
+use super::ProjectionHandle;
 use super::ScenePatch;
 use super::ScenePatchKind;
 use crate::core::realization::PaletteSpec;
@@ -9,6 +9,9 @@ use crate::core::runtime_reducer::RenderSideEffects;
 use crate::core::types::Millis;
 use crate::core::types::ProposalId;
 use thiserror::Error;
+
+#[cfg(test)]
+use super::RetainedProjection;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct DegradedApplyMetrics {
@@ -90,17 +93,20 @@ pub(crate) enum RealizationLedger {
     #[default]
     Cleared,
     Consistent {
-        acknowledged: ProjectionSnapshot,
+        // authoritative: shell-trusted projection currently acknowledged.
+        acknowledged: ProjectionHandle,
     },
     Diverged {
-        last_consistent: Option<ProjectionSnapshot>,
+        // snapshot: most recent trusted projection before divergence.
+        last_consistent: Option<ProjectionHandle>,
+        // authoritative: current reason reducer trust diverged from shell state.
         divergence: RealizationDivergence,
     },
 }
 
 impl RealizationLedger {
     #[cfg(test)]
-    pub(crate) const fn last_consistent(&self) -> Option<&ProjectionSnapshot> {
+    pub(crate) fn last_consistent(&self) -> Option<&ProjectionHandle> {
         match self {
             Self::Cleared => None,
             Self::Consistent { acknowledged } => Some(acknowledged),
@@ -110,7 +116,7 @@ impl RealizationLedger {
         }
     }
 
-    pub(crate) const fn trusted_acknowledged_for_patch(&self) -> Option<&ProjectionSnapshot> {
+    pub(crate) fn trusted_acknowledged_for_patch(&self) -> Option<&ProjectionHandle> {
         match self {
             Self::Cleared | Self::Diverged { .. } => None,
             Self::Consistent { acknowledged } => Some(acknowledged),
@@ -133,14 +139,14 @@ impl RealizationLedger {
         }
     }
 
-    pub(crate) fn acknowledge(target: Option<ProjectionSnapshot>) -> Self {
+    pub(crate) fn acknowledge(target: Option<ProjectionHandle>) -> Self {
         target.map_or(Self::Cleared, |acknowledged| Self::Consistent {
             acknowledged,
         })
     }
 
     pub(crate) fn diverged_from(
-        last_consistent: Option<ProjectionSnapshot>,
+        last_consistent: Option<ProjectionHandle>,
         divergence: RealizationDivergence,
     ) -> Self {
         Self::Diverged {
@@ -148,6 +154,24 @@ impl RealizationLedger {
             divergence,
         }
     }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_invariants(&self) {
+        match self {
+            Self::Cleared => {}
+            Self::Consistent { acknowledged } => acknowledged.debug_assert_invariants(),
+            Self::Diverged {
+                last_consistent, ..
+            } => {
+                if let Some(last_consistent) = last_consistent {
+                    last_consistent.debug_assert_invariants();
+                }
+            }
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub(crate) fn debug_assert_invariants(&self) {}
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -271,7 +295,6 @@ pub(crate) enum ProposalShapeError {
 pub(crate) enum ProposalExecution {
     Draw {
         patch: ScenePatch,
-        target_projection: ProjectionSnapshot,
         realization: RealizationDraw,
     },
     Clear {
@@ -294,16 +317,13 @@ impl ProposalExecution {
     ) -> Result<Self, ProposalShapeError> {
         match patch.kind() {
             ScenePatchKind::Clear => Err(ProposalShapeError::DrawReachedClearPatch),
-            ScenePatchKind::Noop | ScenePatchKind::Replace => patch
-                .basis()
-                .target()
-                .cloned()
-                .map(|target_projection| Self::Draw {
-                    patch,
-                    target_projection,
-                    realization,
-                })
-                .ok_or(ProposalShapeError::DrawMissingTargetProjection),
+            ScenePatchKind::Noop | ScenePatchKind::Replace => {
+                if patch.basis().target_handle().is_some() {
+                    Ok(Self::Draw { patch, realization })
+                } else {
+                    Err(ProposalShapeError::DrawMissingTargetProjection)
+                }
+            }
         }
     }
 
@@ -348,13 +368,12 @@ impl ProposalExecution {
     }
 
     #[cfg(test)]
-    pub(crate) fn draw_realization(&self) -> Option<(&ProjectionSnapshot, &RealizationDraw)> {
+    pub(crate) fn draw_realization(&self) -> Option<(&RetainedProjection, &RealizationDraw)> {
         match self {
-            Self::Draw {
-                target_projection,
-                realization,
-                ..
-            } => Some((target_projection, realization)),
+            Self::Draw { patch, realization } => patch
+                .basis()
+                .target()
+                .map(|target_projection| (target_projection, realization)),
             Self::Clear { .. } | Self::Noop { .. } | Self::Failure { .. } => None,
         }
     }
@@ -556,8 +575,9 @@ mod tests {
     use crate::core::runtime_reducer::RenderSideEffects;
     use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::state::PatchBasis;
-    use crate::core::state::ProjectionSnapshot;
+    use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ProjectionWitness;
+    use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
     use crate::core::state::ScenePatchKind;
     use crate::core::types::CursorCol;
@@ -565,9 +585,10 @@ mod tests {
     use crate::core::types::IngressSeq;
     use crate::core::types::Millis;
     use crate::core::types::ObservationId;
+    use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::ProposalId;
-    use crate::core::types::SceneRevision;
+    use crate::core::types::RenderRevision;
     use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::CellOp;
     use crate::test_support::proptest::pure_config;
@@ -578,19 +599,59 @@ mod tests {
     #[derive(Clone, Debug)]
     struct PatchFixture {
         patch: ScenePatch,
-        expected_target: Option<ProjectionSnapshot>,
+        expected_target: Option<RetainedProjection>,
     }
 
-    fn projection_snapshot_with_ingress_seq(ingress_seq: u64) -> ProjectionSnapshot {
-        ProjectionSnapshot::new(
+    fn retained_projection_with_ingress_seq(ingress_seq: u64) -> RetainedProjection {
+        RetainedProjection::new(
             ProjectionWitness::new(
-                SceneRevision::INITIAL,
+                RenderRevision::INITIAL,
                 ObservationId::from_ingress_seq(IngressSeq::new(ingress_seq)),
                 ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
                 ProjectorRevision::CURRENT,
             ),
+            ProjectionReuseKey::new(
+                None,
+                None,
+                None,
+                TargetCellPresentation::None,
+                ProjectionPolicyRevision::INITIAL,
+            ),
+            crate::draw::render_plan::PlannerState::default(),
             LogicalRaster::new(None, Arc::from(Vec::<CellOp>::new())),
         )
+    }
+
+    #[test]
+    fn realization_ledger_debug_assert_rejects_stale_projection_materialization() {
+        let stale_realization =
+            crate::core::realization::realize_logical_raster(&LogicalRaster::new(
+                None,
+                Arc::from([CellOp {
+                    row: 4,
+                    col: 6,
+                    zindex: 2,
+                    glyph: crate::draw::render_plan::Glyph::Static("X"),
+                    highlight: crate::draw::render_plan::HighlightRef::Normal(
+                        crate::draw::render_plan::HighlightLevel::from_raw_clamped(3),
+                    ),
+                }]),
+            ));
+        let ledger = RealizationLedger::acknowledge(Some(
+            retained_projection_with_ingress_seq(7)
+                .with_cached_realization_for_test(stale_realization)
+                .into_handle(),
+        ));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ledger.debug_assert_invariants();
+        }));
+
+        if cfg!(debug_assertions) {
+            assert!(result.is_err());
+        } else {
+            assert!(result.is_ok());
+        }
     }
 
     fn draw_plan() -> RealizationDraw {
@@ -609,6 +670,7 @@ mod tests {
                 aggregated_particle_cells: Arc::default(),
                 particle_screen_cells: Arc::default(),
                 color_at_cursor: None,
+                projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
                 static_config: Arc::new(crate::types::StaticRenderConfig {
                     cursor_color: None,
                     cursor_color_insert_mode: None,
@@ -718,26 +780,26 @@ mod tests {
                 expected_target: None,
             }),
             (1_u64..=u16::MAX as u64).prop_map(|seq| {
-                let target = projection_snapshot_with_ingress_seq(seq);
+                let target = retained_projection_with_ingress_seq(seq);
                 PatchFixture {
                     patch: ScenePatch::derive(PatchBasis::new(
-                        Some(target.clone()),
-                        Some(target.clone()),
+                        Some(target.clone().into()),
+                        Some(target.clone().into()),
                     )),
                     expected_target: Some(target),
                 }
             }),
             (1_u64..=u16::MAX as u64).prop_map(|seq| PatchFixture {
                 patch: ScenePatch::derive(PatchBasis::new(
-                    Some(projection_snapshot_with_ingress_seq(seq)),
+                    Some(retained_projection_with_ingress_seq(seq).into()),
                     None,
                 )),
                 expected_target: None,
             }),
             (1_u64..=u16::MAX as u64).prop_map(|seq| {
-                let target = projection_snapshot_with_ingress_seq(seq);
+                let target = retained_projection_with_ingress_seq(seq);
                 PatchFixture {
-                    patch: ScenePatch::derive(PatchBasis::new(None, Some(target.clone()))),
+                    patch: ScenePatch::derive(PatchBasis::new(None, Some(target.clone().into()))),
                     expected_target: Some(target),
                 }
             }),
@@ -746,11 +808,11 @@ mod tests {
                 (u16::MAX as u64 + 1)..=(u16::MAX as u64 * 2)
             )
                 .prop_map(|(current_seq, target_seq)| {
-                    let target = projection_snapshot_with_ingress_seq(target_seq);
+                    let target = retained_projection_with_ingress_seq(target_seq);
                     PatchFixture {
                         patch: ScenePatch::derive(PatchBasis::new(
-                            Some(projection_snapshot_with_ingress_seq(current_seq)),
-                            Some(target.clone()),
+                            Some(retained_projection_with_ingress_seq(current_seq).into()),
+                            Some(target.clone().into()),
                         )),
                         expected_target: Some(target),
                     }
@@ -800,7 +862,7 @@ mod tests {
         prop_oneof![
             Just(RealizationLedger::Cleared),
             (1_u64..=u16::MAX as u64).prop_map(|seq| RealizationLedger::Consistent {
-                acknowledged: projection_snapshot_with_ingress_seq(seq),
+                acknowledged: retained_projection_with_ingress_seq(seq).into(),
             }),
             (
                 proptest::option::of(1_u64..=u16::MAX as u64),
@@ -809,7 +871,8 @@ mod tests {
                 .prop_map(|(last_consistent_seq, divergence)| {
                     RealizationLedger::Diverged {
                         last_consistent: last_consistent_seq
-                            .map(projection_snapshot_with_ingress_seq),
+                            .map(retained_projection_with_ingress_seq)
+                            .map(Into::into),
                         divergence,
                     }
                 }),
@@ -964,7 +1027,9 @@ mod tests {
             acknowledged_seq in proptest::option::of(1_u64..=u16::MAX as u64),
             ledger in realization_ledger_strategy(),
         ) {
-            let acknowledged = acknowledged_seq.map(projection_snapshot_with_ingress_seq);
+            let acknowledged = acknowledged_seq
+                .map(retained_projection_with_ingress_seq)
+                .map(Into::into);
 
             prop_assert_eq!(
                 RealizationLedger::acknowledge(acknowledged.clone()),

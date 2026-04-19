@@ -8,6 +8,7 @@ use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::ObservationRuntimeContext;
+use crate::core::effect::ObservationRuntimeContextArgs;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RenderCleanupExecution;
 use crate::core::effect::RenderPlanningContext;
@@ -20,6 +21,8 @@ use crate::core::event::RenderCleanupAppliedAction;
 use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderDecision;
 use crate::core::runtime_reducer::render_cleanup_delay_ms;
+use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
+use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
 use crate::core::runtime_reducer::render_hard_cleanup_delay_ms;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::BufferPerfClass;
@@ -29,8 +32,8 @@ use crate::core::state::ExternalDemand;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ObservationBasis;
-use crate::core::state::ObservationRequest;
 use crate::core::state::ObservationSnapshot;
+use crate::core::state::PendingObservation;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeRequestSet;
 use crate::core::state::ProbeState;
@@ -103,30 +106,18 @@ pub(super) fn ingress_marks_cursor_autocmd_freshness(kind: ExternalDemandKind) -
     )
 }
 
-fn hot_cleanup_state(
-    state: &CoreState,
-    observed_at: Millis,
-    max_kept_windows: usize,
-) -> RenderCleanupState {
+fn hot_cleanup_state(state: &CoreState, observed_at: Millis) -> RenderCleanupState {
     RenderCleanupState::scheduled(
         observed_at,
         render_cleanup_delay_ms(&state.runtime().config),
         render_hard_cleanup_delay_ms(&state.runtime().config),
-        max_kept_windows,
     )
 }
 
-fn scheduled_cleanup_state(
-    state: &CoreState,
-    observed_at: Millis,
-    max_kept_windows: usize,
-) -> RenderCleanupState {
-    match state.render_cleanup().thermal() {
-        crate::core::state::RenderThermalState::Cold => {
-            hot_cleanup_state(state, observed_at, max_kept_windows)
-        }
-        crate::core::state::RenderThermalState::Hot
-        | crate::core::state::RenderThermalState::Cooling => state.render_cleanup(),
+fn scheduled_cleanup_state(state: &CoreState, observed_at: Millis) -> RenderCleanupState {
+    match state.render_cleanup() {
+        RenderCleanupState::Cold => hot_cleanup_state(state, observed_at),
+        RenderCleanupState::Hot(_) | RenderCleanupState::Cooling(_) => state.render_cleanup(),
     }
 }
 
@@ -151,25 +142,25 @@ fn cursor_position_read_policy(state: &CoreState) -> CursorPositionReadPolicy {
     CursorPositionReadPolicy::new(state.runtime().config.smear_to_cmd)
 }
 
-pub(super) fn retained_cursor_color_fallback(
+pub(super) fn observation_cursor_color_fallback(
     observation: Option<&ObservationSnapshot>,
 ) -> Option<CursorColorFallback> {
     let observation = observation?;
     let sample = observation
         .cursor_color()
         .map(crate::core::state::CursorColorSample::new)?;
-    let witness = observation.basis().cursor_color_witness()?.clone();
+    let witness = observation.cursor_color_probe_witness()?;
     Some(CursorColorFallback::new(sample, witness))
 }
 
-fn retained_cursor_text_context_boundary(
+fn observation_cursor_text_context_boundary(
     observation: Option<&ObservationSnapshot>,
 ) -> Option<CursorTextContextBoundary> {
     observation.and_then(|snapshot| snapshot.basis().cursor_text_context_state().boundary())
 }
 
 pub(super) fn exact_boundary_refresh_required(state: &CoreState) -> bool {
-    let Some(observation) = state.retained_observation() else {
+    let Some(observation) = state.phase_observation() else {
         return false;
     };
 
@@ -196,13 +187,13 @@ pub(super) fn start_boundary_refresh_observation(
     }
 
     let requested_target = state
-        .retained_observation()
+        .phase_observation()
         .and_then(ObservationSnapshot::exact_cursor_position);
     let requested_target = state.fallback_cursor_position(requested_target);
     let buffer_perf_class = state
-        .retained_observation()
+        .phase_observation()
         .map_or(BufferPerfClass::Full, |observation| {
-            observation.request().demand().buffer_perf_class()
+            observation.demand().buffer_perf_class()
         });
     let (state, seq) = state.allocate_ingress_seq();
     let demand = ExternalDemand::new(
@@ -212,46 +203,48 @@ pub(super) fn start_boundary_refresh_observation(
         requested_target,
         buffer_perf_class,
     );
-    let request = ObservationRequest::new(demand, probe_requests_for(&state, buffer_perf_class));
-    let next_state = state.enter_observing_request(request.clone());
-    let effect = request_observation_base(&next_state, request, None);
+    let pending = PendingObservation::new(demand, probe_requests_for(&state, buffer_perf_class));
+    let Some(next_state) = state.enter_observing_request(pending.clone()) else {
+        unreachable!("boundary refresh observations should only start from ready states");
+    };
+    let effect = request_observation_base(&next_state, pending, None);
     Some((next_state, effect))
 }
 
 fn observation_runtime_context(
     state: &CoreState,
-    request: &ObservationRequest,
+    pending: &PendingObservation,
     ingress_observation_surface: Option<IngressObservationSurface>,
 ) -> ObservationRuntimeContext {
-    let cursor_color_fallback = retained_cursor_color_fallback(state.retained_observation());
+    let cursor_color_fallback = observation_cursor_color_fallback(state.phase_observation());
     let cursor_text_context_boundary =
-        retained_cursor_text_context_boundary(state.retained_observation());
-    let buffer_perf_class = request.demand().buffer_perf_class();
+        observation_cursor_text_context_boundary(state.phase_observation());
+    let buffer_perf_class = pending.demand().buffer_perf_class();
     let probe_policy = ProbePolicy::for_demand(
-        request.demand().kind(),
+        pending.demand().kind(),
         buffer_perf_class,
         cursor_color_fallback.is_some(),
     );
-    ObservationRuntimeContext::new(
-        cursor_position_read_policy(state),
-        state.runtime().config.scroll_buffer_space,
-        state.runtime().tracked_location(),
+    ObservationRuntimeContext::new(ObservationRuntimeContextArgs {
+        cursor_position_policy: cursor_position_read_policy(state),
+        scroll_buffer_space: state.runtime().config.scroll_buffer_space,
+        tracked_location: state.runtime().tracked_location(),
         cursor_text_context_boundary,
-        state.runtime().current_corners(),
+        current_corners: state.runtime().current_corners(),
         ingress_observation_surface,
         buffer_perf_class,
         probe_policy,
-    )
+    })
 }
 
 pub(super) fn request_observation_base(
     state: &CoreState,
-    request: ObservationRequest,
+    pending: PendingObservation,
     ingress_observation_surface: Option<IngressObservationSurface>,
 ) -> Effect {
     Effect::RequestObservationBase(RequestObservationBaseEffect {
-        context: observation_runtime_context(state, &request, ingress_observation_surface),
-        request,
+        context: observation_runtime_context(state, &pending, ingress_observation_surface),
+        request: pending,
     })
 }
 
@@ -273,8 +266,9 @@ pub(super) fn probe_refresh_budget_exhausted_metric(kind: ProbeKind) -> Effect {
 )]
 fn request_probe(
     state: &CoreState,
+    observation_id: crate::core::types::ObservationId,
     observation_basis: ObservationBasis,
-    probe_request_id: crate::core::types::ProbeRequestId,
+    cursor_color_probe_generations: Option<crate::core::state::CursorColorProbeGenerations>,
     kind: ProbeKind,
     background_chunk: Option<crate::core::state::BackgroundProbeChunk>,
     demand_kind: ExternalDemandKind,
@@ -287,8 +281,9 @@ fn request_probe(
         cursor_color_fallback.is_some(),
     );
     Effect::RequestProbe(RequestProbeEffect {
+        observation_id,
         observation_basis: Box::new(observation_basis),
-        probe_request_id,
+        cursor_color_probe_generations,
         kind,
         cursor_position_policy: cursor_position_read_policy(state),
         buffer_perf_class,
@@ -306,13 +301,21 @@ pub(super) fn probe_requests_for(
     state: &CoreState,
     buffer_perf_class: BufferPerfClass,
 ) -> ProbeRequestSet {
-    ProbeRequestSet::new(
-        state.runtime().config.requires_cursor_color_sampling(),
-        state
-            .runtime()
-            .config
-            .requires_background_sampling_for_perf_class(buffer_perf_class),
-    )
+    let mut requests = ProbeRequestSet::none();
+
+    if state.runtime().config.requires_cursor_color_sampling() {
+        requests = requests.with_requested(ProbeKind::CursorColor);
+    }
+
+    if state
+        .runtime()
+        .config
+        .requires_background_sampling_for_perf_class(buffer_perf_class)
+    {
+        requests = requests.with_requested(ProbeKind::Background);
+    }
+
+    requests
 }
 
 pub(super) fn next_pending_probe_effect(
@@ -321,15 +324,16 @@ pub(super) fn next_pending_probe_effect(
     cursor_color_fallback: Option<CursorColorFallback>,
 ) -> Option<Effect> {
     let basis = observation.basis();
-    let demand_kind = observation.request().demand().kind();
-    let buffer_perf_class = observation.request().demand().buffer_perf_class();
-    if let crate::core::state::ProbeSlot::Requested(ProbeState::Pending { request_id }) =
+    let demand_kind = observation.demand().kind();
+    let buffer_perf_class = observation.demand().buffer_perf_class();
+    if let crate::core::state::ProbeSlot::Requested(ProbeState::Pending) =
         observation.probes().cursor_color()
     {
         return Some(request_probe(
             state,
+            observation.observation_id(),
             basis.clone(),
-            *request_id,
+            observation.cursor_color_probe_generations(),
             ProbeKind::CursorColor,
             None,
             demand_kind,
@@ -338,17 +342,14 @@ pub(super) fn next_pending_probe_effect(
         ));
     }
 
-    if let crate::core::state::BackgroundProbeState::Collecting {
-        request_id,
-        progress,
-    } = observation.background_probe_state()
-    {
+    if let Some(background_chunk) = observation.probes().background().next_chunk() {
         return Some(request_probe(
             state,
+            observation.observation_id(),
             basis.clone(),
-            *request_id,
+            None,
             ProbeKind::Background,
-            progress.next_chunk(),
+            Some(background_chunk),
             demand_kind,
             buffer_perf_class,
             cursor_color_fallback,
@@ -372,7 +373,6 @@ pub(super) fn apply_proposal_effect(
 
 pub(super) fn request_render_plan_effect(
     planning: RenderPlanningContext,
-    observation_id: crate::core::types::ObservationId,
     proposal_id: ProposalId,
     render_decision: RenderDecision,
     animation_schedule: AnimationSchedule,
@@ -381,7 +381,6 @@ pub(super) fn request_render_plan_effect(
     Effect::RequestRenderPlan(Box::new(RequestRenderPlanEffect {
         proposal_id,
         planning,
-        observation_id,
         render_decision,
         animation_schedule,
         requested_at,
@@ -416,26 +415,11 @@ pub(super) fn ingress_cursor_presentation_effect(
     ))
 }
 
-fn proposal_max_kept_windows(state: &CoreState, proposal: &InFlightProposal) -> usize {
-    match proposal.execution() {
-        ProposalExecution::Draw {
-            realization: draw, ..
-        } => draw.max_kept_windows(),
-        ProposalExecution::Clear {
-            realization: clear, ..
-        } => clear.max_kept_windows(),
-        ProposalExecution::Noop { .. } | ProposalExecution::Failure { .. } => {
-            state.runtime().config.max_kept_windows
-        }
-    }
-}
-
 pub(super) fn enter_hot_cleanup_state(
     state: CoreState,
     observed_at: Millis,
-    max_kept_windows: usize,
 ) -> (CoreState, Vec<Effect>) {
-    let cleanup = hot_cleanup_state(&state, observed_at, max_kept_windows);
+    let cleanup = hot_cleanup_state(&state, observed_at);
     let next_state = state.with_render_cleanup(cleanup);
     if next_state.timers().active_token(TimerId::Cleanup).is_some() {
         return (next_state, Vec::new());
@@ -467,16 +451,9 @@ pub(super) fn advance_cleanup_for_proposal(
 ) -> (CoreState, Vec<Effect>) {
     match proposal.cleanup_action() {
         RenderCleanupAction::NoAction => (state, Vec::new()),
-        RenderCleanupAction::Invalidate => {
-            let max_kept_windows = proposal_max_kept_windows(&state, proposal);
-            enter_hot_cleanup_state(state, observed_at, max_kept_windows)
-        }
+        RenderCleanupAction::Invalidate => enter_hot_cleanup_state(state, observed_at),
         RenderCleanupAction::Schedule => {
-            let cleanup = scheduled_cleanup_state(
-                &state,
-                observed_at,
-                proposal_max_kept_windows(&state, proposal),
-            );
+            let cleanup = scheduled_cleanup_state(&state, observed_at);
             let next_state = state.with_render_cleanup(cleanup);
             if next_state.timers().active_token(TimerId::Cleanup).is_some() {
                 return (next_state, Vec::new());
@@ -488,42 +465,42 @@ pub(super) fn advance_cleanup_for_proposal(
 
 pub(super) fn cleanup_effect_for_timer_fire(
     cleanup: RenderCleanupState,
+    config: &crate::config::RuntimeConfig,
     observed_at: Millis,
 ) -> Option<Effect> {
-    if cleanup
-        .hard_purge_due_at()
-        .is_some_and(|hard_due_at| observed_at.value() >= hard_due_at.value())
-    {
-        return Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
-            execution: RenderCleanupExecution::HardPurge,
-        }));
-    }
-
-    match cleanup.thermal() {
-        crate::core::state::RenderThermalState::Hot => {
-            let next_compaction_due_at = cleanup.next_compaction_due_at()?;
-            if observed_at.value() < next_compaction_due_at.value() {
+    match cleanup {
+        RenderCleanupState::Hot(schedule) => {
+            if observed_at.value() >= schedule.hard_purge_due_at().value() {
+                return Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+                    execution: RenderCleanupExecution::HardPurge,
+                }));
+            }
+            if observed_at.value() < schedule.next_compaction_due_at().value() {
                 return None;
             }
             Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
                 execution: RenderCleanupExecution::SoftClear {
-                    max_kept_windows: cleanup.max_kept_windows(),
+                    max_kept_windows: config.max_kept_windows,
                 },
             }))
         }
-        crate::core::state::RenderThermalState::Cooling => {
-            let next_compaction_due_at = cleanup.next_compaction_due_at()?;
-            if observed_at.value() < next_compaction_due_at.value() {
+        RenderCleanupState::Cooling(schedule) => {
+            if observed_at.value() >= schedule.hard_purge_due_at().value() {
+                return Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+                    execution: RenderCleanupExecution::HardPurge,
+                }));
+            }
+            if observed_at.value() < schedule.next_compaction_due_at().value() {
                 return None;
             }
             Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
                 execution: RenderCleanupExecution::CompactToBudget {
-                    target_budget: cleanup.idle_target_budget(),
-                    max_prune_per_tick: cleanup.max_prune_per_tick(),
+                    target_budget: render_cleanup_idle_target_budget(config),
+                    max_prune_per_tick: render_cleanup_max_prune_per_tick(config),
                 },
             }))
         }
-        crate::core::state::RenderThermalState::Cold => None,
+        RenderCleanupState::Cold => None,
     }
 }
 

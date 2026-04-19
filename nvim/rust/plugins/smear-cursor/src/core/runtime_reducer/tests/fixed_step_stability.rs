@@ -11,7 +11,6 @@ struct StabilitySummary {
 
 fn run_fps_stability_scenario(render_fps: f64) -> StabilitySummary {
     let mut state = RuntimeState::default();
-    state.config.fps = render_fps;
     state.config.time_interval = RuntimeConfig::interval_ms_for_fps(render_fps);
     state.config.simulation_hz = 240.0;
     state.config.max_simulation_steps_per_frame = 16;

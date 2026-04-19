@@ -188,11 +188,70 @@ fn runtime_options_patch_apply_clears_filetypes_list() {
     assert!(state.config.filetypes_disabled.is_empty());
 }
 
+#[test]
+fn apply_runtime_options_time_interval_alias_updates_canonical_frame_timing() {
+    let mut state = RuntimeState::default();
+
+    apply_options_expect_ok(&mut state, [("time_interval", Object::from(9.5_f64))]);
+
+    assert_eq!(state.config.time_interval, 9.5);
+    assert_eq!(state.config.fps(), RuntimeConfig::fps_for_interval_ms(9.5));
+}
+
+#[test]
+fn apply_runtime_options_fps_alias_updates_canonical_frame_timing() {
+    let mut state = RuntimeState::default();
+    let expected_time_interval = RuntimeConfig::interval_ms_for_fps(90.0);
+
+    apply_options_expect_ok(&mut state, [("fps", Object::from(90.0_f64))]);
+
+    assert_eq!(state.config.time_interval, expected_time_interval);
+    assert_eq!(
+        state.config.fps(),
+        RuntimeConfig::fps_for_interval_ms(expected_time_interval)
+    );
+}
+
+#[test]
+fn apply_runtime_options_rejects_dual_frame_timing_aliases() {
+    let mut state = RuntimeState::default();
+    let baseline = state.clone();
+    let err = apply_runtime_options(
+        &mut state,
+        &options_dict([
+            ("time_interval", Object::from(12.0_f64)),
+            ("fps", Object::from(90.0_f64)),
+        ]),
+    )
+    .expect_err("expected mixed frame-timing alias rejection");
+
+    assert!(err.to_string().contains("fps"));
+    pretty_assertions::assert_eq!(state, baseline);
+}
+
+#[test]
+fn apply_runtime_options_rejects_particle_switch_octant_braille_above_one() {
+    let mut state = RuntimeState::default();
+    let baseline = state.clone();
+    let err = apply_runtime_options(
+        &mut state,
+        &options_dict([("particle_switch_octant_braille", Object::from(1.1_f64))]),
+    )
+    .expect_err("expected runtime option validation failure");
+
+    assert!(
+        err.to_string().contains("particle_switch_octant_braille"),
+        "unexpected runtime option error: {err:?}"
+    );
+    pretty_assertions::assert_eq!(state, baseline);
+}
+
 proptest! {
     #![proptest_config(pure_config())]
 
     #[test]
     fn prop_apply_runtime_options_sets_requested_fields_and_preserves_others(
+        use_fps_alias in any::<bool>(),
         explicit_time_interval in 1.0_f64..80.0_f64,
         fps in 1.0_f64..400.0_f64,
         simulation_hz in 1.0_f64..400.0_f64,
@@ -222,54 +281,56 @@ proptest! {
         let mut state = RuntimeState::default();
         let expected_tail_response_ms = head_response_ms + tail_response_delta;
         let expected_stop_distance_exit = stop_distance_enter + stop_distance_exit_delta;
-        apply_options_expect_ok(
-            &mut state,
-            [
-                ("time_interval", Object::from(explicit_time_interval)),
-                ("fps", Object::from(fps)),
-                ("simulation_hz", Object::from(simulation_hz)),
-                (
-                    "max_simulation_steps_per_frame",
-                    Object::from(i64::from(max_simulation_steps_per_frame)),
-                ),
-                ("animate_in_insert_mode", Object::from(animate_in_insert_mode)),
-                ("animate_command_line", Object::from(animate_command_line)),
-                ("smear_between_windows", Object::from(smear_between_windows)),
-                ("smear_between_buffers", Object::from(smear_between_buffers)),
-                (
-                    "max_kept_windows",
-                    Object::from(i64::try_from(max_kept_windows).unwrap_or(i64::MAX)),
-                ),
-                ("buffer_perf_mode", Object::from(buffer_perf_mode.option_name())),
-                ("stop_distance_enter", Object::from(stop_distance_enter)),
-                ("stop_distance_exit", Object::from(expected_stop_distance_exit)),
-                ("stop_velocity_enter", Object::from(stop_velocity_enter)),
-                ("stop_hold_frames", Object::from(i64::from(stop_hold_frames))),
-                ("tail_duration_ms", Object::from(tail_duration_ms)),
-                (
-                    "spatial_coherence_weight",
-                    Object::from(spatial_coherence_weight),
-                ),
-                (
-                    "temporal_stability_weight",
-                    Object::from(temporal_stability_weight),
-                ),
-                ("top_k_per_cell", Object::from(i64::from(top_k_per_cell))),
-                ("head_response_ms", Object::from(head_response_ms)),
-                ("damping_ratio", Object::from(damping_ratio)),
-                ("tail_response_ms", Object::from(expected_tail_response_ms)),
-                ("trail_duration_ms", Object::from(trail_duration_ms)),
-                ("trail_min_distance", Object::from(trail_min_distance)),
-                ("trail_thickness", Object::from(trail_thickness)),
-                ("trail_thickness_x", Object::from(trail_thickness_x)),
-            ],
-        );
+        let mut entries = vec![
+            ("simulation_hz", Object::from(simulation_hz)),
+            (
+                "max_simulation_steps_per_frame",
+                Object::from(i64::from(max_simulation_steps_per_frame)),
+            ),
+            ("animate_in_insert_mode", Object::from(animate_in_insert_mode)),
+            ("animate_command_line", Object::from(animate_command_line)),
+            ("smear_between_windows", Object::from(smear_between_windows)),
+            ("smear_between_buffers", Object::from(smear_between_buffers)),
+            (
+                "max_kept_windows",
+                Object::from(i64::try_from(max_kept_windows).unwrap_or(i64::MAX)),
+            ),
+            ("buffer_perf_mode", Object::from(buffer_perf_mode.option_name())),
+            ("stop_distance_enter", Object::from(stop_distance_enter)),
+            ("stop_distance_exit", Object::from(expected_stop_distance_exit)),
+            ("stop_velocity_enter", Object::from(stop_velocity_enter)),
+            ("stop_hold_frames", Object::from(i64::from(stop_hold_frames))),
+            ("tail_duration_ms", Object::from(tail_duration_ms)),
+            (
+                "spatial_coherence_weight",
+                Object::from(spatial_coherence_weight),
+            ),
+            (
+                "temporal_stability_weight",
+                Object::from(temporal_stability_weight),
+            ),
+            ("top_k_per_cell", Object::from(i64::from(top_k_per_cell))),
+            ("head_response_ms", Object::from(head_response_ms)),
+            ("damping_ratio", Object::from(damping_ratio)),
+            ("tail_response_ms", Object::from(expected_tail_response_ms)),
+            ("trail_duration_ms", Object::from(trail_duration_ms)),
+            ("trail_min_distance", Object::from(trail_min_distance)),
+            ("trail_thickness", Object::from(trail_thickness)),
+            ("trail_thickness_x", Object::from(trail_thickness_x)),
+        ];
+        let expected_time_interval = if use_fps_alias {
+            entries.push(("fps", Object::from(fps)));
+            RuntimeConfig::interval_ms_for_fps(fps)
+        } else {
+            entries.push(("time_interval", Object::from(explicit_time_interval)));
+            explicit_time_interval
+        };
+        apply_options_expect_ok(&mut state, entries);
 
         pretty_assertions::assert_eq!(
             state.config,
             RuntimeConfig {
-                fps,
-                time_interval: RuntimeConfig::interval_ms_for_fps(fps),
+                time_interval: expected_time_interval,
                 simulation_hz,
                 max_simulation_steps_per_frame,
                 animate_in_insert_mode,
@@ -296,6 +357,7 @@ proptest! {
                 ..RuntimeConfig::default()
             }
         );
+        pretty_assertions::assert_eq!(state.config.fps(), RuntimeConfig::fps_for_interval_ms(expected_time_interval));
     }
 
     #[test]

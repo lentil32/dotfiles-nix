@@ -190,8 +190,8 @@ fn animation_timer_from_ready_enters_planning_and_requests_render_plan() {
 fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 100);
     let observation = ObservationSnapshot::new(
-        request.clone(),
-        observation_basis(&request, Some(cursor(9, 9)), 100),
+        request,
+        observation_basis(Some(cursor(9, 9)), 100),
         observation_motion(),
     );
     let mut runtime = ready_state().runtime().clone();
@@ -206,7 +206,8 @@ fn animation_timer_uses_timer_timestamp_when_observation_clock_is_stale() {
     let base = ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(observation);
+        .with_ready_observation(observation)
+        .expect("primed state should accept a ready observation");
     let (state, token) = timer_armed_state(base);
 
     let transition = reduce(&state, animation_tick_event(token, 116));
@@ -292,7 +293,7 @@ fn animation_timer_preserves_perf_class_across_boundary_refresh() {
         7,
         &CursorLocation::new(11, 22, 3, 9),
     );
-    let request = ObservationRequest::new(
+    let request = PendingObservation::new(
         ExternalDemand::new(
             IngressSeq::new(9),
             ExternalDemandKind::ExternalCursor,
@@ -300,24 +301,27 @@ fn animation_timer_preserves_perf_class_across_boundary_refresh() {
             None,
             BufferPerfClass::FastMotion,
         ),
-        ProbeRequestSet::new(true, false),
+        ProbeRequestSet::only(ProbeKind::CursorColor),
     );
-    let observation = ObservationSnapshot::new(
-        request.clone(),
-        observation_basis(&request, Some(cursor(9, 9)), 91),
+    let mut observation = ObservationSnapshot::new(
+        request,
+        observation_basis(Some(cursor(9, 9)), 91),
         observation_motion(),
-    )
-    .with_cursor_color_probe(ProbeState::ready(
-        ProbeKind::CursorColor.request_id(request.observation_id()),
-        request.observation_id(),
-        ProbeReuse::Compatible,
-        Some(CursorColorSample::new(0x00AB_CDEF)),
-    ))
-    .expect("cursor color probe should be requested");
+    );
+    assert!(
+        observation
+            .probes_mut()
+            .set_cursor_color_state(ProbeState::ready(
+                ProbeReuse::Compatible,
+                Some(CursorColorSample::new(0x00AB_CDEF)),
+            )),
+        "cursor color probe should be requested",
+    );
     let base = ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(observation);
+        .with_ready_observation(observation)
+        .expect("primed state should accept a ready observation");
     let (state, token) = timer_armed_state(base);
 
     let transition = reduce(&state, animation_tick_event(token, 116));
@@ -393,14 +397,15 @@ fn conceal_deferred_boundary_refresh_uses_latest_exact_cursor_anchor() {
         BufferPerfClass::FastMotion,
     );
     let observation = ObservationSnapshot::new(
-        request.clone(),
-        observation_basis(&request, Some(cursor(12, 13)), 91),
+        request,
+        observation_basis(Some(cursor(12, 13)), 91),
         observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
     );
     let base = ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(observation);
+        .with_ready_observation(observation)
+        .expect("primed state should accept a ready observation");
     let (state, token) = timer_armed_state(base);
 
     let transition = reduce(&state, animation_tick_event(token, 116));

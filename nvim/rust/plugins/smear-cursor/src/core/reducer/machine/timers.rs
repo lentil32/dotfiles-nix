@@ -104,27 +104,29 @@ pub(super) fn reduce_timer_signal_with_token(
         }
         TimerKind::Ingress => reduce_ingress_timer_signal(disarmed_state, observed_at),
         TimerKind::Recovery => {
-            if disarmed_state.lifecycle() != crate::core::types::Lifecycle::Recovering {
-                Transition::stay_owned(disarmed_state)
-            } else {
+            if disarmed_state.lifecycle() == crate::core::types::Lifecycle::Recovering {
                 let mut disarmed_state = disarmed_state;
-                let settled = match disarmed_state.take_retained_observation() {
-                    Some(observation) => {
-                        reset_recovery_attempt(disarmed_state.enter_ready(observation))
-                    }
-                    None => reset_recovery_attempt(disarmed_state.into_primed()),
+                let settled = if disarmed_state.restore_retained_observation_to_ready() {
+                    reset_recovery_attempt(disarmed_state)
+                } else {
+                    reset_recovery_attempt(disarmed_state.into_primed())
                 };
                 observe_or_plan(settled, observed_at)
+            } else {
+                Transition::stay_owned(disarmed_state)
             }
         }
         TimerKind::Cleanup => {
-            match cleanup_effect_for_timer_fire(disarmed_state.render_cleanup(), observed_at) {
-                Some(effect) => Transition::new(disarmed_state, vec![effect]),
-                None => {
-                    let (scheduled_state, effects) =
-                        arm_render_cleanup_timer(disarmed_state, observed_at);
-                    Transition::new(scheduled_state, effects)
-                }
+            if let Some(effect) = cleanup_effect_for_timer_fire(
+                disarmed_state.render_cleanup(),
+                &disarmed_state.runtime().config,
+                observed_at,
+            ) {
+                Transition::new(disarmed_state, vec![effect])
+            } else {
+                let (scheduled_state, effects) =
+                    arm_render_cleanup_timer(disarmed_state, observed_at);
+                Transition::new(scheduled_state, effects)
             }
         }
     }

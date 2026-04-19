@@ -1,5 +1,6 @@
 use super::Transition;
 use super::support::request_render_plan_effect;
+use crate::config::RuntimeConfig;
 use crate::core::effect::RenderPlanningContext;
 use crate::core::effect::RenderPlanningObservation;
 use crate::core::realization::PaletteSpec;
@@ -16,10 +17,7 @@ use crate::core::state::ApplyFailureKind;
 use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbePlan;
 use crate::core::state::CoreState;
-use crate::core::state::CursorTrailGeometry;
-use crate::core::state::CursorTrailProjectionPolicy;
 use crate::core::state::CursorTrailSemantic;
-use crate::core::state::DirtyEntitySet;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ObservationSnapshot;
 use crate::core::state::PatchBasis;
@@ -27,35 +25,42 @@ use crate::core::state::PlannedProjectionUpdate;
 use crate::core::state::PlannedRender;
 use crate::core::state::PlannedSceneUpdate;
 use crate::core::state::PreparedObservationPlan;
-use crate::core::state::ProjectionCache;
-use crate::core::state::ProjectionCacheEntry;
+use crate::core::state::ProjectionHandle;
 use crate::core::state::ProjectionPlannerClock;
 use crate::core::state::ProjectionReuseKey;
-use crate::core::state::ProjectionSnapshot;
 use crate::core::state::ProjectionWitness;
 use crate::core::state::RealizationClear;
 use crate::core::state::RealizationDivergence;
 use crate::core::state::RealizationDraw;
 use crate::core::state::RealizationFailure;
 use crate::core::state::RealizationPlan;
+use crate::core::state::RetainedProjection;
 use crate::core::state::ScenePatch;
 use crate::core::state::SceneState;
-use crate::core::state::SemanticEntity;
-use crate::core::state::SemanticEntityId;
-use crate::core::state::SemanticScene;
 use crate::core::state::classify_semantic_event;
 use crate::core::types::Millis;
+use crate::core::types::MotionRevision;
+use crate::core::types::ObservationId;
+use crate::core::types::ProjectionPolicyRevision;
 use crate::core::types::ProjectorRevision;
 use crate::core::types::ProposalId;
-use crate::core::types::SceneRevision;
+use crate::core::types::RenderRevision;
 use crate::core::types::ViewportSnapshot;
 use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
 use crate::draw::render_plan::Viewport;
 use crate::draw::render_plan::{self};
 use crate::types::DEFAULT_RNG_STATE;
-use crate::types::PlannerFrame;
 use crate::types::Point;
+use crate::types::RenderFrame;
 use std::cell::OnceCell;
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
+
+#[cfg(test)]
+use crate::core::state::SemanticEntityId;
 
 fn point_from_cursor_position(position: crate::core::types::CursorPosition) -> Point {
     Point {
@@ -66,13 +71,11 @@ fn point_from_cursor_position(position: crate::core::types::CursorPosition) -> P
 
 struct PlannedRuntimeTransition {
     transition: crate::core::runtime_reducer::CursorTransition,
-    runtime_changed: bool,
 }
 
 fn deterministic_event_seed(observation: &ObservationSnapshot) -> u32 {
-    let request = observation.request();
     let observed_at = observation.basis().observed_at().value() as u32;
-    let observation_id = request.observation_id().value() as u32;
+    let observation_id = observation.observation_id().value() as u32;
     let mixed = observation_id ^ observed_at.rotate_left(13) ^ 0x9E37_79B9;
     if mixed == 0 { DEFAULT_RNG_STATE } else { mixed }
 }
@@ -86,52 +89,47 @@ fn projection_viewport(viewport: ViewportSnapshot) -> Viewport {
 
 fn render_planning_observation(observation: &ObservationSnapshot) -> RenderPlanningObservation {
     RenderPlanningObservation::new(
-        observation.basis().observation_id(),
-        observation.basis().viewport(),
-        observation.background_probe().cloned(),
-    )
-}
-
-fn projection_witness(
-    scene_revision: SceneRevision,
-    observation: &RenderPlanningObservation,
-) -> ProjectionWitness {
-    ProjectionWitness::new(
-        scene_revision,
         observation.observation_id(),
-        observation.viewport(),
-        ProjectorRevision::CURRENT,
+        observation.basis().viewport(),
+        observation.probes().background().batch().cloned(),
     )
 }
 
-fn projection_entry_for_reuse<'a>(
-    scene: &'a SceneState,
-    witness: ProjectionWitness,
-    policy: &CursorTrailProjectionPolicy,
-) -> Option<&'a ProjectionCacheEntry> {
-    let entry = scene.projection_entry()?;
-    if entry.snapshot().witness().viewport() != witness.viewport()
-        || entry.reuse_key().policy() != policy
+fn retained_projection_for_reuse(
+    scene: &SceneState,
+    viewport: ViewportSnapshot,
+    projection_policy_revision: ProjectionPolicyRevision,
+) -> Option<&RetainedProjection> {
+    let retained_projection = scene.retained_projection()?;
+    let witness = retained_projection.witness();
+    let reuse_key = retained_projection.reuse_key();
+    if witness.viewport() != viewport
+        || reuse_key.projection_policy_revision() != projection_policy_revision
     {
         return None;
     }
 
-    Some(entry)
+    Some(retained_projection)
 }
 
 fn planner_seed(
     scene: &SceneState,
-    policy: &CursorTrailProjectionPolicy,
+    projection_policy_revision: ProjectionPolicyRevision,
 ) -> ProjectionPlannerState {
     // projection snapshots are witness-bound shell inputs, but planner history is part
     // of semantic motion continuity. Reusing planner state across observation/revision drift keeps
     // the ribbon history alive between frames while policy drift still resets the planner.
     scene
-        .projection_entry()
-        .filter(|entry| entry.reuse_key().policy() == policy)
+        .retained_projection()
+        .filter(|retained_projection| {
+            retained_projection.reuse_key().projection_policy_revision()
+                == projection_policy_revision
+        })
         .map_or_else(
             ProjectionPlannerState::default,
-            |entry: &ProjectionCacheEntry| entry.planner_state().clone(),
+            |retained_projection: &RetainedProjection| {
+                retained_projection.cached_planner_state().clone()
+            },
         )
 }
 
@@ -139,12 +137,68 @@ fn planner_clock(planner_state: &ProjectionPlannerState) -> ProjectionPlannerClo
     ProjectionPlannerClock::new(planner_state.step_index(), planner_state.history_revision())
 }
 
-fn frame_advances_planner(frame: &PlannerFrame) -> bool {
+fn hash_f64(hasher: &mut DefaultHasher, value: f64) {
+    hasher.write_u64(value.to_bits());
+}
+
+fn render_frame_motion_fingerprint(frame: &RenderFrame) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    frame.mode.hash(&mut hasher);
+    frame.planner_idle_steps.hash(&mut hasher);
+    frame.vertical_bar.hash(&mut hasher);
+    frame.trail_stroke_id.hash(&mut hasher);
+    frame.retarget_epoch.hash(&mut hasher);
+    frame.particle_count.hash(&mut hasher);
+
+    hash_f64(&mut hasher, frame.target.row);
+    hash_f64(&mut hasher, frame.target.col);
+
+    for corner in &frame.corners {
+        hash_f64(&mut hasher, corner.row);
+        hash_f64(&mut hasher, corner.col);
+    }
+    for corner in &frame.target_corners {
+        hash_f64(&mut hasher, corner.row);
+        hash_f64(&mut hasher, corner.col);
+    }
+    for sample in frame.step_samples.iter() {
+        for corner in &sample.corners {
+            hash_f64(&mut hasher, corner.row);
+            hash_f64(&mut hasher, corner.col);
+        }
+        hash_f64(&mut hasher, sample.dt_ms);
+    }
+    for aggregate in frame.aggregated_particle_cells().iter() {
+        aggregate.row().hash(&mut hasher);
+        aggregate.col().hash(&mut hasher);
+        for sub_row in aggregate.cell() {
+            for value in sub_row {
+                hash_f64(&mut hasher, *value);
+            }
+        }
+    }
+
+    hasher.finish()
+}
+
+fn next_motion_revision(
+    current_scene: &SceneState,
+    next_motion_fingerprint: Option<u64>,
+) -> MotionRevision {
+    let current_render_revision = current_scene.render_revision();
+    if current_scene.last_motion_fingerprint() != next_motion_fingerprint {
+        current_render_revision.motion().next()
+    } else {
+        current_render_revision.motion()
+    }
+}
+
+fn frame_advances_planner(frame: &RenderFrame) -> bool {
     !frame.step_samples.is_empty() || frame.planner_idle_steps > 0
 }
 
 fn projection_reuse_planner_clock(
-    frame: &PlannerFrame,
+    frame: &RenderFrame,
     planner_state: &ProjectionPlannerState,
 ) -> Option<ProjectionPlannerClock> {
     // planner aging is projection-owned, not semantic-geometry-owned. Advancing frames
@@ -153,51 +207,48 @@ fn projection_reuse_planner_clock(
     frame_advances_planner(frame).then(|| planner_clock(planner_state))
 }
 
-fn next_semantics_for_render_decision(
-    current: &SemanticScene,
+fn next_cursor_trail_for_render_decision(
+    current: Option<&CursorTrailSemantic>,
     render_decision: &RenderDecision,
-) -> SemanticScene {
+) -> Option<CursorTrailSemantic> {
     match &render_decision.render_action {
-        RenderAction::Draw(frame) => current.clone().with_entity(SemanticEntity::CursorTrail(
-            CursorTrailSemantic::from_render_frame(
-                frame.as_ref(),
-                render_decision.render_side_effects.target_cell_presentation,
-            ),
+        RenderAction::Draw(_frame) => Some(CursorTrailSemantic::new(
+            render_decision.render_side_effects.target_cell_presentation,
         )),
-        RenderAction::ClearAll => current
-            .clone()
-            .without_entity(SemanticEntityId::CursorTrail),
-        RenderAction::Noop => current.clone(),
+        RenderAction::ClearAll => None,
+        RenderAction::Noop => current.cloned(),
     }
 }
 
-fn cursor_trail_semantic(scene: &SemanticScene) -> Option<&CursorTrailSemantic> {
-    match scene.entity(SemanticEntityId::CursorTrail)? {
-        SemanticEntity::CursorTrail(trail) => Some(trail),
-    }
-}
-
-fn dirty_entities(previous: &SemanticScene, next: &SemanticScene) -> DirtyEntitySet {
-    let previous_entity = previous.entity(SemanticEntityId::CursorTrail);
-    let next_entity = next.entity(SemanticEntityId::CursorTrail);
-    if previous_entity == next_entity {
-        DirtyEntitySet::default()
-    } else {
-        DirtyEntitySet::default().insert(SemanticEntityId::CursorTrail)
-    }
-}
-
-fn frame_requires_background_probe(
-    geometry: &CursorTrailGeometry,
-    policy: &CursorTrailProjectionPolicy,
+fn semantic_cursor_trail_changed(
+    previous: Option<&CursorTrailSemantic>,
+    next: Option<&CursorTrailSemantic>,
 ) -> bool {
-    geometry.requires_background_probe(policy)
+    previous != next
+}
+
+#[cfg(test)]
+fn dirty_entities(
+    previous: Option<&CursorTrailSemantic>,
+    next: Option<&CursorTrailSemantic>,
+) -> BTreeSet<SemanticEntityId> {
+    if semantic_cursor_trail_changed(previous, next) {
+        BTreeSet::from([SemanticEntityId::CursorTrail])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn frame_requires_background_probe(frame: &RenderFrame) -> bool {
+    !frame.particles_over_text && frame.has_particles()
 }
 
 struct PreparedProjection<'a> {
-    witness: ProjectionWitness,
+    render_revision: RenderRevision,
+    observation_id: ObservationId,
+    viewport_snapshot: ViewportSnapshot,
     viewport: Viewport,
-    planner_frame: PlannerFrame,
+    frame: RenderFrame,
     trail_signature: OnceCell<Option<u64>>,
     particle_overlay_signature: OnceCell<Option<u64>>,
     planner_state: ProjectionPlannerState,
@@ -206,27 +257,49 @@ struct PreparedProjection<'a> {
 }
 
 impl PreparedProjection<'_> {
+    fn projection_policy_revision(&self) -> ProjectionPolicyRevision {
+        self.frame.projection_policy_revision
+    }
+
     fn trail_signature(&self) -> Option<u64> {
         *self
             .trail_signature
-            .get_or_init(|| render_plan::frame_draw_signature(&self.planner_frame))
+            .get_or_init(|| render_plan::frame_draw_signature(&self.frame))
     }
 
     fn particle_overlay_signature(&self) -> Option<u64> {
         *self
             .particle_overlay_signature
-            .get_or_init(|| render_plan::frame_particle_overlay_signature(&self.planner_frame))
+            .get_or_init(|| render_plan::frame_particle_overlay_signature(&self.frame))
+    }
+
+    fn witness(&self) -> ProjectionWitness {
+        ProjectionWitness::new(
+            self.render_revision,
+            self.observation_id,
+            self.viewport_snapshot,
+            ProjectorRevision::CURRENT,
+        )
+    }
+
+    fn reuse_key(&self, target_cell_presentation: TargetCellPresentation) -> ProjectionReuseKey {
+        ProjectionReuseKey::new(
+            self.trail_signature(),
+            self.particle_overlay_signature(),
+            self.reuse_planner_clock,
+            target_cell_presentation,
+            self.projection_policy_revision(),
+        )
     }
 }
 
 fn prepare_projection<'a>(
     current_scene: &SceneState,
-    scene_revision: SceneRevision,
+    render_revision: RenderRevision,
     observation: &'a RenderPlanningObservation,
-    geometry: &CursorTrailGeometry,
-    policy: &CursorTrailProjectionPolicy,
+    frame: RenderFrame,
 ) -> Result<PreparedProjection<'a>, ApplyFailureKind> {
-    let background_probe = if frame_requires_background_probe(geometry, policy) {
+    let background_probe = if frame_requires_background_probe(&frame) {
         let Some(background_probe) = observation.background_probe() else {
             // probe-gated particles may not silently degrade into a
             // "successful" projection. Force an explicit retry path instead.
@@ -236,13 +309,15 @@ fn prepare_projection<'a>(
     } else {
         None
     };
-    let planner_frame = geometry.planner_frame(policy);
-    let planner_state = planner_seed(current_scene, policy);
-    let reuse_planner_clock = projection_reuse_planner_clock(&planner_frame, &planner_state);
+    let projection_policy_revision = frame.projection_policy_revision;
+    let planner_state = planner_seed(current_scene, projection_policy_revision);
+    let reuse_planner_clock = projection_reuse_planner_clock(&frame, &planner_state);
     Ok(PreparedProjection {
-        witness: projection_witness(scene_revision, observation),
+        render_revision,
+        observation_id: observation.observation_id(),
+        viewport_snapshot: observation.viewport(),
         viewport: projection_viewport(observation.viewport()),
-        planner_frame,
+        frame,
         trail_signature: OnceCell::new(),
         particle_overlay_signature: OnceCell::new(),
         planner_state,
@@ -253,23 +328,21 @@ fn prepare_projection<'a>(
 
 fn project_prepared_frame(
     prepared: PreparedProjection<'_>,
-    policy: &CursorTrailProjectionPolicy,
-    target_cell_presentation: TargetCellPresentation,
-) -> ProjectionCacheEntry {
+    trail_semantic: &CursorTrailSemantic,
+) -> ProjectionHandle {
+    let target_cell_presentation = trail_semantic.target_cell_presentation();
     let trail_signature = prepared.trail_signature();
-    let particle_overlay_signature = prepared.particle_overlay_signature();
+    let witness = prepared.witness();
+    let reuse_key = prepared.reuse_key(target_cell_presentation);
     let mut planner_output = render_plan::render_frame_to_plan_with_signature(
-        &prepared.planner_frame,
+        &prepared.frame,
         prepared.planner_state,
         prepared.viewport,
         trail_signature,
     );
     if let TargetCellPresentation::OverlayCursorCell(shape) = target_cell_presentation {
-        planner_output.plan.target_cell_overlay = render_plan::plan_target_cell_overlay(
-            &prepared.planner_frame,
-            prepared.viewport,
-            shape,
-        );
+        planner_output.plan.target_cell_overlay =
+            render_plan::plan_target_cell_overlay(&prepared.frame, prepared.viewport, shape);
     }
 
     let logical_raster = project_render_plan(
@@ -277,236 +350,207 @@ fn project_prepared_frame(
         prepared.viewport,
         prepared.background_probe,
     );
-    let snapshot = ProjectionSnapshot::new(prepared.witness, logical_raster);
-    let PreparedProjection {
-        reuse_planner_clock,
-        ..
-    } = prepared;
-    ProjectionCacheEntry::new(
+    RetainedProjection::new(
+        witness,
+        reuse_key,
         planner_output.next_state,
-        snapshot,
-        ProjectionReuseKey::new(
-            planner_output.signature,
-            particle_overlay_signature,
-            reuse_planner_clock,
-            target_cell_presentation,
-            policy.clone(),
-        ),
+        logical_raster,
     )
+    .into_handle()
 }
 
 #[cfg(test)]
 fn project_draw_frame(
     current_scene: &SceneState,
-    scene_revision: SceneRevision,
+    render_revision: RenderRevision,
     observation: &ObservationSnapshot,
-    geometry: &CursorTrailGeometry,
-    policy: &CursorTrailProjectionPolicy,
+    frame: &RenderFrame,
     target_cell_presentation: TargetCellPresentation,
-) -> Result<ProjectionCacheEntry, ApplyFailureKind> {
+) -> Result<ProjectionHandle, ApplyFailureKind> {
     let observation = render_planning_observation(observation);
-    let prepared = prepare_projection(
-        current_scene,
-        scene_revision,
-        &observation,
-        geometry,
-        policy,
-    )?;
-    Ok(project_prepared_frame(
-        prepared,
-        policy,
-        target_cell_presentation,
-    ))
+    let prepared = prepare_projection(current_scene, render_revision, &observation, frame.clone())?;
+    let trail_semantic = CursorTrailSemantic::new(target_cell_presentation);
+    Ok(project_prepared_frame(prepared, &trail_semantic))
 }
 
-fn reusable_prepared_projection_entry(
+fn reusable_prepared_projection(
     current_scene: &SceneState,
     prepared: &PreparedProjection<'_>,
-    policy: &CursorTrailProjectionPolicy,
-    target_cell_presentation: TargetCellPresentation,
-) -> Option<ProjectionCacheEntry> {
-    let entry = projection_entry_for_reuse(current_scene, prepared.witness, policy)?;
-    let reuse_key = entry.reuse_key();
+    trail_semantic: &CursorTrailSemantic,
+) -> Option<ProjectionHandle> {
+    let target_cell_presentation = trail_semantic.target_cell_presentation();
+    let projection_policy_revision = prepared.projection_policy_revision();
+    let witness = prepared.witness();
+    let reuse_key = prepared.reuse_key(target_cell_presentation);
+    let retained_projection = retained_projection_for_reuse(
+        current_scene,
+        witness.viewport(),
+        projection_policy_revision,
+    )?;
+    let retained_witness = retained_projection.witness();
+    let retained_reuse_key = retained_projection.reuse_key();
 
-    if reuse_key.planner_clock() != prepared.reuse_planner_clock
-        || reuse_key.target_cell_presentation() != target_cell_presentation
-        || reuse_key.policy() != policy
+    if retained_reuse_key.planner_clock() != reuse_key.planner_clock()
+        || retained_reuse_key.target_cell_presentation() != target_cell_presentation
     {
         return None;
     }
-    if reuse_key.trail_signature() != prepared.trail_signature() {
+    if retained_reuse_key.trail_signature() != reuse_key.trail_signature() {
         return None;
     }
 
-    let refresh_particle_overlay = reuse_key.particle_overlay_signature()
-        != prepared.particle_overlay_signature()
+    let refresh_particle_overlay = retained_reuse_key.particle_overlay_signature()
+        != reuse_key.particle_overlay_signature()
         || (prepared.background_probe.is_some()
-            && entry.snapshot().witness().observation_id() != prepared.witness.observation_id());
-    let snapshot = if refresh_particle_overlay {
+            && retained_witness.observation_id() != witness.observation_id());
+    let retained_projection = if refresh_particle_overlay {
         let particle_cells = project_particle_overlay_cells(
-            &prepared.planner_frame,
+            &prepared.frame,
             prepared.viewport,
             prepared.background_probe,
         );
         crate::events::record_particle_overlay_refresh(particle_cells.len());
-        entry
-            .snapshot()
-            .with_replaced_particle_cells(prepared.witness, particle_cells)
+        retained_projection.with_replaced_particle_cells(witness, reuse_key, particle_cells)
     } else {
-        entry.snapshot().rebind_witness(prepared.witness)
+        retained_projection.rebind_snapshot(witness, reuse_key)
     };
 
-    Some(ProjectionCacheEntry::new(
-        entry.planner_state().clone(),
-        snapshot,
-        ProjectionReuseKey::new(
-            prepared.trail_signature(),
-            prepared.particle_overlay_signature(),
-            prepared.reuse_planner_clock,
-            target_cell_presentation,
-            policy.clone(),
-        ),
-    ))
+    Some(retained_projection.into_handle())
 }
 
 #[cfg(test)]
-fn reusable_projection_entry(
+fn reusable_projection(
     current_scene: &SceneState,
-    scene_revision: SceneRevision,
+    render_revision: RenderRevision,
     observation: &ObservationSnapshot,
-    geometry: &CursorTrailGeometry,
-    policy: &CursorTrailProjectionPolicy,
+    frame: &RenderFrame,
     target_cell_presentation: TargetCellPresentation,
-) -> Option<ProjectionCacheEntry> {
+) -> Option<ProjectionHandle> {
     let observation = render_planning_observation(observation);
-    let prepared = prepare_projection(
-        current_scene,
-        scene_revision,
-        &observation,
-        geometry,
-        policy,
-    )
-    .ok()?;
-    reusable_prepared_projection_entry(current_scene, &prepared, policy, target_cell_presentation)
+    let prepared =
+        prepare_projection(current_scene, render_revision, &observation, frame.clone()).ok()?;
+    let trail_semantic = CursorTrailSemantic::new(target_cell_presentation);
+    reusable_prepared_projection(current_scene, &prepared, &trail_semantic)
 }
 
 fn update_scene_from_render_decision_with_context(
     current_scene: &SceneState,
     observation: Option<&RenderPlanningObservation>,
-    trusted_projection: Option<&ProjectionSnapshot>,
+    trusted_projection: Option<&ProjectionHandle>,
     render_decision: &RenderDecision,
 ) -> (
     PlannedSceneUpdate,
-    Option<ProjectionSnapshot>,
+    Option<ProjectionHandle>,
     Option<ApplyFailureKind>,
 ) {
-    let next_semantics =
-        next_semantics_for_render_decision(current_scene.semantics(), render_decision);
-    let dirty = dirty_entities(current_scene.semantics(), &next_semantics);
-    let next_revision = if dirty.is_empty() {
-        current_scene.revision()
+    let current_render_revision = current_scene.render_revision();
+    let next_cursor_trail =
+        next_cursor_trail_for_render_decision(current_scene.cursor_trail(), render_decision);
+    let semantics_changed =
+        semantic_cursor_trail_changed(current_scene.cursor_trail(), next_cursor_trail.as_ref());
+    let next_semantic_revision = if semantics_changed {
+        current_render_revision.semantics().next()
     } else {
-        current_scene.revision().next()
+        current_render_revision.semantics()
     };
 
     match &render_decision.render_action {
         RenderAction::Draw(frame) => {
-            let Some(trail_semantic) = cursor_trail_semantic(&next_semantics) else {
+            let next_motion_fingerprint = Some(render_frame_motion_fingerprint(frame.as_ref()));
+            let next_motion_revision = next_motion_revision(current_scene, next_motion_fingerprint);
+            let next_render_revision =
+                RenderRevision::new(next_motion_revision, next_semantic_revision);
+
+            let Some(trail_semantic) = next_cursor_trail.as_ref() else {
                 // Surprising: draw planning lost its semantic trail payload before projection.
                 let next_scene = PlannedSceneUpdate::new(
-                    next_revision,
-                    next_semantics,
-                    PlannedProjectionUpdate::Replace(ProjectionCache::Invalid),
-                    dirty,
+                    next_semantic_revision,
+                    next_motion_revision,
+                    next_motion_fingerprint,
+                    next_cursor_trail,
+                    PlannedProjectionUpdate::Replace(None),
                 );
                 return (next_scene, None, Some(ApplyFailureKind::MissingProjection));
             };
-            let policy = CursorTrailProjectionPolicy::from_render_frame(frame);
             let Some(observation) = observation else {
                 // Surprising: render planning completed without an active observation basis.
                 // Keep semantic truth updated, but do not fabricate a projection.
                 let next_scene = PlannedSceneUpdate::new(
-                    next_revision,
-                    next_semantics,
-                    PlannedProjectionUpdate::Replace(ProjectionCache::Invalid),
-                    dirty,
+                    next_semantic_revision,
+                    next_motion_revision,
+                    next_motion_fingerprint,
+                    next_cursor_trail,
+                    PlannedProjectionUpdate::Replace(None),
                 );
                 return (next_scene, None, Some(ApplyFailureKind::MissingProjection));
             };
 
             let prepared = match prepare_projection(
                 current_scene,
-                next_revision,
+                next_render_revision,
                 observation,
-                trail_semantic.geometry(),
-                &policy,
+                frame.as_ref().clone(),
             ) {
                 Ok(prepared) => prepared,
                 Err(reason) => {
                     let next_scene = PlannedSceneUpdate::new(
-                        next_revision,
-                        next_semantics,
-                        PlannedProjectionUpdate::Replace(ProjectionCache::Invalid),
-                        dirty,
+                        next_semantic_revision,
+                        next_motion_revision,
+                        next_motion_fingerprint,
+                        next_cursor_trail,
+                        PlannedProjectionUpdate::Replace(None),
                     );
                     return (next_scene, None, Some(reason));
                 }
             };
 
-            if let Some(reused) = reusable_prepared_projection_entry(
-                current_scene,
-                &prepared,
-                &policy,
-                render_decision.render_side_effects.target_cell_presentation,
-            ) {
+            if let Some(reused) =
+                reusable_prepared_projection(current_scene, &prepared, trail_semantic)
+            {
                 crate::events::record_projection_reuse_hit();
-                let snapshot = reused.snapshot().clone();
+                let retained_projection = reused.clone();
                 let next_scene = PlannedSceneUpdate::new(
-                    next_revision,
-                    next_semantics,
-                    PlannedProjectionUpdate::Replace(ProjectionCache::Ready(Box::new(reused))),
-                    if dirty.is_empty() {
-                        DirtyEntitySet::default()
-                    } else {
-                        dirty
-                    },
+                    next_semantic_revision,
+                    next_motion_revision,
+                    next_motion_fingerprint,
+                    next_cursor_trail,
+                    PlannedProjectionUpdate::Replace(Some(reused)),
                 );
-                return (next_scene, Some(snapshot), None);
+                return (next_scene, Some(retained_projection), None);
             }
             crate::events::record_projection_reuse_miss();
 
-            let entry = project_prepared_frame(
-                prepared,
-                &policy,
-                render_decision.render_side_effects.target_cell_presentation,
-            );
-            let snapshot = entry.snapshot().clone();
+            let retained_projection = project_prepared_frame(prepared, trail_semantic);
             let next_scene = PlannedSceneUpdate::new(
-                next_revision,
-                next_semantics,
-                PlannedProjectionUpdate::Replace(ProjectionCache::Ready(Box::new(entry))),
-                dirty,
+                next_semantic_revision,
+                next_motion_revision,
+                next_motion_fingerprint,
+                next_cursor_trail,
+                PlannedProjectionUpdate::Replace(Some(retained_projection.clone())),
             );
-            (next_scene, Some(snapshot), None)
+            (next_scene, Some(retained_projection), None)
         }
         RenderAction::ClearAll => {
+            let next_motion_revision = next_motion_revision(current_scene, None);
             let next_scene = PlannedSceneUpdate::new(
-                next_revision,
-                next_semantics,
-                PlannedProjectionUpdate::Replace(ProjectionCache::Invalid),
-                dirty,
+                next_semantic_revision,
+                next_motion_revision,
+                None,
+                next_cursor_trail,
+                PlannedProjectionUpdate::Replace(None),
             );
             (next_scene, None, None)
         }
         RenderAction::Noop => {
             let projection = trusted_projection.cloned();
             let next_scene = PlannedSceneUpdate::new(
-                current_scene.revision(),
-                next_semantics,
+                current_render_revision.semantics(),
+                current_render_revision.motion(),
+                current_scene.last_motion_fingerprint(),
+                next_cursor_trail,
                 PlannedProjectionUpdate::Keep,
-                DirtyEntitySet::default(),
             );
-            // the scene projection cache is planner reuse state, not shell authority.
+            // the retained scene projection is planner reuse state, not shell authority.
             // A noop proposal may only target the trusted acknowledged render; otherwise cleanup
             // or divergence can leak stale cached draw input into apply as a replace patch.
             (next_scene, projection, None)
@@ -515,16 +559,16 @@ fn update_scene_from_render_decision_with_context(
 }
 
 fn patch_basis(
-    acknowledged_projection: Option<ProjectionSnapshot>,
-    target: Option<ProjectionSnapshot>,
+    acknowledged_projection: Option<ProjectionHandle>,
+    target: Option<ProjectionHandle>,
 ) -> PatchBasis {
     PatchBasis::new(acknowledged_projection, target)
 }
 
 fn realization_plan_for_render_decision(
-    clear_all_max_kept_windows: usize,
+    config: &RuntimeConfig,
     render_decision: &RenderDecision,
-    projection: Option<&ProjectionSnapshot>,
+    projection: Option<&ProjectionHandle>,
     projection_failure: Option<ApplyFailureKind>,
 ) -> RealizationPlan {
     match &render_decision.render_action {
@@ -553,7 +597,7 @@ fn realization_plan_for_render_decision(
             // Even if projection trust has already degraded to a noop patch basis, a reducer
             // `ClearAll` must still force shell clear work or the last visible trail can survive
             // until unrelated ingress repaints the UI.
-            RealizationPlan::Clear(RealizationClear::new(clear_all_max_kept_windows))
+            RealizationPlan::Clear(RealizationClear::new(config.max_kept_windows))
         }
         RenderAction::Noop => RealizationPlan::Noop,
     }
@@ -614,12 +658,9 @@ fn plan_runtime_transition_for_runtime(
         mode,
         &event,
         source,
-        observation.request().demand().buffer_perf_class(),
+        observation.demand().buffer_perf_class(),
     );
-    PlannedRuntimeTransition {
-        transition,
-        runtime_changed: runtime.runtime_changed_since_preview(),
-    }
+    PlannedRuntimeTransition { transition }
 }
 
 fn prepare_observation_plan_with_runtime(
@@ -629,16 +670,17 @@ fn prepare_observation_plan_with_runtime(
     observation: &ObservationSnapshot,
     observed_at: Millis,
 ) -> (crate::state::RuntimeState, PreparedObservationPlan) {
-    let mut preview_runtime = runtime.planning_preview();
+    let mut preview_runtime = crate::state::RuntimePreview::new(&mut runtime);
     let planned_transition = plan_runtime_transition_for_runtime(
-        &mut preview_runtime,
+        preview_runtime.runtime_mut(),
         latest_exact_cursor_position,
         previous_observation,
         observation,
         observed_at,
     );
-    let prepared_plan = if !planned_transition.runtime_changed {
-        runtime.reclaim_preview_particles_scratch(preview_runtime.into_preview_particle_storage());
+    let prepared_plan = if !preview_runtime.runtime_changed_since_preview() {
+        let preview_particles = preview_runtime.into_preview_particle_storage();
+        runtime.reclaim_preview_particles_scratch(preview_particles);
         PreparedObservationPlan::unchanged(planned_transition.transition)
     } else {
         PreparedObservationPlan::new(
@@ -699,10 +741,7 @@ fn plan_ready_state_with_transition(
         next_animation_at_ms,
     } = cursor_transition;
 
-    let Some(observation_id) = state
-        .observation()
-        .map(|observation| observation.basis().observation_id())
-    else {
+    let Some(planning_observation) = state.observation().map(render_planning_observation) else {
         // Surprising: `plan_ready_state` lost its ready observation before planning.
         return Transition::stay(&state);
     };
@@ -718,12 +757,12 @@ fn plan_ready_state_with_transition(
     }
     let planning = RenderPlanningContext::new(
         state.shared_scene(),
-        state.observation().map(render_planning_observation),
+        Some(planning_observation),
         state
             .realization()
             .trusted_acknowledged_for_patch()
             .cloned(),
-        state.runtime().config.max_kept_windows,
+        std::sync::Arc::new(state.runtime().config.clone()),
     );
     let Some(next_state) = state.enter_planning(proposal_id) else {
         unreachable!("ready lifecycle checked above")
@@ -733,7 +772,6 @@ fn plan_ready_state_with_transition(
         next_state,
         vec![request_render_plan_effect(
             planning,
-            observation_id,
             proposal_id,
             render_decision,
             animation_schedule,
@@ -820,22 +858,21 @@ pub(crate) fn build_planned_render(
     render_decision: &RenderDecision,
     animation_schedule: AnimationSchedule,
 ) -> Result<PlannedRender, crate::core::state::ProposalShapeError> {
-    let (current_scene, observation, acknowledged_projection, clear_all_max_kept_windows) =
-        planning.into_parts();
+    let (current_scene, observation, acknowledged_projection, config) = planning.into_parts();
     let (scene_update, projection, projection_failure) =
         update_scene_from_render_decision_with_context(
-            current_scene.as_ref(),
+            &current_scene,
             observation.as_ref(),
             acknowledged_projection.as_ref(),
             render_decision,
         );
-    let basis = patch_basis(acknowledged_projection, projection);
     let realization = realization_plan_for_render_decision(
-        clear_all_max_kept_windows,
+        config.as_ref(),
         render_decision,
-        basis.target(),
+        projection.as_ref(),
         projection_failure,
     );
+    let basis = patch_basis(acknowledged_projection, projection);
     let patch = ScenePatch::derive(basis);
     build_in_flight_proposal(
         proposal_id,
@@ -853,36 +890,33 @@ mod tests {
     use super::AnimationSchedule;
     use super::PaletteSpec;
     use super::build_in_flight_proposal;
+    use super::build_planned_render;
     use super::dirty_entities;
     use super::patch_basis;
     use super::planner_seed;
     use super::project_draw_frame;
     use super::realization_plan_for_render_decision;
-    use super::reusable_projection_entry;
+    use super::reusable_projection;
     use super::update_scene_from_render_decision_with_context;
+    use crate::config::RuntimeConfig;
+    use crate::core::effect::RenderPlanningContext;
     use crate::core::runtime_reducer::RenderAction;
     use crate::core::runtime_reducer::RenderDecision;
     use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::state::BackgroundProbeChunkMask;
     use crate::core::state::BackgroundProbePlan;
-    use crate::core::state::BackgroundProbeUpdate;
     use crate::core::state::BufferPerfClass;
-    use crate::core::state::CoreState;
     use crate::core::state::CursorPositionSync;
-    use crate::core::state::CursorTrailGeometry;
-    use crate::core::state::CursorTrailProjectionPolicy;
     use crate::core::state::CursorTrailSemantic;
     use crate::core::state::ExternalDemand;
     use crate::core::state::ExternalDemandKind;
     use crate::core::state::ObservationBasis;
     use crate::core::state::ObservationMotion;
-    use crate::core::state::ObservationRequest;
     use crate::core::state::ObservationSnapshot;
     use crate::core::state::PatchBasis;
+    use crate::core::state::PendingObservation;
     use crate::core::state::ProbeKind;
     use crate::core::state::ProbeRequestSet;
-    use crate::core::state::ProbeReuse;
-    use crate::core::state::ProjectionCache;
     use crate::core::state::RealizationClear;
     use crate::core::state::RealizationDivergence;
     use crate::core::state::RealizationDraw;
@@ -891,17 +925,17 @@ mod tests {
     use crate::core::state::ScenePatch;
     use crate::core::state::ScenePatchKind;
     use crate::core::state::SceneState;
-    use crate::core::state::SemanticEntity;
     use crate::core::state::SemanticEntityId;
-    use crate::core::state::SemanticScene;
     use crate::core::types::CursorCol;
     use crate::core::types::CursorPosition;
     use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::Millis;
-    use crate::core::types::ObservationId;
+    use crate::core::types::MotionRevision;
+    use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProposalId;
-    use crate::core::types::SceneRevision;
+    use crate::core::types::RenderRevision;
+    use crate::core::types::SemanticRevision;
     use crate::core::types::StrokeId;
     use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
@@ -975,6 +1009,7 @@ mod tests {
             aggregated_particle_cells: Arc::default(),
             particle_screen_cells: Arc::default(),
             color_at_cursor: None,
+            projection_policy_revision: ProjectionPolicyRevision::INITIAL,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: None,
                 cursor_color_insert_mode: None,
@@ -1003,8 +1038,19 @@ mod tests {
         }
     }
 
+    fn render_revision(
+        motion_revision: MotionRevision,
+        semantic_revision: SemanticRevision,
+    ) -> RenderRevision {
+        RenderRevision::new(motion_revision, semantic_revision)
+    }
+
+    fn projection_policy_revision(frame: &RenderFrame) -> ProjectionPolicyRevision {
+        frame.projection_policy_revision
+    }
+
     fn observation(seq: u64) -> ObservationSnapshot {
-        let request = ObservationRequest::new(
+        let request = PendingObservation::new(
             ExternalDemand::new(
                 IngressSeq::new(seq),
                 ExternalDemandKind::ExternalCursor,
@@ -1015,7 +1061,6 @@ mod tests {
             ProbeRequestSet::default(),
         );
         let basis = ObservationBasis::new(
-            ObservationId::from_ingress_seq(IngressSeq::new(seq)),
             Millis::new(seq),
             "n".to_string(),
             Some(CursorPosition {
@@ -1040,7 +1085,7 @@ mod tests {
             7,
             &CursorLocation::new(1, 1, 1, 1),
         );
-        runtime.set_last_mode_was_cmdline(false);
+        runtime.record_observed_mode(/*current_is_cmdline*/ false);
         runtime.reclaim_preview_particles_scratch(Vec::with_capacity(8));
 
         let expected_scratch_capacity = runtime.preview_particles_scratch_capacity();
@@ -1095,9 +1140,9 @@ mod tests {
             7,
             &CursorLocation::new(1, 1, 1, 1),
         );
-        runtime.set_last_mode_was_cmdline(false);
+        runtime.record_observed_mode(/*current_is_cmdline*/ false);
 
-        let request = ObservationRequest::new(
+        let request = PendingObservation::new(
             ExternalDemand::new(
                 IngressSeq::new(2),
                 ExternalDemandKind::ExternalCursor,
@@ -1110,7 +1155,6 @@ mod tests {
         let observation = ObservationSnapshot::new(
             request,
             ObservationBasis::new(
-                ObservationId::from_ingress_seq(IngressSeq::new(2)),
                 Millis::new(2),
                 "n".to_string(),
                 Some(CursorPosition {
@@ -1160,7 +1204,7 @@ mod tests {
             7,
             &location,
         );
-        runtime.set_last_mode_was_cmdline(false);
+        runtime.record_observed_mode(/*current_is_cmdline*/ false);
         runtime.set_target(
             Point {
                 row: 9.0,
@@ -1171,7 +1215,7 @@ mod tests {
         runtime.start_animation_towards_target();
         runtime.record_animation_tick(100.0);
 
-        let request = ObservationRequest::new(
+        let request = PendingObservation::new(
             ExternalDemand::new(
                 IngressSeq::new(3),
                 ExternalDemandKind::ExternalCursor,
@@ -1184,7 +1228,6 @@ mod tests {
         let observation = ObservationSnapshot::new(
             request,
             ObservationBasis::new(
-                ObservationId::from_ingress_seq(IngressSeq::new(3)),
                 Millis::new(3),
                 "n".to_string(),
                 Some(CursorPosition {
@@ -1228,7 +1271,7 @@ mod tests {
         seq: u64,
         allowed_cells: &[ScreenCell],
     ) -> ObservationSnapshot {
-        let request = ObservationRequest::new(
+        let request = PendingObservation::new(
             ExternalDemand::new(
                 IngressSeq::new(seq),
                 ExternalDemandKind::ExternalCursor,
@@ -1236,10 +1279,9 @@ mod tests {
                 None,
                 BufferPerfClass::Full,
             ),
-            ProbeRequestSet::new(false, true),
+            ProbeRequestSet::only(ProbeKind::Background),
         );
         let basis = ObservationBasis::new(
-            ObservationId::from_ingress_seq(IngressSeq::new(seq)),
             Millis::new(seq),
             "n".to_string(),
             Some(CursorPosition {
@@ -1249,33 +1291,26 @@ mod tests {
             CursorLocation::new(1, 1, 1, 1),
             ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
         );
-        let snapshot =
-            ObservationSnapshot::new(request.clone(), basis, ObservationMotion::default())
-                .with_background_probe_plan(BackgroundProbePlan::from_cells(
-                    allowed_cells.to_vec(),
-                ));
-        let mut progress = snapshot
-            .background_progress()
-            .cloned()
-            .expect("background probe plan should remain pending until sampled");
-        let chunk = progress
+        let mut snapshot = ObservationSnapshot::new(request, basis, ObservationMotion::default());
+        *snapshot.probes_mut().background_mut() =
+            crate::core::state::BackgroundProbeState::from_plan(BackgroundProbePlan::from_cells(
+                allowed_cells.to_vec(),
+            ));
+        let chunk = snapshot
+            .probes()
+            .background()
             .next_chunk()
             .expect("single-cell sparse probe should emit one chunk");
         let allowed_mask = BackgroundProbeChunkMask::from_allowed_mask(&vec![true; chunk.len()]);
-        let BackgroundProbeUpdate::Complete(batch) = progress
-            .apply_chunk(&chunk, &allowed_mask)
-            .expect("sparse chunk should materialize a ready background batch")
-        else {
-            panic!("single chunk sparse probe should complete immediately");
-        };
+        let viewport = snapshot.basis().viewport();
+        assert!(
+            snapshot
+                .probes_mut()
+                .background_mut()
+                .apply_chunk(viewport, &chunk, &allowed_mask,),
+            "single chunk sparse probe should complete immediately",
+        );
         snapshot
-            .with_background_probe_ready(
-                ProbeKind::Background.request_id(request.observation_id()),
-                request.observation_id(),
-                ProbeReuse::Exact,
-                batch,
-            )
-            .expect("requested background probe should accept the sampled batch")
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1290,7 +1325,8 @@ mod tests {
     enum ReuseMutationAxis {
         Exact,
         ObservationWitness,
-        SceneRevision,
+        MotionRevision,
+        SemanticRevision,
         ParticleOverlay,
         Presentation,
         Policy,
@@ -1310,7 +1346,8 @@ mod tests {
         prop_oneof![
             Just(ReuseMutationAxis::Exact),
             Just(ReuseMutationAxis::ObservationWitness),
-            Just(ReuseMutationAxis::SceneRevision),
+            Just(ReuseMutationAxis::MotionRevision),
+            Just(ReuseMutationAxis::SemanticRevision),
             Just(ReuseMutationAxis::ParticleOverlay),
             Just(ReuseMutationAxis::Presentation),
             Just(ReuseMutationAxis::Policy),
@@ -1383,9 +1420,7 @@ mod tests {
     }
 
     fn frame_with_policy_drift(mut frame: RenderFrame) -> RenderFrame {
-        let mut drifted_static_config = (*frame.static_config).clone();
-        drifted_static_config.color_levels = drifted_static_config.color_levels.saturating_add(1);
-        frame.static_config = Arc::new(drifted_static_config);
+        frame.projection_policy_revision = frame.projection_policy_revision.next();
         frame
     }
 
@@ -1408,48 +1443,32 @@ mod tests {
         fn prop_dirty_entities_track_semantic_cursor_trail_identity(
             mutation_axis in dirty_mutation_axis_strategy(),
             initial_presentation in target_cell_presentation_strategy(),
-            color_at_cursor in any::<u32>(),
+            _color_at_cursor in any::<u32>(),
         ) {
-            let previous_frame = base_frame();
-            let mut next_frame = previous_frame.clone();
             let next_presentation = match mutation_axis {
                 DirtyMutationAxis::None => initial_presentation,
-                DirtyMutationAxis::PaletteOnly => {
-                    next_frame.color_at_cursor = Some(color_at_cursor);
+                DirtyMutationAxis::PaletteOnly | DirtyMutationAxis::Geometry => {
                     initial_presentation
                 }
                 DirtyMutationAxis::Presentation => {
                     alternate_target_cell_presentation(initial_presentation)
                 }
-                DirtyMutationAxis::Geometry => {
-                    next_frame.retarget_epoch = next_frame.retarget_epoch.saturating_add(1);
-                    initial_presentation
-                }
             };
 
-            let previous = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-                CursorTrailSemantic::from_render_frame(&previous_frame, initial_presentation),
-            ));
-            let next = SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-                CursorTrailSemantic::from_render_frame(&next_frame, next_presentation),
-            ));
-            let dirty = dirty_entities(&previous, &next);
-            let expected_dirty = previous.entity(SemanticEntityId::CursorTrail)
-                != next.entity(SemanticEntityId::CursorTrail);
+            let previous = Some(CursorTrailSemantic::new(initial_presentation));
+            let next = Some(CursorTrailSemantic::new(next_presentation));
+            let dirty = dirty_entities(previous.as_ref(), next.as_ref());
+            let expected_dirty = previous != next;
 
             prop_assert_eq!(dirty.is_empty(), !expected_dirty);
             if expected_dirty {
-                prop_assert_eq!(
-                    dirty.entities(),
-                    &BTreeSet::from([SemanticEntityId::CursorTrail])
-                );
+                prop_assert_eq!(&dirty, &BTreeSet::from([SemanticEntityId::CursorTrail]));
             }
 
             match mutation_axis {
                 DirtyMutationAxis::PaletteOnly => prop_assert!(dirty.is_empty()),
-                DirtyMutationAxis::Presentation | DirtyMutationAxis::Geometry => {
-                    prop_assert!(!dirty.is_empty())
-                }
+                DirtyMutationAxis::Presentation => prop_assert!(!dirty.is_empty()),
+                DirtyMutationAxis::Geometry => prop_assert!(dirty.is_empty()),
                 DirtyMutationAxis::None => prop_assert!(dirty.is_empty()),
             }
         }
@@ -1471,49 +1490,51 @@ mod tests {
                 frame = frame_with_background_probe_requirement(frame);
             }
 
-            let geometry = CursorTrailGeometry::from_render_frame(&frame);
-            let cached_policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
+            let cached_policy_revision = projection_policy_revision(&frame);
             let cached_observation =
                 observation_for_projection(observation_seq, requires_background_probe);
             let cached = project_draw_frame(
                 &SceneState::default(),
-                SceneRevision::INITIAL,
+                RenderRevision::INITIAL,
                 &cached_observation,
-                &geometry,
-                &cached_policy,
+                &frame,
                 target_cell_presentation,
             )
             .expect("cached projection fixture should be valid");
-            let cached_planner_state = cached.planner_state().clone();
-            let current_scene =
-                SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
+            let cached_planner_state = cached.cached_planner_state().clone();
+            let current_scene = SceneState::default().with_retained_projection(cached);
             let query_frame = match mutation_axis {
                 ReuseMutationAxis::ParticleOverlay => frame_with_particle_overlay_drift(frame.clone()),
                 ReuseMutationAxis::Exact
                 | ReuseMutationAxis::ObservationWitness
-                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::MotionRevision
+                | ReuseMutationAxis::SemanticRevision
                 | ReuseMutationAxis::Presentation
                 | ReuseMutationAxis::Policy => frame.clone(),
             };
-            let query_geometry = CursorTrailGeometry::from_render_frame(&query_frame);
-
             let query_observation = match mutation_axis {
                 ReuseMutationAxis::ObservationWitness => {
                     observation_for_projection(observation_seq.saturating_add(1), requires_background_probe)
                 }
                 ReuseMutationAxis::Exact
-                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::MotionRevision
+                | ReuseMutationAxis::SemanticRevision
                 | ReuseMutationAxis::ParticleOverlay
                 | ReuseMutationAxis::Presentation
                 | ReuseMutationAxis::Policy => cached_observation,
             };
-            let scene_revision = match mutation_axis {
-                ReuseMutationAxis::SceneRevision => SceneRevision::INITIAL.next(),
+            let render_revision = match mutation_axis {
+                ReuseMutationAxis::MotionRevision => {
+                    render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL)
+                }
+                ReuseMutationAxis::SemanticRevision => {
+                    render_revision(MotionRevision::INITIAL, SemanticRevision::INITIAL.next())
+                }
                 ReuseMutationAxis::Exact
                 | ReuseMutationAxis::ObservationWitness
                 | ReuseMutationAxis::ParticleOverlay
                 | ReuseMutationAxis::Presentation
-                | ReuseMutationAxis::Policy => SceneRevision::INITIAL,
+                | ReuseMutationAxis::Policy => RenderRevision::INITIAL,
             };
             let query_presentation = match mutation_axis {
                 ReuseMutationAxis::Presentation => {
@@ -1521,34 +1542,40 @@ mod tests {
                 }
                 ReuseMutationAxis::Exact
                 | ReuseMutationAxis::ObservationWitness
-                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::MotionRevision
+                | ReuseMutationAxis::SemanticRevision
                 | ReuseMutationAxis::ParticleOverlay
                 | ReuseMutationAxis::Policy => target_cell_presentation,
             };
-            let query_policy = match mutation_axis {
+            let query_policy_revision = match mutation_axis {
                 ReuseMutationAxis::Policy => {
-                    CursorTrailProjectionPolicy::from_render_frame(&frame_with_policy_drift(frame))
+                    projection_policy_revision(&frame_with_policy_drift(frame))
                 }
                 ReuseMutationAxis::Exact
                 | ReuseMutationAxis::ObservationWitness
-                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::MotionRevision
+                | ReuseMutationAxis::SemanticRevision
                 | ReuseMutationAxis::ParticleOverlay
-                | ReuseMutationAxis::Presentation => cached_policy,
+                | ReuseMutationAxis::Presentation => cached_policy_revision,
             };
 
-            let reused = reusable_projection_entry(
+            let mut query_frame = query_frame;
+            if mutation_axis == ReuseMutationAxis::Policy {
+                query_frame.projection_policy_revision = query_policy_revision;
+            }
+            let reused = reusable_projection(
                 &current_scene,
-                scene_revision,
+                render_revision,
                 &query_observation,
-                &query_geometry,
-                &query_policy,
+                &query_frame,
                 query_presentation,
             );
             let expected_seed = match mutation_axis {
                 ReuseMutationAxis::Policy => ProjectionPlannerState::default(),
                 ReuseMutationAxis::Exact
                 | ReuseMutationAxis::ObservationWitness
-                | ReuseMutationAxis::SceneRevision
+                | ReuseMutationAxis::MotionRevision
+                | ReuseMutationAxis::SemanticRevision
                 | ReuseMutationAxis::ParticleOverlay
                 | ReuseMutationAxis::Presentation => cached_planner_state,
             };
@@ -1556,11 +1583,15 @@ mod tests {
                 mutation_axis,
                 ReuseMutationAxis::Exact
                     | ReuseMutationAxis::ObservationWitness
-                    | ReuseMutationAxis::SceneRevision
+                    | ReuseMutationAxis::MotionRevision
+                    | ReuseMutationAxis::SemanticRevision
                     | ReuseMutationAxis::ParticleOverlay
             ) && !advances_planner;
 
-            prop_assert_eq!(planner_seed(&current_scene, &query_policy), expected_seed);
+            prop_assert_eq!(
+                planner_seed(&current_scene, query_policy_revision),
+                expected_seed
+            );
             prop_assert_eq!(reused.is_some(), expected_reuse);
 
             if let Some(reused) = reused {
@@ -1569,8 +1600,8 @@ mod tests {
                     target_cell_presentation
                 );
                 prop_assert_eq!(
-                    reused.snapshot().witness().observation_id(),
-                    query_observation.request().observation_id(),
+                    reused.witness().observation_id(),
+                    query_observation.observation_id(),
                 );
             }
         }
@@ -1581,38 +1612,38 @@ mod tests {
             target_cell_presentation in target_cell_presentation_strategy(),
         ) {
             let frame = base_frame();
-            let geometry = CursorTrailGeometry::from_render_frame(&frame);
-            let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
+            let policy_revision = projection_policy_revision(&frame);
             let first_observation = observation(observation_seq);
             let first = project_draw_frame(
                 &SceneState::default(),
-                SceneRevision::INITIAL,
+                RenderRevision::INITIAL,
                 &first_observation,
-                &geometry,
-                &policy,
+                &frame,
                 target_cell_presentation,
             )
             .expect("first projection should succeed");
             let current_scene =
-                SceneState::default().with_projection(ProjectionCache::Ready(Box::new(first.clone())));
+                SceneState::default().with_retained_projection(first.clone());
             let second = project_draw_frame(
                 &current_scene,
-                SceneRevision::INITIAL.next(),
+                render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
                 &observation(observation_seq.saturating_add(1)),
-                &geometry,
-                &policy,
+                &frame,
                 target_cell_presentation,
             )
             .expect("second projection should succeed");
 
-            prop_assert_eq!(planner_seed(&current_scene, &policy), first.planner_state().clone());
-            prop_assert_ne!(first.planner_state(), second.planner_state());
+            prop_assert_eq!(
+                planner_seed(&current_scene, policy_revision),
+                first.cached_planner_state().clone()
+            );
+            prop_assert_ne!(first.cached_planner_state(), second.cached_planner_state());
         }
 
     }
 
     #[test]
-    fn reusable_projection_entry_refreshes_particle_overlay_without_replanning_the_trail() {
+    fn reusable_projection_refreshes_particle_overlay_without_replanning_the_trail() {
         let mut cached_frame = base_frame();
         cached_frame.step_samples = Vec::new().into();
         cached_frame.planner_idle_steps = 0;
@@ -1634,49 +1665,41 @@ mod tests {
             lifetime: 0.8,
         }]));
 
-        let cached_geometry = CursorTrailGeometry::from_render_frame(&cached_frame);
-        let query_geometry = CursorTrailGeometry::from_render_frame(&query_frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&cached_frame);
         let cached_observation = observation(1);
         let query_observation = observation(2);
         let cached = project_draw_frame(
             &SceneState::default(),
-            SceneRevision::INITIAL,
+            RenderRevision::INITIAL,
             &cached_observation,
-            &cached_geometry,
-            &policy,
+            &cached_frame,
             TargetCellPresentation::None,
         )
         .expect("cached particle projection should succeed");
-        let current_scene =
-            SceneState::default().with_projection(ProjectionCache::Ready(Box::new(cached)));
-        let reused = reusable_projection_entry(
+        let current_scene = SceneState::default().with_retained_projection(cached);
+        let reused = reusable_projection(
             &current_scene,
-            SceneRevision::INITIAL.next(),
+            render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
             &query_observation,
-            &query_geometry,
-            &policy,
+            &query_frame,
             TargetCellPresentation::None,
         )
         .expect("particle-only drift should still reuse the cached trail");
         let fully_reprojected = project_draw_frame(
             &current_scene,
-            SceneRevision::INITIAL.next(),
+            render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
             &query_observation,
-            &query_geometry,
-            &policy,
+            &query_frame,
             TargetCellPresentation::None,
         )
         .expect("full particle reprojection should succeed");
 
-        assert_eq!(reused.snapshot(), fully_reprojected.snapshot());
+        assert_eq!(reused.semantic_view(), fully_reprojected.semantic_view());
         assert_eq!(
-            reused.snapshot().realization().static_spans().as_ptr(),
+            reused.cached_realization().static_spans().as_ptr(),
             current_scene
-                .projection_entry()
-                .expect("cached projection entry")
-                .snapshot()
-                .realization()
+                .retained_projection()
+                .expect("cached retained projection")
+                .cached_realization()
                 .static_spans()
                 .as_ptr(),
         );
@@ -1691,6 +1714,49 @@ mod tests {
     }
 
     #[test]
+    fn stripped_projection_reuse_cache_preserves_projection_output_for_same_frame() {
+        let mut cached_frame = base_frame();
+        cached_frame.step_samples = Vec::new().into();
+        cached_frame.planner_idle_steps = 0;
+        let cached_observation = observation(1);
+        let cached = project_draw_frame(
+            &SceneState::default(),
+            RenderRevision::INITIAL,
+            &cached_observation,
+            &cached_frame,
+            TargetCellPresentation::None,
+        )
+        .expect("cached projection fixture should be valid");
+        let warm_scene = SceneState::default().with_retained_projection(cached);
+        let query_observation = observation(2);
+        let warm_projection = reusable_projection(
+            &warm_scene,
+            render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
+            &query_observation,
+            &cached_frame,
+            TargetCellPresentation::None,
+        )
+        .expect("warm projection cache should be reusable");
+        let stripped_projection = project_draw_frame(
+            &SceneState::default(),
+            render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
+            &query_observation,
+            &cached_frame,
+            TargetCellPresentation::None,
+        )
+        .expect("projection recompute should succeed without reuse cache");
+
+        assert_eq!(
+            warm_projection.semantic_view(),
+            stripped_projection.semantic_view()
+        );
+        assert_eq!(
+            warm_projection.shell_projection(),
+            stripped_projection.shell_projection()
+        );
+    }
+
+    #[test]
     fn clear_action_without_acknowledged_projection_still_uses_clear_realization() {
         let decision = RenderDecision {
             render_action: RenderAction::ClearAll,
@@ -1700,38 +1766,62 @@ mod tests {
             render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
         };
 
-        let clear_all_max_kept_windows = CoreState::default().runtime().config.max_kept_windows;
+        let config = RuntimeConfig {
+            max_kept_windows: 21,
+            ..RuntimeConfig::default()
+        };
 
         assert_eq!(
-            realization_plan_for_render_decision(clear_all_max_kept_windows, &decision, None, None,),
-            RealizationPlan::Clear(RealizationClear::new(clear_all_max_kept_windows))
+            realization_plan_for_render_decision(&config, &decision, None, None,),
+            RealizationPlan::Clear(RealizationClear::new(config.max_kept_windows))
+        );
+    }
+
+    #[test]
+    fn build_planned_render_uses_captured_config_for_clear_budget() {
+        let decision = RenderDecision {
+            render_action: RenderAction::ClearAll,
+            render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
+            render_allocation_policy:
+                crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
+            render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
+        };
+        let config = RuntimeConfig {
+            max_kept_windows: 13,
+            ..RuntimeConfig::default()
+        };
+
+        let planned_render = build_planned_render(
+            RenderPlanningContext::new(SceneState::default(), None, None, Arc::new(config.clone())),
+            ProposalId::new(41),
+            &decision,
+            AnimationSchedule::Idle,
+        )
+        .expect("clear planning should preserve proposal shape invariants");
+
+        assert_eq!(
+            planned_render.proposal().realization(),
+            RealizationPlan::Clear(RealizationClear::new(config.max_kept_windows))
         );
     }
 
     #[test]
     fn noop_render_action_uses_trusted_acknowledged_target_not_stale_scene_projection() {
         let frame = base_frame();
-        let geometry = CursorTrailGeometry::from_render_frame(&frame);
-        let policy = CursorTrailProjectionPolicy::from_render_frame(&frame);
         let cached_observation = observation(1);
         let cached = project_draw_frame(
             &SceneState::default(),
-            SceneRevision::INITIAL,
+            RenderRevision::INITIAL,
             &cached_observation,
-            &geometry,
-            &policy,
+            &frame,
             TargetCellPresentation::None,
         )
         .expect("projection without probe-gated particles");
         let scene = SceneState::default()
-            .with_projection(ProjectionCache::Ready(Box::new(cached.clone())))
-            .with_semantics(
-                SemanticScene::default().with_entity(SemanticEntity::CursorTrail(
-                    CursorTrailSemantic::from_render_frame(&frame, TargetCellPresentation::None),
-                )),
-            );
+            .with_retained_projection(cached.clone())
+            .with_cursor_trail(CursorTrailSemantic::new(TargetCellPresentation::None));
         let realization = RealizationLedger::Diverged {
-            last_consistent: Some(cached.snapshot().clone()),
+            last_consistent: Some(cached),
             divergence: RealizationDivergence::ShellStateUnknown,
         };
         let decision = RenderDecision {
@@ -1755,15 +1845,15 @@ mod tests {
             realization.trusted_acknowledged_for_patch().cloned(),
             projection.clone(),
         ));
-        let clear_all_max_kept_windows = CoreState::default().runtime().config.max_kept_windows;
+        let config = RuntimeConfig::default();
 
-        assert!(next_scene.projection_entry().is_some());
+        assert!(next_scene.retained_projection().is_some());
         assert!(projection_failure.is_none());
         assert_eq!(projection, None);
         assert_eq!(patch.kind(), ScenePatchKind::Noop);
         assert_eq!(
             realization_plan_for_render_decision(
-                clear_all_max_kept_windows,
+                &config,
                 &decision,
                 projection.as_ref(),
                 projection_failure,

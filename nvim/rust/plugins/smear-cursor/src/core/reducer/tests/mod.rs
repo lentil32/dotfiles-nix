@@ -50,10 +50,10 @@ use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationMotion;
-use crate::core::state::ObservationRequest;
 use crate::core::state::ObservationSnapshot;
 use crate::core::state::ObservedTextRow;
 use crate::core::state::PatchBasis;
+use crate::core::state::PendingObservation;
 use crate::core::state::ProbeFailure;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeRequestSet;
@@ -65,9 +65,9 @@ use crate::core::state::RealizationDivergence;
 use crate::core::state::RealizationLedger;
 use crate::core::state::RealizationPlan;
 use crate::core::state::RecoveryPolicyState;
+use crate::core::state::RenderCleanupState;
 use crate::core::state::RenderThermalState;
 use crate::core::state::ScenePatch;
-use crate::core::state::SemanticEntityId;
 use crate::core::types::CursorCol;
 use crate::core::types::CursorPosition;
 use crate::core::types::CursorRow;
@@ -83,7 +83,6 @@ use crate::state::CursorLocation;
 use crate::state::CursorShape;
 use crate::state::RuntimeState;
 use crate::test_support::cursor;
-use crate::test_support::cursor_color_probe_witness;
 use crate::test_support::sparse_probe_cells;
 use crate::types::Point;
 use crate::types::ScreenCell;
@@ -94,7 +93,7 @@ mod support;
 pub(in crate::core::reducer::tests) use self::support::*;
 
 struct ObservationScenario {
-    request: ObservationRequest,
+    request: PendingObservation,
     basis: ObservationBasis,
     based: Transition,
 }
@@ -104,7 +103,7 @@ impl ObservationScenario {
         let observing =
             observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
         let request = active_request(&observing);
-        let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+        let basis = observation_basis(Some(cursor(7, 8)), 26);
         let based =
             collect_observation_base(&observing, &request, basis.clone(), observation_motion());
         Self {
@@ -118,20 +117,29 @@ impl ObservationScenario {
         let observing =
             observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
         let request = active_request(&observing);
-        let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
-        let observation =
+        let basis = observation_basis(Some(cursor(7, 8)), 26);
+        let mut observation =
             ObservationSnapshot::new(request.clone(), basis.clone(), observation_motion())
-                .with_background_probe_plan(BackgroundProbePlan::from_cells(plan_cells));
+                .with_cursor_color_probe_generations(
+                    ready
+                        .runtime()
+                        .config
+                        .requires_cursor_color_sampling()
+                        .then_some(cursor_color_probe_generations()),
+                );
+        *observation.probes_mut().background_mut() =
+            BackgroundProbeState::from_plan(BackgroundProbePlan::from_cells(plan_cells));
         let next = observing
             .clone()
             .with_latest_exact_cursor_position(Some(cursor(7, 8)))
-            .with_active_observation(Some(observation.clone()))
+            .with_active_observation(observation.clone())
             .expect("observation should stay active");
-        let cursor_color_fallback = retained_cursor_color_fallback(&observing);
+        let cursor_color_fallback = observation_cursor_color_fallback(&observing);
         let effect = if ready.runtime().config.requires_cursor_color_sampling() {
             Effect::RequestProbe(RequestProbeEffect {
+                observation_id: request.observation_id(),
                 observation_basis: Box::new(basis.clone()),
-                probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
+                cursor_color_probe_generations: Some(cursor_color_probe_generations()),
                 kind: ProbeKind::CursorColor,
                 cursor_position_policy: cursor_position_policy(&observing),
                 buffer_perf_class: request.demand().buffer_perf_class(),
@@ -145,8 +153,9 @@ impl ObservationScenario {
             })
         } else {
             Effect::RequestProbe(RequestProbeEffect {
+                observation_id: request.observation_id(),
                 observation_basis: Box::new(basis.clone()),
-                probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
+                cursor_color_probe_generations: None,
                 kind: ProbeKind::Background,
                 cursor_position_policy: cursor_position_policy(&observing),
                 buffer_perf_class: request.demand().buffer_perf_class(),
@@ -155,9 +164,7 @@ impl ObservationScenario {
                     request.demand().buffer_perf_class(),
                     cursor_color_fallback.as_ref(),
                 ),
-                background_chunk: observation
-                    .background_progress()
-                    .and_then(crate::core::state::BackgroundProbeProgress::next_chunk),
+                background_chunk: observation.probes().background().next_chunk(),
                 cursor_color_fallback: None,
             })
         };
@@ -170,10 +177,7 @@ impl ObservationScenario {
     }
 
     fn with_background_probe_cell_count(ready: CoreState, cell_count: usize) -> Self {
-        let observing =
-            observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
-        let request = active_request(&observing);
-        let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+        let basis = observation_basis(Some(cursor(7, 8)), 26);
         Self::with_background_plan(ready, sparse_probe_cells(basis.viewport(), cell_count))
     }
 }
@@ -195,6 +199,7 @@ mod probe_completion_sequence;
 mod probe_failure_retention;
 mod probe_refresh_retry_budget;
 mod probe_retry;
+mod protocol_boundary_rejections;
 mod protocol_shared_state_constructors;
 mod protocol_workflow_slots;
 mod timer_interleavings;

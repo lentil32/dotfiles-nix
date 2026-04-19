@@ -67,7 +67,6 @@ pub(in crate::core::reducer::tests) fn planned_state_after_animation_tick(
     let computed = reduce(
         &transition.next,
         Event::RenderPlanComputed(RenderPlanComputedEvent {
-            proposal_id,
             planned_render: Box::new(
                 crate::core::reducer::build_planned_render(
                     payload.planning,
@@ -94,12 +93,9 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
         .trusted_acknowledged_for_patch()
         .cloned();
     let target = match &realization {
-        RealizationPlan::Draw(_) => acknowledged.clone().or_else(|| {
-            state
-                .scene()
-                .projection_entry()
-                .map(|entry| entry.snapshot().clone())
-        }),
+        RealizationPlan::Draw(_) => acknowledged
+            .clone()
+            .or_else(|| state.scene().retained_projection_handle().cloned()),
         RealizationPlan::Noop => acknowledged.clone(),
         RealizationPlan::Clear(_) | RealizationPlan::Failure(_) => None,
     };
@@ -156,8 +152,10 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
     };
     (
         state
+            .enter_planning(proposal_id)
+            .expect("test staging requires a ready observation")
             .enter_applying(proposal)
-            .expect("test staging requires a retained observation"),
+            .expect("test staging requires a matching planning proposal"),
         proposal_id,
     )
 }

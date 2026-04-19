@@ -79,7 +79,7 @@ proptest! {
 
         state.current_corners = current_corners;
         state.previous_center = center(&current_corners);
-        state.trail_origin_corners = trail_origin;
+        state.trail.origin_corners = trail_origin;
         state.particles = particles
             .into_iter()
             .map(|(position, velocity, lifetime)| Particle {

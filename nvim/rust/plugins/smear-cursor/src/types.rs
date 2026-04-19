@@ -1,3 +1,4 @@
+use crate::core::types::ProjectionPolicyRevision;
 use crate::core::types::StrokeId;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
@@ -454,49 +455,6 @@ pub(crate) fn aggregate_particle_screen_cells(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PlannerRenderConfig {
-    pub(crate) hide_target_hack: bool,
-    pub(crate) max_kept_windows: usize,
-    pub(crate) never_draw_over_target: bool,
-    pub(crate) particle_max_lifetime: f64,
-    pub(crate) particle_switch_octant_braille: f64,
-    pub(crate) particles_over_text: bool,
-    pub(crate) color_levels: u32,
-    pub(crate) block_aspect_ratio: f64,
-    pub(crate) tail_duration_ms: f64,
-    pub(crate) simulation_hz: f64,
-    pub(crate) trail_thickness: f64,
-    pub(crate) trail_thickness_x: f64,
-    pub(crate) spatial_coherence_weight: f64,
-    pub(crate) temporal_stability_weight: f64,
-    pub(crate) top_k_per_cell: u8,
-    pub(crate) windows_zindex: u32,
-}
-
-impl From<&StaticRenderConfig> for PlannerRenderConfig {
-    fn from(config: &StaticRenderConfig) -> Self {
-        Self {
-            hide_target_hack: config.hide_target_hack,
-            max_kept_windows: config.max_kept_windows,
-            never_draw_over_target: config.never_draw_over_target,
-            particle_max_lifetime: config.particle_max_lifetime,
-            particle_switch_octant_braille: config.particle_switch_octant_braille,
-            particles_over_text: config.particles_over_text,
-            color_levels: config.color_levels,
-            block_aspect_ratio: config.block_aspect_ratio,
-            tail_duration_ms: config.tail_duration_ms,
-            simulation_hz: config.simulation_hz,
-            trail_thickness: config.trail_thickness,
-            trail_thickness_x: config.trail_thickness_x,
-            spatial_coherence_weight: config.spatial_coherence_weight,
-            temporal_stability_weight: config.temporal_stability_weight,
-            top_k_per_cell: config.top_k_per_cell,
-            windows_zindex: config.windows_zindex,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StaticRenderConfig {
     pub(crate) cursor_color: Option<String>,
     pub(crate) cursor_color_insert_mode: Option<String>,
@@ -523,30 +481,6 @@ pub(crate) struct StaticRenderConfig {
     pub(crate) windows_zindex: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PlannerFrame {
-    pub(crate) mode: ModeClass,
-    pub(crate) corners: [Point; 4],
-    pub(crate) step_samples: SharedRenderStepSamples,
-    pub(crate) planner_idle_steps: u32,
-    pub(crate) target: Point,
-    pub(crate) target_corners: [Point; 4],
-    pub(crate) vertical_bar: bool,
-    pub(crate) trail_stroke_id: StrokeId,
-    pub(crate) retarget_epoch: u64,
-    pub(crate) particle_count: usize,
-    pub(crate) aggregated_particle_cells: SharedAggregatedParticleCells,
-    pub(crate) planner_config: PlannerRenderConfig,
-}
-
-impl Deref for PlannerFrame {
-    type Target = PlannerRenderConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.planner_config
-    }
-}
-
 fn particle_artifacts_for_shared_particles(
     particles: SharedParticles,
     particles_over_text: bool,
@@ -571,41 +505,6 @@ fn particle_artifacts_for_shared_particles(
     )
 }
 
-impl PlannerFrame {
-    pub(crate) fn from_render_frame(frame: &RenderFrame) -> Self {
-        Self {
-            mode: frame.mode,
-            corners: frame.corners,
-            step_samples: frame.step_samples.clone(),
-            planner_idle_steps: frame.planner_idle_steps,
-            target: frame.target,
-            target_corners: frame.target_corners,
-            vertical_bar: frame.vertical_bar,
-            trail_stroke_id: frame.trail_stroke_id,
-            retarget_epoch: frame.retarget_epoch,
-            particle_count: frame.particle_count,
-            aggregated_particle_cells: frame.aggregated_particle_cells.clone(),
-            planner_config: PlannerRenderConfig::from(frame.static_config.as_ref()),
-        }
-    }
-
-    pub(crate) const fn has_particles(&self) -> bool {
-        self.particle_count > 0
-    }
-
-    pub(crate) fn aggregated_particle_cells(&self) -> &[AggregatedParticleCell] {
-        &self.aggregated_particle_cells
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_particles(&mut self, particles: SharedParticles) {
-        let (particle_count, aggregated_particle_cells, _) =
-            particle_artifacts_for_shared_particles(particles, self.particles_over_text);
-        self.particle_count = particle_count;
-        self.aggregated_particle_cells = aggregated_particle_cells;
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RenderFrame {
     pub(crate) mode: ModeClass,
@@ -621,6 +520,7 @@ pub(crate) struct RenderFrame {
     pub(crate) aggregated_particle_cells: SharedAggregatedParticleCells,
     pub(crate) particle_screen_cells: SharedParticleScreenCells,
     pub(crate) color_at_cursor: Option<u32>,
+    pub(crate) projection_policy_revision: ProjectionPolicyRevision,
     pub(crate) static_config: Arc<StaticRenderConfig>,
 }
 

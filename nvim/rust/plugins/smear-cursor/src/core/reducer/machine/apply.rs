@@ -21,7 +21,11 @@ use crate::core::event::EffectFailedEvent;
 use crate::core::event::RenderCleanupAppliedEvent;
 use crate::core::event::RenderPlanComputedEvent;
 use crate::core::event::RenderPlanFailedEvent;
+use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
+use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
 use crate::core::state::CoreState;
+use crate::core::state::ProtocolPhaseKind;
+use crate::core::state::QueuedDemand;
 use crate::core::state::RealizationDivergence;
 use crate::core::state::RealizationLedger;
 use crate::core::types::Millis;
@@ -31,7 +35,8 @@ pub(super) fn reduce_render_plan_computed(
     mut state: CoreState,
     payload: RenderPlanComputedEvent,
 ) -> Transition {
-    if state.pending_plan_proposal_id() != Some(payload.proposal_id) {
+    let proposal_id = payload.planned_render.proposal_id();
+    if state.pending_plan_proposal_id() != Some(proposal_id) {
         return Transition::new(
             state,
             vec![record_event_loop_metric(EventLoopMetricEffect::StaleToken)],
@@ -109,6 +114,9 @@ pub(super) fn reduce_render_cleanup_applied(
     let next_cleanup =
         cleanup_state_after_applied(previous_cleanup, payload.action, payload.observed_at);
     let next_realization = state.realization().clone().cleanup_applied();
+    let next_cleanup_target_budget = render_cleanup_idle_target_budget(&state.runtime().config);
+    let next_cleanup_max_prune_per_tick =
+        render_cleanup_max_prune_per_tick(&state.runtime().config);
     let next_state = state
         .with_realization(next_realization)
         .with_render_cleanup(next_cleanup);
@@ -124,8 +132,8 @@ pub(super) fn reduce_render_cleanup_applied(
             vec![crate::core::effect::Effect::ApplyRenderCleanup(
                 ApplyRenderCleanupEffect {
                     execution: RenderCleanupExecution::CompactToBudget {
-                        target_budget: next_cleanup.idle_target_budget(),
-                        max_prune_per_tick: next_cleanup.max_prune_per_tick(),
+                        target_budget: next_cleanup_target_budget,
+                        max_prune_per_tick: next_cleanup_max_prune_per_tick,
                     },
                 },
             )],
@@ -134,10 +142,10 @@ pub(super) fn reduce_render_cleanup_applied(
 
     let (next_state, mut effects) = arm_render_cleanup_timer(next_state, payload.observed_at);
     if matches!(
-        (previous_cleanup.thermal(), next_cleanup.thermal()),
+        (previous_cleanup, next_cleanup),
         (
-            crate::core::state::RenderThermalState::Cooling,
-            crate::core::state::RenderThermalState::Cold
+            crate::core::state::RenderCleanupState::Cooling(_),
+            crate::core::state::RenderCleanupState::Cold
         )
     ) && let Some(started_at) = previous_cleanup.entered_cooling_at()
     {
@@ -164,7 +172,7 @@ fn reduce_apply_completed(
         );
     };
     let ready_state = state.with_realization(RealizationLedger::acknowledge(
-        proposal.basis().target().cloned(),
+        proposal.basis().target_handle().cloned(),
     ));
 
     let (ready_state, mut effects) =
@@ -229,7 +237,7 @@ fn reduce_apply_non_success(
         );
     };
     let realized = state.with_realization(RealizationLedger::diverged_from(
-        proposal.basis().acknowledged().cloned(),
+        proposal.basis().acknowledged_handle().cloned(),
         divergence,
     ));
 
@@ -260,6 +268,52 @@ pub(super) fn reduce_effect_failed(state: CoreState, payload: EffectFailedEvent)
         );
     }
 
-    let (next_state, schedule) = enter_recovering_with_backoff(state, payload.observed_at);
+    let phase_kind = state.phase_kind();
+    let retry_demand = match phase_kind {
+        ProtocolPhaseKind::Collecting | ProtocolPhaseKind::Observing => {
+            state.active_demand().cloned()
+        }
+        ProtocolPhaseKind::Idle
+        | ProtocolPhaseKind::Primed
+        | ProtocolPhaseKind::Ready
+        | ProtocolPhaseKind::Planning
+        | ProtocolPhaseKind::Applying
+        | ProtocolPhaseKind::Recovering => None,
+    };
+    let state = if let Some(retry_demand) = retry_demand {
+        state
+            .map_demand_queue(|queue| {
+                if retry_demand.is_cursor()
+                    && queue
+                        .latest_cursor()
+                        .is_some_and(|queued| queued.seq() >= retry_demand.seq())
+                {
+                    (queue, ())
+                } else {
+                    let (queue, _) = queue.enqueue(QueuedDemand::ready(retry_demand));
+                    (queue, ())
+                }
+            })
+            .0
+    } else {
+        state
+    };
+    let recovery_source = match phase_kind {
+        ProtocolPhaseKind::Observing => {
+            // Generic effect failures can interrupt probe completion mid-observation.
+            // Retry from the root demand instead of replaying a partial active snapshot.
+            state.into_primed()
+        }
+        ProtocolPhaseKind::Idle
+        | ProtocolPhaseKind::Primed
+        | ProtocolPhaseKind::Collecting
+        | ProtocolPhaseKind::Ready
+        | ProtocolPhaseKind::Planning
+        | ProtocolPhaseKind::Applying
+        | ProtocolPhaseKind::Recovering => state,
+    };
+
+    let (next_state, schedule) =
+        enter_recovering_with_backoff(recovery_source, payload.observed_at);
     Transition::new(next_state, vec![schedule])
 }

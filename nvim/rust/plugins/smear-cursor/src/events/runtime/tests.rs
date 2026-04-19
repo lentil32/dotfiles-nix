@@ -1,14 +1,38 @@
 use super::*;
 use crate::config::BufferPerfMode;
+use crate::core::state::BufferPerfClass;
+use crate::core::state::CursorColorProbeWitness;
+use crate::core::state::CursorColorSample;
+use crate::core::state::CursorTextContext;
+use crate::core::state::ExternalDemand;
+use crate::core::state::ExternalDemandKind;
+use crate::core::state::ObservationBasis;
+use crate::core::state::ObservationMotion;
+use crate::core::state::ObservationSnapshot;
+use crate::core::state::ObservedTextRow;
+use crate::core::state::PendingObservation;
+use crate::core::state::ProbeKind;
+use crate::core::state::ProbeRequestSet;
+use crate::core::state::ProbeReuse;
+use crate::core::state::ProbeState;
+use crate::core::types::CursorCol;
+use crate::core::types::CursorRow;
+use crate::core::types::Generation;
+use crate::core::types::IngressSeq;
+use crate::core::types::Millis;
 use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
+use crate::core::types::ViewportSnapshot;
 use crate::events::RealCursorVisibility;
 use crate::events::cursor::BufferMetadata;
 #[cfg(feature = "perf-counters")]
 use crate::events::ingress::AutocmdIngress;
 use crate::events::policy::BufferEventPolicy;
 use crate::events::policy::BufferPerfTelemetry;
+use crate::state::CursorLocation;
+use crate::test_support::cursor;
 use insta::assert_snapshot;
+use nvim_oxi::Object;
 use nvim_oxi::api;
 use pretty_assertions::assert_eq;
 
@@ -145,6 +169,201 @@ fn transient_reset_clears_real_cursor_visibility_cache() {
 }
 
 #[test]
+fn colorscheme_boundary_clears_only_color_dependent_shell_caches() {
+    let (metadata, policy, context_key, context) = prime_shell_boundary_state();
+    let cleared_color_witness = shell_cache_color_witness(Generation::new(1), Generation::new(1));
+
+    note_cursor_color_colorscheme_change().expect("colorscheme boundary should succeed");
+
+    let (
+        real_cursor_visibility,
+        viewport,
+        cached_metadata,
+        cached_policy,
+        cached_telemetry,
+        text_revision,
+        colorscheme_generation,
+        cache_generation,
+        cached_context,
+        cached_color,
+    ) = mutate_engine_state(|state| {
+        (
+            state.shell.real_cursor_visibility(),
+            state.shell.editor_viewport_cache.cached_for_test(),
+            state
+                .shell
+                .buffer_metadata_cache
+                .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state
+                .shell
+                .buffer_perf_policy_cache
+                .cached_policy(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state
+                .shell
+                .buffer_perf_telemetry_cache
+                .telemetry(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state
+                .shell
+                .buffer_text_revision_cache
+                .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state.shell.probe_cache.colorscheme_generation(),
+            state.shell.probe_cache.cursor_color_cache_generation(),
+            state
+                .shell
+                .probe_cache
+                .cached_cursor_text_context(&context_key),
+            state
+                .shell
+                .probe_cache
+                .cached_cursor_color_sample(&cleared_color_witness),
+        )
+    })
+    .expect("engine state access should succeed");
+
+    assert_eq!(real_cursor_visibility, None);
+    assert_eq!(viewport, Some(EditorViewport::from_dimensions(24, 1, 80)));
+    assert_eq!(cached_metadata, Some(metadata));
+    assert_eq!(cached_policy, Some(policy));
+    assert_eq!(
+        cached_telemetry.map(BufferPerfTelemetry::callback_duration_estimate_ms),
+        Some(SHELL_CACHE_TEST_CALLBACK_DURATION_MS)
+    );
+    assert_eq!(text_revision, Some(Generation::new(1)));
+    assert_eq!(colorscheme_generation, Generation::new(1));
+    assert_eq!(cache_generation, Generation::new(1));
+    assert_eq!(
+        cached_context,
+        super::super::probe_cache::CursorTextContextCacheLookup::Hit(Some(context))
+    );
+    assert_eq!(
+        cached_color,
+        super::super::probe_cache::CursorColorCacheLookup::Miss
+    );
+}
+
+#[test]
+fn transient_reset_purges_shell_caches_but_preserves_host_handles() {
+    let context_key = prime_shell_boundary_state().2;
+    let cleared_color_witness = shell_cache_color_witness(Generation::INITIAL, Generation::INITIAL);
+
+    mutate_engine_state(|state| {
+        state.shell.set_namespace_id(77);
+        state
+            .shell
+            .note_host_bridge_verified(super::super::HostBridgeRevision::CURRENT);
+    })
+    .expect("engine state access should succeed");
+
+    reset_transient_event_state();
+
+    let (
+        namespace_id,
+        host_bridge_state,
+        real_cursor_visibility,
+        viewport,
+        cached_metadata,
+        cached_policy,
+        cached_telemetry,
+        text_revision,
+        colorscheme_generation,
+        cache_generation,
+        cached_context,
+        cached_color,
+    ) = mutate_engine_state(|state| {
+        (
+            state.shell.namespace_id(),
+            state.shell.host_bridge_state(),
+            state.shell.real_cursor_visibility(),
+            state.shell.editor_viewport_cache.cached_for_test(),
+            state
+                .shell
+                .buffer_metadata_cache
+                .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state
+                .shell
+                .buffer_perf_policy_cache
+                .cached_policy(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state
+                .shell
+                .buffer_perf_telemetry_cache
+                .telemetry(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state
+                .shell
+                .buffer_text_revision_cache
+                .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
+            state.shell.probe_cache.colorscheme_generation(),
+            state.shell.probe_cache.cursor_color_cache_generation(),
+            state
+                .shell
+                .probe_cache
+                .cached_cursor_text_context(&context_key),
+            state
+                .shell
+                .probe_cache
+                .cached_cursor_color_sample(&cleared_color_witness),
+        )
+    })
+    .expect("engine state access should succeed");
+
+    assert_eq!(namespace_id, Some(77));
+    assert_eq!(
+        host_bridge_state,
+        super::super::HostBridgeState::Verified {
+            revision: super::super::HostBridgeRevision::CURRENT,
+        }
+    );
+    assert_eq!(real_cursor_visibility, None);
+    assert_eq!(viewport, None);
+    assert_eq!(cached_metadata, None);
+    assert_eq!(cached_policy, None);
+    assert_eq!(cached_telemetry, None);
+    assert_eq!(text_revision, None);
+    assert_eq!(colorscheme_generation, Generation::INITIAL);
+    assert_eq!(cache_generation, Generation::INITIAL);
+    assert_eq!(
+        cached_context,
+        super::super::probe_cache::CursorTextContextCacheLookup::Miss
+    );
+    assert_eq!(
+        cached_color,
+        super::super::probe_cache::CursorColorCacheLookup::Miss
+    );
+}
+
+#[test]
+fn transient_reset_drops_shell_scratch_buffer_capacity() {
+    let mut background_scratch =
+        take_background_probe_request_scratch().expect("background scratch should be available");
+    background_scratch.reserve(32);
+    background_scratch.push(Object::from(7_i64));
+    reclaim_background_probe_request_scratch(background_scratch)
+        .expect("background scratch should be reclaimable");
+
+    let mut conceal_scratch =
+        take_conceal_regions_scratch().expect("conceal region scratch should be available");
+    conceal_scratch.reserve(32);
+    conceal_scratch.push(crate::test_support::conceal_region(3, 4, 11, 1));
+    reclaim_conceal_regions_scratch(conceal_scratch)
+        .expect("conceal region scratch should be reclaimable");
+
+    reset_transient_event_state();
+
+    let background_scratch =
+        take_background_probe_request_scratch().expect("background scratch should be available");
+    assert!(background_scratch.is_empty());
+    assert_eq!(background_scratch.capacity(), 0);
+    reclaim_background_probe_request_scratch(background_scratch)
+        .expect("background scratch should be reclaimable");
+
+    let conceal_scratch =
+        take_conceal_regions_scratch().expect("conceal region scratch should be available");
+    assert!(conceal_scratch.is_empty());
+    assert_eq!(conceal_scratch.capacity(), 0);
+    reclaim_conceal_regions_scratch(conceal_scratch)
+        .expect("conceal region scratch should be reclaimable");
+}
+
+#[test]
 fn perf_diagnostics_report_includes_recovery_fields_within_bridge_budget() {
     super::reset_event_loop_for_test();
     let report = test_perf_diagnostics_report();
@@ -203,6 +422,61 @@ fn perf_diagnostics_report_includes_recovery_fields_within_bridge_budget() {
 fn perf_diagnostics_report_snapshot_renders_stable_field_order() {
     super::reset_event_loop_for_test();
     assert_snapshot!(test_perf_diagnostics_report());
+}
+
+#[test]
+fn perf_diagnostics_report_uses_phase_owned_cursor_color_for_probe_policy() {
+    let previous_core_state = core_state().expect("core state read should succeed");
+    super::reset_event_loop_for_test();
+
+    let pending = PendingObservation::new(
+        ExternalDemand::new(
+            IngressSeq::new(7),
+            ExternalDemandKind::ExternalCursor,
+            Millis::new(25),
+            Some(cursor(3, 5)),
+            BufferPerfClass::Full,
+        ),
+        ProbeRequestSet::only(ProbeKind::CursorColor),
+    );
+    let basis = ObservationBasis::new(
+        Millis::new(26),
+        "n".to_string(),
+        Some(cursor(3, 5)),
+        CursorLocation::new(11, SHELL_CACHE_TEST_BUFFER_HANDLE, 3, 5),
+        ViewportSnapshot::new(CursorRow(24), CursorCol(80)),
+    )
+    .with_buffer_revision(Some(17));
+    let mut observation = ObservationSnapshot::new(pending, basis, ObservationMotion::new(None))
+        .with_cursor_color_probe_generations(Some(
+            crate::core::state::CursorColorProbeGenerations::new(
+                Generation::INITIAL,
+                Generation::INITIAL,
+            ),
+        ));
+    assert!(
+        observation
+            .probes_mut()
+            .set_cursor_color_state(ProbeState::ready(
+                ProbeReuse::Compatible,
+                Some(CursorColorSample::new(0x00AB_CDEF)),
+            )),
+        "cursor color probe state should accept a sampled fallback",
+    );
+
+    set_core_state(
+        crate::core::state::CoreState::default()
+            .into_primed()
+            .with_ready_observation(observation)
+            .expect("primed state should accept a ready observation"),
+    )
+    .expect("core state write should succeed");
+
+    let report = test_perf_diagnostics_report();
+    assert!(report.contains("probe_policy=exact_compatible"));
+    assert_snapshot!(report);
+
+    set_core_state(previous_core_state).expect("core state restore should succeed");
 }
 
 #[cfg(feature = "perf-counters")]
@@ -314,6 +588,110 @@ fn reset_buffer_event_policy_state() {
         state.shell.buffer_perf_telemetry_cache.clear();
     })
     .expect("engine state access should succeed");
+}
+
+const SHELL_CACHE_TEST_BUFFER_HANDLE: i64 = 91;
+const SHELL_CACHE_TEST_CALLBACK_DURATION_MS: f64 = 12.0;
+
+fn shell_cache_context_key() -> super::super::probe_cache::CursorTextContextCacheKey {
+    super::super::probe_cache::CursorTextContextCacheKey::new(
+        SHELL_CACHE_TEST_BUFFER_HANDLE,
+        3,
+        7,
+        Some(5),
+    )
+}
+
+fn shell_cache_context() -> CursorTextContext {
+    CursorTextContext::new(
+        SHELL_CACHE_TEST_BUFFER_HANDLE,
+        3,
+        7,
+        vec![
+            ObservedTextRow::new("before".to_string()),
+            ObservedTextRow::new("cursor".to_string()),
+            ObservedTextRow::new("after".to_string()),
+        ],
+        Some(vec![ObservedTextRow::new("tracked".to_string())]),
+    )
+}
+
+fn shell_cache_color_witness(
+    colorscheme_generation: Generation,
+    cache_generation: Generation,
+) -> CursorColorProbeWitness {
+    CursorColorProbeWitness::new(
+        11,
+        SHELL_CACHE_TEST_BUFFER_HANDLE,
+        3,
+        "n".to_string(),
+        None,
+        colorscheme_generation,
+        cache_generation,
+    )
+}
+
+fn prime_shell_boundary_state() -> (
+    BufferMetadata,
+    BufferEventPolicy,
+    super::super::probe_cache::CursorTextContextCacheKey,
+    CursorTextContext,
+) {
+    super::reset_event_loop_for_test();
+    reset_transient_event_state();
+
+    let snapshot = snapshot_for_perf_mode(BufferPerfMode::Auto);
+    let metadata = listed_buffer_metadata(42);
+    let context_key = shell_cache_context_key();
+    let context = shell_cache_context();
+    let color_witness = shell_cache_color_witness(Generation::INITIAL, Generation::INITIAL);
+
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .buffer_perf_telemetry_cache
+            .record_callback_duration(
+                SHELL_CACHE_TEST_BUFFER_HANDLE,
+                SHELL_CACHE_TEST_CALLBACK_DURATION_MS,
+            );
+    })
+    .expect("engine state access should succeed");
+
+    let policy = resolve_policy_for_test(
+        &snapshot,
+        SHELL_CACHE_TEST_BUFFER_HANDLE,
+        &metadata,
+        1_000.0,
+    );
+
+    mutate_engine_state(|state| {
+        state
+            .shell
+            .editor_viewport_cache
+            .store_for_test(EditorViewport::from_dimensions(24, 1, 80));
+        state
+            .shell
+            .buffer_metadata_cache
+            .store_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE, metadata.clone());
+        state
+            .shell
+            .buffer_text_revision_cache
+            .advance(SHELL_CACHE_TEST_BUFFER_HANDLE);
+        state
+            .shell
+            .probe_cache
+            .store_cursor_text_context(context_key.clone(), Some(context.clone()));
+        state
+            .shell
+            .probe_cache
+            .store_cursor_color_sample(color_witness, Some(CursorColorSample::new(0x00AB_CDEF)));
+        state
+            .shell
+            .note_real_cursor_visibility(RealCursorVisibility::Hidden);
+    })
+    .expect("engine state access should succeed");
+
+    (metadata, policy, context_key, context)
 }
 
 #[test]

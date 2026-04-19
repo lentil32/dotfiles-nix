@@ -1,4 +1,5 @@
 use super::BackgroundProbeBatch;
+use super::BackgroundProbeChunk;
 use super::BackgroundProbeChunkMask;
 use super::BackgroundProbePlan;
 use super::BackgroundProbeProgress;
@@ -9,11 +10,10 @@ use super::CursorTextContext;
 use super::CursorTextContextState;
 use super::ObservationBasis;
 use super::ObservationMotion;
-use super::ObservationRequest;
 use super::ObservationSnapshot;
 use super::ObservedTextRow;
+use super::PendingObservation;
 use super::ProbeFailure;
-use super::ProbeKind;
 use super::ProbeRequestSet;
 use super::ProbeReuse;
 use super::ProbeSlot;
@@ -28,7 +28,6 @@ use crate::core::types::CursorPosition;
 use crate::core::types::CursorRow;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
-use crate::core::types::ObservationId;
 use crate::core::types::ViewportSnapshot;
 use crate::state::CursorLocation;
 use crate::types::ScreenCell;
@@ -37,8 +36,8 @@ mod background_probe;
 mod probe_state;
 mod semantic;
 
-fn observation_request(probes: ProbeRequestSet) -> ObservationRequest {
-    ObservationRequest::new(
+fn observation_request(probes: ProbeRequestSet) -> PendingObservation {
+    PendingObservation::new(
         ExternalDemand::new(
             IngressSeq::new(1),
             ExternalDemandKind::ExternalCursor,
@@ -50,9 +49,8 @@ fn observation_request(probes: ProbeRequestSet) -> ObservationRequest {
     )
 }
 
-fn observation_basis(request: &ObservationRequest, viewport: ViewportSnapshot) -> ObservationBasis {
+fn observation_basis(viewport: ViewportSnapshot) -> ObservationBasis {
     ObservationBasis::new(
-        request.observation_id(),
         Millis::new(10),
         "n".to_string(),
         Some(CursorPosition {
@@ -62,6 +60,29 @@ fn observation_basis(request: &ObservationRequest, viewport: ViewportSnapshot) -
         CursorLocation::new(1, 1, 1, 1),
         viewport,
     )
+}
+
+fn with_background_probe_plan(
+    mut snapshot: ObservationSnapshot,
+    plan: BackgroundProbePlan,
+) -> ObservationSnapshot {
+    *snapshot.probes_mut().background_mut() = BackgroundProbeState::from_plan(plan);
+    snapshot
+}
+
+fn with_background_probe_failed(
+    mut snapshot: ObservationSnapshot,
+    failure: ProbeFailure,
+) -> Option<ObservationSnapshot> {
+    snapshot
+        .probes_mut()
+        .background_mut()
+        .set_failed(failure)
+        .then_some(snapshot)
+}
+
+fn next_background_chunk(snapshot: &ObservationSnapshot) -> Option<BackgroundProbeChunk> {
+    snapshot.probes().background().next_chunk()
 }
 
 fn observed_rows(rows: &[&str]) -> Vec<ObservedTextRow> {
@@ -100,7 +121,6 @@ fn assert_text_mutation_classification(
         ObservationSnapshot::new(
             request.clone(),
             ObservationBasis::new(
-                ObservationId::from_ingress_seq(IngressSeq::new(1)),
                 Millis::new(10),
                 "n".to_string(),
                 Some(previous_position),
@@ -116,7 +136,6 @@ fn assert_text_mutation_classification(
         ObservationSnapshot::new(
             request,
             ObservationBasis::new(
-                ObservationId::from_ingress_seq(IngressSeq::new(1)),
                 Millis::new(11),
                 "n".to_string(),
                 Some(current_position),

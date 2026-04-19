@@ -20,11 +20,10 @@ use crate::core::event::Event as CoreEvent;
 use crate::core::runtime_reducer::CursorVisibilityEffect;
 use crate::core::runtime_reducer::RenderAllocationPolicy;
 use crate::core::state::InFlightProposal;
-use crate::core::state::ProjectionSnapshot;
 use crate::core::state::ProposalExecution;
 use crate::core::state::RealizationFailure;
+use crate::core::state::ShellProjection;
 use crate::draw::AllocationPolicy;
-use crate::draw::ApplyMetrics;
 use crate::draw::ClearPrepaintOverlaysSummary;
 use crate::draw::CompactRenderWindowsSummary;
 use crate::draw::PurgeRenderWindowsSummary;
@@ -45,6 +44,8 @@ pub(super) enum ApplyRenderActionError {
     Shell(#[from] nvim_oxi::Error),
     #[error("render apply viewport drifted")]
     ViewportDrift,
+    #[error("draw proposal reached shell apply without a target projection")]
+    DrawProposalMissingTarget,
     #[error("failure proposal reached render shell apply")]
     FailureProposalReachedShell(RealizationFailure),
 }
@@ -87,10 +88,6 @@ fn flush_shell_redraw(effect_name: &'static str) {
             trace_lazy(|| format!("shell_redraw trigger={effect_name} result=err error={err}"));
         }
     }
-}
-
-fn draw_release_requires_redraw(metrics: &ApplyMetrics) -> bool {
-    metrics.hidden_windows > 0 || metrics.invalid_removed_windows > 0
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,7 +228,7 @@ fn apply_cursor_visibility_effect(
 }
 
 fn viewport_matches_projection_witness(
-    projection: &ProjectionSnapshot,
+    projection: ShellProjection<'_>,
     live_viewport: crate::draw::render_plan::Viewport,
 ) -> bool {
     let expected_viewport = projection.witness().viewport();
@@ -239,7 +236,7 @@ fn viewport_matches_projection_witness(
         && live_viewport.max_col == i64::from(expected_viewport.max_col.value())
 }
 
-fn live_viewport_matches_projection(projection: &ProjectionSnapshot) -> Result<bool> {
+fn live_viewport_matches_projection(projection: ShellProjection<'_>) -> Result<bool> {
     let live_viewport = editor_bounds()?;
     Ok(viewport_matches_projection_witness(
         projection,
@@ -265,11 +262,14 @@ pub(super) fn apply_render_action(
     let mut metrics = RenderExecutionMetrics::default();
     match proposal.execution() {
         ProposalExecution::Draw {
-            target_projection,
-            realization: draw,
-            ..
+            realization: draw, ..
         } => {
-            let projection = target_projection;
+            let projection = proposal
+                .patch()
+                .basis()
+                .target_handle()
+                .ok_or(ApplyRenderActionError::DrawProposalMissingTarget)?;
+            let projection = projection.shell_projection();
             trace_lazy(|| {
                 format!(
                     "render_projection_debug namespace_id={} {}",
@@ -287,12 +287,9 @@ pub(super) fn apply_render_action(
                 draw.max_kept_windows(),
                 to_draw_allocation_policy(draw.allocation_policy()),
             )?;
-            let draw_release_redraw = draw_release_requires_redraw(&draw_metrics);
+            let draw_release_redraw = draw_metrics.requires_shell_redraw();
             metrics.merge_apply_metrics(draw_metrics);
             if draw_release_redraw && !render_side_effects.redraw_after_draw_if_cmdline {
-                // Surprising: terminal drain can end via an empty draw projection that hides
-                // the last smear windows through release/reuse cleanup rather than an explicit
-                // clear realization. Flush that hide immediately instead of waiting for later input.
                 flush_shell_redraw("draw_release_redraw");
             }
             metrics.had_visual_change = metrics.had_visual_change
@@ -349,30 +346,30 @@ pub(super) fn apply_render_action(
 
 #[cfg(test)]
 mod tests {
-    use super::ApplyMetrics;
     use super::ApplyRenderActionError;
     use super::RenderCleanupOutcome;
     use super::apply_render_action;
-    use super::draw_release_requires_redraw;
     use super::viewport_matches_projection_witness;
     use crate::core::realization::LogicalRaster;
     use crate::core::runtime_reducer::RenderSideEffects;
     use crate::core::state::ApplyFailureKind;
     use crate::core::state::InFlightProposal;
     use crate::core::state::PatchBasis;
-    use crate::core::state::ProjectionSnapshot;
+    use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ProjectionWitness;
     use crate::core::state::RealizationClear;
     use crate::core::state::RealizationDivergence;
     use crate::core::state::RealizationFailure;
+    use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
     use crate::core::types::CursorCol;
     use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::ObservationId;
+    use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::ProposalId;
-    use crate::core::types::SceneRevision;
+    use crate::core::types::RenderRevision;
     use crate::core::types::ViewportSnapshot;
     use crate::draw::ClearActiveRenderWindowsSummary;
     use crate::draw::ClearPrepaintOverlaysSummary;
@@ -384,14 +381,22 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::Arc;
 
-    fn projection_snapshot(viewport: ViewportSnapshot) -> ProjectionSnapshot {
-        ProjectionSnapshot::new(
+    fn retained_projection(viewport: ViewportSnapshot) -> RetainedProjection {
+        RetainedProjection::new(
             ProjectionWitness::new(
-                SceneRevision::INITIAL,
+                RenderRevision::INITIAL,
                 ObservationId::from_ingress_seq(IngressSeq::new(1)),
                 viewport,
                 ProjectorRevision::CURRENT,
             ),
+            ProjectionReuseKey::new(
+                None,
+                None,
+                None,
+                crate::core::runtime_reducer::TargetCellPresentation::None,
+                ProjectionPolicyRevision::INITIAL,
+            ),
+            crate::draw::render_plan::PlannerState::default(),
             LogicalRaster::new(None, Arc::from(Vec::<CellOp>::new())),
         )
     }
@@ -530,14 +535,14 @@ mod tests {
             live_row in -1_i64..258_i64,
             live_col in -1_i64..514_i64,
         ) {
-            let projection = projection_snapshot(ViewportSnapshot::new(
+            let projection = retained_projection(ViewportSnapshot::new(
                 CursorRow(u32::from(max_row)),
                 CursorCol(u32::from(max_col)),
             ));
             let live_viewport = Viewport { max_row: live_row, max_col: live_col };
 
             prop_assert_eq!(
-                viewport_matches_projection_witness(&projection, live_viewport),
+                viewport_matches_projection_witness(projection.shell_projection(), live_viewport),
                 live_row == i64::from(max_row) && live_col == i64::from(max_col)
             );
         }
@@ -549,16 +554,6 @@ mod tests {
             prop_assert_eq!(outcome.action(), expected_cleanup_action(outcome));
             prop_assert_eq!(outcome.had_visual_change(), expected_visual_change(outcome));
         }
-    }
-
-    #[test]
-    fn draw_release_requires_redraw_when_apply_hides_windows() {
-        let metrics = ApplyMetrics {
-            hidden_windows: 1,
-            ..ApplyMetrics::default()
-        };
-
-        assert!(draw_release_requires_redraw(&metrics));
     }
 
     #[test]
@@ -582,10 +577,10 @@ mod tests {
     #[test]
     fn draw_proposal_uses_target_projection_for_noop_patch_basis() {
         let viewport = ViewportSnapshot::new(CursorRow(20), CursorCol(40));
-        let projection = projection_snapshot(viewport);
+        let projection = retained_projection(viewport);
         let patch = ScenePatch::derive(PatchBasis::new(
-            Some(projection.clone()),
-            Some(projection.clone()),
+            Some(projection.clone().into()),
+            Some(projection.clone().into()),
         ));
         let proposal = InFlightProposal::draw(
             ProposalId::new(1),
@@ -605,6 +600,7 @@ mod tests {
                     aggregated_particle_cells: std::sync::Arc::default(),
                     particle_screen_cells: std::sync::Arc::default(),
                     color_at_cursor: None,
+                    projection_policy_revision: ProjectionPolicyRevision::INITIAL,
                     static_config: std::sync::Arc::new(crate::types::StaticRenderConfig {
                         cursor_color: None,
                         cursor_color_insert_mode: None,

@@ -47,13 +47,15 @@ fn build_render_frame_preserves_core_cursor_geometry() {
 
     let frame = crate::core::runtime_reducer::build_render_frame(
         &mut state,
-        "n",
-        current_corners,
-        Vec::new(),
-        0,
-        target_position,
-        false,
-        BufferPerfClass::Full,
+        crate::core::runtime_reducer::RenderFrameRequest {
+            mode: "n",
+            render_corners: current_corners,
+            step_samples: Vec::new(),
+            planner_idle_steps: 0,
+            target: target_position,
+            vertical_bar: false,
+            buffer_perf_class: BufferPerfClass::Full,
+        },
     );
 
     assert_eq!(frame.corners, state.current_corners());
@@ -80,13 +82,15 @@ fn build_render_frame_reclaims_render_step_sample_scratch() {
 
     let frame = crate::core::runtime_reducer::build_render_frame(
         &mut state,
-        "n",
-        current_corners,
-        step_samples,
-        0,
-        target_position,
-        false,
-        BufferPerfClass::Full,
+        crate::core::runtime_reducer::RenderFrameRequest {
+            mode: "n",
+            render_corners: current_corners,
+            step_samples,
+            planner_idle_steps: 0,
+            target: target_position,
+            vertical_bar: false,
+            buffer_perf_class: BufferPerfClass::Full,
+        },
     );
 
     assert_eq!(frame.step_samples.as_ref(), [retained_sample].as_slice());
@@ -127,13 +131,15 @@ fn build_render_frame_omits_particles_when_perf_class_disables_ornamental_effect
 
     let frame = crate::core::runtime_reducer::build_render_frame(
         &mut state,
-        "n",
-        current_corners,
-        Vec::new(),
-        0,
-        target_position,
-        false,
-        BufferPerfClass::FastMotion,
+        crate::core::runtime_reducer::RenderFrameRequest {
+            mode: "n",
+            render_corners: current_corners,
+            step_samples: Vec::new(),
+            planner_idle_steps: 0,
+            target: target_position,
+            vertical_bar: false,
+            buffer_perf_class: BufferPerfClass::FastMotion,
+        },
     );
 
     assert!(!frame.has_particles());
@@ -171,13 +177,15 @@ fn build_render_frame_reuses_cached_particle_aggregation() {
     let target_position = state.target_position();
     let frame = crate::core::runtime_reducer::build_render_frame(
         &mut state,
-        "n",
-        current_corners,
-        Vec::new(),
-        0,
-        target_position,
-        false,
-        BufferPerfClass::Full,
+        crate::core::runtime_reducer::RenderFrameRequest {
+            mode: "n",
+            render_corners: current_corners,
+            step_samples: Vec::new(),
+            planner_idle_steps: 0,
+            target: target_position,
+            vertical_bar: false,
+            buffer_perf_class: BufferPerfClass::Full,
+        },
     );
 
     assert!(std::sync::Arc::ptr_eq(
@@ -218,19 +226,86 @@ fn build_render_frame_reuses_cached_particle_screen_cells_for_background_probes(
     let target_position = state.target_position();
     let frame = crate::core::runtime_reducer::build_render_frame(
         &mut state,
-        "n",
-        current_corners,
-        Vec::new(),
-        0,
-        target_position,
-        false,
-        BufferPerfClass::Full,
+        crate::core::runtime_reducer::RenderFrameRequest {
+            mode: "n",
+            render_corners: current_corners,
+            step_samples: Vec::new(),
+            planner_idle_steps: 0,
+            target: target_position,
+            vertical_bar: false,
+            buffer_perf_class: BufferPerfClass::Full,
+        },
     );
 
     assert!(std::sync::Arc::ptr_eq(
         &cached_screen_cells,
         &frame.particle_screen_cells
     ));
+}
+
+#[test]
+fn build_render_frame_matches_with_warm_or_purged_particle_cache() {
+    let mut warm_state = RuntimeState::default();
+    warm_state.config.particles_over_text = false;
+    let location = CursorLocation::new(10, 20, 1, 1);
+    let shape = CursorShape::new(false, false);
+    let position = Point { row: 5.0, col: 7.0 };
+    warm_state.initialize_cursor(position, shape, 3, &location);
+    warm_state.apply_step_output(StepOutput {
+        current_corners: warm_state.current_corners(),
+        velocity_corners: warm_state.velocity_corners(),
+        spring_velocity_corners: warm_state.spring_velocity_corners(),
+        trail_elapsed_ms: warm_state.trail_elapsed_ms(),
+        particles: vec![Particle {
+            position: Point {
+                row: 5.25,
+                col: 7.5,
+            },
+            velocity: Point::ZERO,
+            lifetime: 1.0,
+        }],
+        previous_center: warm_state.previous_center(),
+        index_head: 0,
+        index_tail: 0,
+        rng_state: warm_state.rng_state(),
+    });
+    let current_corners = warm_state.current_corners();
+    let target_position = warm_state.target_position();
+
+    let _ = warm_state.shared_particle_screen_cells();
+    let warm_frame = crate::core::runtime_reducer::build_render_frame(
+        &mut warm_state,
+        crate::core::runtime_reducer::RenderFrameRequest {
+            mode: "n",
+            render_corners: current_corners,
+            step_samples: Vec::new(),
+            planner_idle_steps: 0,
+            target: target_position,
+            vertical_bar: false,
+            buffer_perf_class: BufferPerfClass::Full,
+        },
+    );
+
+    let mut purged_state = warm_state.clone();
+    purged_state.purge_cached_particle_artifacts();
+    assert!(!purged_state.has_cached_aggregated_particle_cells());
+    assert!(!purged_state.has_cached_particle_screen_cells());
+    assert_eq!(purged_state.semantic_view(), warm_state.semantic_view());
+
+    let purged_frame = crate::core::runtime_reducer::build_render_frame(
+        &mut purged_state,
+        crate::core::runtime_reducer::RenderFrameRequest {
+            mode: "n",
+            render_corners: current_corners,
+            step_samples: Vec::new(),
+            planner_idle_steps: 0,
+            target: target_position,
+            vertical_bar: false,
+            buffer_perf_class: BufferPerfClass::Full,
+        },
+    );
+
+    assert_eq!(purged_frame, warm_frame);
 }
 
 #[test]

@@ -42,10 +42,6 @@ fn reconfigure_window_config(row: i64, col: i64, width: u32, zindex: u32) -> Win
     )
 }
 
-fn hide_window_config() -> WindowConfig {
-    crate::draw::hide_floating_window_config()
-}
-
 fn set_existing_window_config(window: &mut api::Window, config: WindowConfig) -> Result<()> {
     crate::draw::set_existing_floating_window_config(window, config)
 }

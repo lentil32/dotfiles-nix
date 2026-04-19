@@ -17,13 +17,17 @@ pub(crate) use background_probe::BackgroundProbeChunkMask;
 )]
 pub(crate) use background_probe::BackgroundProbePackedMaskIter;
 pub(crate) use background_probe::BackgroundProbePlan;
+#[cfg(test)]
 pub(crate) use background_probe::BackgroundProbeProgress;
+#[cfg(test)]
 pub(crate) use background_probe::BackgroundProbeUpdate;
+pub(crate) use cursor_context::CursorColorProbeGenerations;
 pub(crate) use cursor_context::CursorColorProbeWitness;
 pub(crate) use cursor_context::CursorTextContext;
 pub(crate) use cursor_context::CursorTextContextBoundary;
 pub(crate) use cursor_context::CursorTextContextState;
 pub(crate) use cursor_context::ObservedTextRow;
+pub(crate) use probe::BackgroundProbeState;
 pub(crate) use probe::CursorColorSample;
 pub(crate) use probe::ProbeFailure;
 pub(crate) use probe::ProbeKind;
@@ -39,9 +43,9 @@ pub(crate) use probe::ProbeSlot;
 pub(crate) use probe::ProbeState;
 pub(crate) use semantic::SemanticEvent;
 pub(crate) use semantic::classify_semantic_event;
-pub(crate) use snapshot::BackgroundProbeState;
 pub(crate) use snapshot::CursorPositionSync;
 pub(crate) use snapshot::ObservationBasis;
 pub(crate) use snapshot::ObservationMotion;
-pub(crate) use snapshot::ObservationRequest;
 pub(crate) use snapshot::ObservationSnapshot;
+pub(crate) use snapshot::PendingObservation;
+pub(crate) use snapshot::derive_cursor_color_probe_witness;

@@ -101,8 +101,25 @@ pub(crate) fn render_hard_cleanup_delay_ms(config: &RuntimeConfig) -> u64 {
     let scaled = soft_delay.saturating_mul(RENDER_HARD_PURGE_DELAY_MULTIPLIER);
     scaled.max(MIN_RENDER_HARD_PURGE_DELAY_MS)
 }
+
+pub(crate) const fn render_cleanup_idle_target_budget(config: &RuntimeConfig) -> usize {
+    if config.max_kept_windows < DEFAULT_IDLE_RETENTION_BUDGET {
+        config.max_kept_windows
+    } else {
+        DEFAULT_IDLE_RETENTION_BUDGET
+    }
+}
+
+pub(crate) const fn render_cleanup_max_prune_per_tick(config: &RuntimeConfig) -> usize {
+    if config.max_kept_windows == 0 {
+        1
+    } else {
+        config.max_kept_windows
+    }
+}
 use crate::config::RuntimeConfig;
 
+const DEFAULT_IDLE_RETENTION_BUDGET: usize = 2;
 pub(crate) const MIN_RENDER_CLEANUP_DELAY_MS: u64 = 200;
 pub(crate) const MIN_RENDER_HARD_PURGE_DELAY_MS: u64 = 3_000;
 pub(crate) const RENDER_HARD_PURGE_DELAY_MULTIPLIER: u64 = 8;

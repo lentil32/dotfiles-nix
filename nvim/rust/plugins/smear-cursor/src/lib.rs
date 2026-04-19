@@ -14,6 +14,8 @@ mod allocation_counters;
 mod animation;
 mod config;
 mod core;
+#[cfg(test)]
+mod doc_sync;
 mod draw;
 mod events;
 mod lua;

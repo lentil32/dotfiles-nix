@@ -68,20 +68,21 @@ fn single_background_probe_scenario() -> ObservationScenario {
 
 fn expected_background_probe_effect(
     state: &CoreState,
-    request: &ObservationRequest,
+    request: &PendingObservation,
     basis: &ObservationBasis,
     chunk: BackgroundProbeChunk,
 ) -> Effect {
     Effect::RequestProbe(RequestProbeEffect {
+        observation_id: request.observation_id(),
         observation_basis: Box::new(basis.clone()),
-        probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
+        cursor_color_probe_generations: None,
         kind: ProbeKind::Background,
         cursor_position_policy: cursor_position_policy(state),
         buffer_perf_class: request.demand().buffer_perf_class(),
         probe_policy: expected_probe_policy(
             request.demand().kind(),
             request.demand().buffer_perf_class(),
-            retained_cursor_color_fallback(state).as_ref(),
+            observation_cursor_color_fallback(state).as_ref(),
         ),
         background_chunk: Some(chunk),
         cursor_color_fallback: None,
@@ -142,11 +143,12 @@ proptest! {
                 .observation()
                 .expect("cursor color completion should keep observation active");
             let first_chunk = observation
-                .background_progress()
-                .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
+                .probes()
+                .background()
+                .next_chunk()
                 .expect("background chunk should remain pending after cursor color completion");
             let background_collecting = matches!(
-                observation.background_probe_state(),
+                observation.probes().background(),
                 BackgroundProbeState::Collecting { .. }
             );
 
@@ -172,10 +174,9 @@ proptest! {
             let observation = state
                 .observation()
                 .expect("background probe sequence should keep an active observation");
-            let progress = observation
-                .background_progress()
-                .expect("background probe progress should remain available");
-            let chunk = progress
+            let chunk = observation
+                .probes()
+                .background()
                 .next_chunk()
                 .expect("background probe progress should yield the next chunk");
             let allowed_cells =
@@ -196,17 +197,16 @@ proptest! {
                     .next
                     .observation()
                     .expect("partial background chunk should keep observation active");
-                let progressed = progressed_observation
-                    .background_progress()
-                    .expect("partial background chunk should keep progress available");
-                let next_chunk = progressed
+                let next_chunk = progressed_observation
+                    .probes()
+                    .background()
                     .next_chunk()
                     .expect("partial background chunk should request the next chunk");
 
                 prop_assert_eq!(after_chunk.next.lifecycle(), Lifecycle::Observing);
                 prop_assert!(after_chunk.next.pending_proposal().is_none());
-                prop_assert_eq!(progressed.next_cell_index(), completed_cell_count);
-                prop_assert!(progressed_observation.background_probe().is_none());
+                prop_assert_eq!(next_chunk.start_index(), completed_cell_count);
+                prop_assert!(progressed_observation.probes().background().batch().is_none());
                 prop_assert_eq!(
                     progressed_observation.cursor_color(),
                     expected_cursor_color,
@@ -280,12 +280,14 @@ fn background_ready_probe_report_stores_allowed_cells_and_reuse_state_in_snapsho
         .observation()
         .expect("stored observation snapshot");
     let background = observation
-        .background_probe()
+        .probes()
+        .background()
+        .batch()
         .expect("background probe batch");
     assert!(background.allows_particle(crate::types::ScreenCell::new(7, 8).expect("cell")));
     assert!(!background.allows_particle(crate::types::ScreenCell::new(7, 9).expect("cell")));
     pretty_assert_eq!(
-        observation.background_probe_reuse(),
+        observation.probes().background().reuse(),
         Some(ProbeReuse::Exact)
     );
 }
@@ -296,7 +298,7 @@ fn background_probe_preparation_leaves_live_runtime_unchanged_until_completion()
     let observing =
         observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
     let request = active_request(&observing);
-    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+    let basis = observation_basis(Some(cursor(7, 8)), 26);
 
     let prepared = collect_observation_base(&observing, &request, basis, observation_motion());
 
@@ -341,7 +343,7 @@ fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
         index_tail: 0,
         rng_state: prepared_runtime.rng_state(),
     });
-    let preview_runtime = prepared_runtime.planning_preview();
+    let preview_runtime = crate::state::RuntimePreview::new(&mut prepared_runtime);
     let prepared_plan = crate::core::state::PreparedObservationPlan::new(
         preview_runtime.into_prepared_motion(),
         crate::core::runtime_reducer::CursorTransition {
@@ -367,7 +369,7 @@ fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
     );
 
     assert!(
-        staged.clear_active_observation(),
+        staged.replace_active_observation_with_pending(scenario.request),
         "refresh retries should be able to drop the staged observation",
     );
     assert_eq!(
@@ -382,7 +384,7 @@ fn final_background_probe_completion_reuses_the_cached_runtime_transition() {
     let observing =
         observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
     let request = active_request(&observing);
-    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+    let basis = observation_basis(Some(cursor(7, 8)), 26);
     let based = collect_observation_base(&observing, &request, basis, observation_motion());
     let prepared_plan = based
         .next
@@ -428,11 +430,77 @@ fn final_background_probe_completion_reuses_the_cached_runtime_transition() {
     let [Effect::RequestRenderPlan(payload)] = resolved.effects.as_slice() else {
         panic!("expected render plan request after background probe completion");
     };
-    pretty_assert_eq!(payload.planning.scene().motion(), &expected_runtime);
+    pretty_assert_eq!(resolved.next.runtime(), &expected_runtime);
     pretty_assert_eq!(
         &payload.render_decision,
         &prepared_plan.transition().render_decision,
     );
+}
+
+#[test]
+fn background_only_probe_completion_matches_with_or_without_prepared_transition_cache() {
+    let scenario = single_background_probe_scenario();
+    let cold_resolved = reduce(
+        &scenario
+            .based
+            .next
+            .clone()
+            .with_runtime(RuntimeState::default()),
+        background_probe_report(
+            &scenario.request,
+            scenario.basis.viewport(),
+            &[(7, 8)],
+            ProbeReuse::Exact,
+        ),
+    );
+    let [Effect::RequestRenderPlan(cold_payload)] = cold_resolved.effects.as_slice() else {
+        panic!("expected render plan request after uncached background-only completion");
+    };
+    let prepared_plan = crate::core::state::PreparedObservationPlan::new(
+        cold_resolved.next.runtime().prepared_motion(),
+        crate::core::runtime_reducer::CursorTransition {
+            render_decision: cold_payload.render_decision.clone(),
+            motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
+            should_schedule_next_animation: !matches!(
+                cold_payload.animation_schedule,
+                crate::core::state::AnimationSchedule::Idle
+            ),
+            next_animation_at_ms: cold_payload
+                .animation_schedule
+                .deadline()
+                .map(crate::core::types::Millis::value),
+        },
+    );
+
+    let mut warm = scenario.based.next;
+    assert!(
+        warm.set_prepared_observation_plan(Some(prepared_plan)),
+        "manual observing scenario should accept a cached runtime transition",
+    );
+    let warm_resolved = reduce(
+        &warm.with_runtime(RuntimeState::default()),
+        background_probe_report(
+            &scenario.request,
+            scenario.basis.viewport(),
+            &[(7, 8)],
+            ProbeReuse::Exact,
+        ),
+    );
+
+    pretty_assert_eq!(
+        warm_resolved.next.semantic_view(),
+        cold_resolved.next.semantic_view()
+    );
+    let [Effect::RequestRenderPlan(warm_payload)] = warm_resolved.effects.as_slice() else {
+        panic!("expected render plan request after cached background-only completion");
+    };
+    pretty_assert_eq!(warm_payload.proposal_id, cold_payload.proposal_id);
+    pretty_assert_eq!(warm_payload.requested_at, cold_payload.requested_at);
+    pretty_assert_eq!(
+        warm_payload.animation_schedule,
+        cold_payload.animation_schedule
+    );
+    pretty_assert_eq!(warm_payload.render_decision, cold_payload.render_decision);
 }
 
 #[test]
@@ -442,7 +510,7 @@ fn background_only_probe_completion_reuses_the_cached_runtime_transition() {
         observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25, None);
     pretty_assert_eq!(
         active_request(&observing).probes(),
-        ProbeRequestSet::new(false, true)
+        ProbeRequestSet::only(ProbeKind::Background)
     );
 
     let mut prepared_runtime = ready.runtime().clone();
@@ -501,7 +569,7 @@ fn background_only_probe_completion_reuses_the_cached_runtime_transition() {
     let [Effect::RequestRenderPlan(payload)] = resolved.effects.as_slice() else {
         panic!("expected render plan request after background-only probe completion");
     };
-    pretty_assert_eq!(payload.planning.scene().motion(), &expected_runtime);
+    pretty_assert_eq!(resolved.next.runtime(), &expected_runtime);
     pretty_assert_eq!(
         &payload.render_decision,
         &prepared_plan.transition().render_decision,

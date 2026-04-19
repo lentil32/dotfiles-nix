@@ -13,7 +13,7 @@ fn completed_mode_change_observation_with_cursor_queued() -> Transition {
     collect_observation_base(
         &observing_with_cursor_queued,
         &request,
-        observation_basis(&request, Some(cursor(7, 8)), 32),
+        observation_basis(Some(cursor(7, 8)), 32),
         observation_motion(),
     )
 }

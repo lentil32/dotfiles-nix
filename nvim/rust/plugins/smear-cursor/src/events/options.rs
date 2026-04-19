@@ -10,6 +10,7 @@ use crate::lua::parse_optional_with as parse_optional_value_with;
 use crate::lua::string_from_object;
 use crate::state::ColorOptionsPatch;
 use crate::state::CtermCursorColorsPatch;
+use crate::state::FrameTimingPatch;
 use crate::state::MotionOptionsPatch;
 use crate::state::OptionalChange;
 use crate::state::ParticleOptionsPatch;
@@ -216,6 +217,14 @@ pub(super) fn validated_non_negative_f64(key: &str, value: Object) -> Result<f64
     Ok(parsed)
 }
 
+fn validated_unit_interval_f64(key: &str, value: Object) -> Result<f64> {
+    let parsed = validated_non_negative_f64(key, value)?;
+    if parsed > 1.0 {
+        return Err(invalid_key(key, "number between 0 and 1"));
+    }
+    Ok(parsed)
+}
+
 fn validated_positive_f64(key: &str, value: Object) -> Result<f64> {
     let parsed = validated_f64(key, value)?;
     if parsed <= 0.0 {
@@ -367,6 +376,10 @@ fn parse_optional_non_negative_f64(raw: Option<Object>, key: &'static str) -> Re
     parse_optional_with(raw, key, validated_non_negative_f64)
 }
 
+fn parse_optional_unit_interval_f64(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
+    parse_optional_with(raw, key, validated_unit_interval_f64)
+}
+
 fn parse_optional_positive_f64(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
     parse_optional_with(raw, key, validated_positive_f64)
 }
@@ -444,20 +457,49 @@ define_option_spec!(
     parse_optional_bool,
     runtime.enabled
 );
-define_option_spec!(
-    spec_time_interval_apply,
-    SPEC_TIME_INTERVAL,
-    TimeInterval,
-    parse_optional_time_interval,
-    runtime.time_interval
-);
-define_option_spec!(
-    spec_fps_apply,
-    SPEC_FPS,
-    Fps,
-    parse_optional_positive_f64,
-    runtime.fps
-);
+fn reject_overlapping_frame_timing_alias(key: &'static str) -> Result<()> {
+    Err(invalid_key(
+        key,
+        "set either fps or time_interval, but not both",
+    ))
+}
+
+fn spec_time_interval_apply(
+    opts: &Dictionary,
+    patch: &mut RuntimeOptionsPatch,
+    key: OptionKey,
+) -> Result<()> {
+    let Some(value) = parse_optional_time_interval(raw_option(opts, key.as_str()), key.as_str())?
+    else {
+        return Ok(());
+    };
+    if patch.runtime.frame_timing.is_some() {
+        return reject_overlapping_frame_timing_alias(key.as_str());
+    }
+    patch.runtime.frame_timing = Some(FrameTimingPatch::TimeInterval(value));
+    Ok(())
+}
+
+const SPEC_TIME_INTERVAL: OptionSpec =
+    OptionSpec::new(OptionKey::TimeInterval, spec_time_interval_apply);
+
+fn spec_fps_apply(
+    opts: &Dictionary,
+    patch: &mut RuntimeOptionsPatch,
+    key: OptionKey,
+) -> Result<()> {
+    let Some(value) = parse_optional_positive_f64(raw_option(opts, key.as_str()), key.as_str())?
+    else {
+        return Ok(());
+    };
+    if patch.runtime.frame_timing.is_some() {
+        return reject_overlapping_frame_timing_alias(key.as_str());
+    }
+    patch.runtime.frame_timing = Some(FrameTimingPatch::Fps(value));
+    Ok(())
+}
+
+const SPEC_FPS: OptionSpec = OptionSpec::new(OptionKey::Fps, spec_fps_apply);
 define_option_spec!(
     spec_simulation_hz_apply,
     SPEC_SIMULATION_HZ,
@@ -882,7 +924,7 @@ define_option_spec!(
     spec_particle_switch_octant_braille_apply,
     SPEC_PARTICLE_SWITCH_OCTANT_BRAILLE,
     ParticleSwitchOctantBraille,
-    parse_optional_non_negative_f64,
+    parse_optional_unit_interval_f64,
     particles.particle_switch_octant_braille
 );
 define_option_spec!(

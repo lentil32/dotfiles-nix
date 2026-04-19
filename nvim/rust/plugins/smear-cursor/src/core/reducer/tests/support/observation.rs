@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::core::effect::ObservationRuntimeContextArgs;
 
 pub(in crate::core::reducer::tests) fn ready_state() -> CoreState {
     let mut runtime = RuntimeState::default();
@@ -48,7 +49,7 @@ pub(in crate::core::reducer::tests) fn observation_request(
     seq: u64,
     kind: ExternalDemandKind,
     observed_at: u64,
-) -> ObservationRequest {
+) -> PendingObservation {
     observation_request_with_perf_class(seq, kind, observed_at, BufferPerfClass::Full)
 }
 
@@ -57,8 +58,8 @@ pub(in crate::core::reducer::tests) fn observation_request_with_perf_class(
     kind: ExternalDemandKind,
     observed_at: u64,
     buffer_perf_class: BufferPerfClass,
-) -> ObservationRequest {
-    ObservationRequest::new(
+) -> PendingObservation {
+    PendingObservation::new(
         ExternalDemand::new(
             IngressSeq::new(seq),
             kind,
@@ -71,27 +72,25 @@ pub(in crate::core::reducer::tests) fn observation_request_with_perf_class(
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis(
-    request: &ObservationRequest,
     position: Option<CursorPosition>,
     observed_at: u64,
 ) -> ObservationBasis {
-    observation_basis_in_mode(request, position, observed_at, "n")
+    observation_basis_in_mode(position, observed_at, "n")
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis_in_mode(
-    request: &ObservationRequest,
     position: Option<CursorPosition>,
     observed_at: u64,
     mode: &str,
 ) -> ObservationBasis {
     ObservationBasis::new(
-        request.observation_id(),
         Millis::new(observed_at),
         mode.to_string(),
         position,
         CursorLocation::new(11, 22, 3, 4),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
     )
+    .with_buffer_revision(Some(0))
 }
 
 pub(in crate::core::reducer::tests) fn observed_rows(rows: &[&str]) -> Vec<ObservedTextRow> {
@@ -116,7 +115,6 @@ pub(in crate::core::reducer::tests) fn text_context(
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
-    request: &ObservationRequest,
     position: Option<CursorPosition>,
     observed_at: u64,
     cursor_line: i64,
@@ -125,13 +123,13 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
     tracked_rows: Option<&[&str]>,
 ) -> ObservationBasis {
     ObservationBasis::new(
-        request.observation_id(),
         Millis::new(observed_at),
         "n".to_string(),
         position,
         CursorLocation::new(11, 22, 3, cursor_line),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
     )
+    .with_buffer_revision(Some(changedtick))
     .with_cursor_text_context_state(CursorTextContextState::Sampled(text_context(
         changedtick,
         cursor_line,
@@ -141,21 +139,28 @@ pub(in crate::core::reducer::tests) fn observation_basis_with_text_context(
 }
 
 pub(in crate::core::reducer::tests) fn observation_basis_with_text_context_boundary(
-    request: &ObservationRequest,
     position: Option<CursorPosition>,
     observed_at: u64,
     cursor_line: i64,
     boundary: crate::core::state::CursorTextContextBoundary,
 ) -> ObservationBasis {
     ObservationBasis::new(
-        request.observation_id(),
         Millis::new(observed_at),
         "n".to_string(),
         position,
         CursorLocation::new(11, 22, 3, cursor_line),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
     )
+    .with_buffer_revision(Some(0))
     .with_cursor_text_context_state(CursorTextContextState::BoundaryOnly(boundary))
+}
+
+pub(in crate::core::reducer::tests) fn cursor_color_probe_generations()
+-> crate::core::state::CursorColorProbeGenerations {
+    crate::core::state::CursorColorProbeGenerations::new(
+        crate::core::types::Generation::INITIAL,
+        crate::core::types::Generation::INITIAL,
+    )
 }
 
 pub(in crate::core::reducer::tests) fn observation_motion() -> ObservationMotion {
@@ -166,7 +171,7 @@ pub(in crate::core::reducer::tests) fn observation_snapshot(
     position: CursorPosition,
 ) -> ObservationSnapshot {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
-    let basis = observation_basis(&request, Some(position), 91);
+    let basis = observation_basis(Some(position), 91);
     ObservationSnapshot::new(request, basis, observation_motion())
 }
 
@@ -182,7 +187,7 @@ pub(in crate::core::reducer::tests) fn observation_snapshot_with_cursor_color_re
     color: u32,
     reuse: ProbeReuse,
 ) -> ObservationSnapshot {
-    let request = ObservationRequest::new(
+    let request = PendingObservation::new(
         ExternalDemand::new(
             IngressSeq::new(9),
             ExternalDemandKind::ExternalCursor,
@@ -190,19 +195,30 @@ pub(in crate::core::reducer::tests) fn observation_snapshot_with_cursor_color_re
             None,
             BufferPerfClass::Full,
         ),
-        ProbeRequestSet::new(true, false),
+        ProbeRequestSet::only(ProbeKind::CursorColor),
     );
-    let basis = observation_basis(&request, Some(position), 91).with_cursor_color_witness(Some(
-        cursor_color_probe_witness(11, 22, 0, "n", Some(position), 0),
-    ));
-    ObservationSnapshot::new(request.clone(), basis, observation_motion())
-        .with_cursor_color_probe(ProbeState::ready(
-            ProbeKind::CursorColor.request_id(request.observation_id()),
-            request.observation_id(),
-            reuse,
-            Some(CursorColorSample::new(color)),
-        ))
-        .expect("cursor color probe should be requested")
+    let basis = observation_basis(Some(position), 91);
+    let mut observation = ObservationSnapshot::new(request, basis, observation_motion())
+        .with_cursor_color_probe_generations(Some(cursor_color_probe_generations()));
+    assert!(
+        observation
+            .probes_mut()
+            .set_cursor_color_state(ProbeState::ready(
+                reuse,
+                Some(CursorColorSample::new(color)),
+            )),
+        "cursor color probe should be requested",
+    );
+    observation
+}
+
+pub(in crate::core::reducer::tests) fn primed_state_with_ready_observation(
+    state: CoreState,
+    observation: ObservationSnapshot,
+) -> CoreState {
+    state
+        .with_ready_observation(observation)
+        .expect("primed state should accept ready observation fixtures")
 }
 
 pub(in crate::core::reducer::tests) fn observing_state_from_demand(
@@ -218,24 +234,33 @@ pub(in crate::core::reducer::tests) fn observing_state_from_demand(
     .next
 }
 
-pub(in crate::core::reducer::tests) fn active_request(state: &CoreState) -> ObservationRequest {
+pub(in crate::core::reducer::tests) fn active_request(state: &CoreState) -> PendingObservation {
     state
-        .active_observation_request()
+        .pending_observation()
         .cloned()
-        .expect("active observation request")
+        .expect("collecting phase should own the pending observation")
 }
 
 pub(in crate::core::reducer::tests) fn collect_observation_base(
     state: &CoreState,
-    request: &ObservationRequest,
+    request: &PendingObservation,
     basis: ObservationBasis,
     motion: ObservationMotion,
 ) -> Transition {
+    let requested_cursor_color = request.requested_probes().cursor_color().then_some(());
+    let cursor_color_probe_generations = requested_cursor_color.and_then(|()| {
+        state
+            .runtime()
+            .config
+            .requires_cursor_color_sampling_for_mode(basis.mode())
+            .then_some(cursor_color_probe_generations())
+    });
     reduce(
         state,
         Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
+            observation_id: request.observation_id(),
             basis,
+            cursor_color_probe_generations,
             motion,
         }),
     )
@@ -268,12 +293,12 @@ pub(in crate::core::reducer::tests) fn cursor_position_policy(
     CursorPositionReadPolicy::new(state.runtime().config.smear_to_cmd)
 }
 
-pub(in crate::core::reducer::tests) fn retained_cursor_color_fallback(
+pub(in crate::core::reducer::tests) fn observation_cursor_color_fallback(
     state: &CoreState,
 ) -> Option<CursorColorFallback> {
-    let observation = state.retained_observation()?;
+    let observation = state.phase_observation()?;
     let sample = observation.cursor_color().map(CursorColorSample::new)?;
-    let witness = observation.basis().cursor_color_witness()?.clone();
+    let witness = observation.cursor_color_probe_witness()?;
     Some(CursorColorFallback::new(sample, witness))
 }
 
@@ -304,11 +329,12 @@ pub(in crate::core::reducer::tests) fn compatible_cursor_color_ready_state(
     ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(observation_snapshot_with_cursor_color_reuse(
+        .with_ready_observation(observation_snapshot_with_cursor_color_reuse(
             cursor(9, 9),
             0x00AB_CDEF,
             ProbeReuse::Compatible,
         ))
+        .expect("primed state should accept a compatible ready observation")
 }
 
 pub(in crate::core::reducer::tests) fn conceal_deferred_cursor_ready_state(
@@ -329,7 +355,7 @@ pub(in crate::core::reducer::tests) fn conceal_deferred_cursor_ready_state(
         90,
         BufferPerfClass::FastMotion,
     );
-    let basis = observation_basis(&request, Some(cursor(9, 9)), 91);
+    let basis = observation_basis(Some(cursor(9, 9)), 91);
     let observation = ObservationSnapshot::new(
         request,
         basis,
@@ -339,7 +365,8 @@ pub(in crate::core::reducer::tests) fn conceal_deferred_cursor_ready_state(
     ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(observation)
+        .with_ready_observation(observation)
+        .expect("primed state should accept a conceal-deferred ready observation")
 }
 
 pub(in crate::core::reducer::tests) fn observation_runtime_context(
@@ -354,45 +381,43 @@ pub(in crate::core::reducer::tests) fn observation_runtime_context_with_perf_cla
     demand_kind: ExternalDemandKind,
     buffer_perf_class: BufferPerfClass,
 ) -> ObservationRuntimeContext {
-    let cursor_color_fallback = retained_cursor_color_fallback(state);
+    let cursor_color_fallback = observation_cursor_color_fallback(state);
     let cursor_text_context_boundary = state
-        .retained_observation()
+        .phase_observation()
         .and_then(|observation| observation.basis().cursor_text_context_boundary());
-    ObservationRuntimeContext::new(
-        cursor_position_policy(state),
-        state.runtime().config.scroll_buffer_space,
-        state.runtime().tracked_location(),
+    ObservationRuntimeContext::new(ObservationRuntimeContextArgs {
+        cursor_position_policy: cursor_position_policy(state),
+        scroll_buffer_space: state.runtime().config.scroll_buffer_space,
+        tracked_location: state.runtime().tracked_location(),
         cursor_text_context_boundary,
-        state.runtime().current_corners(),
-        None,
+        current_corners: state.runtime().current_corners(),
+        ingress_observation_surface: None,
         buffer_perf_class,
-        expected_probe_policy(
+        probe_policy: expected_probe_policy(
             demand_kind,
             buffer_perf_class,
             cursor_color_fallback.as_ref(),
         ),
-    )
+    })
 }
 
 pub(in crate::core::reducer::tests) fn cursor_color_probe_report(
-    request: &ObservationRequest,
+    request: &PendingObservation,
     reuse: ProbeReuse,
     color: Option<u32>,
 ) -> Event {
     Event::ProbeReported(ProbeReportedEvent::CursorColorReady {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
         reuse,
         sample: color.map(CursorColorSample::new),
     })
 }
 
 pub(in crate::core::reducer::tests) fn cursor_color_probe_failed(
-    request: &ObservationRequest,
+    request: &PendingObservation,
 ) -> Event {
     Event::ProbeReported(ProbeReportedEvent::CursorColorFailed {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
         failure: ProbeFailure::ShellReadFailed,
     })
 }
@@ -415,21 +440,20 @@ pub(in crate::core::reducer::tests) fn background_probe_batch(
 }
 
 pub(in crate::core::reducer::tests) fn background_probe_report(
-    request: &ObservationRequest,
+    request: &PendingObservation,
     viewport: ViewportSnapshot,
     allowed_cells: &[(u32, u32)],
     reuse: ProbeReuse,
 ) -> Event {
     Event::ProbeReported(ProbeReportedEvent::BackgroundReady {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
         reuse,
         batch: background_probe_batch(viewport, allowed_cells),
     })
 }
 
 pub(in crate::core::reducer::tests) fn background_chunk_probe_report(
-    request: &ObservationRequest,
+    request: &PendingObservation,
     chunk: &BackgroundProbeChunk,
     _viewport: ViewportSnapshot,
     allowed_cells: &[(u32, u32)],
@@ -449,7 +473,6 @@ pub(in crate::core::reducer::tests) fn background_chunk_probe_report(
 
     Event::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
         chunk: chunk.clone(),
         allowed_mask: BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
     })
@@ -458,9 +481,10 @@ pub(in crate::core::reducer::tests) fn background_chunk_probe_report(
 pub(in crate::core::reducer::tests) fn ready_state_with_observation(
     position: CursorPosition,
 ) -> CoreState {
-    ready_state()
-        .with_latest_exact_cursor_position(Some(position))
-        .enter_ready(observation_snapshot(position))
+    primed_state_with_ready_observation(
+        ready_state().with_latest_exact_cursor_position(Some(position)),
+        observation_snapshot(position),
+    )
 }
 
 pub(in crate::core::reducer::tests) fn recovering_state_with_observation(

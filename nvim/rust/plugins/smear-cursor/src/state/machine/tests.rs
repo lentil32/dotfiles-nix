@@ -1,5 +1,6 @@
 pub(super) use super::CursorLocation;
 pub(super) use super::CursorShape;
+pub(super) use super::RuntimePreview;
 pub(super) use super::RuntimeState;
 pub(super) use super::types::SettlingWindow;
 pub(super) use crate::animation::center;
@@ -13,6 +14,7 @@ use crate::types::Point;
 pub(super) use crate::types::RenderStepSample;
 use proptest::prelude::*;
 
+mod config_updates;
 mod epochs;
 mod fixtures;
 mod lifecycle;

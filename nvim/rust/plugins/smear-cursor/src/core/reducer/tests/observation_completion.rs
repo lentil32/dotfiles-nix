@@ -42,9 +42,8 @@ fn idle_apply_completion_requests_boundary_refresh_for_conceal_deferred_cursor_p
 fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
     let previous_request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let previous_observation = ObservationSnapshot::new(
-        previous_request.clone(),
+        previous_request,
         observation_basis_with_text_context(
-            &previous_request,
             Some(cursor(9, 9)),
             91,
             9,
@@ -64,7 +63,8 @@ fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
     let ready = ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(previous_observation);
+        .with_ready_observation(previous_observation)
+        .expect("primed state should accept a retained ready observation");
     let observing = reduce(
         &ready,
         external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
@@ -76,7 +76,6 @@ fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
         &observing,
         &request,
         observation_basis_with_text_context(
-            &request,
             Some(cursor(9, 10)),
             101,
             9,
@@ -100,9 +99,8 @@ fn observation_completion_with_text_mutation_requests_clear_all_render_plan() {
 fn observation_completion_with_motion_only_requests_draw_render_plan() {
     let previous_request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let previous_observation = ObservationSnapshot::new(
-        previous_request.clone(),
+        previous_request,
         observation_basis_with_text_context(
-            &previous_request,
             Some(cursor(9, 9)),
             91,
             9,
@@ -122,7 +120,8 @@ fn observation_completion_with_motion_only_requests_draw_render_plan() {
     let ready = ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(previous_observation);
+        .with_ready_observation(previous_observation)
+        .expect("primed state should accept a retained ready observation");
     let observing = reduce(
         &ready,
         external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
@@ -134,7 +133,6 @@ fn observation_completion_with_motion_only_requests_draw_render_plan() {
         &observing,
         &request,
         observation_basis_with_text_context(
-            &request,
             Some(cursor(10, 9)),
             101,
             10,
@@ -158,9 +156,8 @@ fn observation_completion_with_motion_only_requests_draw_render_plan() {
 fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all_render_plan() {
     let previous_request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let previous_observation = ObservationSnapshot::new(
-        previous_request.clone(),
+        previous_request,
         observation_basis_with_text_context(
-            &previous_request,
             Some(cursor(9, 9)),
             91,
             9,
@@ -180,7 +177,8 @@ fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all
     let ready = ready_state()
         .with_latest_exact_cursor_position(Some(cursor(9, 9)))
         .with_runtime(runtime)
-        .enter_ready(previous_observation);
+        .with_ready_observation(previous_observation)
+        .expect("primed state should accept a retained ready observation");
     let observing = reduce(
         &ready,
         external_demand_event(ExternalDemandKind::ExternalCursor, 100, None),
@@ -192,7 +190,6 @@ fn observation_completion_with_scroll_and_text_mutation_still_requests_clear_all
         &observing,
         &request,
         ObservationBasis::new(
-            request.observation_id(),
             Millis::new(101),
             "n".to_string(),
             Some(cursor(10, 3)),
@@ -261,25 +258,25 @@ fn observation_completion_moves_runtime_particles_into_render_planning() {
     let transition = crate::core::reducer::reduce_owned(
         observing,
         Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
+            observation_id: request.observation_id(),
             basis: ObservationBasis::new(
-                request.observation_id(),
                 Millis::new(101),
                 "n".to_string(),
                 Some(cursor(40, 20)),
                 CursorLocation::new(99, 22, 3, 40),
                 ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
             ),
+            cursor_color_probe_generations: None,
             motion: observation_motion(),
         }),
     );
 
-    let [Effect::RequestRenderPlan(payload)] = transition.effects.as_slice() else {
+    let [Effect::RequestRenderPlan(_payload)] = transition.effects.as_slice() else {
         panic!("expected render plan request after observation completion");
     };
-    pretty_assert_eq!(payload.planning.scene().motion().particles().len(), 1);
+    pretty_assert_eq!(transition.next.runtime().particles().len(), 1);
     assert_eq!(
-        payload.planning.scene().motion().particles().as_ptr(),
+        transition.next.runtime().particles().as_ptr(),
         particles_ptr
     );
 }
@@ -297,7 +294,7 @@ fn conceal_deferred_observation_completion_preserves_latest_exact_cursor_anchor(
     let transition = collect_observation_base(
         &observing,
         &request,
-        observation_basis(&request, Some(cursor(12, 13)), 101),
+        observation_basis(Some(cursor(12, 13)), 101),
         observation_motion().with_cursor_position_sync(CursorPositionSync::ConcealDeferred),
     );
 

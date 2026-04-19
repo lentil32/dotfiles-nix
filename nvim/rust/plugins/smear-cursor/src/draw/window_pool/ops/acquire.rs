@@ -272,9 +272,6 @@ pub(crate) fn frame_capacity_target(
         AllocationPolicy::BootstrapIfPoolEmpty => 0,
     };
 
-    // Surprising: this peak-frame cap intentionally stays distinct from the adaptive retained
-    // budget hard max. One burst can need more simultaneous windows than we want to keep warm
-    // once cleanup converges back to idle.
     let requested_capacity = required_capacity.saturating_add(warm_spare);
     FrameCapacityTarget {
         requested_capacity,

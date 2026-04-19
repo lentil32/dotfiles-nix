@@ -60,10 +60,12 @@ fn ready_state_for_observation_request_case(
     });
 
     if retain_cursor_color {
-        ready.enter_ready(observation_snapshot_with_cursor_color(
-            cursor(7, 8),
-            0x00AB_CDEF,
-        ))
+        ready
+            .with_ready_observation(observation_snapshot_with_cursor_color(
+                cursor(7, 8),
+                0x00AB_CDEF,
+            ))
+            .expect("primed state should accept a retained ready observation")
     } else {
         ready
     }
@@ -118,7 +120,18 @@ proptest! {
             ),
         );
 
-        let expected_request = ObservationRequest::new(
+        let mut expected_probes = ProbeRequestSet::none();
+        if normal_mode_uses_sampling || insert_mode_uses_sampling {
+            expected_probes = expected_probes.with_requested(ProbeKind::CursorColor);
+        }
+        if particles_enabled
+            && !particles_over_text
+            && buffer_perf_class.keeps_ornamental_effects()
+        {
+            expected_probes = expected_probes.with_requested(ProbeKind::Background);
+        }
+
+        let expected_request = PendingObservation::new(
             ExternalDemand::new(
                 IngressSeq::new(1),
                 ExternalDemandKind::ExternalCursor,
@@ -126,29 +139,28 @@ proptest! {
                 None,
                 buffer_perf_class,
             ),
-            ProbeRequestSet::new(
-                normal_mode_uses_sampling || insert_mode_uses_sampling,
-                particles_enabled
-                    && !particles_over_text
-                    && buffer_perf_class.keeps_ornamental_effects(),
-            ),
+            expected_probes,
         );
+
+        let mut expected_effects = Vec::new();
+        if retain_cursor_color {
+            expected_effects.push(Effect::RecordEventLoopMetric(
+                EventLoopMetricEffect::IngressCoalesced,
+            ));
+        }
+        expected_effects.push(Effect::RequestObservationBase(RequestObservationBaseEffect {
+            request: expected_request,
+            context: observation_runtime_context_with_perf_class(
+                &ready,
+                ExternalDemandKind::ExternalCursor,
+                buffer_perf_class,
+            ),
+        }));
 
         prop_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
         prop_assert_eq!(
             transition.effects,
-            with_cleanup_invalidation(
-                &transition.next,
-                observed_at,
-                vec![Effect::RequestObservationBase(RequestObservationBaseEffect {
-                    request: expected_request,
-                    context: observation_runtime_context_with_perf_class(
-                        &ready,
-                        ExternalDemandKind::ExternalCursor,
-                        buffer_perf_class,
-                    ),
-                })],
-            ),
+            with_cleanup_invalidation(&transition.next, observed_at, expected_effects),
         );
     }
 }
@@ -157,9 +169,8 @@ proptest! {
 fn retained_cursor_text_context_boundary_is_carried_into_observation_runtime_context() {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let retained = ObservationSnapshot::new(
-        request.clone(),
+        request,
         observation_basis_with_text_context(
-            &request,
             Some(cursor(9, 9)),
             91,
             9,
@@ -169,7 +180,9 @@ fn retained_cursor_text_context_boundary_is_carried_into_observation_runtime_con
         ),
         observation_motion(),
     );
-    let ready = ready_state().enter_ready(retained);
+    let ready = ready_state()
+        .with_ready_observation(retained)
+        .expect("primed state should accept a retained ready observation");
 
     let transition = reduce(
         &ready,
@@ -194,9 +207,8 @@ fn retained_cursor_text_context_boundary_is_carried_into_observation_runtime_con
 fn retained_cursor_text_context_boundary_survives_without_sampled_rows() {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let retained = ObservationSnapshot::new(
-        request.clone(),
+        request,
         observation_basis_with_text_context_boundary(
-            &request,
             Some(cursor(9, 9)),
             91,
             9,
@@ -204,7 +216,9 @@ fn retained_cursor_text_context_boundary_survives_without_sampled_rows() {
         ),
         observation_motion(),
     );
-    let ready = ready_state().enter_ready(retained);
+    let ready = ready_state()
+        .with_ready_observation(retained)
+        .expect("primed state should accept a retained ready observation");
 
     let transition = reduce(
         &ready,

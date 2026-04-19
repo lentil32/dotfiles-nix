@@ -19,7 +19,6 @@ pub(crate) struct BackgroundProbeChunk {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct BackgroundProbeBatch {
-    viewport: ViewportSnapshot,
     probed_cells: BackgroundProbeCellView,
     allowed_mask: BackgroundProbeChunkMask,
 }
@@ -254,9 +253,8 @@ impl BackgroundProbeBatch {
             .unwrap_or(0)
     }
 
-    pub(crate) fn empty(viewport: ViewportSnapshot) -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
-            viewport,
             probed_cells: BackgroundProbeCellView::default(),
             allowed_mask: BackgroundProbeChunkMask::all_disallowed(0),
         }
@@ -268,55 +266,50 @@ impl BackgroundProbeBatch {
         if allowed_mask.len() != expected_len {
             // Surprising: the shell returned a malformed background probe batch. Keep the
             // probe conservative instead of fusing partial screen state into semantic truth.
-            return Self::empty(viewport);
+            return Self::empty();
         }
 
         let Some(probed_cells) = viewport_cells(viewport) else {
-            return Self::empty(viewport);
+            return Self::empty();
         };
 
         Self::from_probed_cells(
-            viewport,
             BackgroundProbeCellView::from_cells(probed_cells),
             BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
         )
     }
 
     fn from_probed_cells(
-        viewport: ViewportSnapshot,
         probed_cells: BackgroundProbeCellView,
         allowed_mask: BackgroundProbeChunkMask,
     ) -> Self {
-        if probed_cells.len() != allowed_mask.len()
-            || !probed_cells.is_sorted_unique()
-            || probed_cells.iter().any(|cell| !in_viewport(viewport, cell))
-        {
-            return Self::empty(viewport);
+        if probed_cells.len() != allowed_mask.len() || !probed_cells.is_sorted_unique() {
+            return Self::empty();
         }
 
         Self {
-            viewport,
             probed_cells,
             allowed_mask,
         }
     }
 
-    fn from_packed_mask(
-        viewport: ViewportSnapshot,
-        probed_cells: BackgroundProbeCellView,
-        packed_mask: Vec<u8>,
-    ) -> Self {
+    fn from_packed_mask(probed_cells: BackgroundProbeCellView, packed_mask: Vec<u8>) -> Self {
         let Some(allowed_mask) =
             BackgroundProbeChunkMask::from_packed_bytes(probed_cells.len(), packed_mask)
         else {
-            return Self::empty(viewport);
+            return Self::empty();
         };
 
-        Self::from_probed_cells(viewport, probed_cells, allowed_mask)
+        Self::from_probed_cells(probed_cells, allowed_mask)
     }
 
-    pub(crate) const fn viewport(&self) -> ViewportSnapshot {
-        self.viewport
+    pub(crate) fn is_valid_for_viewport(&self, viewport: ViewportSnapshot) -> bool {
+        self.probed_cells.len() == self.allowed_mask.len()
+            && self.probed_cells.is_sorted_unique()
+            && self
+                .probed_cells
+                .iter()
+                .all(|cell| in_viewport(viewport, cell))
     }
 
     pub(crate) fn allowed_mask_len(&self) -> usize {
@@ -404,7 +397,6 @@ const MAX_BACKGROUND_PROBE_CELLS_PER_CHUNK: usize = 2048;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct BackgroundProbeProgress {
-    viewport: ViewportSnapshot,
     plan: BackgroundProbePlan,
     next_cell_index: usize,
     packed_mask: BackgroundProbePackedMaskBuilder,
@@ -417,19 +409,13 @@ pub(crate) enum BackgroundProbeUpdate {
 }
 
 impl BackgroundProbeProgress {
-    pub(crate) fn new(viewport: ViewportSnapshot, plan: BackgroundProbePlan) -> Self {
+    pub(crate) fn new(plan: BackgroundProbePlan) -> Self {
         let packed_mask = BackgroundProbePackedMaskBuilder::new(plan.len());
         Self {
-            viewport,
             plan,
             next_cell_index: 0,
             packed_mask,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn next_cell_index(&self) -> usize {
-        self.next_cell_index
     }
 
     pub(crate) fn next_chunk(&self) -> Option<BackgroundProbeChunk> {
@@ -451,7 +437,6 @@ impl BackgroundProbeProgress {
         if self.next_cell_index >= self.plan.len() {
             return Some(BackgroundProbeUpdate::Complete(
                 BackgroundProbeBatch::from_packed_mask(
-                    self.viewport,
                     self.plan.cells.clone(),
                     std::mem::take(&mut self.packed_mask).into_packed_mask_bytes(),
                 ),

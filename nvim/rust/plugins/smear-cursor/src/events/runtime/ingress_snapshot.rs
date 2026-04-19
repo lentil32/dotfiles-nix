@@ -72,6 +72,9 @@ impl IngressModePolicySnapshot {
     }
 }
 
+// Operation-scoped copy of shell-visible runtime facts for one ingress read. This
+// snapshot may borrow immutable shell-owned data, but it must never become a
+// retained reducer-owned semantic owner.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IngressReadSnapshot {
     enabled: bool,
@@ -224,9 +227,7 @@ impl IngressReadSnapshot {
         &self,
         buffer: Option<&api::Buffer>,
     ) -> Option<BufferEventPolicy> {
-        let Some(buffer) = buffer else {
-            return None;
-        };
+        let buffer = buffer?;
 
         match resolved_current_buffer_event_policy(self, buffer) {
             Ok(policy) => Some(policy),
@@ -486,5 +487,47 @@ mod tests {
 
         assert_eq!(disabled_snapshot.current_buffer_event_policy(), None);
         assert_eq!(disabled_snapshot.current_buffer_perf_class(), None);
+    }
+
+    #[test]
+    fn ingress_snapshot_remains_stable_after_later_core_state_mutation() {
+        let shape = crate::state::CursorShape::new(false, false);
+        let initial_location = crate::state::CursorLocation::new(11, 22, 3, 4);
+        let mut initial_runtime = crate::state::RuntimeState::default();
+        initial_runtime.initialize_cursor(
+            Point { row: 3.0, col: 4.0 },
+            shape,
+            7,
+            &initial_location,
+        );
+        initial_runtime.config.smear_to_cmd = true;
+        super::super::set_core_state(
+            crate::core::state::CoreState::default().with_runtime(initial_runtime),
+        )
+        .expect("test core state write should succeed");
+
+        let snapshot =
+            IngressReadSnapshot::capture_with_current_buffer(None).expect("snapshot capture");
+        let expected = snapshot.clone();
+
+        let mutated_location = crate::state::CursorLocation::new(99, 88, 7, 6);
+        let mut mutated_runtime = crate::state::RuntimeState::default();
+        mutated_runtime.set_enabled(false);
+        mutated_runtime.initialize_cursor(
+            Point {
+                row: 30.0,
+                col: 40.0,
+            },
+            shape,
+            9,
+            &mutated_location,
+        );
+        mutated_runtime.config.smear_to_cmd = false;
+        super::super::set_core_state(
+            crate::core::state::CoreState::default().with_runtime(mutated_runtime),
+        )
+        .expect("mutated test core state write should succeed");
+
+        assert_eq!(snapshot, expected);
     }
 }

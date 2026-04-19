@@ -2,7 +2,7 @@ use super::*;
 use crate::core::effect::RequestProbeEffect;
 use pretty_assertions::assert_eq;
 
-fn setup_cursor_probe_ingress() -> (CoreDispatchTestContext, ObservationRequest) {
+fn setup_cursor_probe_ingress() -> (CoreDispatchTestContext, PendingObservation) {
     let scope = CoreDispatchTestContext::new();
     scope.set_core_state(ready_state_with_cursor_color_probe());
     let request = scope.dispatch_external_cursor_ingress_to_queue(25);
@@ -37,7 +37,7 @@ fn observation_base_edge_executes_the_same_wave_cursor_probe() {
         .planned_follow_ups
         .push_back(vec![observation_base_collected(
             &request,
-            observation_basis(&request, Some(cursor(7, 8)), 26),
+            observation_basis(Some(cursor(7, 8)), 26),
         )]);
     executor.planned_follow_ups.push_back(Vec::new());
     executor
@@ -71,7 +71,7 @@ fn observation_base_edge_updates_the_retained_observation_from_same_wave_probe()
         .planned_follow_ups
         .push_back(vec![observation_base_collected(
             &request,
-            observation_basis(&request, Some(cursor(7, 8)), 26),
+            observation_basis(Some(cursor(7, 8)), 26),
         )]);
     executor.planned_follow_ups.push_back(Vec::new());
     executor
@@ -90,7 +90,7 @@ fn observation_base_edge_updates_the_retained_observation_from_same_wave_probe()
 
 fn setup_after_same_wave_cursor_probe() -> (
     CoreDispatchTestContext,
-    ObservationRequest,
+    PendingObservation,
     RecordingExecutor,
 ) {
     let (scope, request) = setup_cursor_probe_ingress();
@@ -99,7 +99,7 @@ fn setup_after_same_wave_cursor_probe() -> (
         .planned_follow_ups
         .push_back(vec![observation_base_collected(
             &request,
-            observation_basis(&request, Some(cursor(7, 8)), 26),
+            observation_basis(Some(cursor(7, 8)), 26),
         )]);
     executor.planned_follow_ups.push_back(Vec::new());
     executor

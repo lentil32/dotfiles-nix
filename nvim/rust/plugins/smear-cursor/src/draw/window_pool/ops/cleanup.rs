@@ -175,11 +175,9 @@ pub(crate) fn compact_tabs_to_budget(
         let Some(tab_windows) = render_tabs.get_mut(&tab_handle) else {
             continue;
         };
-        // Surprising: Cooling should already have closed visible windows on the Hot->Cooling edge,
-        // but compaction must still recover authoritatively if stale shell-visible entries remain.
         summary.closed_visible_windows = summary
             .closed_visible_windows
-            .saturating_add(close_visible_tab_windows(tab_windows, namespace_id));
+            .saturating_add(close_shell_visible_tab_windows(tab_windows, namespace_id));
         let invalid_removed = remove_invalid_windows(tab_windows, namespace_id);
         if invalid_removed > 0 {
             summary.invalid_removed_windows = summary
@@ -198,8 +196,6 @@ pub(crate) fn compact_tabs_to_budget(
 }
 
 fn shell_visible_close_indices(tab_windows: &TabWindows) -> Vec<usize> {
-    // Surprising: `visible_available_indices` is only a reuse/hide queue. Cleanup authority must
-    // follow the retained window lifecycle itself so stale tracking cannot strand visible floats.
     tab_windows
         .windows
         .iter()
@@ -208,7 +204,7 @@ fn shell_visible_close_indices(tab_windows: &TabWindows) -> Vec<usize> {
         .collect()
 }
 
-fn close_visible_tab_windows(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
+fn close_shell_visible_tab_windows(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
     let remove_indices = shell_visible_close_indices(tab_windows);
     if remove_indices.is_empty() {
         return 0;
@@ -223,15 +219,14 @@ fn close_visible_tab_windows(tab_windows: &mut TabWindows, namespace_id: u32) ->
     closed_windows
 }
 
-pub(crate) fn close_visible_tab(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
-    close_visible_tab_windows(tab_windows, namespace_id)
+pub(crate) fn close_shell_visible_tab(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
+    close_shell_visible_tab_windows(tab_windows, namespace_id)
 }
 
 fn release_unused_tab_windows(
     tab_windows: &mut TabWindows,
     namespace_id: u32,
 ) -> ReleaseUnusedSummary {
-    let hide_config = hide_window_config();
     let mut summary = ReleaseUnusedSummary::default();
     let mut hide_indices = tab_windows.take_visible_available_indices_for_hide();
     if hide_indices.is_empty() {
@@ -258,16 +253,14 @@ fn release_unused_tab_windows(
             continue;
         };
 
-        // Surprising: some UIs can continue displaying the last float payload after a hide until
-        // a later repaint. Clear the render namespace before hiding so reused windows do not leak
-        // stale smear cells on screen.
-        if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
-            log_draw_error("clear cached render namespace before hide", &err);
-            let _ = mark_cached_window_invalid(tab_windows, index);
-            continue;
-        }
-
-        if crate::draw::set_existing_floating_window_config_ref(&mut window, &hide_config).is_err()
+        if crate::draw::clear_namespace_and_hide_floating_window(
+            namespace_id,
+            &mut buffer,
+            &mut window,
+            "clear cached render namespace before hide",
+            "hide cached render window",
+        )
+        .is_err()
         {
             let _ = mark_cached_window_invalid(tab_windows, index);
             continue;

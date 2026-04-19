@@ -34,7 +34,7 @@ proptest! {
         );
         state.velocity_corners = [velocity; 4];
         state.spring_velocity_corners = [spring_velocity; 4];
-        state.trail_elapsed_ms = [trail_elapsed; 4];
+        state.trail.elapsed_ms = [trail_elapsed; 4];
         state.particles = particles
             .iter()
             .map(|(position, velocity, lifetime)| Particle {

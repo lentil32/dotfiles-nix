@@ -1,5 +1,6 @@
 use super::super::super::logging::trace_lazy;
 use super::super::super::runtime::EffectExecutor;
+use super::super::super::runtime::read_engine_state;
 use super::super::super::runtime::record_delayed_ingress_pending_update_count;
 use super::super::super::runtime::record_ingress_coalesced_count;
 use super::super::super::runtime::record_post_burst_convergence;
@@ -219,10 +220,7 @@ fn dispatch_effect_follow_ups(
             continue;
         }
 
-        let source_allows_same_wave_probe = matches!(
-            follow_up,
-            CoreEvent::ObservationBaseCollected(ref payload) if !payload.request.probes().background()
-        );
+        let source_allows_same_wave_probe = observation_base_allows_same_wave_probe(&follow_up)?;
         let mut handle_effects = |effects| {
             dispatch_follow_up_effects_for_source(source_allows_same_wave_probe, effects, executor)
         };
@@ -239,6 +237,25 @@ fn dispatch_effect_follow_ups(
     }
 
     Ok(())
+}
+
+fn observation_base_allows_same_wave_probe(
+    event: &CoreEvent,
+) -> std::result::Result<bool, ScheduledWorkExecutionError> {
+    let CoreEvent::ObservationBaseCollected(payload) = event else {
+        return Ok(false);
+    };
+
+    read_engine_state(|state| {
+        state
+            .core_state()
+            .pending_observation()
+            .is_some_and(|pending| {
+                pending.observation_id() == payload.observation_id
+                    && !pending.requested_probes().background()
+            })
+    })
+    .map_err(ScheduledWorkExecutionError::from)
 }
 
 pub(super) fn execute_effect_only_step(

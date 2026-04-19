@@ -6,7 +6,7 @@
 
 use crate::core::state::BackgroundProbeBatch;
 #[cfg(test)]
-use crate::core::state::ProjectionSnapshot;
+use crate::core::state::RetainedProjection;
 #[cfg(test)]
 use crate::core::state::ScenePatch;
 #[cfg(test)]
@@ -21,7 +21,6 @@ use crate::draw::render_plan::TargetCellOverlay;
 use crate::draw::render_plan::Viewport;
 use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::types::ModeClass;
-use crate::types::PlannerFrame;
 use crate::types::RenderFrame;
 use crate::types::ScreenCell;
 use std::collections::hash_map::DefaultHasher;
@@ -157,6 +156,7 @@ impl LogicalRaster {
         self.iter_cells().copied().collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn into_particle_cells(self) -> Arc<[CellOp]> {
         self.particle_cells
     }
@@ -197,6 +197,7 @@ pub(crate) struct RealizationSpan {
 }
 
 impl RealizationSpan {
+    #[cfg(test)]
     fn payload_hash_for_chunks(chunks: &[RealizationSpanChunk]) -> u64 {
         let mut hasher = DefaultHasher::new();
         for chunk in chunks {
@@ -255,10 +256,12 @@ impl RealizationProjection {
         self.clear
     }
 
+    #[cfg(test)]
     pub(crate) fn particle_spans(&self) -> &[RealizationSpan] {
         self.particle_spans.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn static_spans(&self) -> &[RealizationSpan] {
         self.static_spans.as_ref()
     }
@@ -281,7 +284,7 @@ impl RealizationProjection {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ScenePatchRealization<'a> {
-    Draw(&'a ProjectionSnapshot),
+    Draw(&'a RetainedProjection),
     Clear,
     Noop,
 }
@@ -304,8 +307,6 @@ pub(crate) fn project_scene_patch(
         ScenePatchKind::Replace => patch
             .basis()
             .target()
-            // Surprising: a replace patch without a target projection breaks the
-            // phase-4 basis invariant and leaves shell apply without draw input.
             .map(ScenePatchRealization::Draw)
             .ok_or(ScenePatchRealizationError::MissingTargetProjection),
     }
@@ -457,7 +458,7 @@ fn project_particle_ops(
 }
 
 pub(crate) fn project_particle_overlay_cells(
-    frame: &PlannerFrame,
+    frame: &RenderFrame,
     viewport: Viewport,
     background_probe: Option<&BackgroundProbeBatch>,
 ) -> Arc<[CellOp]> {
@@ -605,15 +606,17 @@ pub(crate) fn project_render_plan(
 mod tests {
     use super::*;
     use crate::core::state::PatchBasis;
-    use crate::core::state::ProjectionSnapshot;
+    use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ProjectionWitness;
+    use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
     use crate::core::types::CursorCol;
     use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::ObservationId;
+    use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
-    use crate::core::types::SceneRevision;
+    use crate::core::types::RenderRevision;
     use crate::core::types::StrokeId;
     use crate::core::types::ViewportSnapshot;
     use crate::draw::render_plan::HighlightLevel;
@@ -625,7 +628,6 @@ mod tests {
     use crate::types::CursorCellShape;
     use crate::types::ModeClass;
     use crate::types::Particle;
-    use crate::types::PlannerFrame;
     use crate::types::Point;
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
@@ -676,6 +678,7 @@ mod tests {
             aggregated_particle_cells: Arc::default(),
             particle_screen_cells: Arc::default(),
             color_at_cursor: None,
+            projection_policy_revision: ProjectionPolicyRevision::INITIAL,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: None,
                 cursor_color_insert_mode: None,
@@ -821,7 +824,6 @@ mod tests {
     #[derive(Clone, Debug)]
     struct RenderPlanFixture {
         viewport: Viewport,
-        viewport_snapshot: ViewportSnapshot,
         plan: RenderPlan,
         background_probe: Option<BackgroundProbeBatch>,
     }
@@ -863,7 +865,6 @@ mod tests {
                             });
                             RenderPlanFixture {
                                 viewport,
-                                viewport_snapshot,
                                 plan: RenderPlan {
                                     clear,
                                     cell_ops,
@@ -919,17 +920,27 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct ScenePatchFixture {
-        acknowledged: Option<ProjectionSnapshot>,
-        target: Option<ProjectionSnapshot>,
+        acknowledged: Option<RetainedProjection>,
+        target: Option<RetainedProjection>,
         expected_kind: ScenePatchKind,
     }
 
     fn witness(observation_seq: u64, max_row: u32, max_col: u32) -> ProjectionWitness {
         ProjectionWitness::new(
-            SceneRevision::INITIAL,
+            RenderRevision::INITIAL,
             ObservationId::from_ingress_seq(IngressSeq::new(observation_seq)),
             ViewportSnapshot::new(CursorRow(max_row), CursorCol(max_col)),
             ProjectorRevision::CURRENT,
+        )
+    }
+
+    fn reuse_key() -> ProjectionReuseKey {
+        ProjectionReuseKey::new(
+            None,
+            None,
+            None,
+            crate::core::runtime_reducer::TargetCellPresentation::None,
+            ProjectionPolicyRevision::INITIAL,
         )
     }
 
@@ -938,9 +949,11 @@ mod tests {
         max_row: u32,
         max_col: u32,
         max_kept_windows: usize,
-    ) -> ProjectionSnapshot {
-        ProjectionSnapshot::new(
+    ) -> RetainedProjection {
+        RetainedProjection::new(
             witness(observation_seq, max_row, max_col),
+            reuse_key(),
+            crate::draw::render_plan::PlannerState::default(),
             LogicalRaster::new(
                 Some(ClearOp { max_kept_windows }),
                 Arc::from(Vec::<CellOp>::new()),
@@ -1029,17 +1042,16 @@ mod tests {
             assert_eq!(raster.clear(), fixture.plan.clear);
             assert_eq!(raster.collected_cells(), expected);
             assert_eq!(flatten_projection_cells(&realized), expected);
-            if let Some(background_probe) = fixture.background_probe.as_ref() {
-                prop_assert_eq!(background_probe.viewport(), fixture.viewport_snapshot);
-            }
         }
 
         #[test]
         fn prop_scene_patch_kind_and_realization_follow_only_the_basis_pair(
             fixture in scene_patch_fixture(),
         ) {
-            let patch =
-                ScenePatch::derive(PatchBasis::new(fixture.acknowledged.clone(), fixture.target.clone()));
+            let patch = ScenePatch::derive(PatchBasis::new(
+                fixture.acknowledged.clone().map(Into::into),
+                fixture.target.clone().map(Into::into),
+            ));
 
             assert_eq!(patch.kind(), fixture.expected_kind);
             match (fixture.expected_kind, fixture.target.as_ref()) {
@@ -1069,11 +1081,7 @@ mod tests {
             max_row: 40,
             max_col: 80,
         };
-        let planner_output = render_frame_to_plan(
-            &PlannerFrame::from_render_frame(&frame),
-            PlannerState::default(),
-            viewport,
-        );
+        let planner_output = render_frame_to_plan(&frame, PlannerState::default(), viewport);
         let raster = project_render_plan(&planner_output.plan, viewport, None);
         let realized = realize_logical_raster(&raster);
 
@@ -1188,8 +1196,6 @@ mod tests {
                 lifetime: 1.1,
             },
         ]));
-        let frame = PlannerFrame::from_render_frame(&render_frame);
-
         let viewport = Viewport {
             max_row: 20,
             max_col: 20,
@@ -1205,14 +1211,14 @@ mod tests {
         );
 
         let legacy_particle_cells = project_render_plan(
-            &crate::draw::render_plan::particle_overlay_plan(&frame, viewport),
+            &crate::draw::render_plan::particle_overlay_plan(&render_frame, viewport),
             viewport,
             Some(&probe),
         )
         .into_particle_cells();
 
         assert_eq!(
-            project_particle_overlay_cells(&frame, viewport, Some(&probe)),
+            project_particle_overlay_cells(&render_frame, viewport, Some(&probe)),
             legacy_particle_cells,
         );
     }

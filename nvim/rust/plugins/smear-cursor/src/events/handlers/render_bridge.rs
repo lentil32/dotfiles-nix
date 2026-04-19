@@ -114,6 +114,15 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
                         ApplyFailureKind::ViewportDrift,
                         RealizationDivergence::ShellStateUnknown,
                     ),
+                    ApplyRenderActionError::DrawProposalMissingTarget => {
+                        warn(
+                            "draw proposal reached render shell apply without a target projection",
+                        );
+                        (
+                            ApplyFailureKind::MissingProjection,
+                            RealizationDivergence::ShellStateUnknown,
+                        )
+                    }
                     ApplyRenderActionError::Shell(error) => {
                         warn(&format!("core render apply failed: {error}"));
                         (

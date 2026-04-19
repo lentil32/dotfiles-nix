@@ -117,6 +117,25 @@ fn first_edge_leaves_new_follow_up_work_for_a_later_edge() {
 }
 
 #[test]
+fn staging_effect_only_work_keeps_payloads_out_of_core_state() {
+    let _context = CoreDispatchTestContext::new();
+    let initial = ready_state();
+    replace_core_state(initial.clone());
+
+    assert!(queue_stage_batch(vec![
+        Effect::RedrawCmdline,
+        cleanup_timer_effect(1)
+    ]));
+
+    assert_eq!(current_core_state(), initial);
+    assert_eq!(queued_work_count(), 2);
+    assert!(matches!(
+        queued_front_work_item(),
+        Some(ScheduledWorkUnit::EffectOnlyStep(_))
+    ));
+}
+
+#[test]
 fn hot_edge_continues_through_cleanup_follow_up_waves() {
     let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
     assert!(harness.stage_batch(vec![cleanup_effect(12)]));

@@ -140,7 +140,7 @@ fn semantic_classifier_detects_motion_without_text_mutation() {
     let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
     let previous = ObservationSnapshot::new(
         request.clone(),
-        observation_basis(&request, viewport).with_cursor_text_context_state(
+        observation_basis(viewport).with_cursor_text_context_state(
             CursorTextContextState::Sampled(text_context(
                 8,
                 7,
@@ -153,7 +153,6 @@ fn semantic_classifier_detects_motion_without_text_mutation() {
     let current = ObservationSnapshot::new(
         request,
         ObservationBasis::new(
-            ObservationId::from_ingress_seq(IngressSeq::new(1)),
             Millis::new(11),
             "n".to_string(),
             Some(CursorPosition {
@@ -184,7 +183,7 @@ fn semantic_classifier_detects_viewport_or_window_motion_cases() {
     let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
     let previous = ObservationSnapshot::new(
         request.clone(),
-        observation_basis(&request, viewport),
+        observation_basis(viewport),
         ObservationMotion::default(),
     );
     let cases = [
@@ -198,7 +197,6 @@ fn semantic_classifier_detects_viewport_or_window_motion_cases() {
         let current = ObservationSnapshot::new(
             request.clone(),
             ObservationBasis::new(
-                ObservationId::from_ingress_seq(IngressSeq::new(1)),
                 Millis::new(11),
                 "n".to_string(),
                 Some(CursorPosition {
@@ -221,7 +219,7 @@ fn semantic_classifier_detects_viewport_or_window_motion_cases() {
 #[test]
 fn semantic_classifier_detects_mode_change() {
     let previous_request = observation_request(ProbeRequestSet::default());
-    let current_request = ObservationRequest::new(
+    let current_request = PendingObservation::new(
         ExternalDemand::new(
             IngressSeq::new(1),
             ExternalDemandKind::ModeChanged,
@@ -233,14 +231,13 @@ fn semantic_classifier_detects_mode_change() {
     );
     let viewport = ViewportSnapshot::new(CursorRow(40), CursorCol(120));
     let previous = ObservationSnapshot::new(
-        previous_request.clone(),
-        observation_basis(&previous_request, viewport),
+        previous_request,
+        observation_basis(viewport),
         ObservationMotion::default(),
     );
     let current = ObservationSnapshot::new(
-        current_request.clone(),
+        current_request,
         ObservationBasis::new(
-            current_request.observation_id(),
             Millis::new(11),
             "i".to_string(),
             Some(CursorPosition {
@@ -267,7 +264,6 @@ fn semantic_classifier_prioritizes_text_mutation_before_viewport_motion() {
         ObservationSnapshot::new(
             request.clone(),
             ObservationBasis::new(
-                request.observation_id(),
                 Millis::new(10),
                 "n".to_string(),
                 Some(CursorPosition {
@@ -285,7 +281,6 @@ fn semantic_classifier_prioritizes_text_mutation_before_viewport_motion() {
     let current = ObservationSnapshot::new(
         request,
         ObservationBasis::new(
-            ObservationId::from_ingress_seq(IngressSeq::new(1)),
             Millis::new(11),
             "n".to_string(),
             Some(CursorPosition {

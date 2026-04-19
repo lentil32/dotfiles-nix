@@ -3,16 +3,6 @@ use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
 
-const DEFAULT_IDLE_RETENTION_BUDGET: usize = 2;
-
-const fn default_idle_target_budget(max_kept_windows: usize) -> usize {
-    if max_kept_windows < DEFAULT_IDLE_RETENTION_BUDGET {
-        max_kept_windows
-    } else {
-        DEFAULT_IDLE_RETENTION_BUDGET
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) enum BufferPerfClass {
     #[default]
@@ -105,14 +95,79 @@ pub(crate) enum RenderThermalState {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct RenderCleanupState {
-    thermal: RenderThermalState,
-    max_kept_windows: usize,
-    idle_target_budget: usize,
-    max_prune_per_tick: usize,
-    next_compaction_due_at: Option<Millis>,
-    entered_cooling_at: Option<Millis>,
-    hard_purge_due_at: Option<Millis>,
+pub(crate) struct HotRenderCleanupState {
+    next_compaction_due_at: Millis,
+    hard_purge_due_at: Millis,
+}
+
+impl HotRenderCleanupState {
+    fn scheduled(observed_at: Millis, soft_delay_ms: u64, hard_delay_ms: u64) -> Self {
+        let soft_delay_ms = soft_delay_ms.max(1);
+        let hard_delay_ms = hard_delay_ms.max(soft_delay_ms);
+        Self {
+            next_compaction_due_at: Millis::new(observed_at.value().saturating_add(soft_delay_ms)),
+            hard_purge_due_at: Millis::new(observed_at.value().saturating_add(hard_delay_ms)),
+        }
+    }
+
+    pub(crate) const fn next_compaction_due_at(self) -> Millis {
+        self.next_compaction_due_at
+    }
+
+    pub(crate) const fn hard_purge_due_at(self) -> Millis {
+        self.hard_purge_due_at
+    }
+
+    pub(crate) const fn enter_cooling(self, observed_at: Millis) -> CoolingRenderCleanupState {
+        CoolingRenderCleanupState {
+            entered_cooling_at: observed_at,
+            next_compaction_due_at: observed_at,
+            hard_purge_due_at: self.hard_purge_due_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CoolingRenderCleanupState {
+    entered_cooling_at: Millis,
+    next_compaction_due_at: Millis,
+    hard_purge_due_at: Millis,
+}
+
+impl CoolingRenderCleanupState {
+    pub(crate) const fn entered_cooling_at(self) -> Millis {
+        self.entered_cooling_at
+    }
+
+    pub(crate) const fn next_compaction_due_at(self) -> Millis {
+        self.next_compaction_due_at
+    }
+
+    pub(crate) const fn hard_purge_due_at(self) -> Millis {
+        self.hard_purge_due_at
+    }
+
+    pub(crate) const fn continue_cooling(self, observed_at: Millis) -> Self {
+        Self {
+            next_compaction_due_at: observed_at,
+            ..self
+        }
+    }
+
+    pub(crate) const fn next_deadline(self) -> Millis {
+        if self.next_compaction_due_at.value() <= self.hard_purge_due_at.value() {
+            self.next_compaction_due_at
+        } else {
+            self.hard_purge_due_at
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RenderCleanupState {
+    Hot(HotRenderCleanupState),
+    Cooling(CoolingRenderCleanupState),
+    Cold,
 }
 
 impl Default for RenderCleanupState {
@@ -123,256 +178,194 @@ impl Default for RenderCleanupState {
 
 impl RenderCleanupState {
     pub(crate) const fn cold() -> Self {
-        Self {
-            thermal: RenderThermalState::Cold,
-            max_kept_windows: 0,
-            idle_target_budget: 0,
-            max_prune_per_tick: 0,
-            next_compaction_due_at: None,
-            entered_cooling_at: None,
-            hard_purge_due_at: None,
-        }
+        Self::Cold
     }
 
     pub(crate) const fn converge_to_cold(self) -> Self {
-        Self {
-            thermal: RenderThermalState::Cold,
-            next_compaction_due_at: None,
-            entered_cooling_at: None,
-            hard_purge_due_at: None,
-            ..self
-        }
+        Self::Cold
     }
 
-    pub(crate) fn scheduled(
-        observed_at: Millis,
-        soft_delay_ms: u64,
-        hard_delay_ms: u64,
-        max_kept_windows: usize,
-    ) -> Self {
-        let soft_delay_ms = soft_delay_ms.max(1);
-        let hard_delay_ms = hard_delay_ms.max(soft_delay_ms);
-        Self {
-            thermal: RenderThermalState::Hot,
-            max_kept_windows,
-            // Surprising: Hot still honors the large adaptive reuse budget, but Cooling must
-            // converge to a tiny idle pool so post-burst cost does not inherit the hot-path floor.
-            idle_target_budget: default_idle_target_budget(max_kept_windows),
-            max_prune_per_tick: max_kept_windows.max(1),
-            next_compaction_due_at: Some(Millis::new(
-                observed_at.value().saturating_add(soft_delay_ms),
-            )),
-            entered_cooling_at: None,
-            hard_purge_due_at: Some(Millis::new(
-                observed_at.value().saturating_add(hard_delay_ms),
-            )),
-        }
+    pub(crate) fn scheduled(observed_at: Millis, soft_delay_ms: u64, hard_delay_ms: u64) -> Self {
+        Self::Hot(HotRenderCleanupState::scheduled(
+            observed_at,
+            soft_delay_ms,
+            hard_delay_ms,
+        ))
     }
 
     pub(crate) const fn thermal(self) -> RenderThermalState {
-        self.thermal
-    }
-
-    pub(crate) const fn max_kept_windows(self) -> usize {
-        self.max_kept_windows
-    }
-
-    pub(crate) const fn idle_target_budget(self) -> usize {
-        self.idle_target_budget
-    }
-
-    pub(crate) const fn max_prune_per_tick(self) -> usize {
-        self.max_prune_per_tick
+        match self {
+            Self::Hot(_) => RenderThermalState::Hot,
+            Self::Cooling(_) => RenderThermalState::Cooling,
+            Self::Cold => RenderThermalState::Cold,
+        }
     }
 
     pub(crate) const fn next_compaction_due_at(self) -> Option<Millis> {
-        self.next_compaction_due_at
+        match self {
+            Self::Hot(schedule) => Some(schedule.next_compaction_due_at()),
+            Self::Cooling(schedule) => Some(schedule.next_compaction_due_at()),
+            Self::Cold => None,
+        }
     }
 
     pub(crate) const fn entered_cooling_at(self) -> Option<Millis> {
-        self.entered_cooling_at
+        match self {
+            Self::Cooling(schedule) => Some(schedule.entered_cooling_at()),
+            Self::Hot(_) | Self::Cold => None,
+        }
     }
 
     pub(crate) const fn hard_purge_due_at(self) -> Option<Millis> {
-        self.hard_purge_due_at
+        match self {
+            Self::Hot(schedule) => Some(schedule.hard_purge_due_at()),
+            Self::Cooling(schedule) => Some(schedule.hard_purge_due_at()),
+            Self::Cold => None,
+        }
     }
 
     pub(crate) const fn next_deadline(self) -> Option<Millis> {
-        match self.thermal {
-            RenderThermalState::Hot => match self.next_compaction_due_at {
-                Some(next_compaction_due_at) => Some(next_compaction_due_at),
-                None => self.hard_purge_due_at,
-            },
-            RenderThermalState::Cooling => {
-                match (self.next_compaction_due_at, self.hard_purge_due_at) {
-                    (Some(next_compaction_due_at), Some(hard_purge_due_at)) => Some(
-                        if next_compaction_due_at.value() <= hard_purge_due_at.value() {
-                            next_compaction_due_at
-                        } else {
-                            hard_purge_due_at
-                        },
-                    ),
-                    (Some(next_compaction_due_at), None) => Some(next_compaction_due_at),
-                    (None, Some(hard_purge_due_at)) => Some(hard_purge_due_at),
-                    (None, None) => None,
-                }
-            }
-            RenderThermalState::Cold => None,
+        match self {
+            Self::Hot(schedule) => Some(schedule.next_compaction_due_at()),
+            Self::Cooling(schedule) => Some(schedule.next_deadline()),
+            Self::Cold => None,
         }
     }
 
     pub(crate) fn enter_cooling(self, observed_at: Millis) -> Self {
-        match self.thermal {
-            RenderThermalState::Cold => self,
-            RenderThermalState::Hot => Self {
-                thermal: RenderThermalState::Cooling,
-                next_compaction_due_at: Some(observed_at),
-                entered_cooling_at: Some(observed_at),
-                ..self
-            },
-            RenderThermalState::Cooling => Self {
-                next_compaction_due_at: Some(observed_at),
-                ..self
-            },
+        match self {
+            Self::Hot(schedule) => Self::Cooling(schedule.enter_cooling(observed_at)),
+            Self::Cooling(schedule) => Self::Cooling(schedule.continue_cooling(observed_at)),
+            Self::Cold => Self::Cold,
         }
     }
 
     pub(crate) fn continue_cooling(self, observed_at: Millis) -> Self {
-        match self.thermal {
-            RenderThermalState::Cold => self,
-            RenderThermalState::Hot => self.enter_cooling(observed_at),
-            RenderThermalState::Cooling => Self {
-                next_compaction_due_at: Some(observed_at),
-                ..self
+        match self {
+            Self::Hot(_) => self.enter_cooling(observed_at),
+            Self::Cooling(schedule) => Self::Cooling(schedule.continue_cooling(observed_at)),
+            Self::Cold => Self::Cold,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct TimerSlotState {
+    generation: TimerGeneration,
+    armed: bool,
+}
+
+impl TimerSlotState {
+    fn arm(self, timer_id: TimerId) -> (Self, TimerToken) {
+        let generation = self.generation.next();
+        let token = TimerToken::new(timer_id, generation);
+        (
+            Self {
+                generation,
+                armed: true,
             },
+            token,
+        )
+    }
+
+    fn active_token(self, timer_id: TimerId) -> Option<TimerToken> {
+        self.armed
+            .then_some(TimerToken::new(timer_id, self.generation))
+    }
+
+    fn is_active(self, token: TimerToken) -> bool {
+        self.armed && self.generation == token.generation()
+    }
+
+    fn clear_active(self) -> Self {
+        Self {
+            armed: false,
+            ..self
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TimerState {
-    animation_generation: TimerGeneration,
-    ingress_generation: TimerGeneration,
-    recovery_generation: TimerGeneration,
-    cleanup_generation: TimerGeneration,
-    active_animation: Option<TimerToken>,
-    active_ingress: Option<TimerToken>,
-    active_recovery: Option<TimerToken>,
-    active_cleanup: Option<TimerToken>,
+    animation: TimerSlotState,
+    ingress: TimerSlotState,
+    recovery: TimerSlotState,
+    cleanup: TimerSlotState,
 }
 
 impl Default for TimerState {
     fn default() -> Self {
         Self {
-            animation_generation: TimerGeneration::INITIAL,
-            ingress_generation: TimerGeneration::INITIAL,
-            recovery_generation: TimerGeneration::INITIAL,
-            cleanup_generation: TimerGeneration::INITIAL,
-            active_animation: None,
-            active_ingress: None,
-            active_recovery: None,
-            active_cleanup: None,
+            animation: TimerSlotState {
+                generation: TimerGeneration::INITIAL,
+                armed: false,
+            },
+            ingress: TimerSlotState {
+                generation: TimerGeneration::INITIAL,
+                armed: false,
+            },
+            recovery: TimerSlotState {
+                generation: TimerGeneration::INITIAL,
+                armed: false,
+            },
+            cleanup: TimerSlotState {
+                generation: TimerGeneration::INITIAL,
+                armed: false,
+            },
         }
     }
 }
 
 impl TimerState {
-    fn generation_for(self, timer_id: TimerId) -> TimerGeneration {
+    fn slot(self, timer_id: TimerId) -> TimerSlotState {
         match timer_id {
-            TimerId::Animation => self.animation_generation,
-            TimerId::Ingress => self.ingress_generation,
-            TimerId::Recovery => self.recovery_generation,
-            TimerId::Cleanup => self.cleanup_generation,
+            TimerId::Animation => self.animation,
+            TimerId::Ingress => self.ingress,
+            TimerId::Recovery => self.recovery,
+            TimerId::Cleanup => self.cleanup,
         }
     }
 
-    fn with_generation(self, timer_id: TimerId, generation: TimerGeneration) -> Self {
+    fn with_slot(self, timer_id: TimerId, slot: TimerSlotState) -> Self {
         match timer_id {
             TimerId::Animation => Self {
-                animation_generation: generation,
+                animation: slot,
                 ..self
             },
             TimerId::Ingress => Self {
-                ingress_generation: generation,
+                ingress: slot,
                 ..self
             },
             TimerId::Recovery => Self {
-                recovery_generation: generation,
+                recovery: slot,
                 ..self
             },
             TimerId::Cleanup => Self {
-                cleanup_generation: generation,
+                cleanup: slot,
                 ..self
             },
         }
     }
 
     pub(crate) fn active_token(self, timer_id: TimerId) -> Option<TimerToken> {
-        match timer_id {
-            TimerId::Animation => self.active_animation,
-            TimerId::Ingress => self.active_ingress,
-            TimerId::Recovery => self.active_recovery,
-            TimerId::Cleanup => self.active_cleanup,
-        }
-    }
-
-    fn with_active_token(self, token: TimerToken) -> Self {
-        match token.id() {
-            TimerId::Animation => Self {
-                active_animation: Some(token),
-                ..self
-            },
-            TimerId::Ingress => Self {
-                active_ingress: Some(token),
-                ..self
-            },
-            TimerId::Recovery => Self {
-                active_recovery: Some(token),
-                ..self
-            },
-            TimerId::Cleanup => Self {
-                active_cleanup: Some(token),
-                ..self
-            },
-        }
+        self.slot(timer_id).active_token(timer_id)
     }
 
     pub(crate) fn arm(self, timer_id: TimerId) -> (Self, TimerToken) {
-        let generation = self.generation_for(timer_id).next();
-        let token = TimerToken::new(timer_id, generation);
-        let next = self
-            .with_generation(timer_id, generation)
-            .with_active_token(token);
-        (next, token)
+        let (slot, token) = self.slot(timer_id).arm(timer_id);
+        (self.with_slot(timer_id, slot), token)
     }
 
     pub(crate) fn is_active(self, token: TimerToken) -> bool {
-        self.active_token(token.id()) == Some(token)
+        self.slot(token.id()).is_active(token)
     }
 
     pub(crate) fn clear_active(self, timer_id: TimerId) -> Self {
-        match timer_id {
-            TimerId::Animation => Self {
-                active_animation: None,
-                ..self
-            },
-            TimerId::Ingress => Self {
-                active_ingress: None,
-                ..self
-            },
-            TimerId::Recovery => Self {
-                active_recovery: None,
-                ..self
-            },
-            TimerId::Cleanup => Self {
-                active_cleanup: None,
-                ..self
-            },
-        }
+        self.with_slot(timer_id, self.slot(timer_id).clear_active())
     }
 
     pub(crate) fn clear_matching(self, token: TimerToken) -> Self {
-        if self.is_active(token) {
+        if self.slot(token.id()).is_active(token) {
             self.clear_active(token.id())
         } else {
             self
@@ -478,13 +471,11 @@ mod tests {
             observed_at in any::<u64>(),
             soft_delay_ms in any::<u64>(),
             hard_delay_ms in any::<u64>(),
-            max_kept_windows in 0_usize..=64_usize,
         ) {
             let cleanup = RenderCleanupState::scheduled(
                 Millis::new(observed_at),
                 soft_delay_ms,
                 hard_delay_ms,
-                max_kept_windows,
             );
             let clamped_soft_delay_ms = soft_delay_ms.max(1);
             let clamped_hard_delay_ms = hard_delay_ms.max(clamped_soft_delay_ms);
@@ -493,20 +484,19 @@ mod tests {
             let expected_hard_purge_due_at =
                 Millis::new(observed_at.saturating_add(clamped_hard_delay_ms));
 
-            prop_assert_eq!(cleanup.thermal(), RenderThermalState::Hot);
-            prop_assert_eq!(cleanup.max_kept_windows(), max_kept_windows);
-            prop_assert_eq!(
-                cleanup.idle_target_budget(),
-                max_kept_windows.min(DEFAULT_IDLE_RETENTION_BUDGET)
-            );
-            prop_assert_eq!(cleanup.max_prune_per_tick(), max_kept_windows.max(1));
-            prop_assert_eq!(
-                cleanup.next_compaction_due_at(),
-                Some(expected_next_compaction_due_at)
-            );
-            prop_assert_eq!(cleanup.entered_cooling_at(), None);
-            prop_assert_eq!(cleanup.hard_purge_due_at(), Some(expected_hard_purge_due_at));
-            prop_assert_eq!(cleanup.next_deadline(), Some(expected_next_compaction_due_at));
+            match cleanup {
+                RenderCleanupState::Hot(schedule) => {
+                    prop_assert_eq!(
+                        schedule.next_compaction_due_at(),
+                        expected_next_compaction_due_at
+                    );
+                    prop_assert_eq!(schedule.hard_purge_due_at(), expected_hard_purge_due_at);
+                    prop_assert_eq!(cleanup.next_deadline(), Some(expected_next_compaction_due_at));
+                }
+                RenderCleanupState::Cooling(_) | RenderCleanupState::Cold => {
+                    prop_assert!(false, "scheduled cleanup should always be hot");
+                }
+            }
         }
 
         #[test]
@@ -514,7 +504,6 @@ mod tests {
             observed_at in any::<u64>(),
             soft_delay_ms in any::<u64>(),
             hard_delay_ms in any::<u64>(),
-            max_kept_windows in 0_usize..=64_usize,
             entered_cooling_at in any::<u64>(),
             rearm_sequence in vec((any::<bool>(), any::<u64>()), 0..=32),
         ) {
@@ -522,7 +511,6 @@ mod tests {
                 Millis::new(observed_at),
                 soft_delay_ms,
                 hard_delay_ms,
-                max_kept_windows,
             );
             let entered_cooling_at = Millis::new(entered_cooling_at);
             let mut cleanup = scheduled.enter_cooling(entered_cooling_at);
@@ -548,26 +536,23 @@ mod tests {
                     expected_hard_purge_due_at
                 };
 
-            prop_assert_eq!(cleanup.thermal(), RenderThermalState::Cooling);
-            prop_assert_eq!(cleanup.max_kept_windows(), scheduled.max_kept_windows());
-            prop_assert_eq!(cleanup.idle_target_budget(), scheduled.idle_target_budget());
-            prop_assert_eq!(cleanup.max_prune_per_tick(), scheduled.max_prune_per_tick());
-            prop_assert_eq!(
-                cleanup.next_compaction_due_at(),
-                Some(expected_next_compaction_due_at)
-            );
-            prop_assert_eq!(cleanup.entered_cooling_at(), Some(entered_cooling_at));
-            prop_assert_eq!(cleanup.hard_purge_due_at(), Some(expected_hard_purge_due_at));
-            prop_assert_eq!(cleanup.next_deadline(), Some(expected_next_deadline));
+            match cleanup {
+                RenderCleanupState::Cooling(schedule) => {
+                    prop_assert_eq!(schedule.entered_cooling_at(), entered_cooling_at);
+                    prop_assert_eq!(
+                        schedule.next_compaction_due_at(),
+                        expected_next_compaction_due_at
+                    );
+                    prop_assert_eq!(schedule.hard_purge_due_at(), expected_hard_purge_due_at);
+                    prop_assert_eq!(schedule.next_deadline(), expected_next_deadline);
+                }
+                RenderCleanupState::Hot(_) | RenderCleanupState::Cold => {
+                    prop_assert!(false, "entered cooling cleanup should always stay cooling");
+                }
+            }
 
             let cold = cleanup.converge_to_cold();
-            prop_assert_eq!(cold.thermal(), RenderThermalState::Cold);
-            prop_assert_eq!(cold.max_kept_windows(), scheduled.max_kept_windows());
-            prop_assert_eq!(cold.idle_target_budget(), scheduled.idle_target_budget());
-            prop_assert_eq!(cold.max_prune_per_tick(), scheduled.max_prune_per_tick());
-            prop_assert_eq!(cold.next_compaction_due_at(), None);
-            prop_assert_eq!(cold.entered_cooling_at(), None);
-            prop_assert_eq!(cold.hard_purge_due_at(), None);
+            prop_assert_eq!(cold, RenderCleanupState::Cold);
             prop_assert_eq!(cold.next_deadline(), None);
         }
     }

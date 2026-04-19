@@ -1,6 +1,9 @@
+mod derived;
+
+pub(crate) use derived::DerivedConfigCache;
+
 use crate::core::state::BufferPerfClass;
 use crate::types::BASE_TIME_INTERVAL;
-use crate::types::StaticRenderConfig;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
 use nvimrs_nvim_utils::mode::is_replace_like_mode;
 use std::collections::HashSet;
@@ -44,7 +47,6 @@ impl BufferPerfMode {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuntimeConfig {
-    pub(crate) fps: f64,
     pub(crate) time_interval: f64,
     pub(crate) simulation_hz: f64,
     pub(crate) max_simulation_steps_per_frame: u32,
@@ -126,6 +128,17 @@ impl RuntimeConfig {
         (1000.0 / fps).max(1.0)
     }
 
+    pub(crate) fn fps_for_interval_ms(time_interval: f64) -> f64 {
+        1000.0 / time_interval.max(1.0)
+    }
+
+    // User-facing compatibility alias. Runtime storage stays canonical on
+    // `time_interval`, so this reconstructs `fps` at the boundary instead of
+    // storing a second timing field.
+    pub(crate) fn fps(&self) -> f64 {
+        Self::fps_for_interval_ms(self.time_interval)
+    }
+
     pub(crate) fn cursor_is_vertical_bar(&self, mode: &str) -> bool {
         if is_insert_like_mode(mode) {
             self.vertical_bar_cursor_insert_mode
@@ -170,7 +183,6 @@ impl RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            fps: DEFAULT_ANIMATION_FPS,
             time_interval: Self::interval_ms_for_fps(DEFAULT_ANIMATION_FPS),
             // Neovide slices animation dt at 1/120s; use the same baseline integration rate.
             simulation_hz: 120.0,
@@ -251,36 +263,6 @@ impl Default for RuntimeConfig {
             spatial_coherence_weight: 1.0,
             temporal_stability_weight: 0.12,
             top_k_per_cell: 5,
-        }
-    }
-}
-
-impl From<&RuntimeConfig> for StaticRenderConfig {
-    fn from(config: &RuntimeConfig) -> Self {
-        Self {
-            cursor_color: config.cursor_color.clone(),
-            cursor_color_insert_mode: config.cursor_color_insert_mode.clone(),
-            normal_bg: config.normal_bg.clone(),
-            transparent_bg_fallback_color: config.transparent_bg_fallback_color.clone(),
-            cterm_cursor_colors: config.cterm_cursor_colors.clone(),
-            cterm_bg: config.cterm_bg,
-            hide_target_hack: config.hide_target_hack,
-            max_kept_windows: config.max_kept_windows,
-            never_draw_over_target: config.never_draw_over_target,
-            particle_max_lifetime: config.particle_max_lifetime,
-            particle_switch_octant_braille: config.particle_switch_octant_braille,
-            particles_over_text: config.particles_over_text,
-            color_levels: config.color_levels,
-            gamma: config.gamma,
-            block_aspect_ratio: config.block_aspect_ratio,
-            tail_duration_ms: config.tail_duration_ms.max(1.0),
-            simulation_hz: config.simulation_hz,
-            trail_thickness: config.trail_thickness,
-            trail_thickness_x: config.trail_thickness_x,
-            spatial_coherence_weight: config.spatial_coherence_weight,
-            temporal_stability_weight: config.temporal_stability_weight,
-            top_k_per_cell: config.top_k_per_cell.max(2),
-            windows_zindex: config.windows_zindex,
         }
     }
 }
@@ -407,7 +389,7 @@ mod tests {
     fn default_animation_fps_lowers_draw_cadence_without_changing_simulation_rate() {
         let config = RuntimeConfig::default();
 
-        assert_eq!(config.fps, DEFAULT_ANIMATION_FPS);
+        assert_eq!(config.fps(), DEFAULT_ANIMATION_FPS);
         assert_eq!(
             config.time_interval,
             RuntimeConfig::interval_ms_for_fps(DEFAULT_ANIMATION_FPS)

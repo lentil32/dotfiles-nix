@@ -3,19 +3,19 @@ use pretty_assertions::assert_eq;
 
 fn setup_multi_probe_ingress() -> (
     CoreDispatchTestContext,
-    ObservationRequest,
+    PendingObservation,
     ObservationBasis,
 ) {
     let scope = CoreDispatchTestContext::new();
     scope.set_core_state(ready_state_with_cursor_and_background_probes());
     let request = scope.dispatch_external_cursor_ingress_to_queue(25);
-    let basis = observation_basis(&request, Some(cursor(7, 8)), 26);
+    let basis = observation_basis(Some(cursor(7, 8)), 26);
     (scope, request, basis)
 }
 
 fn setup_after_observation_base_edge() -> (
     CoreDispatchTestContext,
-    ObservationRequest,
+    PendingObservation,
     ObservationBasis,
     RecordingExecutor,
 ) {
@@ -25,13 +25,13 @@ fn setup_after_observation_base_edge() -> (
         .planned_follow_ups
         .push_back(vec![observation_base_collected(&request, basis.clone())]);
     let _ = drain_next_edge(&mut executor);
-    install_background_probe_plan(&request, &basis);
+    install_background_probe_plan(&basis);
     (scope, request, basis, executor)
 }
 
 fn setup_after_cursor_color_probe_edge() -> (
     CoreDispatchTestContext,
-    ObservationRequest,
+    PendingObservation,
     ObservationBasis,
     BackgroundProbeChunk,
     RecordingExecutor,
@@ -43,8 +43,7 @@ fn setup_after_cursor_color_probe_edge() -> (
     let _ = drain_next_edge(&mut executor);
     let first_background_chunk = current_core_state()
         .observation()
-        .and_then(|observation| observation.background_progress())
-        .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
+        .and_then(|observation| observation.probes().background().next_chunk())
         .expect("first background chunk");
     (scope, request, basis, first_background_chunk, executor)
 }
@@ -104,8 +103,7 @@ fn background_chunk_edge_queues_the_next_background_chunk() {
     let has_more_items = drain_next_edge(&mut executor);
     let second_background_chunk = current_core_state()
         .observation()
-        .and_then(|observation| observation.background_progress())
-        .and_then(crate::core::state::BackgroundProbeProgress::next_chunk)
+        .and_then(|observation| observation.probes().background().next_chunk())
         .expect("second background chunk");
 
     assert!(

@@ -11,6 +11,8 @@ use crate::core::runtime_reducer::CursorVisibilityEffect;
 use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderSideEffects;
 use crate::core::runtime_reducer::TargetCellPresentation;
+use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
+use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::CoreState;
@@ -19,10 +21,13 @@ use crate::core::state::ExternalDemand;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ObservationBasis;
-use crate::core::state::ObservationRequest;
+use crate::core::state::ObservationSnapshot;
 use crate::core::state::PatchBasis;
+use crate::core::state::PendingObservation;
 use crate::core::state::PlannedRender;
-use crate::core::state::ProjectionSnapshot;
+use crate::core::state::ProbeKind;
+use crate::core::state::ProjectionHandle;
+use crate::core::state::ProtocolPhaseKind;
 use crate::core::state::QueuedDemand;
 use crate::core::state::RealizationDivergence;
 use crate::core::state::RealizationLedger;
@@ -33,6 +38,7 @@ use crate::core::state::ScenePatch;
 use crate::core::state::ScenePatchKind;
 use crate::core::types::CursorPosition;
 use crate::core::types::Millis;
+use crate::core::types::ObservationId;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
 use crate::core::types::ViewportSnapshot;
@@ -128,49 +134,65 @@ fn demand_queue_summary(queue: &DemandQueue) -> String {
     format!("cursor={} ordered={}", cursor, queue.ordered().len())
 }
 
-fn observation_request_summary(request: &ObservationRequest) -> String {
-    let probes = request.probes();
+fn pending_observation_summary(pending: &PendingObservation) -> String {
+    let probes = pending.requested_probes();
     format!(
         "obs={} demand=({}) probes=cursor_color:{} background:{}",
-        request.observation_id().value(),
-        external_demand_summary(request.demand()),
+        pending.observation_id().value(),
+        external_demand_summary(pending.demand()),
         probes.cursor_color(),
         probes.background(),
     )
 }
 
-fn observation_basis_summary(basis: &ObservationBasis) -> String {
-    let cursor_color_witness = basis.cursor_color_witness().map_or_else(
-        || "none".to_string(),
-        |witness| {
-            format!(
-                "buf={} tick={} mode={} cursor={} colorscheme_gen={} cache_gen={}",
-                witness.buffer_handle(),
-                witness.changedtick(),
-                witness.mode(),
-                cursor_position_summary(witness.cursor_position()),
-                witness.colorscheme_generation().value(),
-                witness.cache_generation().value(),
-            )
-        },
-    );
+fn protocol_phase_kind_name(kind: ProtocolPhaseKind) -> &'static str {
+    match kind {
+        ProtocolPhaseKind::Idle => "idle",
+        ProtocolPhaseKind::Primed => "primed",
+        ProtocolPhaseKind::Collecting => "collecting",
+        ProtocolPhaseKind::Observing => "observing",
+        ProtocolPhaseKind::Ready => "ready",
+        ProtocolPhaseKind::Planning => "planning",
+        ProtocolPhaseKind::Applying => "applying",
+        ProtocolPhaseKind::Recovering => "recovering",
+    }
+}
+
+fn observation_id_summary(observation_id: ObservationId) -> String {
+    format!("obs={}", observation_id.value())
+}
+
+fn active_observation_summary(observation: &ObservationSnapshot) -> String {
     format!(
-        "obs={} observed_at={} mode={} cursor={} location=({}) viewport={} cursor_color_witness={}",
-        basis.observation_id().value(),
+        "obs={} demand=({}) probes=cursor_color:{} background:{}",
+        observation.observation_id().value(),
+        external_demand_summary(observation.demand()),
+        observation.probes().cursor_color().is_requested(),
+        observation.probes().background().is_requested(),
+    )
+}
+
+fn observation_basis_summary(basis: &ObservationBasis) -> String {
+    let buffer_revision = basis
+        .buffer_revision()
+        .map_or_else(|| "none".to_string(), |revision| revision.to_string());
+    format!(
+        "observed_at={} mode={} cursor={} location=({}) viewport={} buffer_revision={}",
         millis_summary(basis.observed_at()),
         basis.mode(),
         cursor_position_summary(basis.cursor_position()),
         cursor_location_summary(&basis.cursor_location()),
         viewport_summary(basis.viewport()),
-        cursor_color_witness,
+        buffer_revision,
     )
 }
 
-fn projection_summary(snapshot: &ProjectionSnapshot) -> String {
-    let witness = snapshot.witness();
+fn projection_summary(projection: &ProjectionHandle) -> String {
+    let witness = projection.witness();
     format!(
-        "scene_rev={} obs={} projector_rev={} viewport={}",
-        witness.scene_revision().value(),
+        "render_rev=(motion={} semantics={}) obs={} projector_rev={} viewport={}",
+        witness.render_revision().motion().value(),
+        witness.render_revision().semantics().value(),
         witness.observation_id().value(),
         witness.projector_revision().value(),
         viewport_summary(witness.viewport()),
@@ -179,10 +201,10 @@ fn projection_summary(snapshot: &ProjectionSnapshot) -> String {
 
 fn patch_basis_summary(basis: &PatchBasis) -> String {
     let acknowledged = basis
-        .acknowledged()
+        .acknowledged_handle()
         .map_or_else(|| "none".to_string(), projection_summary);
     let target = basis
-        .target()
+        .target_handle()
         .map_or_else(|| "none".to_string(), projection_summary);
     format!("ack={acknowledged} target={target}")
 }
@@ -203,28 +225,31 @@ pub(super) fn scene_patch_summary(patch: &ScenePatch) -> String {
     )
 }
 
-fn render_cleanup_state_summary(cleanup: RenderCleanupState) -> String {
+fn render_cleanup_state_summary(
+    cleanup: RenderCleanupState,
+    config: &crate::config::RuntimeConfig,
+) -> String {
     match cleanup.thermal() {
         RenderThermalState::Hot => format!(
             "hot(next_compaction_due_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_prune_per_tick={})",
             optional_millis_summary(cleanup.next_compaction_due_at()),
             optional_millis_summary(cleanup.hard_purge_due_at()),
-            cleanup.max_kept_windows(),
-            cleanup.idle_target_budget(),
-            cleanup.max_prune_per_tick(),
+            config.max_kept_windows,
+            render_cleanup_idle_target_budget(config),
+            render_cleanup_max_prune_per_tick(config),
         ),
         RenderThermalState::Cooling => format!(
             "cooling(entered_cooling_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_prune_per_tick={})",
             optional_millis_summary(cleanup.entered_cooling_at()),
             optional_millis_summary(cleanup.hard_purge_due_at()),
-            cleanup.max_kept_windows(),
-            cleanup.idle_target_budget(),
-            cleanup.max_prune_per_tick(),
+            config.max_kept_windows,
+            render_cleanup_idle_target_budget(config),
+            render_cleanup_max_prune_per_tick(config),
         ),
         RenderThermalState::Cold => format!(
             "cold(idle_target_budget={} max_prune_per_tick={})",
-            cleanup.idle_target_budget(),
-            cleanup.max_prune_per_tick(),
+            render_cleanup_idle_target_budget(config),
+            render_cleanup_max_prune_per_tick(config),
         ),
     }
 }
@@ -375,10 +400,12 @@ pub(super) fn proposal_summary(proposal: &InFlightProposal) -> String {
 }
 
 fn planned_render_summary(planned_render: &PlannedRender) -> String {
+    let render_revision = planned_render.scene_update().render_revision();
     format!(
-        "proposal=({}) scene_revision={}",
+        "proposal=({}) render_revision=(motion={} semantics={})",
         proposal_summary(planned_render.proposal()),
-        planned_render.scene_update().revision().value(),
+        render_revision.motion().value(),
+        render_revision.semantics().value(),
     )
 }
 
@@ -437,27 +464,49 @@ pub(super) fn apply_report_summary(report: &ApplyReport) -> String {
 }
 
 pub(super) fn core_state_summary(state: &CoreState) -> String {
-    let observation = state.observation().map_or_else(
-        || {
-            state
-                .active_observation_request()
-                .map_or_else(|| "none".to_string(), observation_request_summary)
-        },
-        |observation| {
-            format!(
-                "{} basis=({})",
-                observation_request_summary(observation.request()),
-                observation_basis_summary(observation.basis()),
-            )
-        },
-    );
+    let observation = match (
+        state.pending_observation(),
+        state.observation(),
+        state.retained_observation(),
+    ) {
+        (Some(pending), None, retained) => format!(
+            "pending=({}) retained={}",
+            pending_observation_summary(pending),
+            retained.map_or_else(
+                || "none".to_string(),
+                |observation| format!(
+                    "({} basis=({}))",
+                    active_observation_summary(observation),
+                    observation_basis_summary(observation.basis()),
+                ),
+            ),
+        ),
+        (None, Some(observation), None) => format!(
+            "active=({} basis=({}))",
+            active_observation_summary(observation),
+            observation_basis_summary(observation.basis()),
+        ),
+        (None, None, Some(observation)) => format!(
+            "retained=({} basis=({}))",
+            active_observation_summary(observation),
+            observation_basis_summary(observation.basis()),
+        ),
+        (None, None, None) => "none".to_string(),
+        (pending, active, retained) => format!(
+            "invalid_slots(pending={} active={} retained={})",
+            pending.is_some(),
+            active.is_some(),
+            retained.is_some(),
+        ),
+    };
     let proposal = state
         .pending_proposal()
         .map_or_else(|| "none".to_string(), proposal_summary);
     format!(
-        "lifecycle={:?} cleanup={} timers={} queue={} observation={} proposal={} realization={}",
+        "lifecycle={:?} phase={} cleanup={} timers={} queue={} observation={} proposal={} realization={}",
         state.lifecycle(),
-        render_cleanup_state_summary(state.render_cleanup()),
+        protocol_phase_kind_name(state.phase_kind()),
+        render_cleanup_state_summary(state.render_cleanup(), &state.runtime().config),
         timer_state_summary(state.timers()),
         demand_queue_summary(state.demand_queue()),
         observation,
@@ -470,57 +519,51 @@ fn probe_report_summary(payload: &ProbeReportedEvent) -> String {
     match payload {
         ProbeReportedEvent::CursorColorReady {
             observation_id,
-            probe_request_id,
             reuse,
             sample,
         } => format!(
             "cursor_color_ready(obs={} request={} reuse={reuse:?} sample_present={})",
             observation_id.value(),
-            probe_request_id.value(),
+            ProbeKind::CursorColor.request_id(*observation_id).value(),
             sample.is_some(),
         ),
         ProbeReportedEvent::CursorColorFailed {
             observation_id,
-            probe_request_id,
             failure,
         } => format!(
             "cursor_color_failed(obs={} request={} failure={failure:?})",
             observation_id.value(),
-            probe_request_id.value(),
+            ProbeKind::CursorColor.request_id(*observation_id).value(),
         ),
         ProbeReportedEvent::BackgroundReady {
             observation_id,
-            probe_request_id,
             reuse,
             batch,
         } => format!(
-            "background_ready(obs={} request={} reuse={reuse:?} cells={} viewport={})",
+            "background_ready(obs={} request={} reuse={reuse:?} cells={})",
             observation_id.value(),
-            probe_request_id.value(),
+            ProbeKind::Background.request_id(*observation_id).value(),
             batch.allowed_mask_len(),
-            viewport_summary(batch.viewport()),
         ),
         ProbeReportedEvent::BackgroundChunkReady {
             observation_id,
-            probe_request_id,
             chunk,
             allowed_mask,
         } => format!(
             "background_chunk_ready(obs={} request={} start_index={} cell_count={} packed_bytes={})",
             observation_id.value(),
-            probe_request_id.value(),
+            ProbeKind::Background.request_id(*observation_id).value(),
             chunk.start_index(),
             chunk.len(),
             allowed_mask.packed_len(),
         ),
         ProbeReportedEvent::BackgroundFailed {
             observation_id,
-            probe_request_id,
             failure,
         } => format!(
             "background_failed(obs={} request={} failure={failure:?})",
             observation_id.value(),
-            probe_request_id.value(),
+            ProbeKind::Background.request_id(*observation_id).value(),
         ),
     }
 }
@@ -538,19 +581,18 @@ pub(super) fn core_event_summary(event: &CoreEvent) -> String {
             payload.ingress_cursor_presentation,
         ),
         CoreEvent::ObservationBaseCollected(payload) => format!(
-            "request=({}) basis=({}) scroll_shift={:?}",
-            observation_request_summary(&payload.request),
+            "{} basis=({}) scroll_shift={:?}",
+            observation_id_summary(payload.observation_id),
             observation_basis_summary(&payload.basis),
             payload.motion.scroll_shift(),
         ),
         CoreEvent::ProbeReported(payload) => probe_report_summary(payload),
         CoreEvent::RenderPlanComputed(RenderPlanComputedEvent {
-            proposal_id,
             planned_render,
             observed_at,
         }) => format!(
             "proposal_id={} observed_at={} {}",
-            proposal_id.value(),
+            planned_render.proposal_id().value(),
             millis_summary(*observed_at),
             planned_render_summary(planned_render),
         ),
@@ -603,25 +645,32 @@ pub(super) fn effect_summary(effect: &Effect) -> String {
         Effect::RequestObservationBase(payload) => {
             format!(
                 "request=({})",
-                observation_request_summary(&payload.request)
+                pending_observation_summary(&payload.request)
             )
         }
         Effect::RequestProbe(payload) => format!(
-            "obs={} request={} kind={:?} smear_to_cmd={} chunk={:?} cursor_color_witness={:?}",
-            payload.observation_basis.observation_id().value(),
-            payload.probe_request_id.value(),
+            "obs={} request={} kind={:?} smear_to_cmd={} chunk={:?} cursor_color_generations={:?}",
+            payload.observation_id.value(),
+            payload.probe_request_id().value(),
             payload.kind,
             payload.cursor_position_policy.smear_to_cmd(),
             payload.background_chunk,
-            payload.observation_basis.cursor_color_witness(),
+            payload.cursor_color_probe_generations,
         ),
-        Effect::RequestRenderPlan(payload) => format!(
-            "proposal_id={} observation_id={} requested_at={} animation_schedule={}",
-            payload.proposal_id.value(),
-            payload.observation_id.value(),
-            millis_summary(payload.requested_at),
-            animation_schedule_summary(payload.animation_schedule),
-        ),
+        Effect::RequestRenderPlan(payload) => {
+            let observation_id = payload
+                .planning
+                .observation()
+                .map(|observation| observation.observation_id().value().to_string())
+                .unwrap_or_else(|| "none".to_string());
+            format!(
+                "proposal_id={} observation_id={} requested_at={} animation_schedule={}",
+                payload.proposal_id.value(),
+                observation_id,
+                millis_summary(payload.requested_at),
+                animation_schedule_summary(payload.animation_schedule),
+            )
+        }
         Effect::ApplyProposal(payload) => {
             format!(
                 "requested_at={} {}",
@@ -646,3 +695,6 @@ pub(super) fn effect_summary(effect: &Effect) -> String {
         Effect::RedrawCmdline => "cmdline_redraw".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests;

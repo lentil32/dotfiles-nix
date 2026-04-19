@@ -18,14 +18,15 @@ fn failed_probe_report_is_retained_without_collapsing_to_missing() {
     )
     .next;
     let request = observing
-        .active_observation_request()
+        .pending_observation()
         .cloned()
         .expect("active observation");
     let based = reduce(
         &observing,
         Event::ObservationBaseCollected(ObservationBaseCollectedEvent {
-            request: request.clone(),
-            basis: observation_basis(&request, Some(cursor(7, 8)), 26),
+            observation_id: request.observation_id(),
+            basis: observation_basis(Some(cursor(7, 8)), 26),
+            cursor_color_probe_generations: Some(cursor_color_probe_generations()),
             motion: observation_motion(),
         }),
     );

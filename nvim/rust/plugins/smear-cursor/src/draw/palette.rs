@@ -468,27 +468,23 @@ fn refresh_highlight_palette_for_spec(
             if state.pending_refresh_key != Some(raw_input_key)
                 && state.raw_input_key != Some(raw_input_key)
             {
-                return None;
+                return PaletteRefreshOutcome::SkippedStale;
             }
 
-            Some(
-                match lookup_cached_palette(state, raw_input_key, Some(&resolved_palette)) {
-                    PaletteCacheLookup::RawHit => {
-                        state.pending_refresh_key = None;
-                        PaletteRefreshOutcome::ReusedCommitted
-                    }
-                    PaletteCacheLookup::ResolvedHit => {
-                        state.raw_input_key = Some(raw_input_key);
-                        state.pending_refresh_key = None;
-                        PaletteRefreshOutcome::ReusedCommitted
-                    }
-                    PaletteCacheLookup::Miss => {
-                        return Some(PaletteRefreshOutcome::AppliedHighlights);
-                    }
-                },
-            )
+            match lookup_cached_palette(state, raw_input_key, Some(&resolved_palette)) {
+                PaletteCacheLookup::RawHit => {
+                    state.pending_refresh_key = None;
+                    PaletteRefreshOutcome::ReusedCommitted
+                }
+                PaletteCacheLookup::ResolvedHit => {
+                    state.raw_input_key = Some(raw_input_key);
+                    state.pending_refresh_key = None;
+                    PaletteRefreshOutcome::ReusedCommitted
+                }
+                PaletteCacheLookup::Miss => PaletteRefreshOutcome::AppliedHighlights,
+            }
         });
-        match interpret_palette_refresh_cache_lookup(cache_lookup) {
+        match cache_lookup {
             PaletteRefreshOutcome::SkippedStale => {
                 return Ok(PaletteRefreshOutcome::SkippedStale);
             }
@@ -553,25 +549,6 @@ fn refresh_highlight_palette_for_spec(
         state.pending_refresh_key = None;
     });
     Ok(PaletteRefreshOutcome::AppliedHighlights)
-}
-
-fn interpret_palette_refresh_cache_lookup(
-    cache_lookup: Option<PaletteRefreshOutcome>,
-) -> PaletteRefreshOutcome {
-    match cache_lookup {
-        None => PaletteRefreshOutcome::SkippedStale,
-        Some(PaletteRefreshOutcome::ReusedCommitted) => PaletteRefreshOutcome::ReusedCommitted,
-        Some(PaletteRefreshOutcome::AppliedHighlights) => PaletteRefreshOutcome::AppliedHighlights,
-        Some(PaletteRefreshOutcome::SkippedStale) => {
-            // Surprising: stale refresh currently travels through `None`, not `Some(SkippedStale)`.
-            // Keep a release-safe fallback here so cache-state refactors cannot revive a panic.
-            debug_assert!(
-                false,
-                "palette refresh cache lookup should encode stale requests with None"
-            );
-            PaletteRefreshOutcome::SkippedStale
-        }
-    }
 }
 
 fn defer_palette_refresh(spec: PaletteSpec, raw_input_key: RawPaletteInputKey) {
@@ -648,6 +625,7 @@ mod tests {
             aggregated_particle_cells: Arc::default(),
             particle_screen_cells: Arc::default(),
             color_at_cursor: Some(0x00FF_FFFF),
+            projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: Some("#112233".to_string()),
                 cursor_color_insert_mode: Some("none".to_string()),
@@ -1075,14 +1053,24 @@ mod tests {
     }
 
     #[test]
-    fn stale_palette_cache_fallback_keeps_debug_invariant_visible() {
-        let outcome = std::panic::catch_unwind(|| {
-            interpret_palette_refresh_cache_lookup(Some(PaletteRefreshOutcome::SkippedStale))
+    fn stale_palette_refresh_returns_skipped_stale_directly() {
+        clear_highlight_cache();
+        let spec = PaletteSpec::from_frame(&test_frame());
+        let stale_key = raw_palette_input_key_for_spec(&spec);
+
+        with_palette_state_mut(|state| {
+            state.raw_input_key = Some(RawPaletteInputKey {
+                fingerprint: stale_key.fingerprint.saturating_add(1),
+            });
+            state.pending_refresh_key = Some(RawPaletteInputKey {
+                fingerprint: stale_key.fingerprint.saturating_add(2),
+            });
         });
 
-        assert!(
-            outcome.is_err(),
-            "debug builds should surface the stale-cache invariant"
+        assert_eq!(
+            refresh_highlight_palette_for_spec(&spec, stale_key)
+                .expect("stale refresh should short-circuit"),
+            PaletteRefreshOutcome::SkippedStale
         );
     }
 }

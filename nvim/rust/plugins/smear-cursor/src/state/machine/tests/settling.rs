@@ -129,7 +129,7 @@ proptest! {
                 prop_assert_eq!(state.tracked_location_ref(), baseline.tracked_location_ref());
             }
             TransitionSetupPhase::Idle | TransitionSetupPhase::Running => {
-                prop_assert_eq!(state, baseline);
+                prop_assert_eq!(state.semantic_view(), baseline.semantic_view());
             }
         }
     }

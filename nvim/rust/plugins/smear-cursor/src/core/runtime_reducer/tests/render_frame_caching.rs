@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn draw_frames_reuse_static_render_config_arc_when_config_is_unchanged() {
+fn draw_frames_rebuild_equivalent_static_render_config_views_when_config_is_unchanged() {
     let mut state = RuntimeState::default();
     let first = reduce_cursor_event(&mut state, "n", event(5.0, 6.0), EventSource::External);
     let _ = reduce_cursor_event(
@@ -17,11 +17,15 @@ fn draw_frames_reuse_static_render_config_arc_when_config_is_unchanged() {
         EventSource::AnimationTick,
     );
 
-    let first_static = draw_frame(&first)
-        .map(|frame| Arc::clone(&frame.static_config))
-        .expect("first transition should draw");
-    let second_static = draw_frame(&second)
-        .map(|frame| Arc::clone(&frame.static_config))
-        .expect("second transition should draw");
-    assert!(Arc::ptr_eq(&first_static, &second_static));
+    let first_frame = draw_frame(&first).expect("first transition should draw");
+    let second_frame = draw_frame(&second).expect("second transition should draw");
+
+    let first_static = Arc::clone(&first_frame.static_config);
+    let second_static = Arc::clone(&second_frame.static_config);
+
+    pretty_assertions::assert_eq!(first_static, second_static);
+    pretty_assertions::assert_eq!(
+        first_frame.projection_policy_revision,
+        second_frame.projection_policy_revision
+    );
 }

@@ -53,7 +53,7 @@ fn animation_tick_during_observing_request_is_noop_even_with_queued_ingress() {
     let completed = collect_observation_base(
         &interleaved,
         &request,
-        observation_basis(&request, Some(cursor(7, 9)), 28),
+        observation_basis(Some(cursor(7, 9)), 28),
         observation_motion(),
     );
 
@@ -99,7 +99,6 @@ fn animation_tick_during_planning_is_noop_even_with_queued_ingress() {
     let completed = reduce(
         &interleaved,
         Event::RenderPlanComputed(RenderPlanComputedEvent {
-            proposal_id: payload.proposal_id,
             planned_render: Box::new(
                 crate::core::reducer::build_planned_render(
                     payload.planning.clone(),

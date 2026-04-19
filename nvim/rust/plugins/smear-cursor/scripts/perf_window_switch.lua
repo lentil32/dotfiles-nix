@@ -235,8 +235,6 @@ local function prepend_package_cpath(path)
     return
   end
 
-  -- Surprising: appending the working-tree cdylib path lets an installed plugin shadow the local
-  -- build. Prepend here so the harness always measures the code under test.
   if not vim.startswith(package.cpath, path .. ";") and package.cpath ~= path then
     package.cpath = path .. ";" .. package.cpath
   end
@@ -322,8 +320,6 @@ local function create_workload_buffers(line_count, line_width, requested_windows
     return buffers
   end
 
-  -- Surprising: toggling `smear_between_buffers` only changes plugin policy. The harness needs
-  -- distinct workload buffers per split when it wants to measure real cross-buffer churn.
   for index = 2, requested_windows do
     buffers[index] = create_workload_buffer(line_count, line_width)
   end
@@ -676,9 +672,6 @@ local function main()
   if loaded_module_path == nil then
     error("failed to locate nvimrs_smear_cursor in package.cpath")
   end
-  -- Surprising: plain `require("nvimrs_smear_cursor")` can still resolve an older installed module
-  -- body even after the harness prepends the local release artifact to `package.cpath`.
-  -- `package.loadlib` forces the harness to execute the exact dylib it is about to benchmark.
   local module_loader, load_error =
     package.loadlib(loaded_module_path, "luaopen_nvimrs_smear_cursor")
   if module_loader == nil then

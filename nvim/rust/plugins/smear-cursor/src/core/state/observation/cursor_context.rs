@@ -73,6 +73,32 @@ pub(crate) struct CursorColorProbeWitness {
     cache_generation: Generation,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CursorColorProbeGenerations {
+    colorscheme_generation: Generation,
+    cache_generation: Generation,
+}
+
+impl CursorColorProbeGenerations {
+    pub(crate) const fn new(
+        colorscheme_generation: Generation,
+        cache_generation: Generation,
+    ) -> Self {
+        Self {
+            colorscheme_generation,
+            cache_generation,
+        }
+    }
+
+    pub(crate) const fn colorscheme_generation(self) -> Generation {
+        self.colorscheme_generation
+    }
+
+    pub(crate) const fn cache_generation(self) -> Generation {
+        self.cache_generation
+    }
+}
+
 impl CursorColorProbeWitness {
     pub(crate) fn new(
         window_handle: i64,

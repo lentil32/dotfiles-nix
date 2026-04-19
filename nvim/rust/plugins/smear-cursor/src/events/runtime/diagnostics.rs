@@ -177,17 +177,17 @@ pub(crate) fn perf_diagnostics_report() -> String {
                 } else {
                     None
                 };
-            let has_retained_cursor_color = core
-                .retained_observation()
+            let has_phase_owned_cursor_color = core
+                .phase_observation()
                 .and_then(ObservationSnapshot::cursor_color)
                 .is_some();
             let probe_policy = core
-                .active_observation_request()
-                .map(|request| {
+                .active_demand()
+                .map(|demand| {
                     ProbePolicy::for_demand(
-                        request.demand().kind(),
-                        request.demand().buffer_perf_class(),
-                        has_retained_cursor_color,
+                        demand.kind(),
+                        demand.buffer_perf_class(),
+                        has_phase_owned_cursor_color,
                     )
                 })
                 .or_else(|| {
@@ -195,7 +195,7 @@ pub(crate) fn perf_diagnostics_report() -> String {
                         ProbePolicy::for_demand(
                             ExternalDemandKind::ExternalCursor,
                             policy.perf_class(),
-                            has_retained_cursor_color,
+                            has_phase_owned_cursor_color,
                         )
                     })
                 });
@@ -387,11 +387,7 @@ fn reset_transient_event_state_with_policy() {
     clear_all_core_timer_handles();
     super::super::handlers::reset_scheduled_effect_queue();
     if let Err(err) = mutate_engine_state(|state| {
-        state.shell.probe_cache.reset();
-        state.shell.buffer_metadata_cache.clear();
-        state.shell.buffer_perf_policy_cache.clear();
-        state.shell.buffer_perf_telemetry_cache.clear();
-        state.shell.clear_real_cursor_visibility();
+        state.shell.reset_transient_caches();
     }) {
         warn(&format!(
             "engine state re-entered during transient reset; skipping shell cache reset: {err}"

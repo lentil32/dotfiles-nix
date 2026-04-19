@@ -96,7 +96,7 @@ fn surface_retarget_with_overlay_for_small_cross_window_motion() {
     state.config.max_simulation_steps_per_frame = 16;
     state.config.hide_target_hack = true;
     state.config.smear_between_windows = true;
-    state.refresh_render_static_config();
+    state.commit_runtime_config_update();
     let seed_state = state.clone();
 
     let steps = [

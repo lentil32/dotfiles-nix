@@ -1,5 +1,31 @@
 use super::*;
 
+fn assert_hot_cleanup_state(cleanup: RenderCleanupState, next_due_at: Millis, hard_due_at: Millis) {
+    let RenderCleanupState::Hot(schedule) = cleanup else {
+        panic!("expected hot cleanup state, got {cleanup:?}");
+    };
+    pretty_assert_eq!(schedule.next_compaction_due_at(), next_due_at);
+    pretty_assert_eq!(schedule.hard_purge_due_at(), hard_due_at);
+}
+
+fn assert_cooling_cleanup_state(
+    cleanup: RenderCleanupState,
+    entered_cooling_at: Millis,
+    next_due_at: Millis,
+    hard_due_at: Millis,
+) {
+    let RenderCleanupState::Cooling(schedule) = cleanup else {
+        panic!("expected cooling cleanup state, got {cleanup:?}");
+    };
+    pretty_assert_eq!(schedule.entered_cooling_at(), entered_cooling_at);
+    pretty_assert_eq!(schedule.next_compaction_due_at(), next_due_at);
+    pretty_assert_eq!(schedule.hard_purge_due_at(), hard_due_at);
+}
+
+fn assert_cold_cleanup_state(cleanup: RenderCleanupState) {
+    pretty_assert_eq!(cleanup, RenderCleanupState::Cold);
+}
+
 #[test]
 fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
     let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
@@ -18,8 +44,10 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
+        .enter_planning(proposal_id)
+        .expect("staging clear proposal requires a ready observation")
         .enter_applying(proposal)
-        .expect("staging clear proposal requires retained observation");
+        .expect("staging clear proposal requires the matching planning proposal");
 
     let completed = reduce(
         &staged,
@@ -29,9 +57,10 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
             visual_change: true,
         }),
     );
-    pretty_assert_eq!(
-        completed.next.render_cleanup().thermal(),
-        RenderThermalState::Hot
+    assert_hot_cleanup_state(
+        completed.next.render_cleanup(),
+        Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+        Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
     );
     let soft_token = completed
         .next
@@ -60,13 +89,11 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
             action: RenderCleanupAppliedAction::SoftCleared,
         }),
     );
-    pretty_assert_eq!(
-        after_soft.next.render_cleanup().thermal(),
-        RenderThermalState::Cooling
-    );
-    pretty_assert_eq!(
-        after_soft.next.render_cleanup().entered_cooling_at(),
-        Some(Millis::new(79 + render_cleanup_delay_ms(&runtime.config)))
+    assert_cooling_cleanup_state(
+        after_soft.next.render_cleanup(),
+        Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+        Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+        Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
     );
     pretty_assert_eq!(
         after_soft.next.timers().active_token(TimerId::Cleanup),
@@ -99,18 +126,7 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
             .active_token(TimerId::Cleanup),
         None
     );
-    pretty_assert_eq!(
-        after_compaction.next.render_cleanup().thermal(),
-        RenderThermalState::Cold
-    );
-    pretty_assert_eq!(
-        after_compaction.next.render_cleanup().idle_target_budget(),
-        2
-    );
-    pretty_assert_eq!(
-        after_compaction.next.render_cleanup().max_kept_windows(),
-        21
-    );
+    assert_cold_cleanup_state(after_compaction.next.render_cleanup());
     pretty_assert_eq!(
         after_compaction.effects,
         vec![Effect::RecordEventLoopMetric(
@@ -140,8 +156,10 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
+        .enter_planning(proposal_id)
+        .expect("staging clear proposal requires a ready observation")
         .enter_applying(proposal)
-        .expect("staging clear proposal requires retained observation");
+        .expect("staging clear proposal requires the matching planning proposal");
 
     let completed = reduce(
         &staged,
@@ -180,9 +198,11 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
             },
         }),
     );
-    pretty_assert_eq!(
-        after_compaction.next.render_cleanup().thermal(),
-        RenderThermalState::Cooling
+    assert_cooling_cleanup_state(
+        after_compaction.next.render_cleanup(),
+        Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+        Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+        Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
     );
 
     let hard_token = after_compaction
@@ -218,12 +238,7 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
         after_hard.next.timers().active_token(TimerId::Cleanup),
         None
     );
-    pretty_assert_eq!(
-        after_hard.next.render_cleanup().thermal(),
-        RenderThermalState::Cold
-    );
-    pretty_assert_eq!(after_hard.next.render_cleanup().idle_target_budget(), 2);
-    pretty_assert_eq!(after_hard.next.render_cleanup().max_kept_windows(), 21);
+    assert_cold_cleanup_state(after_hard.next.render_cleanup());
     pretty_assert_eq!(
         after_hard.effects,
         vec![Effect::RecordEventLoopMetric(
@@ -232,6 +247,90 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
                 converged_at: Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
             },
         )]
+    );
+}
+
+#[test]
+fn cleanup_effects_follow_current_runtime_config_without_scheduler_policy_copies() {
+    let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
+    runtime.config.max_kept_windows = 21;
+    let state = ready_state_with_observation(cursor(4, 9)).with_runtime(runtime);
+    let basis = PatchBasis::new(None, None);
+    let patch = ScenePatch::derive(basis);
+    let (state, proposal_id) = state.allocate_proposal_id();
+    let proposal = InFlightProposal::clear(
+        proposal_id,
+        patch,
+        RealizationClear::new(21),
+        RenderCleanupAction::Schedule,
+        RenderSideEffects::default(),
+        crate::core::state::AnimationSchedule::Idle,
+    )
+    .expect("clear proposal should be constructible");
+    let staged = state
+        .enter_planning(proposal_id)
+        .expect("staging clear proposal requires a ready observation")
+        .enter_applying(proposal)
+        .expect("staging clear proposal requires the matching planning proposal");
+
+    let completed = reduce(
+        &staged,
+        Event::ApplyReported(ApplyReport::AppliedFully {
+            proposal_id,
+            observed_at: Millis::new(79),
+            visual_change: true,
+        }),
+    );
+    let mut hot_runtime = completed.next.runtime().clone();
+    hot_runtime.config.max_kept_windows = 7;
+    let hot_state = completed.next.with_runtime(hot_runtime.clone());
+    let soft_token = hot_state
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("soft cleanup timer should be armed");
+
+    let soft_tick = reduce(
+        &hot_state,
+        cleanup_tick_event(
+            soft_token,
+            79 + render_cleanup_delay_ms(&hot_runtime.config),
+        ),
+    );
+
+    pretty_assert_eq!(
+        soft_tick.effects,
+        vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+            execution: RenderCleanupExecution::SoftClear {
+                max_kept_windows: 7,
+            },
+        })]
+    );
+
+    let mut cooling_runtime = soft_tick.next.runtime().clone();
+    cooling_runtime.config.max_kept_windows = 1;
+    let cooling_state = soft_tick.next.with_runtime(cooling_runtime);
+    let after_soft = reduce(
+        &cooling_state,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at: Millis::new(79 + render_cleanup_delay_ms(&hot_runtime.config)),
+            action: RenderCleanupAppliedAction::SoftCleared,
+        }),
+    );
+
+    assert_cooling_cleanup_state(
+        after_soft.next.render_cleanup(),
+        Millis::new(79 + render_cleanup_delay_ms(&hot_runtime.config)),
+        Millis::new(79 + render_cleanup_delay_ms(&hot_runtime.config)),
+        Millis::new(79 + render_hard_cleanup_delay_ms(&hot_runtime.config)),
+    );
+    pretty_assert_eq!(
+        after_soft.effects,
+        vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+            execution: RenderCleanupExecution::CompactToBudget {
+                target_budget: 1,
+                max_prune_per_tick: 1,
+            },
+        })]
     );
 }
 
@@ -253,8 +352,10 @@ fn fresh_ingress_promotes_cooling_cleanup_state_back_to_hot() {
     )
     .expect("clear proposal should be constructible");
     let staged = state
+        .enter_planning(proposal_id)
+        .expect("staging clear proposal requires a ready observation")
         .enter_applying(proposal)
-        .expect("staging clear proposal requires retained observation");
+        .expect("staging clear proposal requires the matching planning proposal");
 
     let completed = reduce(
         &staged,
@@ -307,7 +408,7 @@ fn diverged_realization_cannot_derive_noop_for_identical_target() {
         planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 86);
     let target = staged
         .pending_proposal()
-        .and_then(|proposal| proposal.patch().basis().target().cloned())
+        .and_then(|proposal| proposal.patch().basis().target_handle().cloned())
         .expect("target projection for divergence noop regression");
     let ready = reduce(
         &staged,

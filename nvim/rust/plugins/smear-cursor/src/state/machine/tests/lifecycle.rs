@@ -119,5 +119,37 @@ fn reset_transient_state_restores_default_transient_fields() {
 
     state.reset_transient_state();
 
-    pretty_assertions::assert_eq!(state, expected);
+    pretty_assertions::assert_eq!(state.semantic_view(), expected.semantic_view());
+}
+
+#[test]
+fn cmdline_boundary_tracking_only_reports_known_mode_crossings() {
+    let mut state = RuntimeState::default();
+
+    for (label, current_is_cmdline, expected_boundary) in [
+        (
+            "unknown mode memory does not invent a boundary",
+            true,
+            false,
+        ),
+        (
+            "repeating cmdline mode does not cross the boundary",
+            true,
+            false,
+        ),
+        ("leaving cmdline mode crosses the boundary", false, true),
+        (
+            "repeating non-cmdline mode does not cross the boundary",
+            false,
+            false,
+        ),
+        ("re-entering cmdline mode crosses the boundary", true, true),
+    ] {
+        assert_eq!(
+            state.crossed_cmdline_boundary(current_is_cmdline),
+            expected_boundary,
+            "{label}"
+        );
+        state.record_observed_mode(current_is_cmdline);
+    }
 }

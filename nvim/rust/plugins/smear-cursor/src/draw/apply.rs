@@ -41,6 +41,12 @@ pub(crate) struct ApplyMetrics {
     pub(crate) pool_snapshot: Option<TabPoolSnapshot>,
 }
 
+impl ApplyMetrics {
+    pub(crate) const fn requires_shell_redraw(self) -> bool {
+        self.hidden_windows > 0 || self.invalid_removed_windows > 0
+    }
+}
+
 pub(crate) fn editor_bounds() -> Result<Viewport> {
     let viewport = editor_viewport_for_bounds()?;
     Ok(Viewport {
@@ -369,7 +375,7 @@ fn prepare_frame_capacity(
     })
 }
 
-fn record_release_and_snapshot(namespace_id: u32, tab_handle: i32, metrics: &mut ApplyMetrics) {
+fn finalize_apply_metrics(namespace_id: u32, tab_handle: i32, metrics: &mut ApplyMetrics) {
     let (release_summary, pool_snapshot) = with_render_tab(tab_handle, |tab_windows| {
         (
             window_pool::release_unused_in_tab(tab_windows, namespace_id),
@@ -414,10 +420,7 @@ pub(crate) fn apply_plan(
         Ok(())
     })();
 
-    // Surprising: a drain frame can realize to zero spans while still hiding visible cached
-    // windows. Propagate that release summary so the shell can request a redraw for the final
-    // disappearance instead of waiting for later input.
-    record_release_and_snapshot(namespace_id, tab_handle, &mut metrics);
+    finalize_apply_metrics(namespace_id, tab_handle, &mut metrics);
     apply_result.map(|()| metrics)
 }
 
@@ -464,6 +467,26 @@ mod tests {
 
         assert_eq!(metrics.hidden_windows, 2);
         assert_eq!(metrics.invalid_removed_windows, 1);
+    }
+
+    #[test]
+    fn apply_metrics_require_shell_redraw_when_hidden_windows_change() {
+        let metrics = ApplyMetrics {
+            hidden_windows: 1,
+            ..ApplyMetrics::default()
+        };
+
+        assert!(metrics.requires_shell_redraw());
+    }
+
+    #[test]
+    fn apply_metrics_require_shell_redraw_when_invalid_windows_are_removed() {
+        let metrics = ApplyMetrics {
+            invalid_removed_windows: 1,
+            ..ApplyMetrics::default()
+        };
+
+        assert!(metrics.requires_shell_redraw());
     }
 
     #[test]

@@ -30,7 +30,7 @@ fn commits_observing_state_before_shell_work_runs() {
     let staged_state = current_core_state();
     assert_eq!(staged_state.lifecycle(), Lifecycle::Observing);
     assert!(
-        staged_state.active_observation_request().is_some(),
+        staged_state.pending_observation().is_some(),
         "dispatch should commit reducer state before shell work runs"
     );
     assert!(

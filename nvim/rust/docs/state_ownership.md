@@ -1,119 +1,190 @@
 # Smear Cursor State Ownership
 
-This document names the mutable owners in `nvimrs-smear-cursor` and labels each
-field as one of:
+This document names semantic facts, not raw fields.
 
-- `authoritative`: the reducer-owned source of truth for a semantic fact
-- `cache`: derived data that can be rebuilt from authoritative state
-- `snapshot`: a retained copy of external or prior state used for comparisons
+Every fact appears once, with one authoritative mutable owner. Helper accessors
+that reconstruct a fact from that owner are listed only as derived views, not as
+second owners.
+
+Each row is classified as one of:
+
+- `authoritative`: reducer-owned source of truth for a semantic fact
+- `cache`: derived state that can be purged and rebuilt from authoritative state
+- `snapshot`: retained copy of ingress, prior, or external state used for reuse or
+  comparison
 - `telemetry`: bookkeeping that describes execution rather than UI truth
 
-If a field is not `authoritative`, this document must say what authoritative
-state it is derived from and how it invalidates.
+## Top-Level Split
 
-## Runtime State
+Reducer-owned truth lives under `EngineState.core_state`. Shell-facing state lives
+under `EngineState.shell` and is limited to purgeable caches, reusable scratch
+buffers, telemetry, and retained host capability snapshots. Shell state may
+accelerate reads or avoid redundant host calls, but it does not own reducer
+semantics.
 
-| Field | Class | Owner / derivation |
+At the root boundary:
+
+- `CoreState` is the only authoritative top-level reducer subtree.
+- `ShellState` is restricted to cache, snapshot, and telemetry roles listed in
+  this document; purging it may change cost or reuse, but not semantic output
+  for the same external input sequence.
+
+## Non-Owners
+
+These types and accessors intentionally do not own semantic facts:
+
+- `SceneState` and `CoreState::shared_scene()` are composite views over
+  `motion + semantics + projection`.
+- `CoreState::phase_observation()` and `ProtocolState::phase_observation()` are
+  derived views over whichever observation payload the current phase legally owns.
+- `PatchBasis::kind()` derives `ScenePatchKind`; the kind is never stored.
+- Raw retained projection access stays inside `crate::core`; shell and event
+  code cross the boundary through explicit `ProjectionHandle` views instead of
+  borrowing `RetainedProjection` directly.
+- `ProtocolPhaseKind` and `Lifecycle` are derived from `ProtocolState.phase`.
+
+## Field Role Quick Map
+
+This storage-role index classifies the main reducer and shell roots by field.
+It does not assign new owners; it only labels how the stored fields are used.
+
+- `EngineState`: `core_state` is the authoritative reducer root; `shell` is the
+  shell-owned cache, snapshot, and telemetry root.
+- `ShellState`
+  - snapshot: `namespace_id`, `host_bridge_state`, `editor_viewport_cache`,
+    `buffer_metadata_cache`, `real_cursor_visibility`
+  - cache: `probe_cache`, `background_probe_request_scratch`,
+    `conceal_regions_scratch`, `buffer_text_revision_cache`,
+    `buffer_perf_policy_cache`
+  - telemetry: `buffer_perf_telemetry_cache`
+- `RuntimeState`
+  - authoritative: `config`, `config_revision`, `projection_policy`,
+    `plugin_state`, `animation_phase`, `current_corners`, `target`, `trail`,
+    `velocity_corners`, `spring_velocity_corners`, `particles`,
+    `previous_center`, `rng_state`, `transient`
+  - cache: `derived_config`, `caches`
+- `RuntimeCaches`: cache-only grouping for `scratch_buffers` and
+  `particle_artifacts`.
+- `ProtocolSharedState`: `demand`, `timers`, `recovery_policy`,
+  `ingress_policy`, and `render_cleanup` are authoritative.
+- `PendingObservation`: `demand` is snapshot; `requested_probes` is
+  authoritative.
+- `ObservationBasis`: `observed_at`, `mode`, `cursor_position`,
+  `cursor_location`, `viewport`, `buffer_revision`, and
+  `cursor_text_context_state` are authoritative.
+- `ObservationSnapshot`: `demand` is snapshot; `basis`, `probes`, and `motion`
+  are authoritative; `cursor_color_probe_generations` is a retained snapshot
+  witness used to derive cursor-color reuse keys.
+- `ProtocolPhase`
+  - snapshot: `Collecting.retained`, `Recovering.retained`
+  - authoritative: `Collecting.pending`, both `probe_refresh` fields,
+    each `active` observation payload, `Planning.proposal_id`,
+    `Applying.proposal`
+  - cache: `Observing.prepared_plan`
+- `CoreStatePayload`: `entropy`, `latest_exact_cursor_position`, `motion`,
+  `semantics`, `projection`, and `realization` are authoritative reducer-owned
+  payload.
+- `CoreState`: `generation`, `protocol`, and `payload` are authoritative.
+- `ProjectionState`: `motion_revision` and `last_motion_fingerprint` are
+  authoritative; `cache` is cache.
+- `ProjectionReuseCache`: `retained_projection` is cache.
+- `RetainedProjection`: `witness` is snapshot; `reuse_key`,
+  `cached_planner_state`, `cached_logical_raster`, and `cached_realization` are
+  cache.
+- `RealizationLedger`
+  - authoritative: `Consistent.acknowledged`, `Diverged.divergence`
+  - snapshot: `Diverged.last_consistent`
+- `SceneState`: non-owner composite view over authoritative `semantics` and
+  `projection` handles.
+
+## Core And Protocol Facts
+
+| Fact | Class | Owner / derivation |
 | --- | --- | --- |
-| `RuntimeState.config` | authoritative | User-configured runtime behavior. |
-| `RuntimeState.render_static_config` | cache | Derived from `config`; invalidated by runtime-option patches that mutate `config` and rebuilt with `refresh_render_static_config()`. |
-| `RuntimeState.plugin_state` | authoritative | Runtime enable / disable lifecycle. |
-| `RuntimeState.animation_phase` | authoritative | Runtime animation lifecycle. Settling variants own only timing; target and tracking remain transient-owned. |
-| `RunningPhase.clock` | authoritative | Running-phase animation timing owner. |
-| `DrainingPhase.clock` | authoritative | Tail-drain animation timing owner. |
-| `MotionClock.last_tick_ms` | telemetry | Last consumed animation tick timestamp for the active motion clock. |
-| `MotionClock.next_frame_at_ms` | telemetry | Next scheduled animation deadline for the active motion clock. |
-| `MotionClock.simulation_accumulator_ms` | telemetry | Fixed-step accumulated elapsed time for the active motion clock. |
-| `RuntimeState.current_corners` | authoritative | Current simulated cursor geometry. |
-| `RuntimeState.trail_origin_corners` | authoritative | Tail origin geometry for the live motion model. |
-| `RuntimeState.target_corners` | authoritative | Current render target geometry. |
-| `RuntimeState.velocity_corners` | authoritative | Live physics velocity state. |
-| `RuntimeState.spring_velocity_corners` | authoritative | Live spring velocity state. |
-| `RuntimeState.trail_elapsed_ms` | authoritative | Per-corner trail lifetime state. |
-| `RuntimeState.particles` | authoritative | Live particle simulation payload. |
-| `RuntimeState.preview_particles_source` | snapshot | Borrowed snapshot of the source runtime's particles for preview planning. |
-| `RuntimeState.preview_particles_materialized` | telemetry | Preview bookkeeping: whether `particles` diverged from `preview_particles_source`. |
-| `RuntimeState.preview_baseline` | snapshot | Baseline runtime snapshot paired with `preview_particles_source`. |
-| `RuntimeState.preview_particles_scratch` | cache | Reusable allocation scratch for preview particle materialization; invalidated when `reclaim_preview_particles_scratch()` installs a larger reclaimed buffer. |
-| `RuntimeState.aggregated_particle_cells` | cache | Derived from authoritative live particles; invalidated by `invalidate_cached_particle_artifacts()` whenever `particles` changes. |
-| `RuntimeState.aggregated_particle_cells_dirty` | telemetry | Cache invalidation flag for `aggregated_particle_cells`. |
-| `RuntimeState.particle_screen_cells` | cache | Derived from authoritative live particles; invalidated by `invalidate_cached_particle_artifacts()` whenever `particles` changes. |
-| `RuntimeState.particle_screen_cells_dirty` | telemetry | Cache invalidation flag for `particle_screen_cells`. |
-| `RuntimeState.previous_center` | authoritative | Prior simulated cursor anchor used by motion stepping. |
-| `RuntimeState.rng_state` | authoritative | Reducer-owned RNG state for deterministic particle generation. |
-| `TransientRuntimeState.target_position` | authoritative | Cursor target position. This is the owner even while settling. |
-| `TransientRuntimeState.retarget_epoch` | authoritative | Monotonic retarget identity for render / projection reuse. |
-| `TransientRuntimeState.trail_stroke_id` | authoritative | Current semantic trail instance identity. |
-| `TransientRuntimeState.last_mode_was_cmdline` | snapshot | Last observed mode classification from the editor. |
-| `TransientRuntimeState.tracked_location` | authoritative | Last trusted cursor location from ingress. This is the owner even while settling. |
-| `TransientRuntimeState.color_at_cursor` | authoritative | Last committed cursor color sample applied to runtime rendering. |
+| Lifecycle freshness | authoritative | `CoreState.generation` owns reducer freshness for cache invalidation and effect staleness. |
+| Queued ingress demands | authoritative | `ProtocolSharedState.demand` owns `ExternalDemand`s waiting for protocol service. |
+| Timer generations and tokens | authoritative | `ProtocolSharedState.timers` owns timer-slot generations and armed/disarmed lifecycle state. `TimerToken`s are derived views of the currently armed slots, not a second stored owner. |
+| Recovery retry policy | authoritative | `ProtocolSharedState.recovery_policy` owns retry counters and backoff state. |
+| Ingress throttling and autocmd policy | authoritative | `ProtocolSharedState.ingress_policy` owns delay and cursor-autocmd policy. |
+| Deferred render cleanup lifecycle | authoritative | `ProtocolSharedState.render_cleanup` owns cleanup thermal phase and deadlines only through `RenderCleanupState::{Hot, Cooling, Cold}`. Retention budgets are derived from the current runtime config instead of being copied into scheduler state. |
+| Protocol workflow phase | authoritative | `ProtocolState.phase` is the only workflow owner. There is no separate workflow/slot matrix. |
+| Protocol-attached observation storage | authoritative | The active `ProtocolPhase` variant owns exactly one phase-legal observation payload: `Collecting.pending`, `Collecting.retained`, `Observing.active`, `Ready.active`, `Planning.active`, `Applying.active`, or `Recovering.retained`. |
+| Probe-refresh retry state | authoritative | `ProtocolPhase::{Collecting, Observing}.probe_refresh` owns per-observation probe refresh retries while the protocol remains on the observation path. |
+| Prepared observation preview | cache | `ProtocolPhase::Observing.prepared_plan` caches the preview runtime transition derived from the active observation and current runtime. It is invalidated when the observation changes or the phase leaves `Observing`. |
+| Planning proposal identity | authoritative | `ProtocolPhase::Planning.proposal_id` owns the in-flight proposal id allocation. |
+| Applying proposal payload | authoritative | `ProtocolPhase::Applying.proposal` owns the in-flight realization proposal. |
+| Proposal and ingress sequence allocation | authoritative | `CoreStatePayload.entropy` owns proposal id and ingress sequence allocation. |
+| Latest exact cursor fallback anchor | authoritative | `CoreStatePayload.latest_exact_cursor_position` owns the last exact cursor position reused when a later observation lacks one. |
 
-## Observation State
+## Observation Facts
 
-| Field | Class | Owner / derivation |
+| Fact | Class | Owner / derivation |
 | --- | --- | --- |
-| `ObservationRequest.observation_id` | authoritative | Identity for a single observation workflow. |
-| `ObservationRequest.demand` | snapshot | Retained ingress demand snapshot that started the observation. |
-| `ObservationRequest.probes` | authoritative | Requested probe policy for the observation workflow. |
-| `ObservationBasis.observation_id` | authoritative | Observation identity echoed into base data. |
-| `ObservationBasis.observed_at` | snapshot | Timestamp captured from ingress collection. |
-| `ObservationBasis.mode` | snapshot | Editor mode snapshot. |
-| `ObservationBasis.cursor_position` | snapshot | Best cursor position captured for this observation. |
-| `ObservationBasis.cursor_location` | snapshot | Cursor location snapshot from ingress. |
-| `ObservationBasis.viewport` | snapshot | Viewport snapshot from ingress. |
-| `ObservationBasis.cursor_color_witness` | snapshot | Witness used to validate cursor color probe reuse. |
-| `ObservationBasis.cursor_text_context_state` | snapshot | Unified cursor text-context snapshot. `BoundaryOnly` retains the reuse witness; `Sampled` owns the sampled rows and derives the boundary from that sample. |
-| `ObservationSnapshot.request` | authoritative | Observation workflow owner for request metadata. |
-| `ObservationSnapshot.basis` | authoritative | Observation base owner for ingress snapshots. |
-| `ObservationSnapshot.probes.cursor_color` | authoritative | Cursor-color probe lifecycle owner. |
-| `ObservationSnapshot.background_probe` | authoritative | Unified background-probe lifecycle owner. `Collecting` owns the request id and chunk progress; terminal variants own the sampled batch or failure with their reuse metadata. |
-| `ObservationSnapshot.motion` | authoritative | Observation-scoped motion metadata. |
+| Observation identity | authoritative | Identity is derived only from the observation root demand sequence: `PendingObservation.demand.seq()` while collecting and `ObservationSnapshot.demand.seq()` once active. `ObservationId` accessors compute from that root; neither the snapshot nor active probe lifecycle state stores a mirrored current-observation id. |
+| Pending ingress demand | snapshot | `PendingObservation.demand` retains the ingress request while basis collection is in flight. |
+| Pending requested probe policy | authoritative | `PendingObservation.requested_probes` is the only owner of probe policy before activation. `ObservationSnapshot::new()` consumes it to initialize active probe lifecycle state. |
+| Active ingress demand | snapshot | `ObservationSnapshot.demand` retains the ingress request that produced the active observation. |
+| Active observation basis | authoritative | `ObservationSnapshot.basis` owns `observed_at`, `mode`, `cursor_position`, `cursor_location`, `viewport`, `buffer_revision`, and `cursor_text_context_state`. |
+| Observation-scoped motion metadata | authoritative | `ObservationSnapshot.motion` owns scroll-shift and cursor-position-sync metadata for the active observation. |
+| Cursor-color probe generation witness | snapshot | `ObservationSnapshot.cursor_color_probe_generations` retains the shell-side cursor-color probe generations needed to derive reuse-safe cursor-color witnesses without turning them into a second semantic owner. |
+| Cursor-color probe requestedness and lifecycle | authoritative | `ObservationSnapshot.probes.cursor_color` is the sole active-state owner. `ProbeSlot::Unrequested` vs `Requested(...)` carries requestedness, and `ProbeState` carries reuse, failure, and sample payload. |
+| Background probe requestedness and lifecycle | authoritative | `ObservationSnapshot.probes.background` is the sole active-state owner. `Unrequested`, `Collecting`, `Ready`, and `Failed` cover requestedness, progress, reuse, and terminal payload. |
 
-## Core Protocol State
+## Runtime Motion Facts
 
-| Field | Class | Owner / derivation |
+| Fact | Class | Owner / derivation |
 | --- | --- | --- |
-| `ProtocolSharedState.demand` | authoritative | Queued ingress demands waiting for protocol service. |
-| `ProtocolSharedState.timers` | authoritative | Timer token ownership and generations. |
-| `ProtocolSharedState.recovery_policy` | authoritative | Recovery retry policy state. |
-| `ProtocolSharedState.ingress_policy` | authoritative | Ingress delay / cursor-autocmd policy state. |
-| `ProtocolSharedState.render_cleanup` | authoritative | Deferred render cleanup lifecycle. |
-| `ProtocolState.shared` | authoritative | Shared protocol policy state carried across workflow transitions. |
-| `ProtocolState.observation` | authoritative | Stable observation slot owner; the workflow matrix constrains whether it may be `Empty`, `Retained`, or `Active`. |
-| `ObservationSlot::Retained(observation)` | snapshot | Retained prior observation reused while a new request or recovery workflow is in flight. |
-| `ObservationSlot::Active(observation)` | authoritative | Current observation used by observing-active, ready, planning, and applying workflows. |
-| `ProtocolState.workflow` | authoritative | Protocol lifecycle owner independent of the observation slot. |
-| `ProtocolWorkflow::ObservingRequest.request` | authoritative | Current observation request while base collection is pending. |
-| `ProtocolWorkflow::{ObservingRequest,ObservingActive}.probe_refresh` | authoritative | Probe refresh retry lifecycle for the active observation workflow. |
-| `ProtocolWorkflow::ObservingActive.request` | authoritative | Current observation request paired with the active observation. |
-| `ProtocolWorkflow::ObservingActive.prepared_plan` | cache | Preview-planned runtime transition derived from the active observation and current runtime; invalidated when the active observation changes or the workflow leaves `ObservingActive`. |
-| `ProtocolWorkflow::Planning.proposal_id` | authoritative | In-flight proposal identity allocation. |
-| `ProtocolWorkflow::Applying.proposal` | authoritative | In-flight realization proposal being applied. |
-| `CoreState.generation` | authoritative | Lifecycle generation for cache invalidation and effect freshness. |
-| `CoreState.protocol` | authoritative | Protocol lifecycle owner. |
-| `CoreStatePayload.entropy` | authoritative | Proposal / ingress sequence allocation. |
-| `CoreStatePayload.latest_exact_cursor_position` | authoritative | Fallback cursor anchor updated only from exact cursor observations. |
-| `CoreStatePayload.scene` | authoritative | Semantic scene plus runtime motion owner. |
-| `CoreStatePayload.realization` | authoritative | Acknowledged shell realization owner. |
+| Runtime configuration | authoritative | `RuntimeState.config` owns user-configured motion behavior, including render-cleanup retention policy such as `max_kept_windows`. Frame timing is stored canonically as `time_interval`; `fps` remains only a boundary alias that normalizes into that field. |
+| Runtime config freshness | authoritative | `RuntimeState.config_revision` is the only freshness owner for config-derived runtime views. `DerivedConfigCache` intentionally stores no mirror revision. |
+| Projection policy freshness | authoritative | `RuntimeState.projection_policy.revision()` owns freshness for projection-relevant runtime policy. `commit_runtime_config_update()` advances it only when `DerivedConfigCache::matches_projection_policy()` detects a projection-semantic policy change, so planner reuse keys and render frames do not drift on unrelated config churn. |
+| Derived runtime render policy cache | cache | `RuntimeState.derived_config` caches policy slices derived from `config`. `RuntimeState::static_render_config()` reconstructs the shell-facing static render config view from that cache. |
+| Plugin enable lifecycle | authoritative | `RuntimeState.plugin_state` owns enabled vs disabled plugin state. |
+| Animation lifecycle | authoritative | `RuntimeState.animation_phase` owns uninitialized, idle, settling, running, and draining state. |
+| Animation tick bookkeeping | authoritative | `RunningPhase.clock` and `DrainingPhase.clock` own `last_tick_ms`, `next_frame_at_ms`, and `simulation_accumulator_ms` while those phases are active. |
+| Current simulated cursor geometry | authoritative | `RuntimeState.current_corners` owns the live simulated cursor corners. |
+| Cursor target identity | authoritative | `RuntimeState.target` owns target `position`, `shape`, `tracked_location`, and `retarget_epoch`. Target corners are derived on demand by `CursorTarget::corners()` and are never stored separately. |
+| Trail identity | authoritative | `RuntimeState.trail` owns `stroke_id`, `origin_corners`, and `elapsed_ms`. |
+| Velocity state | authoritative | `RuntimeState.velocity_corners` and `RuntimeState.spring_velocity_corners` own live physics velocity state. |
+| Live particle simulation | authoritative | `RuntimeState.particles` owns live particle state. |
+| Planning preview runtime snapshot | snapshot | `RuntimePreview::baseline` and `RuntimePreview::baseline_particles` retain the authoritative runtime baseline and borrowed source particles for a single preview session. |
+| Reusable scratch allocations | cache | `RuntimeState.caches.scratch_buffers.{preview_particles, render_step_samples, particle_aggregation}` are reusable allocations only. |
+| Derived particle artifacts | cache | `RuntimeState.caches.particle_artifacts.cached.{aggregated_particle_cells, particle_screen_cells}` derive from authoritative live particles. `None` means the artifacts are not materialized yet for the current runtime inputs, not that a cache-owned freshness bit changed. |
+| Previous visual anchor | authoritative | `RuntimeState.previous_center` owns the previous simulated cursor anchor used by motion stepping. |
+| Reducer-owned RNG state | authoritative | `RuntimeState.rng_state` owns deterministic particle generation state. |
+| Last observed cmdline-mode classification | snapshot | `RuntimeState.transient.last_observed_mode` retains the last ingress mode classification witness. |
+| Committed cursor color for runtime rendering | authoritative | `RuntimeState.transient.color_at_cursor` owns the last cursor-color sample committed into runtime rendering state. |
 
-## Scene And Realization State
+## Semantics, Projection, And Realization Facts
 
-| Field | Class | Owner / derivation |
+| Fact | Class | Owner / derivation |
 | --- | --- | --- |
-| `SceneState.revision` | authoritative | Semantic-scene revision. |
-| `SceneState.semantics` | authoritative | Semantic entity graph for the current frame. |
-| `SceneState.motion` | authoritative | Runtime motion state for rendering. |
-| `SceneState.projection` | cache | Planner reuse cache derived from scene semantics plus observation / policy witnesses; invalidated when `apply_planned_update()` mutates scene semantics or when the projection witness / reuse key stops matching. |
-| `SceneState.dirty` | telemetry | Dirty semantic-entity bookkeeping for incremental planning. |
-| `ProjectionCacheEntry.planner_state` | cache | Retained planner reuse state derived from the last projection; invalidated when `reuse_key` no longer matches the current scene / policy inputs or when the cache entry is replaced. |
-| `ProjectionCacheEntry.snapshot` | cache | Retained projection snapshot derived from scene semantics; invalidated when `reuse_key` no longer matches or when the cache entry is replaced. |
-| `ProjectionCacheEntry.reuse_key` | cache | Key derived from semantic geometry, planner clock, presentation, and projection policy; invalidated by any change to those inputs. |
-| `ProjectionSnapshot.witness` | snapshot | Observation / revision witness for a retained projection. |
-| `ProjectionSnapshot.logical_raster` | cache | Derived logical raster for the retained projection; invalidated when the projection snapshot is replaced. |
-| `ProjectionSnapshot.realization` | cache | Derived from `logical_raster` via `realize_logical_raster`; invalidated when `logical_raster` is replaced. |
-| `RealizationLedger::Consistent.acknowledged` | authoritative | Trusted shell realization. |
-| `RealizationLedger::Diverged.last_consistent` | snapshot | Last trusted shell realization before divergence. |
-| `RealizationLedger::Diverged.divergence` | authoritative | Current divergence reason. |
+| Semantic scene revision | authoritative | `SemanticState.revision` owns semantic-scene freshness. |
+| Cursor-trail semantic entity | authoritative | `SemanticState.cursor_trail` owns the optional cursor-trail semantic entity. `CursorTrailSemantic` owns the projection-relevant geometry and target-cell presentation for that entity. |
+| Projection reuse cache | cache | `ProjectionState.cache` owns the purgeable retained projection reuse state. |
+| Retained projection witness | snapshot | `RetainedProjection.witness` binds a retained projection to scene revision, observation id, viewport, and projector revision. |
+| Projection reuse key | cache | `RetainedProjection.reuse_key` is derived from semantic geometry, planner clock, target-cell presentation, and projection policy. It is invalidated when any of those inputs changes. |
+| Retained planner reuse state | cache | `RetainedProjection.cached_planner_state` retains the planner state paired with the cached projection snapshot. |
+| Retained logical raster | cache | `RetainedProjection.cached_logical_raster` is the immutable retained projection output. |
+| Cached shell realization of the retained projection | cache | `RetainedProjection.cached_realization` is derived from `cached_logical_raster` and cached alongside it. |
+| Projection sharing handle | cache | `ProjectionHandle` shares one immutable `RetainedProjection` between projection cache and realization ledger instead of cloning snapshot payloads. Cross-module consumers project it through explicit views such as `semantic_view()` or `shell_projection()` rather than generic deref access. |
+| Trusted shell-acknowledged projection | authoritative | `RealizationLedger::Consistent.acknowledged` owns the shell-trusted projection handle. |
+| Last trusted projection before divergence | snapshot | `RealizationLedger::Diverged.last_consistent` retains the most recent trusted projection handle after divergence. |
+| Current divergence reason | authoritative | `RealizationLedger::Diverged.divergence` owns the current reason the shell is no longer trusted to match reducer state. |
+
+## Shell Boundary Facts
+
+| Fact | Class | Owner / derivation |
+| --- | --- | --- |
+| Render namespace handle | snapshot | `ShellState.namespace_id` retains the draw namespace handle created by `ensure_namespace_id()`. It is a shell capability witness, not a realization or reducer truth owner, and transient cache resets intentionally preserve it. |
+| Verified host bridge capability | snapshot | `ShellState.host_bridge_state` retains whether the current host bridge revision has been verified by `verify_host_bridge()`. It is an external capability witness, not a semantic owner. |
+| Shell probe reuse state | cache | `ShellState.probe_cache` owns purgeable cursor-color, cursor-text-context, conceal-region, conceal-delta, and conceal-screen-cell reuse keyed by external witnesses such as `CursorColorProbeWitness`, buffer-local text revisions, and window state. `note_cursor_color_observation_boundary()`, `note_cursor_color_colorscheme_change()`, `note_conceal_read_boundary()`, `invalidate_buffer_local_probe_caches()`, and `reset_transient_caches()` are its invalidation and purge paths. |
+| Probe request and conceal scratch buffers | cache | `ShellState.background_probe_request_scratch` and `ShellState.conceal_regions_scratch` retain reusable allocations for effect construction only. `reset_transient_caches()` drops the retained allocations, while `reclaim_background_probe_request_scratch()` and `reclaim_conceal_regions_scratch()` only recycle them between operations. |
+| Editor viewport witness | snapshot | `ShellState.editor_viewport_cache` retains the last live `EditorViewport` read from Neovim. `refresh_editor_viewport_cache()`, `invalidate_editor_viewport_cache()`, and `reset_transient_caches()` refresh or purge the witness without changing semantic state. |
+| Buffer metadata witness | snapshot | `ShellState.buffer_metadata_cache` retains `BufferMetadata` read from Neovim so policy and probe code can reuse it without rereading host options on every ingress. `invalidate_buffer_metadata()`, `invalidate_buffer_local_caches()`, and `reset_transient_caches()` clear it. |
+| Buffer text revision cache | cache | `ShellState.buffer_text_revision_cache` retains shell-local generations used to partition buffer-local probe reuse and invalidation. `invalidate_buffer_local_caches()` and `reset_transient_caches()` clear it; it never becomes reducer truth. |
+| Buffer performance policy cache | cache | `ShellState.buffer_perf_policy_cache` caches `BufferEventPolicy` derived from the current ingress snapshot, `BufferMetadata`, and buffer-local telemetry. It is invalidated per buffer or by `reset_transient_caches()` and does not own `BufferPerfClass` independently of those inputs. |
+| Buffer performance telemetry | telemetry | `ShellState.buffer_perf_telemetry_cache` records callback EWMA and probe-pressure signals used to explain or derive future buffer performance policy. It does not own the selected `BufferPerfClass`, and `invalidate_buffer_local_caches()` plus `reset_transient_caches()` purge it. |
+| Real cursor visibility witness | snapshot | `ShellState.real_cursor_visibility` retains the last shell cursor visibility applied so host calls can skip redundant hide/show work. `note_cursor_color_colorscheme_change()`, `invalidate_real_cursor_visibility()`, and `reset_transient_caches()` clear it. |
 
 ## Invariant Hooks
 
@@ -121,12 +192,49 @@ The debug-only invariant entrypoints live next to the owning state types:
 
 - `RuntimeState::debug_assert_invariants()`
 - `ObservationSnapshot::debug_assert_invariants()`
+- `ProjectionState::debug_assert_invariants()`
+- `RealizationLedger::debug_assert_invariants()`
+- `ProtocolState::debug_assert_invariants()`
 - `CoreState::debug_assert_invariants()`
 
-Current invariants pin the adopted ownership model:
+## Named Enforcement Points
 
-- settling phase may own timing only, and requires transient tracking ownership
-- running and draining phases are the only owners of animation tick bookkeeping
-- cursor text context state owns boundary-only and sampled text snapshots in one slot
-- background probe state is the single owner of request id, progress, and terminal payload
-- protocol workflow and observation-slot combinations must satisfy the central matrix in `ProtocolState`
+Important weak forms are normalized or rejected at one boundary each:
+
+- `apply_runtime_options()` normalizes the user-facing `fps` alias into
+  `RuntimeConfig.time_interval` and rejects out-of-range runtime options before
+  `RuntimeState.config` is mutated.
+- `RenderCleanupState::scheduled()` clamps cleanup delays before the scheduler
+  stores them in `ProtocolSharedState.render_cleanup`.
+- `TimerState::{arm, active_token, clear_matching}` keep timer generation and
+  armed/disarmed ownership in one reducer slot per timer id; stale tokens are
+  rejected instead of becoming a second owner.
+- `CoreState::{enter_observing_request, activate_observation,
+  replace_active_observation_with_pending, enter_ready, complete_active_observation,
+  restore_retained_observation_to_ready, enter_planning, enter_applying,
+  take_pending_proposal, restore_retained_observation}` are the protocol
+  construction boundaries that reject cross-phase observation or proposal
+  payload injection instead of persisting an invalid workflow shape.
+
+## Semantic Comparison Surface
+
+The cache-free equality surfaces used by runtime and reducer tests live next to
+the owning types:
+
+- `RuntimeState::semantic_view()` compares authoritative runtime state while
+  ignoring purgeable scratch buffers and rebuildable particle/config caches.
+- `ProjectionHandle::semantic_view()` compares retained projection witness plus
+  logical raster while ignoring reuse-key and cached realization drift.
+- `InFlightProposal::semantic_view()` compares authoritative proposal payload
+  through semantic patch-basis views rather than cached projection internals.
+- `CoreState::semantic_view()` compares authoritative reducer state across
+  protocol, runtime, scene, and realization owners while ignoring runtime
+  scratch buffers, projection reuse caches, and cached shell materialization.
+
+Current invariants pin the ownership model:
+
+- inactive runtime phases must not retain animation tick bookkeeping
+- settling requires tracked-location ownership and an ordered settling window
+- ready background probe batches must match the observation basis viewport
+- retained projection shell materialization must match the retained logical raster
+- protocol phase variants recurse only into the phase-legal observation owner

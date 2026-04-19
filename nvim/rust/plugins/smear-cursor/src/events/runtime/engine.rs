@@ -279,11 +279,7 @@ pub(crate) fn store_conceal_screen_cell(
 
 pub(crate) fn note_cursor_color_colorscheme_change() -> EngineAccessResult<()> {
     mutate_engine_state(|state| {
-        state
-            .shell
-            .probe_cache
-            .note_cursor_color_colorscheme_change();
-        state.shell.clear_real_cursor_visibility();
+        state.shell.note_cursor_color_colorscheme_change();
     })
 }
 

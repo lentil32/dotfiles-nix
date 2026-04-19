@@ -123,18 +123,76 @@ impl ProbeRequestId {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct SceneRevision(u64);
+pub(crate) struct MotionRevision(u64);
 
-impl SceneRevision {
-    #[cfg(test)]
+impl MotionRevision {
     pub(crate) const INITIAL: Self = Self(0);
 }
 
 impl_u64_counter_methods!(
-    SceneRevision,
+    MotionRevision,
     next = pub(crate) saturating_add;
     value = pub(crate),
 );
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct SemanticRevision(u64);
+
+impl SemanticRevision {
+    pub(crate) const INITIAL: Self = Self(0);
+}
+
+impl_u64_counter_methods!(
+    SemanticRevision,
+    next = pub(crate) saturating_add;
+    value = pub(crate),
+);
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct ConfigRevision(u64);
+
+impl ConfigRevision {
+    pub(crate) const INITIAL: Self = Self(0);
+}
+
+impl_u64_counter_methods!(
+    ConfigRevision,
+    next = pub(crate) saturating_add;
+);
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct ProjectionPolicyRevision(u64);
+
+impl ProjectionPolicyRevision {
+    pub(crate) const INITIAL: Self = Self(0);
+}
+
+impl_u64_counter_methods!(
+    ProjectionPolicyRevision,
+    next = pub(crate) saturating_add;
+);
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct RenderRevision {
+    motion: MotionRevision,
+    semantics: SemanticRevision,
+}
+
+impl RenderRevision {
+    pub(crate) const INITIAL: Self = Self::new(MotionRevision::INITIAL, SemanticRevision::INITIAL);
+
+    pub(crate) const fn new(motion: MotionRevision, semantics: SemanticRevision) -> Self {
+        Self { motion, semantics }
+    }
+
+    pub(crate) const fn motion(self) -> MotionRevision {
+        self.motion
+    }
+
+    pub(crate) const fn semantics(self) -> SemanticRevision {
+        self.semantics
+    }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct ProjectorRevision(u64);

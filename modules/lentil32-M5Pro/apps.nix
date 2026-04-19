@@ -154,7 +154,7 @@ in
     };
 
     masApps = {
-      DrawThings = 6444050820;
+      # DrawThings = 6444050820;
       Enpass = 732710998;
       SparkMail = 6445813049;
       WireGuard = 1451685025;

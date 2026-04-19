@@ -924,11 +924,18 @@ write_report() {
     cat "${worst_case_table}"
     printf '```\n\n## Planner Telemetry\n\n```text\n'
     cat "${planner_telemetry_table}"
-    printf '```\n\n## Planner Validation Counters\n\n```text\n'
-    cat "${planner_validation_table}"
-    printf '```\n\n## Ingress Fast-Path Counters\n\n```text\n'
-    cat "${ingress_fast_path_table}"
-    printf '```\n\n## Pool Retention vs max_kept_windows\n\n```text\n'
+    printf '```\n'
+    if awk 'NR == 1 { next } { for (i = 3; i <= NF; i += 1) if ($i != "na") found = 1 } END { exit found ? 0 : 1 }' "${planner_validation_table}"; then
+      printf '\n## Planner Validation Counters\n\n```text\n'
+      cat "${planner_validation_table}"
+      printf '```\n'
+    fi
+    if awk 'NR == 1 { next } { for (i = 3; i <= NF; i += 1) if ($i != "na") found = 1 } END { exit found ? 0 : 1 }' "${ingress_fast_path_table}"; then
+      printf '\n## Ingress Fast-Path Counters\n\n```text\n'
+      cat "${ingress_fast_path_table}"
+      printf '```\n'
+    fi
+    printf '\n## Pool Retention vs max_kept_windows\n\n```text\n'
     cat "${pool_retention_table}"
     printf '```\n\n## Pool Peak Pressure vs max_kept_windows\n\n```text\n'
     cat "${pool_peak_pressure_table}"

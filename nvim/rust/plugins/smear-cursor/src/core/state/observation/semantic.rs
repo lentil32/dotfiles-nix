@@ -77,7 +77,7 @@ pub(crate) fn classify_semantic_event(
 
     let previous_basis = previous.basis();
     let current_basis = current.basis();
-    if current.request().demand().kind() == ExternalDemandKind::ModeChanged
+    if current.demand().kind() == ExternalDemandKind::ModeChanged
         || previous_basis.mode() != current_basis.mode()
     {
         return SemanticEvent::ModeChanged;

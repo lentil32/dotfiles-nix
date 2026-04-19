@@ -441,10 +441,7 @@ fn should_invalidate_conceal_probe_cache_for_option(option_name: &str) -> bool {
 
 fn invalidate_buffer_metadata(buffer_handle: i64) -> Result<()> {
     mutate_engine_state(|state| {
-        state
-            .shell
-            .buffer_metadata_cache
-            .invalidate_buffer(buffer_handle);
+        state.shell.invalidate_buffer_metadata(buffer_handle);
     })
     .map_err(nvim_oxi::Error::from)?;
     Ok(())
@@ -468,7 +465,9 @@ fn refresh_editor_viewport_for_option_set(args: &AutocmdCallbackArgs) -> Result<
 
 fn invalidate_buffer_local_probe_caches(buffer_handle: i64) -> Result<()> {
     mutate_engine_state(|state| {
-        state.shell.probe_cache.invalidate_buffer(buffer_handle);
+        state
+            .shell
+            .invalidate_buffer_local_probe_caches(buffer_handle);
     })
     .map_err(nvim_oxi::Error::from)?;
     Ok(())
@@ -487,10 +486,7 @@ fn advance_buffer_text_revision(buffer_handle: i64) -> Result<()> {
 
 fn invalidate_conceal_probe_caches(buffer_handle: i64) -> Result<()> {
     mutate_engine_state(|state| {
-        state
-            .shell
-            .probe_cache
-            .invalidate_conceal_buffer(buffer_handle);
+        state.shell.invalidate_conceal_probe_caches(buffer_handle);
     })
     .map_err(nvim_oxi::Error::from)?;
     Ok(())
@@ -506,23 +502,7 @@ fn invalidate_conceal_probe_caches_for_option_set(args: &AutocmdCallbackArgs) ->
 
 fn invalidate_buffer_local_caches(buffer_handle: i64) -> Result<()> {
     mutate_engine_state(|state| {
-        state
-            .shell
-            .buffer_metadata_cache
-            .invalidate_buffer(buffer_handle);
-        state
-            .shell
-            .buffer_perf_policy_cache
-            .invalidate_buffer(buffer_handle);
-        state
-            .shell
-            .buffer_perf_telemetry_cache
-            .invalidate_buffer(buffer_handle);
-        state.shell.probe_cache.invalidate_buffer(buffer_handle);
-        state
-            .shell
-            .buffer_text_revision_cache
-            .clear_buffer(buffer_handle);
+        state.shell.invalidate_buffer_local_caches(buffer_handle);
     })
     .map_err(nvim_oxi::Error::from)?;
     Ok(())
@@ -717,11 +697,7 @@ mod tests {
 
     fn reset_buffer_local_cache_state() {
         mutate_engine_state(|state| {
-            state.shell.buffer_metadata_cache.clear();
-            state.shell.buffer_perf_policy_cache.clear();
-            state.shell.buffer_perf_telemetry_cache.clear();
-            state.shell.buffer_text_revision_cache.clear();
-            state.shell.probe_cache.reset();
+            state.shell.reset_transient_caches();
         })
         .expect("engine state access should succeed");
     }
@@ -873,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn option_set_metadata_invalidation_drops_only_the_target_buffer_entry() {
+    fn option_set_metadata_invalidation_drops_only_target_buffer_metadata_and_policy() {
         const TARGET_BUFFER_HANDLE: i64 = 11;
         const OTHER_BUFFER_HANDLE: i64 = 29;
 
@@ -881,6 +857,8 @@ mod tests {
 
         let target_metadata = BufferMetadata::new_for_test("lua", "", true, 42);
         let other_metadata = BufferMetadata::new_for_test("rust", "terminal", false, 99);
+        let target_policy = BufferEventPolicy::from_buffer_metadata("", true, 42, 0.0);
+        let other_policy = BufferEventPolicy::from_buffer_metadata("terminal", false, 99, 0.0);
         mutate_engine_state(|state| {
             state
                 .shell
@@ -890,6 +868,14 @@ mod tests {
                 .shell
                 .buffer_metadata_cache
                 .store_for_test(OTHER_BUFFER_HANDLE, other_metadata.clone());
+            state
+                .shell
+                .buffer_perf_policy_cache
+                .store_policy(TARGET_BUFFER_HANDLE, target_policy);
+            state
+                .shell
+                .buffer_perf_policy_cache
+                .store_policy(OTHER_BUFFER_HANDLE, other_policy);
         })
         .expect("engine state access should succeed");
 
@@ -906,11 +892,22 @@ mod tests {
                     .shell
                     .buffer_metadata_cache
                     .cached_entry_for_test(OTHER_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_perf_policy_cache
+                    .cached_policy(TARGET_BUFFER_HANDLE),
+                state
+                    .shell
+                    .buffer_perf_policy_cache
+                    .cached_policy(OTHER_BUFFER_HANDLE),
             )
         })
         .expect("engine state access should succeed");
 
-        assert_eq!(cached_entries, (None, Some(other_metadata)));
+        assert_eq!(
+            cached_entries,
+            (None, Some(other_metadata), None, Some(other_policy))
+        );
     }
 
     #[test]

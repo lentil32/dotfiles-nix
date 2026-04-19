@@ -12,17 +12,22 @@ pub(crate) fn execute_core_request_render_plan_effect(
     let RequestRenderPlanEffect {
         proposal_id,
         planning,
-        observation_id,
         render_decision,
         animation_schedule,
         requested_at,
     } = payload;
+    let observation_id = planning
+        .observation()
+        .map(crate::core::effect::RenderPlanningObservation::observation_id);
 
     trace_lazy(|| {
         format!(
             "render_plan_start proposal_id={} observation_id={} requested_at={}",
             proposal_id.value(),
-            observation_id.value(),
+            observation_id.map_or_else(
+                || "none".to_string(),
+                |observation_id| observation_id.value().to_string(),
+            ),
             requested_at.value(),
         )
     });
@@ -41,7 +46,6 @@ pub(crate) fn execute_core_request_render_plan_effect(
         },
         |planned_render| match planned_render {
             Ok(planned_render) => CoreEvent::RenderPlanComputed(RenderPlanComputedEvent {
-                proposal_id,
                 planned_render: Box::new(planned_render),
                 observed_at: requested_at,
             }),

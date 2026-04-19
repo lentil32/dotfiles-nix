@@ -3,10 +3,10 @@ use crate::core::types::StepIndex;
 use crate::core::types::StrokeId;
 use crate::types::BASE_TIME_INTERVAL;
 use crate::types::ModeClass;
-use crate::types::PlannerFrame as RenderFrame;
-use crate::types::PlannerRenderConfig;
 use crate::types::Point;
+use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
+use crate::types::StaticRenderConfig;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -45,7 +45,16 @@ fn base_frame() -> RenderFrame {
         retarget_epoch: 1,
         particle_count: 0,
         aggregated_particle_cells: Arc::default(),
-        planner_config: PlannerRenderConfig {
+        particle_screen_cells: Arc::default(),
+        color_at_cursor: None,
+        projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
+        static_config: Arc::new(StaticRenderConfig {
+            cursor_color: None,
+            cursor_color_insert_mode: None,
+            normal_bg: None,
+            transparent_bg_fallback_color: "#303030".to_string(),
+            cterm_cursor_colors: None,
+            cterm_bg: None,
             hide_target_hack: false,
             max_kept_windows: 32,
             never_draw_over_target: false,
@@ -53,6 +62,7 @@ fn base_frame() -> RenderFrame {
             particle_switch_octant_braille: 0.3,
             particles_over_text: true,
             color_levels: 16,
+            gamma: 2.2,
             block_aspect_ratio: crate::config::DEFAULT_BLOCK_ASPECT_RATIO,
             tail_duration_ms: 180.0,
             simulation_hz: 120.0,
@@ -62,7 +72,7 @@ fn base_frame() -> RenderFrame {
             temporal_stability_weight: 0.12,
             top_k_per_cell: 5,
             windows_zindex: 200,
-        },
+        }),
     }
 }
 
@@ -124,14 +134,15 @@ fn set_frame_corners(frame: &mut RenderFrame, corners: [Point; 4]) {
 
 fn with_block_aspect_ratio(frame: &RenderFrame, block_aspect_ratio: f64) -> RenderFrame {
     let mut updated = frame.clone();
-    updated.planner_config.block_aspect_ratio = block_aspect_ratio;
+    Arc::make_mut(&mut updated.static_config).block_aspect_ratio = block_aspect_ratio;
     updated
 }
 
 fn with_trail_thickness(frame: &RenderFrame, trail_thickness: f64) -> RenderFrame {
     let mut updated = frame.clone();
-    updated.planner_config.trail_thickness = trail_thickness;
-    updated.planner_config.trail_thickness_x = trail_thickness;
+    let static_config = Arc::make_mut(&mut updated.static_config);
+    static_config.trail_thickness = trail_thickness;
+    static_config.trail_thickness_x = trail_thickness;
     updated
 }
 

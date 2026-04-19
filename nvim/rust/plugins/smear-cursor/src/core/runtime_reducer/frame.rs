@@ -62,16 +62,29 @@ fn build_step_input(
     }
 }
 
+pub(crate) struct RenderFrameRequest<'a> {
+    pub(crate) mode: &'a str,
+    pub(crate) render_corners: [Point; 4],
+    pub(crate) step_samples: Vec<RenderStepSample>,
+    pub(crate) planner_idle_steps: u32,
+    pub(crate) target: Point,
+    pub(crate) vertical_bar: bool,
+    pub(crate) buffer_perf_class: BufferPerfClass,
+}
+
 pub(crate) fn build_render_frame(
     state: &mut RuntimeState,
-    mode: &str,
-    render_corners: [Point; 4],
-    mut step_samples: Vec<RenderStepSample>,
-    planner_idle_steps: u32,
-    target: Point,
-    vertical_bar: bool,
-    buffer_perf_class: BufferPerfClass,
+    request: RenderFrameRequest<'_>,
 ) -> RenderFrame {
+    let RenderFrameRequest {
+        mode,
+        render_corners,
+        mut step_samples,
+        planner_idle_steps,
+        target,
+        vertical_bar,
+        buffer_perf_class,
+    } = request;
     let (particle_count, aggregated_particle_cells, particle_screen_cells) =
         if buffer_perf_class.keeps_ornamental_effects() {
             let particle_count = state.particles().len();
@@ -110,7 +123,8 @@ pub(crate) fn build_render_frame(
         aggregated_particle_cells,
         particle_screen_cells,
         color_at_cursor: state.color_at_cursor(),
-        static_config: state.render_static_config(),
+        projection_policy_revision: state.projection_policy().revision(),
+        static_config: state.static_render_config(),
     }
 }
 

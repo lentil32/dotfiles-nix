@@ -1,5 +1,5 @@
 use crate::core::realization::PaletteSpec;
-use crate::core::state::ProjectionSnapshot;
+use crate::core::state::ShellProjection;
 use crate::types::CursorCellShape;
 use crate::types::ScreenCell;
 use nvim_oxi::Result;
@@ -183,14 +183,21 @@ pub(crate) fn set_existing_floating_window_config(
     Ok(())
 }
 
-pub(crate) fn set_existing_floating_window_config_ref(
+pub(crate) fn clear_namespace_and_hide_floating_window(
+    namespace_id: u32,
+    buffer: &mut api::Buffer,
     window: &mut api::Window,
-    config: &WindowConfig,
+    clear_context: &'static str,
+    hide_context: &'static str,
 ) -> Result<()> {
-    if config.noautocmd.is_some() {
-        return set_existing_floating_window_config(window, config.clone());
+    if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
+        log_draw_error(clear_context, &err);
+        return Err(nvim_oxi::Error::Api(err));
     }
-    window.set_config(config)?;
+    if let Err(err) = set_existing_floating_window_config(window, hide_floating_window_config()) {
+        log_draw_error(hide_context, &err);
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -420,7 +427,7 @@ pub(crate) fn editor_bounds() -> Result<render_plan::Viewport> {
 pub(crate) fn draw_current(
     namespace_id: u32,
     palette: &PaletteSpec,
-    projection: &ProjectionSnapshot,
+    projection: ShellProjection<'_>,
     max_kept_windows: usize,
     allocation_policy: AllocationPolicy,
 ) -> Result<ApplyMetrics> {
@@ -431,8 +438,6 @@ pub(crate) fn draw_current(
     ensure_palette(palette)?;
 
     let tab_handle = apply::current_tab_handle();
-    // Surprising: the old shell-local draw ack was keyed by proposal id, so it could not
-    // suppress future proposals. The core realization ledger is now the only apply authority.
     let prepared_apply =
         apply::prepare_apply_plan(palette.color_levels(), projection.realization());
     apply::apply_plan(
@@ -470,10 +475,6 @@ fn prepaint_reconfigure_window_config(placement: PrepaintPlacement, hidden: bool
         WindowRelativeTo::Editor,
         WindowStyle::Minimal,
     )
-}
-
-fn hidden_prepaint_window_config() -> WindowConfig {
-    hide_floating_window_config()
 }
 
 fn initialize_prepaint_buffer_options(buffer: &api::Buffer) -> Result<()> {
@@ -533,18 +534,15 @@ fn hide_prepaint_overlay(namespace_id: u32, overlay: &mut PrepaintOverlay) -> bo
         return false;
     };
 
-    // Surprising: some UIs can keep showing the last composed float contents until a later
-    // repaint even after the window is hidden. Blank the prepaint payload first so the reused
-    // overlay does not leave a stale cursor block behind.
-    if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
-        log_draw_error("clear prepaint overlay namespace before hide", &err);
-        return false;
-    }
-
-    if let Err(err) =
-        set_existing_floating_window_config(&mut window, hidden_prepaint_window_config())
+    if clear_namespace_and_hide_floating_window(
+        namespace_id,
+        &mut buffer,
+        &mut window,
+        "clear prepaint overlay namespace before hide",
+        "hide prepaint overlay window",
+    )
+    .is_err()
     {
-        log_draw_error("hide prepaint overlay window", &err);
         return false;
     }
     overlay.placement = None;
@@ -733,10 +731,8 @@ pub(crate) fn clear_active_render_windows(
                     window_pool::begin_cleanup_frame(tab_windows);
                     let pruned_windows =
                         window_pool::prune_tab(tab_windows, namespace_id, max_kept_windows);
-                    // Surprising: some frontends can keep compositing a just-hidden float until later UI
-                    // activity. Cleanup must therefore close shell-visible smear windows authoritatively instead
-                    // of only transitioning pooled lifecycle state to hidden.
-                    let closed_windows = window_pool::close_visible_tab(tab_windows, namespace_id);
+                    let closed_windows =
+                        window_pool::close_shell_visible_tab(tab_windows, namespace_id);
                     let release_summary =
                         window_pool::release_unused_in_tab(tab_windows, namespace_id);
                     ClearActiveRenderWindowsSummary {
@@ -960,6 +956,7 @@ mod tests {
             aggregated_particle_cells: Arc::default(),
             particle_screen_cells: Arc::default(),
             color_at_cursor: None,
+            projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
             static_config: Arc::new(StaticRenderConfig {
                 cursor_color: None,
                 cursor_color_insert_mode: None,
@@ -992,15 +989,11 @@ mod tests {
     fn trail_stroke_change_changes_draw_signature() {
         let mut baseline = base_frame();
         baseline.retarget_epoch = 10;
-        let baseline_signature = super::render_plan::frame_draw_signature(
-            &crate::types::PlannerFrame::from_render_frame(&baseline),
-        );
+        let baseline_signature = super::render_plan::frame_draw_signature(&baseline);
 
         let mut retargeted = baseline;
         retargeted.trail_stroke_id = StrokeId::new(2);
-        let retargeted_signature = super::render_plan::frame_draw_signature(
-            &crate::types::PlannerFrame::from_render_frame(&retargeted),
-        );
+        let retargeted_signature = super::render_plan::frame_draw_signature(&retargeted);
 
         assert_ne!(baseline_signature, retargeted_signature);
     }

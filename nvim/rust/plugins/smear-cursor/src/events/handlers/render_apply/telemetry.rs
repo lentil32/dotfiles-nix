@@ -1,5 +1,5 @@
 use crate::core::state::DegradedApplyMetrics;
-use crate::core::state::ProjectionSnapshot;
+use crate::core::state::ShellProjection;
 use crate::draw::ApplyMetrics;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -142,7 +142,7 @@ impl RenderExecutionMetrics {
     }
 }
 
-pub(super) fn draw_projection_debug_summary(projection: &ProjectionSnapshot) -> String {
+pub(super) fn draw_projection_debug_summary(projection: ShellProjection<'_>) -> String {
     let mut logical_cell_count = 0;
     let mut logical_sample_cells = Vec::with_capacity(8);
     for cell in projection.logical_raster().iter_cells() {
@@ -189,14 +189,16 @@ mod tests {
     use super::draw_projection_debug_summary;
     use crate::core::realization::LogicalRaster;
     use crate::core::state::DegradedApplyMetrics;
-    use crate::core::state::ProjectionSnapshot;
+    use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ProjectionWitness;
+    use crate::core::state::RetainedProjection;
     use crate::core::types::CursorCol;
     use crate::core::types::CursorRow;
     use crate::core::types::IngressSeq;
     use crate::core::types::ObservationId;
+    use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
-    use crate::core::types::SceneRevision;
+    use crate::core::types::RenderRevision;
     use crate::core::types::ViewportSnapshot;
     use crate::draw::ApplyMetrics;
     use crate::draw::TabPoolSnapshot;
@@ -218,14 +220,22 @@ mod tests {
         }
     }
 
-    fn projection_snapshot(cells: Vec<CellOp>) -> ProjectionSnapshot {
-        ProjectionSnapshot::new(
+    fn retained_projection(cells: Vec<CellOp>) -> RetainedProjection {
+        RetainedProjection::new(
             ProjectionWitness::new(
-                SceneRevision::INITIAL,
+                RenderRevision::INITIAL,
                 ObservationId::from_ingress_seq(IngressSeq::new(1)),
                 ViewportSnapshot::new(CursorRow(20), CursorCol(40)),
                 ProjectorRevision::CURRENT,
             ),
+            ProjectionReuseKey::new(
+                None,
+                None,
+                None,
+                crate::core::runtime_reducer::TargetCellPresentation::None,
+                ProjectionPolicyRevision::INITIAL,
+            ),
+            crate::draw::render_plan::PlannerState::default(),
             LogicalRaster::new(None, Arc::from(cells)),
         )
     }
@@ -362,15 +372,15 @@ mod tests {
 
     #[test]
     fn projection_debug_summary_snapshot_renders_empty_raster() {
-        let snapshot = projection_snapshot(Vec::new());
+        let snapshot = retained_projection(Vec::new());
 
-        assert_snapshot!(&draw_projection_debug_summary(&snapshot));
+        assert_snapshot!(&draw_projection_debug_summary(snapshot.shell_projection()));
     }
 
     #[test]
     fn projection_debug_summary_snapshot_renders_small_raster() {
-        let snapshot = projection_snapshot(vec![cell(3, 7, 11), cell(3, 8, 11)]);
+        let snapshot = retained_projection(vec![cell(3, 7, 11), cell(3, 8, 11)]);
 
-        assert_snapshot!(&draw_projection_debug_summary(&snapshot));
+        assert_snapshot!(&draw_projection_debug_summary(snapshot.shell_projection()));
     }
 }

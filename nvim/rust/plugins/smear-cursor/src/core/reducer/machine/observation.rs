@@ -8,13 +8,13 @@ use super::support::enter_hot_cleanup_state;
 use super::support::ingress_cursor_presentation_effect;
 use super::support::ingress_marks_cursor_autocmd_freshness;
 use super::support::next_pending_probe_effect;
+use super::support::observation_cursor_color_fallback;
 use super::support::probe_refresh_budget_exhausted_metric;
 use super::support::probe_refresh_retry_metric;
 use super::support::probe_requests_for;
 use super::support::record_event_loop_metric;
 use super::support::request_observation_base;
 use super::support::reset_recovery_attempt;
-use super::support::retained_cursor_color_fallback;
 use super::support::schedule_timer_with_delay;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
@@ -27,8 +27,8 @@ use crate::core::event::ProbeReportedEvent;
 use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::state::CoreState;
 use crate::core::state::ExternalDemand;
-use crate::core::state::ObservationRequest;
 use crate::core::state::ObservationSnapshot;
+use crate::core::state::PendingObservation;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::ProbeState;
@@ -65,14 +65,14 @@ fn start_next_observation_with_ingress_surface(
     let cleared_ingress_policy = next_state.ingress_policy().clear_pending_delay();
     let next_state = next_state.with_ingress_policy(cleared_ingress_policy);
     let buffer_perf_class = demand.buffer_perf_class();
-    let request =
-        ObservationRequest::new(demand, probe_requests_for(&next_state, buffer_perf_class));
-    let next_state = next_state.enter_observing_request(request.clone());
-    let effect = request_observation_base(
-        &next_state,
-        request.clone(),
-        ingress_observation.and_then(|observation| observation.surface_for(request.demand())),
-    );
+    let pending =
+        PendingObservation::new(demand, probe_requests_for(&next_state, buffer_perf_class));
+    let ingress_observation_surface =
+        ingress_observation.and_then(|observation| observation.surface_for(pending.demand()));
+    let Some(next_state) = next_state.enter_observing_request(pending.clone()) else {
+        unreachable!("queued observations should only start from primed or ready states");
+    };
+    let effect = request_observation_base(&next_state, pending, ingress_observation_surface);
     (next_state, Some(effect))
 }
 
@@ -179,12 +179,10 @@ fn queue_external_demand(
     let active_cursor_superseded = state
         .active_demand()
         .is_some_and(|active| active.is_cursor() && queued_demand.is_cursor());
-    let max_kept_windows = state.runtime().config.max_kept_windows;
     let (queued_state, queue_coalesced) =
         state.map_demand_queue(|queue| queue.enqueue(queued_demand));
     let was_coalesced = active_cursor_superseded || queue_coalesced;
-    let (queued_state, hot_cleanup_effects) =
-        enter_hot_cleanup_state(queued_state, observed_at, max_kept_windows);
+    let (queued_state, hot_cleanup_effects) = enter_hot_cleanup_state(queued_state, observed_at);
 
     let mut transition = match queued_state.lifecycle() {
         crate::core::types::Lifecycle::Idle => Transition::stay(&queued_state),
@@ -267,25 +265,29 @@ pub(super) fn reduce_observation_base_collected(
     mut state: CoreState,
     payload: ObservationBaseCollectedEvent,
 ) -> Transition {
-    let Some(active_request) = state.active_observation_request().cloned() else {
+    let Some(active_pending) = state.pending_observation().cloned() else {
         return Transition::stay_owned(state);
     };
     let ObservationBaseCollectedEvent {
-        request,
+        observation_id,
         basis,
+        cursor_color_probe_generations,
         motion,
     } = payload;
-    if active_request != request || basis.observation_id() != request.observation_id() {
+    if active_pending.observation_id() != observation_id {
         return Transition::stay_owned(state);
     }
+    let pending = active_pending;
 
     let next_latest_exact_cursor_position =
         state.fallback_cursor_position(motion.exact_cursor_position(basis.cursor_position()));
     let observed_at = basis.observed_at();
-    let cursor_color_fallback = retained_cursor_color_fallback(state.retained_observation());
+    let cursor_color_fallback = observation_cursor_color_fallback(state.retained_observation());
     let previous_observation = state.take_retained_observation();
-    let next_observation = ObservationSnapshot::new(request, basis, motion);
-    let (state, prepared_plan) = if next_observation.request().probes().background() {
+    let background_requested = pending.requested_probes().background();
+    let next_observation = ObservationSnapshot::new(pending, basis, motion)
+        .with_cursor_color_probe_generations(cursor_color_probe_generations);
+    let (state, prepared_plan) = if background_requested {
         let (state, prepared_plan) = prepare_observation_plan(
             state,
             previous_observation.as_ref(),
@@ -300,7 +302,10 @@ pub(super) fn reduce_observation_base_collected(
         if let Some(plan) =
             background_probe_plan(prepared_plan, next_observation.basis().viewport())
         {
-            next_observation.with_background_probe_plan(plan)
+            let mut next_observation = next_observation;
+            *next_observation.probes_mut().background_mut() =
+                crate::core::state::BackgroundProbeState::from_plan(plan);
+            next_observation
         } else {
             next_observation
         }
@@ -314,11 +319,14 @@ pub(super) fn reduce_observation_base_collected(
     let next_probe =
         next_pending_probe_effect(&base_state, &next_observation, cursor_color_fallback);
     let Some(next_probe) = next_probe else {
-        return complete_observation(
+        if !base_state.enter_ready(next_observation) {
+            let _ = base_state.restore_retained_observation(previous_observation);
+            return Transition::stay_owned(base_state);
+        }
+        return finalize_ready_observation(
             base_state,
-            next_observation,
             prepared_plan,
-            previous_observation,
+            previous_observation.as_ref(),
         );
     };
     if !base_state.activate_observation(next_observation) {
@@ -336,7 +344,7 @@ fn complete_mode_scoped_cursor_color_probe(
     state: &CoreState,
     mut observation: ObservationSnapshot,
 ) -> ObservationSnapshot {
-    if !observation.request().probes().cursor_color()
+    if !observation.probes().cursor_color().is_requested()
         || state
             .runtime()
             .config
@@ -345,13 +353,9 @@ fn complete_mode_scoped_cursor_color_probe(
         return observation;
     }
 
-    let request_id = ProbeKind::CursorColor.request_id(observation.request().observation_id());
-    let _ = observation.set_cursor_color_probe(ProbeState::ready(
-        request_id,
-        observation.request().observation_id(),
-        ProbeReuse::Exact,
-        None,
-    ));
+    let _ = observation
+        .probes_mut()
+        .set_cursor_color_state(ProbeState::ready(ProbeReuse::Exact, None));
     observation
 }
 
@@ -362,50 +366,42 @@ enum ProbeReportResolution {
 
 fn apply_probe_report(
     observation: &mut ObservationSnapshot,
-    payload: &ProbeReportedEvent,
+    payload: ProbeReportedEvent,
 ) -> Option<ProbeReportResolution> {
-    let observation_id = observation.request().observation_id();
+    let observation_id = observation.observation_id();
 
     match payload {
         ProbeReportedEvent::CursorColorReady {
             observation_id: reported_id,
-            probe_request_id,
             reuse,
             sample,
         } => {
-            if *reported_id != observation_id
-                || observation.probes().cursor_color().request_id() != Some(*probe_request_id)
-                || !observation.probes().cursor_color().is_pending()
-            {
+            if reported_id != observation_id || !observation.probes().cursor_color().is_pending() {
                 return None;
             }
-            if *reuse == ProbeReuse::RefreshRequired {
+            if reuse == ProbeReuse::RefreshRequired {
                 return Some(ProbeReportResolution::RefreshRequired(
                     ProbeKind::CursorColor,
                 ));
             }
-            if !observation.set_cursor_color_probe(ProbeState::ready(
-                *probe_request_id,
-                *reported_id,
-                *reuse,
-                *sample,
-            )) {
+            if !observation
+                .probes_mut()
+                .set_cursor_color_state(ProbeState::ready(reuse, sample))
+            {
                 return None;
             }
             Some(ProbeReportResolution::Updated)
         }
         ProbeReportedEvent::CursorColorFailed {
             observation_id: reported_id,
-            probe_request_id,
             failure,
         } => {
-            if *reported_id != observation_id
-                || observation.probes().cursor_color().request_id() != Some(*probe_request_id)
-                || !observation.probes().cursor_color().is_pending()
-            {
+            if reported_id != observation_id || !observation.probes().cursor_color().is_pending() {
                 return None;
             }
-            if !observation.set_cursor_color_probe(ProbeState::failed(*probe_request_id, *failure))
+            if !observation
+                .probes_mut()
+                .set_cursor_color_state(ProbeState::failed(failure))
             {
                 return None;
             }
@@ -413,51 +409,57 @@ fn apply_probe_report(
         }
         ProbeReportedEvent::BackgroundReady {
             observation_id: reported_id,
-            probe_request_id,
             reuse,
             batch,
         } => {
-            if *reported_id != observation_id {
+            if reported_id != observation_id {
                 return None;
             }
-            if *reuse == ProbeReuse::RefreshRequired {
+            if reuse == ProbeReuse::RefreshRequired {
                 return Some(ProbeReportResolution::RefreshRequired(
                     ProbeKind::Background,
                 ));
             }
-            if !observation.set_background_probe_ready(
-                *probe_request_id,
-                *reported_id,
-                *reuse,
-                batch.clone(),
-            ) {
+            let viewport = observation.basis().viewport();
+            if !observation
+                .probes_mut()
+                .background_mut()
+                .accept_batch(viewport, reuse, batch)
+            {
                 return None;
             }
             Some(ProbeReportResolution::Updated)
         }
         ProbeReportedEvent::BackgroundChunkReady {
             observation_id: reported_id,
-            probe_request_id,
             chunk,
             allowed_mask,
         } => {
-            if *reported_id != observation_id {
+            if reported_id != observation_id {
                 return None;
             }
-            if !observation.apply_background_probe_chunk(*probe_request_id, chunk, allowed_mask) {
+            let viewport = observation.basis().viewport();
+            if !observation.probes_mut().background_mut().apply_chunk(
+                viewport,
+                &chunk,
+                &allowed_mask,
+            ) {
                 return None;
             }
             Some(ProbeReportResolution::Updated)
         }
         ProbeReportedEvent::BackgroundFailed {
             observation_id: reported_id,
-            probe_request_id,
             failure,
         } => {
-            if *reported_id != observation_id {
+            if reported_id != observation_id {
                 return None;
             }
-            if !observation.set_background_probe_failed(*probe_request_id, *failure) {
+            if !observation
+                .probes_mut()
+                .background_mut()
+                .set_failed(failure)
+            {
                 return None;
             }
             Some(ProbeReportResolution::Updated)
@@ -465,25 +467,28 @@ fn apply_probe_report(
     }
 }
 
-fn complete_observation(
+fn finalize_ready_observation(
     mut state: CoreState,
-    observation: ObservationSnapshot,
     prepared_plan: Option<crate::core::state::PreparedObservationPlan>,
-    previous_observation: Option<ObservationSnapshot>,
+    previous_observation: Option<&ObservationSnapshot>,
 ) -> Transition {
-    let observed_at = observation.basis().observed_at();
-    let next_latest_exact_cursor_position =
-        state.fallback_cursor_position(observation.exact_cursor_position());
+    let Some((observed_at, exact_cursor_position)) = state.observation().map(|observation| {
+        (
+            observation.basis().observed_at(),
+            observation.exact_cursor_position(),
+        )
+    }) else {
+        return Transition::stay_owned(state);
+    };
+    let next_latest_exact_cursor_position = state.fallback_cursor_position(exact_cursor_position);
     let prepared_plan = prepared_plan.or_else(|| state.take_prepared_observation_plan());
     let ready = reset_recovery_attempt(
-        state
-            .with_latest_exact_cursor_position(next_latest_exact_cursor_position)
-            .enter_ready(observation),
+        state.with_latest_exact_cursor_position(next_latest_exact_cursor_position),
     );
     if let Some(prepared_plan) = prepared_plan {
         plan_ready_state_with_observation_plan(ready, observed_at, prepared_plan)
     } else {
-        plan_ready_state(ready, previous_observation.as_ref(), observed_at)
+        plan_ready_state(ready, previous_observation, observed_at)
     }
 }
 
@@ -491,14 +496,14 @@ pub(super) fn reduce_probe_reported(
     mut state: CoreState,
     payload: ProbeReportedEvent,
 ) -> Transition {
-    let Some(active_request) = state.active_observation_request().cloned() else {
+    if state.observation().is_none() {
         return Transition::stay_owned(state);
-    };
+    }
     let resolution = {
         let Some(active_observation) = state.observation_mut() else {
             return Transition::stay_owned(state);
         };
-        let Some(resolution) = apply_probe_report(active_observation, &payload) else {
+        let Some(resolution) = apply_probe_report(active_observation, payload) else {
             return Transition::stay_owned(state);
         };
         resolution
@@ -508,8 +513,16 @@ pub(super) fn reduce_probe_reported(
         ProbeReportResolution::RefreshRequired(kind) => {
             // Surprising: the deferred probe no longer matches the captured observation basis.
             // Retry the full base observation instead of fusing mixed-world data.
+            let Some(retry_pending) = state.observation().map(|observation| {
+                PendingObservation::new(
+                    observation.demand().clone(),
+                    probe_requests_for(&state, observation.demand().buffer_perf_class()),
+                )
+            }) else {
+                return Transition::stay_owned(state);
+            };
             let mut cleared_observation = reset_recovery_attempt(state);
-            if !cleared_observation.clear_active_observation() {
+            if !cleared_observation.replace_active_observation_with_pending(retry_pending) {
                 return Transition::stay_owned(cleared_observation);
             }
             let Some(current_refresh_state) = cleared_observation.probe_refresh_state() else {
@@ -521,7 +534,12 @@ pub(super) fn reduce_probe_reported(
                 // a moving cursor or viewport can keep invalidating one observation.
                 // Drop that request after a bounded number of retries so queued ingress regains
                 // ownership instead of waiting behind an obsolete observation forever.
-                let observed_at = active_request.demand().observed_at();
+                let Some(observed_at) = cleared_observation
+                    .active_demand()
+                    .map(ExternalDemand::observed_at)
+                else {
+                    return Transition::stay_owned(cleared_observation);
+                };
                 let mut transition =
                     observe_or_plan(cleared_observation.into_primed(), observed_at);
                 transition
@@ -533,7 +551,10 @@ pub(super) fn reduce_probe_reported(
             if !cleared_observation.set_probe_refresh_state(next_refresh_state) {
                 return Transition::stay_owned(cleared_observation);
             }
-            let effect = request_observation_base(&cleared_observation, active_request, None);
+            let Some(pending) = cleared_observation.pending_observation().cloned() else {
+                return Transition::stay_owned(cleared_observation);
+            };
+            let effect = request_observation_base(&cleared_observation, pending, None);
             Transition::new(
                 cleared_observation,
                 vec![probe_refresh_retry_metric(kind), effect],
@@ -544,18 +565,17 @@ pub(super) fn reduce_probe_reported(
                 let Some(observation) = state.observation() else {
                     return Transition::stay_owned(state);
                 };
-                let cursor_color_fallback = retained_cursor_color_fallback(Some(observation));
+                let cursor_color_fallback = observation_cursor_color_fallback(Some(observation));
                 next_pending_probe_effect(&state, observation, cursor_color_fallback)
             };
             if let Some(next_probe) = next_probe {
                 return Transition::new(state, vec![next_probe]);
             }
             let prepared_plan = state.take_prepared_observation_plan();
-            let Some(observation) = state.take_active_observation_for_completion() else {
+            if !state.complete_active_observation() {
                 return Transition::stay_owned(state);
-            };
-            let previous_observation = state.take_retained_observation();
-            complete_observation(state, observation, prepared_plan, previous_observation)
+            }
+            finalize_ready_observation(state, prepared_plan, None)
         }
     }
 }

@@ -9,6 +9,7 @@ use super::RenderAllocationPolicy;
 use super::RenderCleanupAction;
 use super::ScrollShift;
 use super::decision::CursorTransitions;
+use super::frame::RenderFrameRequest;
 use super::frame::apply_scroll_shift_to_state;
 use super::frame::build_render_frame;
 use super::frame::clamp_row_to_window;
@@ -162,13 +163,15 @@ fn draw_discontinuous_jump_frame(
     );
     let frame = build_render_frame(
         state,
-        mode,
-        current_corners,
-        step_samples,
-        0,
-        spec.to_position,
-        spec.vertical_bar,
-        buffer_perf_class,
+        RenderFrameRequest {
+            mode,
+            render_corners: current_corners,
+            step_samples,
+            planner_idle_steps: 0,
+            target: spec.to_position,
+            vertical_bar: spec.vertical_bar,
+            buffer_perf_class,
+        },
     );
     state.start_tail_drain(planner_tail_drain_steps(state));
     state.record_animation_tick(spec.event_now_ms);
@@ -282,13 +285,15 @@ fn draw_drain_frame(
     let render_corners = corners_for_render(&state.config, &current_corners, &target_corners);
     let frame = build_render_frame(
         state,
-        mode,
-        render_corners,
-        Vec::new(),
-        planner_idle_steps,
-        target_position,
-        vertical_bar,
-        buffer_perf_class,
+        RenderFrameRequest {
+            mode,
+            render_corners,
+            step_samples: Vec::new(),
+            planner_idle_steps,
+            target: target_position,
+            vertical_bar,
+            buffer_perf_class,
+        },
     );
     CursorTransitions::draw(
         mode,
@@ -343,10 +348,8 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             col: event.col,
         };
         let in_cmdline_mode = is_cmdline_mode(mode);
-        let transitioned_to_or_from_cmdline = state
-            .last_mode_was_cmdline()
-            .is_some_and(|was_cmdline| was_cmdline != in_cmdline_mode);
-        state.set_last_mode_was_cmdline(in_cmdline_mode);
+        let transitioned_to_or_from_cmdline = state.crossed_cmdline_boundary(in_cmdline_mode);
+        state.record_observed_mode(in_cmdline_mode);
         let tick_retarget = matches!(source, EventSource::AnimationTick)
             && (state.is_animating() || state.is_settling() || state.is_draining())
             && state.target_position().distance_squared(event_target) > EPSILON;
@@ -471,15 +474,17 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             step_samples.push(bootstrap_step_sample);
             let frame = build_render_frame(
                 state,
-                mode,
-                current_corners,
-                // Bootstrap the planner with a stationary head sample so the first frame renders
-                // visible occupancy before the animation loop has emitted fixed-step samples.
-                step_samples,
-                0,
-                target_position,
-                vertical_bar,
-                buffer_perf_class,
+                RenderFrameRequest {
+                    mode,
+                    render_corners: current_corners,
+                    // Bootstrap the planner with a stationary head sample so the first frame renders
+                    // visible occupancy before the animation loop has emitted fixed-step samples.
+                    step_samples,
+                    planner_idle_steps: 0,
+                    target: target_position,
+                    vertical_bar,
+                    buffer_perf_class,
+                },
             );
             return CursorTransitions::draw(
                 mode,
@@ -727,13 +732,15 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     corners_for_render(&state.config, &current_corners, &target_corners);
                 let frame = build_render_frame(
                     state,
-                    mode,
-                    render_corners,
-                    step_samples,
-                    0,
-                    target_position,
-                    vertical_bar,
-                    buffer_perf_class,
+                    RenderFrameRequest {
+                        mode,
+                        render_corners,
+                        step_samples,
+                        planner_idle_steps: 0,
+                        target: target_position,
+                        vertical_bar,
+                        buffer_perf_class,
+                    },
                 );
                 let next_animation_at_ms =
                     Some(next_animation_deadline_from_clock(state, event.now_ms));
@@ -754,13 +761,15 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 corners_for_render(&state.config, &current_corners, &target_corners);
             let frame = build_render_frame(
                 state,
-                mode,
-                render_corners,
-                step_samples,
-                0,
-                target_position,
-                vertical_bar,
-                buffer_perf_class,
+                RenderFrameRequest {
+                    mode,
+                    render_corners,
+                    step_samples,
+                    planner_idle_steps: 0,
+                    target: target_position,
+                    vertical_bar,
+                    buffer_perf_class,
+                },
             );
             let next_animation_at_ms =
                 Some(next_animation_deadline_from_clock(state, event.now_ms));
@@ -806,13 +815,15 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     corners_for_render(&state.config, &current_corners, &target_corners);
                 let frame = build_render_frame(
                     state,
-                    mode,
-                    render_corners,
-                    Vec::new(),
-                    0,
-                    target_position,
-                    vertical_bar,
-                    buffer_perf_class,
+                    RenderFrameRequest {
+                        mode,
+                        render_corners,
+                        step_samples: Vec::new(),
+                        planner_idle_steps: 0,
+                        target: target_position,
+                        vertical_bar,
+                        buffer_perf_class,
+                    },
                 );
                 CursorTransitions::draw(mode, frame, false, RenderAllocationPolicy::ReuseOnly)
                     .with_motion_class(motion_class)

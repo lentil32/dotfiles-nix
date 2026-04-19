@@ -23,11 +23,16 @@ pub(crate) struct CtermCursorColorsPatch {
     pub(crate) color_levels: u32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FrameTimingPatch {
+    TimeInterval(f64),
+    Fps(f64),
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct RuntimeSwitchesPatch {
     pub(crate) enabled: Option<bool>,
-    pub(crate) time_interval: Option<f64>,
-    pub(crate) fps: Option<f64>,
+    pub(crate) frame_timing: Option<FrameTimingPatch>,
     pub(crate) simulation_hz: Option<f64>,
     pub(crate) max_simulation_steps_per_frame: Option<u32>,
     pub(crate) delay_event_to_smear: Option<f64>,
@@ -157,14 +162,6 @@ macro_rules! apply_config_fields {
 }
 
 impl RuntimeOptionsPatch {
-    fn touches_static_render_config(&self) -> bool {
-        self.runtime.touches_static_render_config()
-            || self.color.touches_static_render_config()
-            || self.particles.touches_static_render_config()
-            || self.motion.touches_static_render_config()
-            || self.rendering.touches_static_render_config()
-    }
-
     pub(crate) fn validate_against(&self, config: &RuntimeConfig) -> Result<()> {
         let head_response_ms = self
             .motion
@@ -201,6 +198,19 @@ impl RuntimeOptionsPatch {
             ));
         }
 
+        let particle_switch_octant_braille = self
+            .particles
+            .particle_switch_octant_braille
+            .unwrap_or(config.particle_switch_octant_braille);
+        if !particle_switch_octant_braille.is_finite()
+            || !(0.0..=1.0).contains(&particle_switch_octant_braille)
+        {
+            return Err(invalid_key(
+                "particle_switch_octant_braille",
+                "number between 0 and 1",
+            ));
+        }
+
         let top_k_per_cell = self
             .rendering
             .top_k_per_cell
@@ -217,7 +227,7 @@ impl RuntimeOptionsPatch {
 
     pub(crate) fn apply(mut self, state: &mut RuntimeState) -> RuntimeOptionsEffects {
         let mut effects = RuntimeOptionsEffects::default();
-        let refresh_render_static_config = self.touches_static_render_config();
+        let previous_config = state.config.clone();
 
         self.runtime.apply(state, &mut effects);
         self.color.apply(&mut state.config);
@@ -229,8 +239,8 @@ impl RuntimeOptionsPatch {
         if !state.config.requires_cursor_color_sampling() {
             state.clear_color_at_cursor();
         }
-        if refresh_render_static_config {
-            state.refresh_render_static_config();
+        if state.config != previous_config {
+            state.commit_runtime_config_update();
         }
 
         effects
@@ -238,26 +248,17 @@ impl RuntimeOptionsPatch {
 }
 
 impl RuntimeSwitchesPatch {
-    fn touches_static_render_config(&self) -> bool {
-        self.simulation_hz.is_some()
-            || self.hide_target_hack.is_some()
-            || self.max_kept_windows.is_some()
-            || self.windows_zindex.is_some()
-    }
-
     fn apply(&mut self, state: &mut RuntimeState, effects: &mut RuntimeOptionsEffects) {
         if let Some(value) = self.enabled.take() {
             state.set_enabled(value);
         }
 
         let config = &mut state.config;
-        if let Some(value) = self.time_interval.take() {
-            config.time_interval = value;
-            config.fps = (1000.0 / value).max(1.0);
-        }
-        if let Some(value) = self.fps.take() {
-            config.fps = value;
-            config.time_interval = RuntimeConfig::interval_ms_for_fps(value);
+        if let Some(frame_timing) = self.frame_timing.take() {
+            config.time_interval = match frame_timing {
+                FrameTimingPatch::TimeInterval(value) => value,
+                FrameTimingPatch::Fps(value) => RuntimeConfig::interval_ms_for_fps(value),
+            };
         }
         apply_config_fields!(
             config,
@@ -293,15 +294,6 @@ impl RuntimeSwitchesPatch {
 }
 
 impl ColorOptionsPatch {
-    fn touches_static_render_config(&self) -> bool {
-        self.cursor_color.is_some()
-            || self.cursor_color_insert_mode.is_some()
-            || self.normal_bg.is_some()
-            || self.transparent_bg_fallback_color.is_some()
-            || self.cterm_bg.is_some()
-            || self.cterm_cursor_colors.is_some()
-    }
-
     fn apply(&mut self, config: &mut RuntimeConfig) {
         apply_optional_value(&mut config.cursor_color, &mut self.cursor_color);
         apply_optional_value(
@@ -347,10 +339,6 @@ impl SmearBehaviorPatch {
 }
 
 impl MotionOptionsPatch {
-    fn touches_static_render_config(&self) -> bool {
-        self.trail_thickness.is_some() || self.trail_thickness_x.is_some()
-    }
-
     fn apply(&mut self, config: &mut RuntimeConfig) {
         apply_config_fields!(
             config,
@@ -376,12 +364,6 @@ impl MotionOptionsPatch {
 }
 
 impl ParticleOptionsPatch {
-    fn touches_static_render_config(&self) -> bool {
-        self.particle_max_lifetime.is_some()
-            || self.particle_switch_octant_braille.is_some()
-            || self.particles_over_text.is_some()
-    }
-
     fn apply(&mut self, config: &mut RuntimeConfig) {
         apply_config_fields!(
             config,
@@ -408,16 +390,6 @@ impl ParticleOptionsPatch {
 }
 
 impl RenderingOptionsPatch {
-    fn touches_static_render_config(&self) -> bool {
-        self.never_draw_over_target.is_some()
-            || self.color_levels.is_some()
-            || self.gamma.is_some()
-            || self.tail_duration_ms.is_some()
-            || self.spatial_coherence_weight.is_some()
-            || self.temporal_stability_weight.is_some()
-            || self.top_k_per_cell.is_some()
-    }
-
     fn apply(&mut self, config: &mut RuntimeConfig) {
         apply_config_fields!(
             config,

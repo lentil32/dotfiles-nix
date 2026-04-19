@@ -114,17 +114,22 @@ enum RealCursorVisibility {
 
 #[derive(Debug, Default)]
 struct ShellState {
+    // Shell-owned state is intentionally non-authoritative: caches, reusable
+    // scratch buffers, telemetry, and host capability witnesses live here.
+    // snapshot: host capability and witness state retained across cache purges.
     namespace_id: Option<u32>,
     host_bridge_state: HostBridgeState,
+    editor_viewport_cache: EditorViewportCache,
+    buffer_metadata_cache: BufferMetadataCache,
+    real_cursor_visibility: Option<RealCursorVisibility>,
+    // cache: purgeable shell-local reuse state and scratch storage.
     probe_cache: ProbeCacheState,
     background_probe_request_scratch: Vec<Object>,
     conceal_regions_scratch: Vec<ConcealRegion>,
     buffer_text_revision_cache: BufferTextRevisionCache,
-    editor_viewport_cache: EditorViewportCache,
-    buffer_metadata_cache: BufferMetadataCache,
     buffer_perf_policy_cache: BufferEventPolicyCache,
+    // telemetry: execution-cost and probe-pressure signals derived from shell work.
     buffer_perf_telemetry_cache: BufferPerfTelemetryCache,
-    real_cursor_visibility: Option<RealCursorVisibility>,
 }
 
 impl ShellState {
@@ -142,6 +147,51 @@ impl ShellState {
 
     fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
         self.host_bridge_state = HostBridgeState::Verified { revision };
+    }
+
+    fn note_cursor_color_colorscheme_change(&mut self) {
+        self.probe_cache.note_cursor_color_colorscheme_change();
+        self.clear_real_cursor_visibility();
+    }
+
+    fn invalidate_editor_viewport_cache(&mut self) {
+        self.editor_viewport_cache.invalidate();
+    }
+
+    fn invalidate_buffer_metadata(&mut self, buffer_handle: i64) {
+        self.buffer_metadata_cache.invalidate_buffer(buffer_handle);
+        self.buffer_perf_policy_cache
+            .invalidate_buffer(buffer_handle);
+    }
+
+    fn invalidate_conceal_probe_caches(&mut self, buffer_handle: i64) {
+        self.probe_cache.invalidate_conceal_buffer(buffer_handle);
+    }
+
+    fn invalidate_buffer_local_probe_caches(&mut self, buffer_handle: i64) {
+        self.probe_cache.invalidate_buffer(buffer_handle);
+    }
+
+    fn invalidate_buffer_local_caches(&mut self, buffer_handle: i64) {
+        self.invalidate_buffer_metadata(buffer_handle);
+        self.buffer_perf_policy_cache
+            .invalidate_buffer(buffer_handle);
+        self.buffer_perf_telemetry_cache
+            .invalidate_buffer(buffer_handle);
+        self.invalidate_buffer_local_probe_caches(buffer_handle);
+        self.buffer_text_revision_cache.clear_buffer(buffer_handle);
+    }
+
+    fn reset_transient_caches(&mut self) {
+        self.probe_cache.reset();
+        self.invalidate_editor_viewport_cache();
+        self.buffer_metadata_cache.clear();
+        self.buffer_perf_policy_cache.clear();
+        self.buffer_perf_telemetry_cache.clear();
+        self.buffer_text_revision_cache.clear();
+        self.background_probe_request_scratch = Vec::new();
+        self.conceal_regions_scratch = Vec::new();
+        self.clear_real_cursor_visibility();
     }
 
     fn take_background_probe_request_scratch(&mut self) -> Vec<Object> {
@@ -190,6 +240,8 @@ impl ShellState {
 
 #[derive(Debug, Default)]
 struct EngineState {
+    // Engine state preserves one top-level split: reducer truth in `core_state`
+    // and shell-owned cache/snapshot/telemetry state in `shell`.
     shell: ShellState,
     core_state: CoreState,
 }

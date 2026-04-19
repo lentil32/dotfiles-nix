@@ -1,4 +1,4 @@
-use super::cursor_color::current_cursor_color_probe_witness;
+use super::cursor_color::current_cursor_color_probe_generations;
 use super::cursor_color::mode_requires_cursor_color_sampling;
 use super::text_context::current_cursor_text_context;
 use crate::core::effect::CursorPositionReadPolicy;
@@ -230,7 +230,11 @@ pub(super) fn current_viewport_snapshot() -> Result<ViewportSnapshot> {
 
 fn collect_observation_basis(
     payload: &RequestObservationBaseEffect,
-) -> Result<(ObservationBasis, ObservationMotion)> {
+) -> Result<(
+    ObservationBasis,
+    Option<crate::core::state::CursorColorProbeGenerations>,
+    ObservationMotion,
+)> {
     let observed_at = to_core_millis(now_ms());
     let editor = CurrentEditorSnapshot::capture_for_observation_base(
         payload.context.ingress_observation_surface(),
@@ -249,6 +253,7 @@ fn collect_observation_basis(
         payload.context.cursor_position_policy(),
         payload.context.probe_policy(),
     )?;
+    let buffer_revision = editor.text_revision().map(Generation::value);
     let current_cursor_text_context = match current_cursor_text_context(
         &editor,
         cursor_location.line,
@@ -261,7 +266,7 @@ fn collect_observation_basis(
             CursorTextContextState::Unavailable
         }
     };
-    let cursor_color_witness = if payload.request.probes().cursor_color()
+    let cursor_color_probe_generations = if payload.request.requested_probes().cursor_color()
         && mode_requires_cursor_color_sampling(mode)?
     {
         if let Err(err) = note_cursor_color_observation_boundary() {
@@ -269,10 +274,18 @@ fn collect_observation_basis(
                 "cursor color cache boundary update failed: {err}"
             ));
         }
-        match current_cursor_color_probe_witness(&editor, cursor_position.position) {
-            Ok(witness) => Some(witness),
+        match current_cursor_color_probe_generations() {
+            Ok(generations) if buffer_revision.is_some() => Some(generations),
+            Ok(_) => {
+                crate::events::logging::warn(
+                    "cursor color probe generations missing buffer revision",
+                );
+                None
+            }
             Err(err) => {
-                crate::events::logging::warn(&format!("cursor color witness read failed: {err}"));
+                crate::events::logging::warn(&format!(
+                    "cursor color probe generations read failed: {err}"
+                ));
                 None
             }
         }
@@ -288,15 +301,15 @@ fn collect_observation_basis(
 
     Ok((
         ObservationBasis::new(
-            payload.request.observation_id(),
             observed_at,
             mode.to_owned(),
             cursor_position.position,
             cursor_location,
             viewport,
         )
-        .with_cursor_color_witness(cursor_color_witness)
+        .with_buffer_revision(buffer_revision)
         .with_cursor_text_context_state(current_cursor_text_context),
+        cursor_color_probe_generations,
         ObservationMotion::new(scroll_shift).with_cursor_position_sync(cursor_position.sync),
     ))
 }
@@ -304,11 +317,12 @@ fn collect_observation_basis(
 pub(crate) fn execute_core_request_observation_base_effect(
     payload: RequestObservationBaseEffect,
 ) -> Result<Vec<CoreEvent>> {
-    let (basis, motion) = collect_observation_basis(&payload)?;
+    let (basis, cursor_color_probe_generations, motion) = collect_observation_basis(&payload)?;
     Ok(vec![CoreEvent::ObservationBaseCollected(
         ObservationBaseCollectedEvent {
-            request: payload.request,
+            observation_id: payload.request.observation_id(),
             basis,
+            cursor_color_probe_generations,
             motion,
         },
     )])

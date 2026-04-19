@@ -26,8 +26,7 @@ use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationMotion;
-use crate::core::state::ObservationRequest;
-use crate::core::state::ObservationSnapshot;
+use crate::core::state::PendingObservation;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::types::CursorCol;
@@ -79,57 +78,49 @@ fn ready_state() -> CoreState {
     CoreState::default().with_runtime(runtime).into_primed()
 }
 
-fn observation_basis(
-    request: &ObservationRequest,
-    position: Option<CursorPosition>,
-    observed_at: u64,
-) -> ObservationBasis {
+fn observation_basis(position: Option<CursorPosition>, observed_at: u64) -> ObservationBasis {
     ObservationBasis::new(
-        request.observation_id(),
         Millis::new(observed_at),
         "n".to_string(),
         position,
         CursorLocation::new(11, 22, 3, 4),
         ViewportSnapshot::new(CursorRow(40), CursorCol(120)),
     )
+    .with_buffer_revision(Some(0))
 }
 
-fn refresh_required_probe_report(request: &ObservationRequest) -> CoreEvent {
+fn refresh_required_probe_report(request: &PendingObservation) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorReady {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
         reuse: ProbeReuse::RefreshRequired,
         sample: Some(CursorColorSample::new(0x00AB_CDEF)),
     })
 }
 
-fn compatible_probe_report(request: &ObservationRequest) -> CoreEvent {
+fn compatible_probe_report(request: &PendingObservation) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorReady {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::CursorColor.request_id(request.observation_id()),
         reuse: ProbeReuse::Compatible,
         sample: Some(CursorColorSample::new(0x00AB_CDEF)),
     })
 }
 
-fn background_probe_report(request: &ObservationRequest, viewport: ViewportSnapshot) -> CoreEvent {
+fn background_probe_report(request: &PendingObservation, _viewport: ViewportSnapshot) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundReady {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
         reuse: ProbeReuse::Exact,
-        batch: BackgroundProbeBatch::empty(viewport),
+        batch: BackgroundProbeBatch::empty(),
     })
 }
 
 fn background_chunk_probe_report(
-    request: &ObservationRequest,
+    request: &PendingObservation,
     chunk: &BackgroundProbeChunk,
     _viewport: ViewportSnapshot,
 ) -> CoreEvent {
     let allowed_mask = vec![false; chunk.len()];
     CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
         observation_id: request.observation_id(),
-        probe_request_id: ProbeKind::Background.request_id(request.observation_id()),
         chunk: chunk.clone(),
         allowed_mask: BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
     })
@@ -151,7 +142,7 @@ impl CoreDispatchTestContext {
         replace_core_state(state);
     }
 
-    fn dispatch_external_cursor_ingress_to_queue(&self, observed_at: u64) -> ObservationRequest {
+    fn dispatch_external_cursor_ingress_to_queue(&self, observed_at: u64) -> PendingObservation {
         dispatch_core_event(external_cursor_demand(observed_at), &mut |effects| {
             // CONTEXT: `stage_batch` reports whether this enqueue operation also needs to arm
             // the drain edge; it does not signal whether the batch was accepted.
@@ -165,24 +156,21 @@ impl CoreDispatchTestContext {
         .expect("ingress dispatch should commit reducer state");
 
         current_core_state()
-            .active_observation_request()
+            .pending_observation()
             .cloned()
-            .expect("ingress dispatch should leave an active observation request")
+            .expect("ingress dispatch should leave an active pending observation")
     }
 
-    fn observing_state_after_base_collection(&self) -> (ObservationRequest, CoreState) {
+    fn observing_state_after_base_collection(&self) -> (PendingObservation, CoreState) {
         self.set_core_state(ready_state_with_cursor_color_probe());
         let observing = reduce_core_event(&current_core_state(), external_cursor_demand(25)).next;
         let request = observing
-            .active_observation_request()
+            .pending_observation()
             .cloned()
-            .expect("active observation request");
+            .expect("active pending observation");
         let based = reduce_core_event(
             &observing,
-            observation_base_collected(
-                &request,
-                observation_basis(&request, Some(cursor(7, 8)), 26),
-            ),
+            observation_base_collected(&request, observation_basis(Some(cursor(7, 8)), 26)),
         );
         self.set_core_state(based.next.clone());
         (request, based.next)
@@ -215,10 +203,16 @@ fn external_cursor_demand(observed_at: u64) -> CoreEvent {
     })
 }
 
-fn observation_base_collected(request: &ObservationRequest, basis: ObservationBasis) -> CoreEvent {
+fn observation_base_collected(request: &PendingObservation, basis: ObservationBasis) -> CoreEvent {
     CoreEvent::ObservationBaseCollected(ObservationBaseCollectedEvent {
-        request: request.clone(),
+        observation_id: request.observation_id(),
         basis,
+        cursor_color_probe_generations: request.requested_probes().cursor_color().then_some(
+            crate::core::state::CursorColorProbeGenerations::new(
+                crate::core::types::Generation::INITIAL,
+                crate::core::types::Generation::INITIAL,
+            ),
+        ),
         motion: ObservationMotion::default(),
     })
 }
@@ -237,17 +231,15 @@ fn ready_state_with_cursor_and_background_probes() -> CoreState {
     ready_state().with_runtime(runtime)
 }
 
-fn install_background_probe_plan(request: &ObservationRequest, basis: &ObservationBasis) {
-    let observation =
-        ObservationSnapshot::new(request.clone(), basis.clone(), ObservationMotion::default())
-            .with_background_probe_plan(BackgroundProbePlan::from_cells(sparse_probe_cells(
-                basis.viewport(),
-                2050,
-            )));
-    let next = current_core_state()
-        .with_latest_exact_cursor_position(Some(cursor(7, 8)))
-        .with_active_observation(Some(observation))
-        .expect("active observation state");
+fn install_background_probe_plan(basis: &ObservationBasis) {
+    let mut next = current_core_state().with_latest_exact_cursor_position(Some(cursor(7, 8)));
+    let Some(active_observation) = next.observation_mut() else {
+        panic!("active observation state");
+    };
+    *active_observation.probes_mut().background_mut() =
+        crate::core::state::BackgroundProbeState::from_plan(BackgroundProbePlan::from_cells(
+            sparse_probe_cells(basis.viewport(), 2050),
+        ));
     replace_core_state(next);
 }
 

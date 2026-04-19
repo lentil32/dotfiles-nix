@@ -74,9 +74,10 @@ impl RuntimeState {
     }
 
     pub(crate) fn start_animation_towards_target(&mut self) {
+        let target_corners = self.target_corners();
         self.velocity_corners = initial_velocity(
             &self.current_corners,
-            &self.target_corners,
+            &target_corners,
             self.config.anticipation,
         );
         self.spring_velocity_corners = self.velocity_corners;
@@ -116,6 +117,7 @@ impl RuntimeState {
         });
     }
 
+    #[cfg(test)]
     pub(crate) fn refresh_settling_target(
         &mut self,
         position: Point,
@@ -351,7 +353,7 @@ impl RuntimeState {
     }
 
     pub(crate) fn tracked_location_ref(&self) -> Option<&CursorLocation> {
-        self.transient.tracked_location.as_ref()
+        self.target.tracked_location.as_ref()
     }
 
     pub(crate) fn update_tracking(&mut self, location: &CursorLocation) {
@@ -361,9 +363,9 @@ impl RuntimeState {
                 || tracked.window_dimensions_changed(location)
         });
         if surface_changed {
-            self.transient.retarget_epoch = self.transient.retarget_epoch.wrapping_add(1);
+            self.target.retarget_epoch = self.target.retarget_epoch.wrapping_add(1);
         }
-        self.transient.tracked_location = Some(location.clone());
+        self.target.tracked_location = Some(location.clone());
     }
 
     pub(crate) fn apply_scroll_shift(
@@ -380,31 +382,31 @@ impl RuntimeState {
             translate_corners(&mut self.current_corners, clamp_translation, 0.0);
         }
         self.previous_center = center(&self.current_corners);
-        translate_corners(&mut self.trail_origin_corners, -row_shift, -col_shift);
-        if !self.particles().is_empty() {
-            self.materialize_preview_particles();
+        translate_corners(&mut self.trail.origin_corners, -row_shift, -col_shift);
+        if !self.particles.is_empty() {
             for particle in &mut self.particles {
                 particle.position.row -= row_shift;
                 particle.position.col -= col_shift;
             }
         }
-        self.invalidate_cached_particle_artifacts();
+        self.purge_cached_particle_artifacts();
     }
 
     pub(crate) fn apply_step_output(&mut self, output: StepOutput) {
         self.current_corners = output.current_corners;
         self.velocity_corners = output.velocity_corners;
         self.spring_velocity_corners = output.spring_velocity_corners;
-        self.trail_elapsed_ms = output.trail_elapsed_ms;
+        self.trail.elapsed_ms = output.trail_elapsed_ms;
         self.previous_center = output.previous_center;
         self.rng_state = output.rng_state;
         self.set_particles_vec(output.particles);
     }
 
     pub(crate) fn settle_at_target(&mut self) {
-        self.current_corners = self.target_corners;
-        self.trail_origin_corners = self.target_corners;
-        self.trail_elapsed_ms = [0.0; 4];
+        let target_corners = self.target_corners();
+        self.current_corners = target_corners;
+        self.trail.origin_corners = target_corners;
+        self.trail.elapsed_ms = [0.0; 4];
         self.velocity_corners = zero_velocity_corners();
         self.spring_velocity_corners = zero_velocity_corners();
     }

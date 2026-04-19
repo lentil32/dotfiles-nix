@@ -33,8 +33,6 @@ pub(super) fn centerline_tail_u(sample_index: usize, sample_count: usize) -> f64
     if sample_count <= 1 {
         return 0.0;
     }
-    // Surprising: centerline samples are oldest -> newest, so comet-tail distance from head
-    // uses the reversed progress coordinate.
     let progress = sample_index as f64 / (sample_count.saturating_sub(1) as f64);
     (1.0 - progress).clamp(0.0, 1.0)
 }

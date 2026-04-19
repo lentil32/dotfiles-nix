@@ -132,8 +132,7 @@ pub(super) fn collect_background_report(payload: &RequestProbeEffect) -> CoreEve
         Err(err) => {
             crate::events::logging::warn(&format!("background probe viewport read failed: {err}"));
             return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
-                observation_id: payload.observation_basis.observation_id(),
-                probe_request_id: payload.probe_request_id,
+                observation_id: payload.observation_id,
                 failure: ProbeFailure::ShellReadFailed,
             });
         }
@@ -141,10 +140,9 @@ pub(super) fn collect_background_report(payload: &RequestProbeEffect) -> CoreEve
 
     if current_viewport != payload.observation_basis.viewport() {
         return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundReady {
-            observation_id: payload.observation_basis.observation_id(),
-            probe_request_id: payload.probe_request_id,
+            observation_id: payload.observation_id,
             reuse: crate::core::state::ProbeReuse::RefreshRequired,
-            batch: BackgroundProbeBatch::empty(payload.observation_basis.viewport()),
+            batch: BackgroundProbeBatch::empty(),
         });
     }
 
@@ -152,8 +150,7 @@ pub(super) fn collect_background_report(payload: &RequestProbeEffect) -> CoreEve
     let Some(chunk) = payload.background_chunk.as_ref() else {
         crate::events::logging::warn("background probe missing chunk request");
         return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
-            observation_id: payload.observation_basis.observation_id(),
-            probe_request_id: payload.probe_request_id,
+            observation_id: payload.observation_id,
             failure: ProbeFailure::ShellReadFailed,
         });
     };
@@ -162,16 +159,14 @@ pub(super) fn collect_background_report(payload: &RequestProbeEffect) -> CoreEve
         Err(err) => {
             crate::events::logging::warn(&format!("background sampling failed: {err}"));
             return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
-                observation_id: payload.observation_basis.observation_id(),
-                probe_request_id: payload.probe_request_id,
+                observation_id: payload.observation_id,
                 failure: ProbeFailure::ShellReadFailed,
             });
         }
     };
 
     CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
-        observation_id: payload.observation_basis.observation_id(),
-        probe_request_id: payload.probe_request_id,
+        observation_id: payload.observation_id,
         chunk: chunk.clone(),
         allowed_mask,
     })
@@ -182,21 +177,17 @@ mod tests {
     use super::*;
     use crate::core::state::BackgroundProbePlan;
     use crate::core::state::BackgroundProbeProgress;
-    use crate::core::types::CursorCol;
-    use crate::core::types::CursorRow;
-    use crate::core::types::ViewportSnapshot;
     use crate::lua::i64_from_object_typed;
     use crate::types::ScreenCell;
     use pretty_assertions::assert_eq;
 
     #[test]
     fn populate_background_probe_request_writes_header_and_cell_pairs() {
-        let viewport = ViewportSnapshot::new(CursorRow(10), CursorCol(10));
         let plan = BackgroundProbePlan::from_cells(vec![
             ScreenCell::new(7, 8).expect("cell"),
             ScreenCell::new(9, 10).expect("cell"),
         ]);
-        let chunk = BackgroundProbeProgress::new(viewport, plan)
+        let chunk = BackgroundProbeProgress::new(plan)
             .next_chunk()
             .expect("chunk should build");
         let mut request = Vec::new();

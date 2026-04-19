@@ -40,6 +40,8 @@ pub(super) enum ScheduledWorkUnit {
     EffectOnlyStep(EffectOnlyStep),
 }
 
+// Shell-queue-only copies of continuable effects. These payloads may survive until
+// the next scheduled drain step, but they must not become reducer-owned state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct EffectOnlyAgenda {
     pub(super) steps: VecDeque<EffectOnlyStep>,

@@ -8,20 +8,20 @@ use crate::types::Point;
 
 impl RuntimeState {
     fn reset_trail_timeline_from_current(&mut self) {
-        self.trail_origin_corners = self.current_corners;
-        self.trail_elapsed_ms = [0.0; 4];
+        self.trail.origin_corners = self.current_corners;
+        self.trail.elapsed_ms = [0.0; 4];
     }
 
     fn sync_cursor_geometry(&mut self, position: Point, shape: CursorShape) {
-        if self.transient.target_position != position {
-            self.transient.retarget_epoch = self.transient.retarget_epoch.wrapping_add(1);
+        if self.target.position != position || self.target.shape != shape {
+            self.target.retarget_epoch = self.target.retarget_epoch.wrapping_add(1);
         }
         let corners = shape.corners(position);
         self.current_corners = corners;
-        self.trail_origin_corners = corners;
-        self.target_corners = corners;
-        self.trail_elapsed_ms = [0.0; 4];
-        self.transient.target_position = position;
+        self.trail.origin_corners = corners;
+        self.trail.elapsed_ms = [0.0; 4];
+        self.target.position = position;
+        self.target.shape = shape;
         self.previous_center = center(&self.current_corners);
     }
 
@@ -80,15 +80,13 @@ impl RuntimeState {
     }
 
     pub(crate) fn set_target(&mut self, position: Point, shape: CursorShape) {
-        let next_target_corners = shape.corners(position);
-        let target_changed = self.transient.target_position != position
-            || self.target_corners != next_target_corners;
+        let target_changed = self.target.position != position || self.target.shape != shape;
         if target_changed {
-            self.transient.retarget_epoch = self.transient.retarget_epoch.wrapping_add(1);
+            self.target.retarget_epoch = self.target.retarget_epoch.wrapping_add(1);
             self.reset_trail_timeline_from_current();
         }
-        self.transient.target_position = position;
-        self.target_corners = next_target_corners;
+        self.target.position = position;
+        self.target.shape = shape;
     }
 
     pub(crate) fn initialize_cursor(
