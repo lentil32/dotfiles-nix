@@ -4,6 +4,7 @@
 //! payloads that the host bridge can apply, keeping missing-basis failures as
 //! explicit lifecycle results instead of hidden exceptions.
 
+use crate::config::normalize_color_levels;
 use crate::core::state::BackgroundProbeBatch;
 #[cfg(test)]
 use crate::core::state::RetainedProjection;
@@ -90,7 +91,7 @@ impl PaletteSpec {
     }
 
     pub(crate) fn color_levels(&self) -> u32 {
-        self.color_levels.max(1)
+        normalize_color_levels(self.color_levels)
     }
 
     pub(crate) fn gamma(&self) -> f64 {

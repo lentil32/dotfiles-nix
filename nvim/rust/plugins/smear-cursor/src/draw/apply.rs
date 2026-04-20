@@ -11,6 +11,7 @@ use super::window_pool::TabPoolSnapshot;
 use super::window_pool::WindowPlacement;
 use super::window_pool::{self};
 use super::with_render_tab;
+use crate::config::normalize_color_levels;
 use crate::core::realization::RealizationProjection;
 use crate::core::realization::RealizationSpan;
 use crate::events::editor_viewport_for_bounds;
@@ -182,7 +183,7 @@ pub(crate) fn prepare_apply_plan<'a>(
     color_levels: u32,
     projection: &'a RealizationProjection,
 ) -> PreparedApplyPlan<'a> {
-    let group_names = highlight_group_names(color_levels.max(1));
+    let group_names = highlight_group_names(normalize_color_levels(color_levels));
 
     PreparedApplyPlan {
         group_names,
@@ -443,6 +444,7 @@ mod tests {
     use super::mark_span_satisfied;
     use super::prepare_apply_plan;
     use super::record_release_summary;
+    use crate::config::MAX_COLOR_LEVELS;
     use crate::core::realization::LogicalRaster;
     use crate::core::realization::realize_logical_raster;
     use crate::draw::render_plan::CellOp;
@@ -550,6 +552,27 @@ mod tests {
                 .group_names()
                 .normal_name(HighlightLevel::from_raw_clamped(4)),
             "SmearCursor4"
+        );
+    }
+
+    #[test]
+    fn prepare_apply_plan_clamps_color_levels_to_the_palette_cap() {
+        let projection = realize_logical_raster(&LogicalRaster::new(None, Arc::default()));
+        let prepared = prepare_apply_plan(MAX_COLOR_LEVELS.saturating_add(32), &projection);
+
+        assert_eq!(
+            prepared
+                .group_names()
+                .normal_name(HighlightLevel::from_raw_clamped(MAX_COLOR_LEVELS)),
+            format!("SmearCursor{MAX_COLOR_LEVELS}")
+        );
+        assert_eq!(
+            prepared
+                .group_names()
+                .normal_name(HighlightLevel::from_raw_clamped(
+                    MAX_COLOR_LEVELS.saturating_add(1)
+                )),
+            format!("SmearCursor{MAX_COLOR_LEVELS}")
         );
     }
 }

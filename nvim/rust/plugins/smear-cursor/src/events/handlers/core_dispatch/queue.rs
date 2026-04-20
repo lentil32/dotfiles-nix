@@ -285,9 +285,7 @@ impl ScheduledEffectQueueState {
     }
 
     pub(super) fn reset(&mut self) {
-        self.items.clear();
-        self.pending_work_units = 0;
-        self.drain_scheduled = false;
+        *self = Self::default();
     }
 }
 

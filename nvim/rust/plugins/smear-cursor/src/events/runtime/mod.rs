@@ -45,6 +45,7 @@ pub(super) use engine::read_engine_state;
 pub(super) use engine::reclaim_background_probe_request_scratch;
 pub(super) use engine::reclaim_conceal_regions_scratch;
 pub(super) use engine::refresh_editor_viewport_cache;
+pub(super) use engine::release_cleanup_cold_shell_storage;
 pub(super) use engine::resolved_current_buffer_event_policy;
 #[cfg(test)]
 pub(super) use engine::set_core_state;

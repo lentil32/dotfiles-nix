@@ -199,8 +199,7 @@ impl ShellState {
         self.buffer_perf_telemetry_cache.clear();
         self.buffer_text_revision_cache.clear();
         self.next_host_callback_id = 0;
-        self.background_probe_request_scratch = Vec::new();
-        self.conceal_regions_scratch = Vec::new();
+        self.release_cleanup_cold_storage();
         self.clear_real_cursor_visibility();
     }
 
@@ -210,11 +209,7 @@ impl ShellState {
 
     fn reclaim_background_probe_request_scratch(&mut self, mut scratch: Vec<Object>) {
         scratch.clear();
-        if self.background_probe_request_scratch.capacity() < scratch.capacity() {
-            self.background_probe_request_scratch = scratch;
-        } else {
-            self.background_probe_request_scratch.clear();
-        }
+        self.background_probe_request_scratch = scratch;
     }
 
     fn take_conceal_regions_scratch(&mut self) -> Vec<ConcealRegion> {
@@ -223,16 +218,22 @@ impl ShellState {
 
     fn reclaim_conceal_regions_scratch(&mut self, mut scratch: Vec<ConcealRegion>) {
         scratch.clear();
-        if self.conceal_regions_scratch.capacity() < scratch.capacity() {
-            self.conceal_regions_scratch = scratch;
-        } else {
-            self.conceal_regions_scratch.clear();
-        }
+        self.conceal_regions_scratch = scratch;
+    }
+
+    fn release_cleanup_cold_storage(&mut self) {
+        self.background_probe_request_scratch = Vec::new();
+        self.conceal_regions_scratch = Vec::new();
     }
 
     #[cfg(test)]
     fn background_probe_request_scratch_capacity(&self) -> usize {
         self.background_probe_request_scratch.capacity()
+    }
+
+    #[cfg(test)]
+    fn conceal_regions_scratch_capacity(&self) -> usize {
+        self.conceal_regions_scratch.capacity()
     }
 
     const fn real_cursor_visibility(&self) -> Option<RealCursorVisibility> {

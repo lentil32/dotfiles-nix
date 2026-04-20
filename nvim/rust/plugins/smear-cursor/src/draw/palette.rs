@@ -1,4 +1,5 @@
 use super::render_plan::HighlightLevel;
+use crate::config::normalize_color_levels;
 use crate::core::realization::PaletteSpec;
 use crate::events::schedule_guarded;
 use crate::events::warn;
@@ -145,12 +146,24 @@ fn with_palette_state_mut<R>(mutator: impl FnOnce(&mut PaletteState) -> R) -> R 
 }
 
 pub(crate) fn clear_highlight_cache() {
-    with_palette_state_mut(|state| {
+    let stale_groups = with_palette_state_mut(|state| {
+        let stale_groups = stale_highlight_group_names(
+            state
+                .palette_key
+                .as_ref()
+                .map(|palette| palette.color_levels),
+            None,
+        );
         state.raw_input_key = None;
         state.palette_key = None;
         state.pending_refresh_key = None;
         state.group_name_cache.clear();
+        stale_groups
     });
+
+    if let Err(err) = clear_highlight_groups(stale_groups.iter().map(String::as_str)) {
+        warn(&format!("palette cache clear failed: {err}"));
+    }
 }
 
 fn lookup_cached_palette(
@@ -202,8 +215,31 @@ fn inverted_hl_group_name(level: u32) -> String {
     format!("SmearCursorInverted{level}")
 }
 
+fn stale_highlight_group_names(
+    previous_levels: Option<u32>,
+    retained_levels: Option<u32>,
+) -> Vec<String> {
+    let Some(previous_levels) = previous_levels.map(normalize_color_levels) else {
+        return Vec::new();
+    };
+    let retained_levels = retained_levels.map(normalize_color_levels).unwrap_or(0);
+    if previous_levels <= retained_levels {
+        return Vec::new();
+    }
+
+    let stale_capacity = usize::try_from(previous_levels.saturating_sub(retained_levels))
+        .unwrap_or(0)
+        .saturating_mul(2);
+    let mut names = Vec::with_capacity(stale_capacity);
+    for level in retained_levels.saturating_add(1)..=previous_levels {
+        names.push(hl_group_name(level));
+        names.push(inverted_hl_group_name(level));
+    }
+    names
+}
+
 pub(crate) fn highlight_group_names(color_levels: u32) -> HighlightGroupNames {
-    let levels = color_levels.max(1);
+    let levels = normalize_color_levels(color_levels);
     if let Some(cached) = with_palette_state(|state| state.group_name_cache.get(&levels).cloned()) {
         return cached;
     }
@@ -420,6 +456,31 @@ fn cterm_color_at_level(cterm_cursor_colors: Option<&[u16]>, level: u32) -> Opti
     colors.get(index).copied()
 }
 
+#[cfg(not(test))]
+fn clear_highlight_group(group: &str) -> Result<()> {
+    let args = Array::from_iter([
+        Object::from(0_i64),
+        Object::from(group),
+        Object::from(Dictionary::new()),
+    ]);
+    let _: Object = api::call_function("nvim_set_hl", args)?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn clear_highlight_groups<'a>(groups: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    for group in groups {
+        clear_highlight_group(group)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn clear_highlight_groups<'a>(groups: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let _ = groups.into_iter().count();
+    Ok(())
+}
+
 fn set_highlight_group(
     group: &str,
     foreground: &str,
@@ -463,6 +524,12 @@ fn refresh_highlight_palette_for_spec(
     raw_input_key: RawPaletteInputKey,
 ) -> Result<PaletteRefreshOutcome> {
     let resolved_palette = resolve_palette_for_spec(spec);
+    let previous_levels = with_palette_state(|state| {
+        state
+            .palette_key
+            .as_ref()
+            .map(|palette_key| palette_key.color_levels)
+    });
     {
         let cache_lookup = with_palette_state_mut(|state| {
             if state.pending_refresh_key != Some(raw_input_key)
@@ -542,6 +609,8 @@ fn refresh_highlight_palette_for_spec(
             cterm_level_color,
         )?;
     }
+    let stale_groups = stale_highlight_group_names(previous_levels, Some(color_levels));
+    clear_highlight_groups(stale_groups.iter().map(String::as_str))?;
 
     with_palette_state_mut(|state| {
         state.raw_input_key = Some(raw_input_key);
@@ -593,6 +662,7 @@ pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MAX_COLOR_LEVELS;
     use crate::core::types::StrokeId;
     use crate::position::RenderPoint;
     use crate::test_support::proptest::ModeCase;
@@ -1050,6 +1120,41 @@ mod tests {
             assert_eq!(state.palette_key, None);
             assert_eq!(state.pending_refresh_key, None);
         });
+    }
+
+    #[test]
+    fn stale_highlight_group_names_clears_only_the_truncated_palette_tail() {
+        assert_eq!(
+            stale_highlight_group_names(Some(5), Some(3)),
+            vec![
+                "SmearCursor4".to_string(),
+                "SmearCursorInverted4".to_string(),
+                "SmearCursor5".to_string(),
+                "SmearCursorInverted5".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_highlight_group_names_clears_every_managed_group_on_full_reset() {
+        assert_eq!(
+            stale_highlight_group_names(Some(2), None),
+            vec![
+                "SmearCursor1".to_string(),
+                "SmearCursorInverted1".to_string(),
+                "SmearCursor2".to_string(),
+                "SmearCursorInverted2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn highlight_group_names_clamps_requests_to_the_palette_cap() {
+        let capped = highlight_group_names(MAX_COLOR_LEVELS);
+        let oversized = highlight_group_names(MAX_COLOR_LEVELS.saturating_add(32));
+
+        assert_eq!(oversized.normal, capped.normal);
+        assert_eq!(oversized.inverted, capped.inverted);
     }
 
     #[test]

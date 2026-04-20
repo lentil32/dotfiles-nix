@@ -117,9 +117,16 @@ pub(super) fn reduce_render_cleanup_applied(
     let next_cleanup_target_budget = render_cleanup_idle_target_budget(&state.runtime().config);
     let next_cleanup_max_prune_per_tick =
         render_cleanup_max_prune_per_tick(&state.runtime().config);
-    let next_state = state
+    let cleanup_converged_to_cold = !matches!(
+        previous_cleanup,
+        crate::core::state::RenderCleanupState::Cold
+    ) && payload.action.converges_to_cold();
+    let mut next_state = state
         .with_realization(next_realization)
         .with_render_cleanup(next_cleanup);
+    if cleanup_converged_to_cold {
+        next_state.runtime_mut().release_cleanup_cold_storage();
+    }
     if matches!(
         payload.action,
         crate::core::event::RenderCleanupAppliedAction::SoftCleared
@@ -283,10 +290,9 @@ pub(super) fn reduce_effect_failed(state: CoreState, payload: EffectFailedEvent)
     let state = if let Some(retry_demand) = retry_demand {
         state
             .map_demand_queue(|queue| {
-                if retry_demand.is_cursor()
-                    && queue
-                        .latest_cursor()
-                        .is_some_and(|queued| queued.seq() >= retry_demand.seq())
+                if queue
+                    .queued(retry_demand.kind())
+                    .is_some_and(|queued| queued.seq() >= retry_demand.seq())
                 {
                     (queue, ())
                 } else {

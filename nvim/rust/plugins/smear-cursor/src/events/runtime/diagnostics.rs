@@ -169,10 +169,7 @@ pub(crate) fn perf_diagnostics_report() -> String {
             let demand_queue = core.demand_queue();
             let pool = render_pool_diagnostics();
             let _delayed_ingress_due_at = ingress_policy.pending_delay_until();
-            let queue_cursor_pending = demand_queue.latest_cursor().is_some();
-            let queue_ordered_backlog = demand_queue.ordered().len();
-            let queue_total_backlog =
-                queue_ordered_backlog.saturating_add(usize::from(queue_cursor_pending));
+            let queue_total_backlog = demand_queue.pending_len();
             let post_burst_convergence_last_ms =
                 if loop_diag.metrics.post_burst_convergence.samples > 0 {
                     Some(loop_diag.metrics.post_burst_convergence.last_ms)

@@ -4,6 +4,7 @@ use super::super::logging::trace_lazy;
 use super::super::logging::unhide_real_cursor;
 use super::super::logging::warn;
 use super::super::runtime::now_ms;
+use super::super::runtime::release_cleanup_cold_shell_storage;
 use super::super::runtime::to_core_millis;
 use super::super::trace::realization_plan_summary;
 use super::super::trace::render_cleanup_execution_summary;
@@ -182,6 +183,13 @@ pub(crate) fn execute_core_apply_render_cleanup_effect(
     }
 
     let action = outcome.action();
+    if action.converges_to_cold()
+        && let Err(err) = release_cleanup_cold_shell_storage()
+    {
+        warn(&format!(
+            "engine state re-entered while releasing cold cleanup shell storage; keeping retained scratch: {err}"
+        ));
+    }
     trace_lazy(|| {
         format!(
             "render_cleanup_result observed_at={} execution={} action={:?} visual_change={}",

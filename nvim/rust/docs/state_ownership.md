@@ -104,7 +104,7 @@ It does not assign new owners; it only labels how the stored fields are used.
 | Fact | Class | Owner / derivation |
 | --- | --- | --- |
 | Lifecycle freshness | authoritative | `CoreState.generation` owns reducer freshness for cache invalidation and effect staleness. |
-| Queued ingress demands | authoritative | `ProtocolSharedState.demand` owns `ExternalDemand`s waiting for protocol service. |
+| Queued ingress demands | authoritative | `ProtocolSharedState.demand` owns at most one pending `ExternalDemand` per `ExternalDemandKind`; same-kind ingress coalesces in place while dequeue order is still derived from the occupied demand sequences. |
 | Timer generations and tokens | authoritative | `ProtocolSharedState.timers` owns timer-slot generations and armed/disarmed lifecycle state. `TimerToken`s are derived views of the currently armed slots, not a second stored owner. |
 | Recovery retry policy | authoritative | `ProtocolSharedState.recovery_policy` owns retry counters and backoff state. |
 | Ingress throttling and autocmd policy | authoritative | `ProtocolSharedState.ingress_policy` owns delay and cursor-autocmd policy. |
@@ -207,6 +207,9 @@ Important weak forms are normalized or rejected at one boundary each:
 - `apply_runtime_options()` validates and normalizes `time_interval` before
   `RuntimeState.config` is mutated, so frame timing has one accepted boundary
   key and one retained owner.
+- `apply_runtime_options()` validates and normalizes `color_levels` before
+  `RuntimeState.config` is mutated, so palette quantization stays bounded at
+  the config boundary instead of inflating draw-time highlight state.
 - `RenderCleanupState::scheduled()` clamps cleanup delays before the scheduler
   stores them in `ProtocolSharedState.render_cleanup`.
 - `TimerState::{arm, active_token, clear_matching}` keep timer generation and

@@ -154,11 +154,21 @@ fn queued_demand_summary(demand: &QueuedDemand) -> String {
     format!("ready({})", external_demand_summary(demand.as_demand()))
 }
 
+fn queued_demand_kind_summary(queue: &DemandQueue, kind: ExternalDemandKind) -> String {
+    queue
+        .queued(kind)
+        .map_or_else(|| "none".to_string(), queued_demand_summary)
+}
+
 fn demand_queue_summary(queue: &DemandQueue) -> String {
-    let cursor = queue
-        .latest_cursor()
-        .map_or_else(|| "none".to_string(), queued_demand_summary);
-    format!("cursor={} ordered={}", cursor, queue.ordered().len())
+    format!(
+        "cursor={} mode={} buffer={} boundary={} total={}",
+        queued_demand_kind_summary(queue, ExternalDemandKind::ExternalCursor),
+        queued_demand_kind_summary(queue, ExternalDemandKind::ModeChanged),
+        queued_demand_kind_summary(queue, ExternalDemandKind::BufferEntered),
+        queued_demand_kind_summary(queue, ExternalDemandKind::BoundaryRefresh),
+        queue.pending_len(),
+    )
 }
 
 fn pending_observation_summary(pending: &PendingObservation) -> String {

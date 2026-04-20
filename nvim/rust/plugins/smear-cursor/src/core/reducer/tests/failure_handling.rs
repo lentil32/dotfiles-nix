@@ -352,6 +352,43 @@ fn effect_failure_during_observing_retries_from_the_root_demand() {
 }
 
 #[test]
+fn effect_failure_keeps_a_newer_same_kind_pending_demand_instead_of_requeueing_the_older_one() {
+    let observing = reduce(
+        &ready_state(),
+        external_demand_event(ExternalDemandKind::ModeChanged, 25),
+    )
+    .next;
+    let queued = reduce(
+        &observing,
+        external_demand_event(ExternalDemandKind::ModeChanged, 26),
+    )
+    .next;
+
+    let failed = reduce(
+        &queued,
+        Event::EffectFailed(EffectFailedEvent {
+            proposal_id: None,
+            observed_at: Millis::new(27),
+        }),
+    );
+
+    pretty_assert_eq!(
+        failed
+            .next
+            .demand_queue()
+            .queued(ExternalDemandKind::ModeChanged),
+        Some(&crate::core::state::QueuedDemand::ready(
+            ExternalDemand::new(
+                IngressSeq::new(2),
+                ExternalDemandKind::ModeChanged,
+                Millis::new(26),
+                BufferPerfClass::Full,
+            )
+        ))
+    );
+}
+
+#[test]
 fn render_plan_failure_increments_retry_attempt_and_clamps_recovery_backoff() {
     let ready = ready_state_with_observation(cursor(4, 9))
         .with_recovery_policy(RecoveryPolicyState::default().with_retry_attempt(4));

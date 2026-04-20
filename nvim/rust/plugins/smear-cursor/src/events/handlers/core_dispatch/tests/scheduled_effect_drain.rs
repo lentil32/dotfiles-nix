@@ -184,6 +184,19 @@ fn drain_failure_resets_the_scheduled_queue_state() {
 }
 
 #[test]
+fn reset_scheduled_effect_queue_releases_retained_deque_capacity() {
+    let harness = ScheduledDrainHarness::new();
+    harness.stage_non_coalescible_backlog(40);
+
+    assert!(queued_item_capacity() > 0);
+
+    reset_scheduled_effect_queue();
+
+    harness.assert_disarmed();
+    assert_eq!(queued_item_capacity(), 0);
+}
+
+#[test]
 fn scheduled_drain_budget_shapes_match_expected_tables() {
     #[derive(Clone, Copy)]
     enum BudgetKind {

@@ -310,6 +310,12 @@ pub(crate) fn reclaim_conceal_regions_scratch(
     })
 }
 
+pub(crate) fn release_cleanup_cold_shell_storage() -> EngineAccessResult<()> {
+    mutate_engine_state(|state| {
+        state.shell.release_cleanup_cold_storage();
+    })
+}
+
 pub(crate) fn reset_core_state() {
     if let Err(err) = mutate_engine_state(|state| {
         let runtime = state.core_state_mut().take_runtime();

@@ -4,6 +4,7 @@ use crate::position::ScreenCell;
 use crate::types::CursorCellShape;
 use nvim_oxi::Result;
 use nvim_oxi::api;
+use nvim_oxi::api::opts::BufDeleteOpts;
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::opts::OptionScope;
 use nvim_oxi::api::opts::SetExtmarkOpts;
@@ -21,8 +22,10 @@ use std::panic::resume_unwind;
 mod apply;
 mod palette;
 pub(crate) mod render_plan;
+mod resource_guard;
 mod window_pool;
 pub(crate) use apply::ApplyMetrics;
+pub(crate) use resource_guard::StagedFloatingWindow;
 pub(crate) use window_pool::AllocationPolicy;
 pub(crate) use window_pool::CompactRenderWindowsSummary;
 #[cfg(test)]
@@ -32,7 +35,8 @@ pub(crate) use window_pool::WindowPlacement;
 
 pub(crate) const EXTMARK_ID: u32 = 999;
 const PREPAINT_EXTMARK_ID: u32 = 1001;
-const PREPAINT_BUFFER_FILETYPE: &str = "smear-cursor-prepaint";
+pub(crate) const PREPAINT_BUFFER_TYPE: &str = "nofile";
+pub(crate) const PREPAINT_BUFFER_FILETYPE: &str = "smear-cursor-prepaint";
 const PREPAINT_HIGHLIGHT_GROUP: &str = "Cursor";
 pub(crate) const BRAILLE_CODE_MIN: i64 = 0x2800;
 pub(crate) const BRAILLE_CODE_MAX: i64 = 0x28FF;
@@ -212,6 +216,17 @@ pub(crate) fn initialize_floating_buffer_options(
     api::set_option_value("bufhidden", "wipe", &opts)?;
     api::set_option_value("swapfile", false, &opts)?;
     Ok(())
+}
+
+pub(crate) fn delete_floating_buffer(buffer: api::Buffer, context: &str) {
+    if !buffer.is_valid() {
+        return;
+    }
+
+    let opts = BufDeleteOpts::builder().force(true).build();
+    if let Err(err) = buffer.delete(&opts) {
+        log_draw_error(context, &err);
+    }
 }
 
 pub(crate) fn initialize_floating_window_options(
@@ -478,7 +493,7 @@ fn prepaint_reconfigure_window_config(placement: PrepaintPlacement, hidden: bool
 }
 
 fn initialize_prepaint_buffer_options(buffer: &api::Buffer) -> Result<()> {
-    initialize_floating_buffer_options(buffer, "nofile", PREPAINT_BUFFER_FILETYPE)
+    initialize_floating_buffer_options(buffer, PREPAINT_BUFFER_TYPE, PREPAINT_BUFFER_FILETYPE)
 }
 
 fn initialize_prepaint_window_options(window: &api::Window) -> Result<()> {
@@ -486,8 +501,9 @@ fn initialize_prepaint_window_options(window: &api::Window) -> Result<()> {
 }
 
 fn close_prepaint_overlay(namespace_id: u32, overlay: PrepaintOverlay) {
-    if let Some(mut buffer) = handles::valid_buffer(i64::from(overlay.buffer_id))
-        && let Err(err) = buffer.clear_namespace(namespace_id, 0..)
+    let mut buffer = handles::valid_buffer(i64::from(overlay.buffer_id));
+    if let Some(existing_buffer) = buffer.as_mut()
+        && let Err(err) = existing_buffer.clear_namespace(namespace_id, 0..)
     {
         log_draw_error("clear prepaint namespace", &err);
     }
@@ -495,6 +511,9 @@ fn close_prepaint_overlay(namespace_id: u32, overlay: PrepaintOverlay) {
         && let Err(err) = window.close(true)
     {
         log_draw_error("close prepaint overlay window", &err);
+    }
+    if let Some(buffer) = buffer.take() {
+        delete_floating_buffer(buffer, "delete prepaint overlay buffer");
     }
 }
 
@@ -507,12 +526,16 @@ fn valid_prepaint_handles(overlay: PrepaintOverlay) -> Option<(api::Window, api:
 fn create_prepaint_overlay(
     placement: PrepaintPlacement,
 ) -> Result<(PrepaintOverlay, api::Window, api::Buffer)> {
-    let buffer = api::create_buf(false, true)?;
-    initialize_prepaint_buffer_options(&buffer)?;
-
+    let mut staged = StagedFloatingWindow::new(
+        api::create_buf(false, true)?,
+        "delete staged prepaint buffer",
+        "close staged prepaint window",
+    );
+    initialize_prepaint_buffer_options(staged.buffer())?;
     let config = prepaint_open_window_config(placement, false);
-    let window = api::open_win(&buffer, false, &config)?;
-    initialize_prepaint_window_options(&window)?;
+    staged.attach_window(api::open_win(staged.buffer(), false, &config)?);
+    initialize_prepaint_window_options(staged.window())?;
+    let (window, buffer) = staged.into_window_and_buffer();
 
     let overlay = PrepaintOverlay {
         window_id: window.handle(),
@@ -563,18 +586,15 @@ pub(crate) fn prepaint_cursor_cell(
     let requested_placement = PrepaintPlacement { cell, zindex };
 
     with_prepaint_by_tab(|prepaint_by_tab| {
-        let previous = prepaint_by_tab.remove(&tab_handle);
-        let mut overlay = previous;
-        let mut handles_pair = previous.and_then(valid_prepaint_handles);
+        let mut overlay_slot =
+            resource_guard::PrepaintOverlaySlot::detach(prepaint_by_tab, tab_handle);
+        let mut handles_pair = overlay_slot.valid_handles();
 
         if handles_pair.is_none() {
-            if let Some(stale) = previous {
-                close_prepaint_overlay(namespace_id, stale);
-            }
-
+            overlay_slot.close_overlay(namespace_id);
             match create_prepaint_overlay(requested_placement) {
                 Ok((created_overlay, window, buffer)) => {
-                    overlay = Some(created_overlay);
+                    overlay_slot.replace(created_overlay);
                     handles_pair = Some((window, buffer));
                 }
                 Err(err) => {
@@ -589,7 +609,9 @@ pub(crate) fn prepaint_cursor_cell(
             return;
         };
 
-        if overlay.is_some_and(|entry| entry.placement != Some(requested_placement))
+        if overlay_slot
+            .overlay()
+            .is_some_and(|entry| entry.placement != Some(requested_placement))
             && let Err(err) = set_existing_floating_window_config(
                 &mut window,
                 prepaint_reconfigure_window_config(requested_placement, false),
@@ -597,12 +619,10 @@ pub(crate) fn prepaint_cursor_cell(
         {
             log_draw_error("reconfigure prepaint overlay window", &err);
 
-            if let Some(stale) = overlay {
-                close_prepaint_overlay(namespace_id, stale);
-            }
+            overlay_slot.close_overlay(namespace_id);
             match create_prepaint_overlay(requested_placement) {
                 Ok((created_overlay, _recreated_window, recreated_buffer)) => {
-                    overlay = Some(created_overlay);
+                    overlay_slot.replace(created_overlay);
                     buffer = recreated_buffer;
                 }
                 Err(recreate_err) => {
@@ -623,13 +643,11 @@ pub(crate) fn prepaint_cursor_cell(
             .build();
         if let Err(err) = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts) {
             log_draw_error("set prepaint overlay payload", &err);
+            overlay_slot.close_overlay(namespace_id);
             return;
         }
 
-        if let Some(mut entry) = overlay {
-            entry.placement = Some(requested_placement);
-            prepaint_by_tab.insert(tab_handle, entry);
-        }
+        overlay_slot.set_placement(requested_placement);
     });
 }
 
@@ -640,12 +658,16 @@ pub(crate) fn clear_prepaint_for_current_tab(namespace_id: u32) {
 
     let tab_handle = apply::current_tab_handle();
     with_prepaint_by_tab(|prepaint_by_tab| {
-        let Some(entry) = prepaint_by_tab.get_mut(&tab_handle) else {
-            return;
+        let mut overlay_slot =
+            resource_guard::PrepaintOverlaySlot::detach(prepaint_by_tab, tab_handle);
+        let hide_succeeded = match overlay_slot.overlay_mut() {
+            Some(entry) => hide_prepaint_overlay(namespace_id, entry),
+            None => return,
         };
-        if !hide_prepaint_overlay(namespace_id, entry) {
-            let _ = prepaint_by_tab.remove(&tab_handle);
+        if hide_succeeded {
+            return;
         }
+        overlay_slot.close_overlay(namespace_id);
     });
 }
 
@@ -791,12 +813,14 @@ pub(crate) fn purge_render_windows(namespace_id: u32) -> PurgeRenderWindowsSumma
             window_pool::purge_tab(tab_windows, namespace_id);
         }
     }
+    // Hard purge is the terminal draw reset. Sweep any host objects that escaped tracking after a
+    // failed mutation so disable/recovery never depends on bookkeeping remaining intact.
+    let _ = window_pool::close_orphan_smear_windows(namespace_id);
     summary
 }
 
 pub(crate) fn recover_all_namespaces(namespace_id: u32) {
     let _ = purge_render_windows(namespace_id);
-    let _ = window_pool::close_orphan_render_windows(namespace_id);
     let _ = apply::clear_namespace_all_buffers(namespace_id);
 }
 
@@ -828,6 +852,8 @@ mod tests {
     use crate::types::RenderFrame;
     use crate::types::RenderStepSample;
     use crate::types::StaticRenderConfig;
+    use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::LazyLock;
     use std::sync::Mutex;
@@ -1126,6 +1152,55 @@ mod tests {
         );
         assert!(summary.had_visual_change());
         assert_eq!(prepaint_count_for_test(), 0);
+
+        reset_draw_context_for_test();
+    }
+
+    #[test]
+    fn detached_prepaint_slot_restores_overlay_when_transaction_aborts() {
+        let _guard = DRAW_TEST_MUTEX
+            .lock()
+            .expect("draw test mutex should not be poisoned");
+        reset_draw_context_for_test();
+
+        let overlay = PrepaintOverlay {
+            window_id: -19,
+            buffer_id: -119,
+            placement: None,
+        };
+        insert_prepaint_overlay_for_test(17, overlay);
+
+        super::with_prepaint_by_tab(|prepaint_by_tab| {
+            let _slot = super::resource_guard::PrepaintOverlaySlot::detach(prepaint_by_tab, 17);
+        });
+
+        assert_eq!(prepaint_snapshot_for_test(), HashMap::from([(17, overlay)]));
+
+        reset_draw_context_for_test();
+    }
+
+    #[test]
+    fn detached_prepaint_slot_drops_tracking_after_overlay_close() {
+        let _guard = DRAW_TEST_MUTEX
+            .lock()
+            .expect("draw test mutex should not be poisoned");
+        reset_draw_context_for_test();
+
+        insert_prepaint_overlay_for_test(
+            17,
+            PrepaintOverlay {
+                window_id: -19,
+                buffer_id: -119,
+                placement: None,
+            },
+        );
+
+        super::with_prepaint_by_tab(|prepaint_by_tab| {
+            let mut slot = super::resource_guard::PrepaintOverlaySlot::detach(prepaint_by_tab, 17);
+            slot.close_overlay(99);
+        });
+
+        assert_eq!(prepaint_snapshot_for_test(), HashMap::new());
 
         reset_draw_context_for_test();
     }

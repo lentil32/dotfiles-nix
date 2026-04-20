@@ -262,6 +262,10 @@ fn queued_work_count() -> usize {
     with_scheduled_effect_queue(|queue| queue.pending_work_units)
 }
 
+fn queued_item_capacity() -> usize {
+    with_scheduled_effect_queue(|queue| queue.items.capacity())
+}
+
 fn queued_front_work_item() -> Option<ScheduledWorkUnit> {
     with_scheduled_effect_queue(|queue| match queue.items.front()? {
         ScheduledWorkItem::EffectBatch(effects) => {

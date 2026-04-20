@@ -1,4 +1,5 @@
 use crate::config::BufferPerfMode;
+use crate::config::MAX_COLOR_LEVELS;
 use crate::lua::ParsedOptionalChange;
 use crate::lua::bool_from_object;
 use crate::lua::f64_from_object;
@@ -22,6 +23,9 @@ use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
 use nvim_oxi::Result;
 use nvim_oxi::String as NvimString;
+
+const COLOR_LEVELS_RANGE_ERROR: &str = "positive integer between 1 and 256";
+const CTERM_CURSOR_COLORS_LENGTH_ERROR: &str = "array[integer] with at most 256 entries";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OptionKey {
@@ -308,6 +312,20 @@ where
         .transpose()
 }
 
+fn parse_optional_color_levels<V>(value: V, key: &'static str) -> Result<Option<u32>>
+where
+    V: Into<Option<Object>>,
+{
+    parse_optional_positive_u32(value, key)?
+        .map(|parsed| {
+            if parsed > MAX_COLOR_LEVELS {
+                return Err(invalid_key(key, COLOR_LEVELS_RANGE_ERROR));
+            }
+            Ok(parsed)
+        })
+        .transpose()
+}
+
 pub(super) fn parse_optional_filetypes_disabled<V>(
     value: V,
     key: &'static str,
@@ -353,8 +371,11 @@ where
         let entry_key = format!("{key}[{}]", index + 1);
         colors.push(validated_cterm_color_index(&entry_key, entry)?);
     }
-    let color_levels =
-        u32::try_from(colors.len()).map_err(|_| invalid_key(key, "array length too large"))?;
+    let color_levels = u32::try_from(colors.len())
+        .map_err(|_| invalid_key(key, CTERM_CURSOR_COLORS_LENGTH_ERROR))?;
+    if color_levels > MAX_COLOR_LEVELS {
+        return Err(invalid_key(key, CTERM_CURSOR_COLORS_LENGTH_ERROR));
+    }
     Ok(Some(OptionalChange::Set(CtermCursorColorsPatch {
         colors,
         color_levels,
@@ -914,7 +935,7 @@ define_option_spec!(
     spec_color_levels_apply,
     SPEC_COLOR_LEVELS,
     ColorLevels,
-    parse_optional_positive_u32,
+    parse_optional_color_levels,
     rendering.color_levels
 );
 define_option_spec!(

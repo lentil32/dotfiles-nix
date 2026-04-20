@@ -29,11 +29,7 @@ impl RuntimeState {
 
     pub(crate) fn reclaim_preview_particles_scratch(&mut self, mut scratch: Vec<Particle>) {
         scratch.clear();
-        if self.caches.scratch_buffers.preview_particles.capacity() < scratch.capacity() {
-            self.caches.scratch_buffers.preview_particles = scratch;
-        } else {
-            self.caches.scratch_buffers.preview_particles.clear();
-        }
+        self.caches.scratch_buffers.preview_particles = scratch;
     }
 
     pub(crate) fn take_render_step_samples_scratch(&mut self) -> Vec<RenderStepSample> {
@@ -45,15 +41,15 @@ impl RuntimeState {
         mut scratch: Vec<RenderStepSample>,
     ) {
         scratch.clear();
-        if self.caches.scratch_buffers.render_step_samples.capacity() < scratch.capacity() {
-            self.caches.scratch_buffers.render_step_samples = scratch;
-        } else {
-            self.caches.scratch_buffers.render_step_samples.clear();
-        }
+        self.caches.scratch_buffers.render_step_samples = scratch;
     }
 
     pub(crate) fn purge_cached_particle_artifacts(&mut self) {
         self.caches.particle_artifacts.cached = None;
+    }
+
+    pub(crate) fn release_cleanup_cold_storage(&mut self) {
+        self.caches = Default::default();
     }
 
     pub(crate) fn static_render_config(&self) -> Arc<StaticRenderConfig> {
@@ -486,6 +482,8 @@ impl RuntimeState {
     pub(crate) fn clear_runtime_state(&mut self) {
         self.clear_initialization();
         self.reset_transient_state();
+        self.clear_particles();
+        self.release_cleanup_cold_storage();
     }
 
     pub(crate) fn disable(&mut self) {

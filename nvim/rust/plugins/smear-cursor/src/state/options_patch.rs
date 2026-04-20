@@ -1,6 +1,7 @@
 use super::RuntimeState;
 use crate::config::BufferPerfMode;
 use crate::config::RuntimeConfig;
+use crate::config::normalize_color_levels;
 use crate::lua::invalid_key;
 use nvim_oxi::Result;
 use std::collections::HashSet;
@@ -300,7 +301,7 @@ impl ColorOptionsPatch {
         if let Some(change) = self.cterm_cursor_colors.take() {
             match change {
                 OptionalChange::Set(patch) => {
-                    config.color_levels = patch.color_levels;
+                    config.color_levels = normalize_color_levels(patch.color_levels);
                     config.cterm_cursor_colors = Some(patch.colors);
                 }
                 OptionalChange::Clear => config.cterm_cursor_colors = None,
@@ -382,12 +383,14 @@ impl ParticleOptionsPatch {
 
 impl RenderingOptionsPatch {
     fn apply(&mut self, config: &mut RuntimeConfig) {
+        if let Some(color_levels) = self.color_levels.take() {
+            config.color_levels = normalize_color_levels(color_levels);
+        }
         apply_config_fields!(
             config,
             self,
             [
                 never_draw_over_target,
-                color_levels,
                 gamma,
                 tail_duration_ms,
                 spatial_coherence_weight,

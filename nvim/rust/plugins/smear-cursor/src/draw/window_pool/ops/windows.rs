@@ -59,8 +59,9 @@ fn initialize_window_options(window: &api::Window) -> Result<()> {
 }
 
 fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {
-    if let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id)
-        && let Err(err) = buffer.clear_namespace(namespace_id, 0..)
+    let mut buffer = buffer_from_handle_i32(handles.buffer_id);
+    if let Some(existing_buffer) = buffer.as_mut()
+        && let Err(err) = existing_buffer.clear_namespace(namespace_id, 0..)
     {
         log_draw_error("clear cached render namespace", &err);
     }
@@ -68,5 +69,8 @@ fn close_cached_window(namespace_id: u32, handles: WindowBufferHandle) {
         && let Err(err) = window.close(true)
     {
         log_draw_error("close cached render window", &err);
+    }
+    if let Some(buffer) = buffer.take() {
+        crate::draw::delete_floating_buffer(buffer, "delete cached render buffer");
     }
 }

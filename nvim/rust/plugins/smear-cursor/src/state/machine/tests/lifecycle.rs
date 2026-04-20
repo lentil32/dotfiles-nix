@@ -1,6 +1,37 @@
 use super::*;
 use proptest::collection::vec;
 
+fn runtime_with_retained_motion_and_purgeable_storage() -> RuntimeState {
+    let tracked = location(11, 22, 33, 44);
+    let mut state = RuntimeState::default();
+    state.config.delay_event_to_smear = 27.0;
+    state.config.hide_target_hack = false;
+    state.commit_runtime_config_update();
+    state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
+    replace_target_preserving_tracking(&mut state, point(8.0, 9.0), default_shape());
+    state.start_animation_towards_target();
+    state.set_color_at_cursor(Some(0x00AB_CDEF));
+    state.record_observed_mode(/*current_is_cmdline*/ true);
+    state.set_last_tick_ms(Some(99.0));
+    state.apply_step_output(sample_step_output());
+    let _ = state.shared_particle_screen_cells();
+    state.reclaim_preview_particles_scratch(Vec::with_capacity(8));
+    let mut scratch = state.take_render_step_samples_scratch();
+    scratch.reserve(4);
+    scratch.push(RenderStepSample::new([point(13.0, 14.0); 4], 16.0));
+    state.reclaim_render_step_samples_scratch(scratch);
+    state
+}
+
+fn runtime_after_cold_clear(source: &RuntimeState) -> RuntimeState {
+    let mut expected = source.clone();
+    expected.clear_initialization();
+    expected.reset_transient_state();
+    expected.clear_particles();
+    expected.caches = Default::default();
+    expected
+}
+
 proptest! {
     #![proptest_config(stateful_config())]
 
@@ -154,6 +185,56 @@ fn reset_transient_state_restores_default_transient_fields() {
     state.reset_transient_state();
 
     pretty_assertions::assert_eq!(state.semantic_view(), expected.semantic_view());
+}
+
+#[test]
+fn clear_runtime_state_cold_resets_motion_and_releases_retained_storage() {
+    let mut state = runtime_with_retained_motion_and_purgeable_storage();
+    let expected = runtime_after_cold_clear(&state);
+
+    assert!(state.preview_particles_scratch_capacity() > 0);
+    assert!(state.render_step_samples_scratch_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_index_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_cells_capacity() > 0);
+    assert!(state.particle_aggregation_scratch_screen_cells_capacity() > 0);
+    assert!(state.has_cached_aggregated_particle_cells());
+    assert!(state.has_cached_particle_screen_cells());
+
+    state.clear_runtime_state();
+
+    pretty_assertions::assert_eq!(state.semantic_view(), expected.semantic_view());
+    assert_eq!(state.preview_particles_scratch_capacity(), 0);
+    assert_eq!(state.render_step_samples_scratch_capacity(), 0);
+    assert_eq!(state.particle_aggregation_scratch_index_capacity(), 0);
+    assert_eq!(state.particle_aggregation_scratch_cells_capacity(), 0);
+    assert_eq!(
+        state.particle_aggregation_scratch_screen_cells_capacity(),
+        0
+    );
+    assert!(!state.has_cached_aggregated_particle_cells());
+    assert!(!state.has_cached_particle_screen_cells());
+}
+
+#[test]
+fn disable_cold_resets_runtime_and_marks_plugin_disabled() {
+    let mut state = runtime_with_retained_motion_and_purgeable_storage();
+    let mut expected = runtime_after_cold_clear(&state);
+    expected.set_enabled(false);
+
+    state.disable();
+
+    pretty_assertions::assert_eq!(state.semantic_view(), expected.semantic_view());
+    assert_eq!(state.preview_particles_scratch_capacity(), 0);
+    assert_eq!(state.render_step_samples_scratch_capacity(), 0);
+    assert_eq!(state.particle_aggregation_scratch_index_capacity(), 0);
+    assert_eq!(state.particle_aggregation_scratch_cells_capacity(), 0);
+    assert_eq!(
+        state.particle_aggregation_scratch_screen_cells_capacity(),
+        0
+    );
+    assert!(!state.has_cached_aggregated_particle_cells());
+    assert!(!state.has_cached_particle_screen_cells());
+    assert!(!state.is_enabled());
 }
 
 #[test]

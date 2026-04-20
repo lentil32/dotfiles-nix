@@ -16,6 +16,17 @@ pub(crate) const DEFAULT_BLOCK_ASPECT_RATIO: f64 = 2.0;
 // refreshed `perf/window-pool-cap-current.md` snapshot peaks at 18 requested
 // windows with zero cap hits, so 64 still leaves more than 3x burst headroom.
 pub(crate) const DEFAULT_MAX_KEPT_WINDOWS: usize = 64;
+pub(crate) const MAX_COLOR_LEVELS: u32 = 256;
+
+pub(crate) const fn normalize_color_levels(color_levels: u32) -> u32 {
+    if color_levels == 0 {
+        1
+    } else if color_levels > MAX_COLOR_LEVELS {
+        MAX_COLOR_LEVELS
+    } else {
+        color_levels
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) enum BufferPerfMode {

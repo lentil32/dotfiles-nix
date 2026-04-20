@@ -4,6 +4,7 @@ use super::super::options::validated_non_negative_f64;
 use super::cterm_colors_object;
 use super::options_dict;
 use crate::config::BufferPerfMode;
+use crate::config::MAX_COLOR_LEVELS;
 use crate::state::OptionalChange;
 use crate::state::RuntimeOptionsPatch;
 use crate::test_support::proptest::pure_config;
@@ -108,6 +109,42 @@ fn runtime_options_patch_parse_cterm_cursor_colors_sets_color_levels() {
     };
     assert_eq!(colors.colors, vec![17_u16, 42_u16]);
     assert_eq!(colors.color_levels, 2_u32);
+}
+
+#[test]
+fn runtime_options_patch_parse_rejects_color_levels_above_the_bounded_palette_cap() {
+    let opts = options_dict([(
+        "color_levels",
+        Object::from(i64::from(MAX_COLOR_LEVELS) + 1),
+    )]);
+
+    let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
+    assert!(
+        err.to_string().contains("color_levels"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.to_string().contains("between 1 and 256"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn runtime_options_patch_parse_rejects_cterm_cursor_colors_arrays_above_the_palette_cap() {
+    let colors = Array::from_iter(
+        (0..=MAX_COLOR_LEVELS).map(|index| Object::from(i64::from((index % 256) as u16))),
+    );
+    let opts = options_dict([("cterm_cursor_colors", Object::from(colors))]);
+
+    let err = RuntimeOptionsPatch::parse(&opts).expect_err("expected parse failure");
+    assert!(
+        err.to_string().contains("cterm_cursor_colors"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.to_string().contains("at most 256 entries"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

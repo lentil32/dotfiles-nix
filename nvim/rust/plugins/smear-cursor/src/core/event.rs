@@ -108,6 +108,16 @@ pub(crate) enum RenderCleanupAppliedAction {
     HardPurged,
 }
 
+impl RenderCleanupAppliedAction {
+    pub(crate) const fn converges_to_cold(self) -> bool {
+        match self {
+            Self::SoftCleared => false,
+            Self::CompactedToBudget { converged_to_idle } => converged_to_idle,
+            Self::HardPurged => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct RenderCleanupAppliedEvent {
     pub(crate) observed_at: Millis,

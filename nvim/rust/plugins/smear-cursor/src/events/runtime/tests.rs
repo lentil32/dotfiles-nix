@@ -69,6 +69,48 @@ fn normalize_handles(mut handles: Vec<CoreTimerHandle>) -> Vec<CoreTimerHandle> 
     handles
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ShellScratchStorageResidency {
+    background_probe_request_retained: bool,
+    conceal_regions_retained: bool,
+}
+
+impl ShellScratchStorageResidency {
+    const RETAINED: Self = Self {
+        background_probe_request_retained: true,
+        conceal_regions_retained: true,
+    };
+
+    const RELEASED: Self = Self {
+        background_probe_request_retained: false,
+        conceal_regions_retained: false,
+    };
+}
+
+fn shell_scratch_storage_residency() -> EngineAccessResult<ShellScratchStorageResidency> {
+    read_engine_state(|state| ShellScratchStorageResidency {
+        background_probe_request_retained: state.shell.background_probe_request_scratch_capacity()
+            > 0,
+        conceal_regions_retained: state.shell.conceal_regions_scratch_capacity() > 0,
+    })
+}
+
+fn prime_shell_scratch_storage() {
+    let mut background_scratch =
+        take_background_probe_request_scratch().expect("background scratch should be available");
+    background_scratch.reserve(32);
+    background_scratch.push(Object::from(7_i64));
+    reclaim_background_probe_request_scratch(background_scratch)
+        .expect("background scratch should be reclaimable");
+
+    let mut conceal_scratch =
+        take_conceal_regions_scratch().expect("conceal region scratch should be available");
+    conceal_scratch.reserve(32);
+    conceal_scratch.push(crate::test_support::conceal_region(3, 4, 11, 1));
+    reclaim_conceal_regions_scratch(conceal_scratch)
+        .expect("conceal region scratch should be reclaimable");
+}
+
 #[test]
 fn core_timer_handles_smoke_replace_lookup_and_clear_each_slot() {
     let mut handles = CoreTimerHandles::default();
@@ -392,19 +434,7 @@ fn transient_reset_purges_shell_caches_and_core_timer_handles_but_preserves_host
 
 #[test]
 fn transient_reset_drops_shell_scratch_buffer_capacity() {
-    let mut background_scratch =
-        take_background_probe_request_scratch().expect("background scratch should be available");
-    background_scratch.reserve(32);
-    background_scratch.push(Object::from(7_i64));
-    reclaim_background_probe_request_scratch(background_scratch)
-        .expect("background scratch should be reclaimable");
-
-    let mut conceal_scratch =
-        take_conceal_regions_scratch().expect("conceal region scratch should be available");
-    conceal_scratch.reserve(32);
-    conceal_scratch.push(crate::test_support::conceal_region(3, 4, 11, 1));
-    reclaim_conceal_regions_scratch(conceal_scratch)
-        .expect("conceal region scratch should be reclaimable");
+    prime_shell_scratch_storage();
 
     reset_transient_event_state();
 
@@ -421,6 +451,23 @@ fn transient_reset_drops_shell_scratch_buffer_capacity() {
     assert_eq!(conceal_scratch.capacity(), 0);
     reclaim_conceal_regions_scratch(conceal_scratch)
         .expect("conceal region scratch should be reclaimable");
+}
+
+#[test]
+fn cleanup_cold_storage_release_drops_shell_scratch_buffer_capacity() {
+    prime_shell_scratch_storage();
+
+    assert_eq!(
+        shell_scratch_storage_residency().expect("engine state access should succeed"),
+        ShellScratchStorageResidency::RETAINED
+    );
+
+    release_cleanup_cold_shell_storage().expect("cold cleanup storage release should succeed");
+
+    assert_eq!(
+        shell_scratch_storage_residency().expect("engine state access should succeed"),
+        ShellScratchStorageResidency::RELEASED
+    );
 }
 
 #[test]

@@ -76,3 +76,40 @@ fn newest_queued_cursor_replaces_the_older_pending_cursor_demand() {
         ))
     );
 }
+
+#[test]
+fn newest_queued_mode_change_replaces_the_older_pending_mode_change() {
+    let ready = ready_state();
+    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ModeChanged, 20);
+    let queued = reduce(
+        &observing,
+        external_demand_event(ExternalDemandKind::ModeChanged, 21),
+    );
+
+    let replaced = reduce(
+        &queued.next,
+        external_demand_event(ExternalDemandKind::ModeChanged, 22),
+    );
+
+    pretty_assert_eq!(replaced.next.demand_queue().pending_len(), 1);
+    pretty_assert_eq!(
+        replaced
+            .next
+            .demand_queue()
+            .queued(ExternalDemandKind::ModeChanged),
+        Some(&crate::core::state::QueuedDemand::ready(
+            ExternalDemand::new(
+                IngressSeq::new(3),
+                ExternalDemandKind::ModeChanged,
+                Millis::new(22),
+                BufferPerfClass::Full,
+            )
+        ))
+    );
+    pretty_assert_eq!(
+        replaced.effects,
+        vec![Effect::RecordEventLoopMetric(
+            EventLoopMetricEffect::IngressCoalesced,
+        )]
+    );
+}

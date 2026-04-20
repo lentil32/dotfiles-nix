@@ -332,43 +332,53 @@ fn window_buffer(window: &api::Window) -> Option<api::Buffer> {
     }
 }
 
-fn buffer_has_render_marker(buffer: &api::Buffer) -> bool {
+fn buffer_matches_marker(buffer: &api::Buffer, filetype_marker: &str, buftype_marker: &str) -> bool {
     let opts = OptionOpts::builder().buf(buffer.clone()).build();
     let Ok(filetype) = api::get_option_value::<String>("filetype", &opts) else {
         return false;
     };
-    if filetype != RENDER_BUFFER_FILETYPE {
+    if filetype != filetype_marker {
         return false;
     }
 
     let Ok(buftype) = api::get_option_value::<String>("buftype", &opts) else {
         return false;
     };
-    buftype == RENDER_BUFFER_TYPE
+    buftype == buftype_marker
 }
 
-pub(crate) fn close_orphan_render_windows(namespace_id: u32) -> usize {
+fn buffer_has_smear_marker(buffer: &api::Buffer) -> bool {
+    buffer_matches_marker(buffer, RENDER_BUFFER_FILETYPE, RENDER_BUFFER_TYPE)
+        || buffer_matches_marker(
+            buffer,
+            crate::draw::PREPAINT_BUFFER_FILETYPE,
+            crate::draw::PREPAINT_BUFFER_TYPE,
+        )
+}
+
+pub(crate) fn close_orphan_smear_windows(namespace_id: u32) -> usize {
     let _event_ignore = EventIgnoreGuard::set_all();
     let mut closed_windows = 0_usize;
     for window in api::list_wins() {
         let Some(mut buffer) = window_buffer(&window) else {
             continue;
         };
-        if !buffer_has_render_marker(&buffer) {
+        if !buffer_has_smear_marker(&buffer) {
             continue;
         }
 
         if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
-            log_draw_error("clear orphan render namespace", &err);
+            log_draw_error("clear orphan smear namespace", &err);
         }
         match window.close(true) {
             Ok(()) => {
                 closed_windows = closed_windows.saturating_add(1);
             }
             Err(err) => {
-                log_draw_error("close orphan render window", &err);
+                log_draw_error("close orphan smear window", &err);
             }
         }
+        crate::draw::delete_floating_buffer(buffer, "delete orphan smear buffer");
     }
     closed_windows
 }

@@ -2,6 +2,7 @@ use super::super::options::apply_runtime_options;
 use super::cterm_colors_object;
 use super::options_dict;
 use crate::config::BufferPerfMode;
+use crate::config::MAX_COLOR_LEVELS;
 use crate::config::RuntimeConfig;
 use crate::state::ColorOptionsPatch;
 use crate::state::OptionalChange;
@@ -168,6 +169,42 @@ fn runtime_options_patch_explicit_color_levels_override_cterm_array_length() {
     );
     assert_eq!(state.config.cterm_cursor_colors, Some(vec![17_u16, 42_u16]));
     assert_eq!(state.config.color_levels, 9_u32);
+}
+
+#[test]
+fn runtime_options_patch_apply_clamps_manual_oversized_color_levels() {
+    let mut state = RuntimeState::default();
+    let patch = RuntimeOptionsPatch {
+        rendering: crate::state::RenderingOptionsPatch {
+            color_levels: Some(MAX_COLOR_LEVELS.saturating_add(32)),
+            ..crate::state::RenderingOptionsPatch::default()
+        },
+        ..RuntimeOptionsPatch::default()
+    };
+
+    patch.apply(&mut state);
+
+    assert_eq!(state.config.color_levels, MAX_COLOR_LEVELS);
+}
+
+#[test]
+fn runtime_options_patch_apply_clamps_manual_oversized_cterm_palette_levels() {
+    let mut state = RuntimeState::default();
+    let patch = RuntimeOptionsPatch {
+        color: ColorOptionsPatch {
+            cterm_cursor_colors: Some(OptionalChange::Set(crate::state::CtermCursorColorsPatch {
+                colors: vec![17_u16, 42_u16],
+                color_levels: MAX_COLOR_LEVELS.saturating_add(32),
+            })),
+            ..ColorOptionsPatch::default()
+        },
+        ..RuntimeOptionsPatch::default()
+    };
+
+    patch.apply(&mut state);
+
+    assert_eq!(state.config.cterm_cursor_colors, Some(vec![17_u16, 42_u16]));
+    assert_eq!(state.config.color_levels, MAX_COLOR_LEVELS);
 }
 
 #[test]
