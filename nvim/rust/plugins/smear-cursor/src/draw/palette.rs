@@ -1,3 +1,9 @@
+use self::core::DeferredPaletteRefreshPoll;
+use self::core::HighlightPaletteKey;
+use self::core::PaletteCoreState;
+use self::core::PaletteRefreshDisposition;
+use self::core::PaletteRefreshPlan;
+use self::core::RawPaletteInputKey;
 use super::render_plan::HighlightLevel;
 use crate::config::normalize_color_levels;
 use crate::core::realization::PaletteSpec;
@@ -23,38 +29,11 @@ use std::panic::catch_unwind;
 use std::panic::resume_unwind;
 use std::sync::Arc;
 
+mod core;
+
 const DEFAULT_CURSOR_COLOR: u32 = 0x00D0_D0D0;
 const DEFAULT_BACKGROUND_COLOR: u32 = 0x0030_3030;
 const HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES: usize = 16;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct HighlightPaletteKey {
-    cursor_color: u32,
-    normal_background: Option<u32>,
-    transparent_fallback: u32,
-    non_inverted_blend: u8,
-    color_levels: u32,
-    gamma_bits: u64,
-    cterm_cursor_colors: Option<Vec<u16>>,
-    cterm_bg: Option<u16>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RawPaletteInputKey {
-    fingerprint: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ResolvedPalette<'a> {
-    cursor_color: u32,
-    normal_background: Option<u32>,
-    transparent_fallback: u32,
-    non_inverted_blend: u8,
-    color_levels: u32,
-    gamma_bits: u64,
-    cterm_cursor_colors: Option<&'a [u16]>,
-    cterm_bg: Option<u16>,
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct HighlightGroupNames {
@@ -78,20 +57,23 @@ impl HighlightGroupNames {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PaletteState {
-    raw_input_key: Option<RawPaletteInputKey>,
-    palette_key: Option<HighlightPaletteKey>,
-    pending_refresh_key: Option<RawPaletteInputKey>,
+    core: PaletteCoreState,
     group_name_cache: HashMap<u32, HighlightGroupNames>,
 }
 
 impl PaletteState {
     fn new() -> Self {
         Self {
-            raw_input_key: None,
-            palette_key: None,
-            pending_refresh_key: None,
+            core: PaletteCoreState::new(),
+            group_name_cache: HashMap::with_capacity(HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES),
+        }
+    }
+
+    fn new_with_epoch(deferred_refresh_epoch: u64) -> Self {
+        Self {
+            core: PaletteCoreState::new_with_epoch(deferred_refresh_epoch),
             group_name_cache: HashMap::with_capacity(HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES),
         }
     }
@@ -102,23 +84,7 @@ thread_local! {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PaletteCacheLookup {
-    RawHit,
-    ResolvedHit,
-    Miss,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PaletteRefreshDisposition {
-    Ready,
-    RefreshAlreadyPending,
-    BootstrapSynchronously,
-    ScheduleDeferred,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PaletteRefreshOutcome {
-    SkippedStale,
     ReusedCommitted,
     AppliedHighlights,
 }
@@ -138,7 +104,7 @@ fn with_palette_state_mut<R>(mutator: impl FnOnce(&mut PaletteState) -> R) -> R 
         match catch_unwind(AssertUnwindSafe(|| mutator(&mut state))) {
             Ok(output) => output,
             Err(panic_payload) => {
-                *state = PaletteState::new();
+                *state = PaletteState::new_with_epoch(state.core.epoch().wrapping_add(1));
                 resume_unwind(panic_payload);
             }
         }
@@ -147,63 +113,13 @@ fn with_palette_state_mut<R>(mutator: impl FnOnce(&mut PaletteState) -> R) -> R 
 
 pub(crate) fn clear_highlight_cache() {
     let stale_groups = with_palette_state_mut(|state| {
-        let stale_groups = stale_highlight_group_names(
-            state
-                .palette_key
-                .as_ref()
-                .map(|palette| palette.color_levels),
-            None,
-        );
-        state.raw_input_key = None;
-        state.palette_key = None;
-        state.pending_refresh_key = None;
+        let stale_groups = stale_highlight_group_names(state.core.clear(), None);
         state.group_name_cache.clear();
         stale_groups
     });
 
     if let Err(err) = clear_highlight_groups(stale_groups.iter().map(String::as_str)) {
         warn(&format!("palette cache clear failed: {err}"));
-    }
-}
-
-fn lookup_cached_palette(
-    state: &PaletteState,
-    raw_input_key: RawPaletteInputKey,
-    resolved_palette: Option<&ResolvedPalette<'_>>,
-) -> PaletteCacheLookup {
-    if state.raw_input_key == Some(raw_input_key) {
-        return PaletteCacheLookup::RawHit;
-    }
-
-    if let Some(resolved_palette) = resolved_palette
-        && state
-            .palette_key
-            .as_ref()
-            .is_some_and(|cached| resolved_palette_matches(cached, resolved_palette))
-    {
-        return PaletteCacheLookup::ResolvedHit;
-    }
-
-    PaletteCacheLookup::Miss
-}
-
-fn stage_palette_refresh(
-    state: &mut PaletteState,
-    raw_input_key: RawPaletteInputKey,
-) -> PaletteRefreshDisposition {
-    if state.raw_input_key == Some(raw_input_key) {
-        return PaletteRefreshDisposition::Ready;
-    }
-
-    if state.pending_refresh_key == Some(raw_input_key) {
-        return PaletteRefreshDisposition::RefreshAlreadyPending;
-    }
-
-    state.pending_refresh_key = Some(raw_input_key);
-    if state.palette_key.is_some() {
-        PaletteRefreshDisposition::ScheduleDeferred
-    } else {
-        PaletteRefreshDisposition::BootstrapSynchronously
     }
 }
 
@@ -397,57 +313,21 @@ fn raw_palette_input_key(frame: &RenderFrame) -> RawPaletteInputKey {
     raw_palette_input_key_for_spec(&PaletteSpec::from_frame(frame))
 }
 
-fn resolved_palette_matches(cached: &HighlightPaletteKey, resolved: &ResolvedPalette<'_>) -> bool {
-    cached.cursor_color == resolved.cursor_color
-        && cached.normal_background == resolved.normal_background
-        && cached.transparent_fallback == resolved.transparent_fallback
-        && cached.non_inverted_blend == resolved.non_inverted_blend
-        && cached.color_levels == resolved.color_levels
-        && cached.gamma_bits == resolved.gamma_bits
-        && cached.cterm_cursor_colors.as_deref() == resolved.cterm_cursor_colors
-        && cached.cterm_bg == resolved.cterm_bg
-}
-
-impl ResolvedPalette<'_> {
-    fn into_owned(self) -> HighlightPaletteKey {
-        HighlightPaletteKey {
-            cursor_color: self.cursor_color,
-            normal_background: self.normal_background,
-            transparent_fallback: self.transparent_fallback,
-            non_inverted_blend: self.non_inverted_blend,
-            color_levels: self.color_levels,
-            gamma_bits: self.gamma_bits,
-            cterm_cursor_colors: self.cterm_cursor_colors.map(<[u16]>::to_vec),
-            cterm_bg: self.cterm_bg,
-        }
-    }
-}
-
-fn resolve_palette_for_spec(spec: &PaletteSpec) -> ResolvedPalette<'_> {
-    let color_levels = spec.color_levels();
-    let gamma = spec.gamma();
-    let cursor_color = resolve_mode_cursor_color_for_spec(spec);
-    let normal_background = resolve_normal_background_for_spec(spec);
-    let transparent_fallback = resolve_transparent_fallback_for_spec(spec);
-    let non_inverted_blend = 0;
-    ResolvedPalette {
-        cursor_color,
-        normal_background,
-        transparent_fallback,
-        non_inverted_blend,
-        color_levels,
-        gamma_bits: gamma.to_bits(),
-        cterm_cursor_colors: spec.cterm_cursor_colors(),
+fn resolve_palette_key_for_spec(spec: &PaletteSpec) -> HighlightPaletteKey {
+    HighlightPaletteKey {
+        cursor_color: resolve_mode_cursor_color_for_spec(spec),
+        normal_background: resolve_normal_background_for_spec(spec),
+        transparent_fallback: resolve_transparent_fallback_for_spec(spec),
+        non_inverted_blend: 0,
+        color_levels: spec.color_levels(),
+        gamma_bits: spec.gamma_bits(),
+        cterm_cursor_colors: spec.cterm_cursor_colors().map(<[u16]>::to_vec),
         cterm_bg: spec.cterm_bg(),
     }
 }
 
-fn clear_pending_palette_refresh(raw_input_key: RawPaletteInputKey) {
-    with_palette_state_mut(|state| {
-        if state.pending_refresh_key == Some(raw_input_key) {
-            state.pending_refresh_key = None;
-        }
-    });
+fn poll_deferred_palette_refresh(expected_epoch: u64) -> DeferredPaletteRefreshPoll {
+    with_palette_state_mut(|state| state.core.poll_deferred_refresh(expected_epoch))
 }
 
 fn cterm_color_at_level(cterm_cursor_colors: Option<&[u16]>, level: u32) -> Option<u16> {
@@ -519,75 +399,32 @@ fn set_highlight_group(
     Ok(())
 }
 
-fn refresh_highlight_palette_for_spec(
+fn apply_highlight_palette(
     spec: &PaletteSpec,
-    raw_input_key: RawPaletteInputKey,
-) -> Result<PaletteRefreshOutcome> {
-    let resolved_palette = resolve_palette_for_spec(spec);
-    let previous_levels = with_palette_state(|state| {
-        state
-            .palette_key
-            .as_ref()
-            .map(|palette_key| palette_key.color_levels)
-    });
-    {
-        let cache_lookup = with_palette_state_mut(|state| {
-            if state.pending_refresh_key != Some(raw_input_key)
-                && state.raw_input_key != Some(raw_input_key)
-            {
-                return PaletteRefreshOutcome::SkippedStale;
-            }
-
-            match lookup_cached_palette(state, raw_input_key, Some(&resolved_palette)) {
-                PaletteCacheLookup::RawHit => {
-                    state.pending_refresh_key = None;
-                    PaletteRefreshOutcome::ReusedCommitted
-                }
-                PaletteCacheLookup::ResolvedHit => {
-                    state.raw_input_key = Some(raw_input_key);
-                    state.pending_refresh_key = None;
-                    PaletteRefreshOutcome::ReusedCommitted
-                }
-                PaletteCacheLookup::Miss => PaletteRefreshOutcome::AppliedHighlights,
-            }
-        });
-        match cache_lookup {
-            PaletteRefreshOutcome::SkippedStale => {
-                return Ok(PaletteRefreshOutcome::SkippedStale);
-            }
-            PaletteRefreshOutcome::ReusedCommitted => {
-                return Ok(PaletteRefreshOutcome::ReusedCommitted);
-            }
-            PaletteRefreshOutcome::AppliedHighlights => {}
-        }
-    }
-
-    let color_levels = resolved_palette.color_levels;
-    let interpolation_background = resolved_palette
+    palette_key: &HighlightPaletteKey,
+    previous_levels: Option<u32>,
+) -> Result<()> {
+    let interpolation_background = palette_key
         .normal_background
-        .unwrap_or(resolved_palette.transparent_fallback);
-    let group_names = highlight_group_names(color_levels);
-    let inverted_foreground = rgb_to_hex(
-        resolved_palette
-            .normal_background
-            .unwrap_or(resolved_palette.transparent_fallback),
-    );
+        .unwrap_or(palette_key.transparent_fallback);
+    let group_names = highlight_group_names(palette_key.color_levels);
+    let inverted_foreground = rgb_to_hex(interpolation_background);
     let inverted_ctermfg = spec.cterm_bg().or_else(|| {
-        resolved_palette
+        palette_key
             .cterm_cursor_colors
+            .as_deref()
             .and_then(|colors| colors.first().copied())
     });
 
-    for level in 1..=color_levels {
+    for level in 1..=palette_key.color_levels {
         let level_ref = HighlightLevel::from_raw_clamped(level);
-        let opacity = (f64::from(level) / f64::from(color_levels)).powf(1.0 / spec.gamma());
-        let blended = interpolate_color(
-            interpolation_background,
-            resolved_palette.cursor_color,
-            opacity,
-        );
+        let opacity =
+            (f64::from(level) / f64::from(palette_key.color_levels)).powf(1.0 / spec.gamma());
+        let blended =
+            interpolate_color(interpolation_background, palette_key.cursor_color, opacity);
         let blended_hex = rgb_to_hex(blended);
-        let cterm_level_color = cterm_color_at_level(resolved_palette.cterm_cursor_colors, level);
+        let cterm_level_color =
+            cterm_color_at_level(palette_key.cterm_cursor_colors.as_deref(), level);
         let hl_group = group_names.normal_name(level_ref);
         let inverted_hl_group = group_names.inverted_name(level_ref);
 
@@ -595,7 +432,7 @@ fn refresh_highlight_palette_for_spec(
             hl_group,
             blended_hex.as_str(),
             "none",
-            resolved_palette.non_inverted_blend,
+            palette_key.non_inverted_blend,
             cterm_level_color,
             None,
         )?;
@@ -609,41 +446,64 @@ fn refresh_highlight_palette_for_spec(
             cterm_level_color,
         )?;
     }
-    let stale_groups = stale_highlight_group_names(previous_levels, Some(color_levels));
-    clear_highlight_groups(stale_groups.iter().map(String::as_str))?;
 
-    with_palette_state_mut(|state| {
-        state.raw_input_key = Some(raw_input_key);
-        state.palette_key = Some(resolved_palette.into_owned());
-        state.pending_refresh_key = None;
-    });
+    let stale_groups = stale_highlight_group_names(previous_levels, Some(palette_key.color_levels));
+    clear_highlight_groups(stale_groups.iter().map(String::as_str))
+}
+
+fn refresh_highlight_palette_for_spec(
+    spec: &PaletteSpec,
+    raw_input_key: RawPaletteInputKey,
+) -> Result<PaletteRefreshOutcome> {
+    let palette_key = resolve_palette_key_for_spec(spec);
+    let previous_levels = match with_palette_state_mut(|state| {
+        state.core.prepare_refresh(raw_input_key, &palette_key)
+    }) {
+        PaletteRefreshPlan::ReuseCommitted => return Ok(PaletteRefreshOutcome::ReusedCommitted),
+        PaletteRefreshPlan::Apply { previous_levels } => previous_levels,
+    };
+
+    apply_highlight_palette(spec, &palette_key, previous_levels)?;
+    with_palette_state_mut(|state| state.core.commit_refresh(raw_input_key, palette_key));
     Ok(PaletteRefreshOutcome::AppliedHighlights)
 }
 
-fn defer_palette_refresh(spec: PaletteSpec, raw_input_key: RawPaletteInputKey) {
-    schedule_guarded(
-        "palette_refresh",
-        move || match refresh_highlight_palette_for_spec(&spec, raw_input_key) {
+fn drain_deferred_palette_refresh(expected_epoch: u64) {
+    loop {
+        let pending_refresh = match poll_deferred_palette_refresh(expected_epoch) {
+            DeferredPaletteRefreshPoll::Run(pending_refresh) => pending_refresh,
+            DeferredPaletteRefreshPoll::Idle | DeferredPaletteRefreshPoll::StaleEpoch => return,
+        };
+
+        match refresh_highlight_palette_for_spec(
+            &pending_refresh.spec,
+            pending_refresh.raw_input_key,
+        ) {
             Ok(PaletteRefreshOutcome::AppliedHighlights) => {
                 if let Err(err) = super::redraw() {
                     warn(&format!("palette refresh redraw failed: {err}"));
                 }
             }
-            Ok(PaletteRefreshOutcome::ReusedCommitted | PaletteRefreshOutcome::SkippedStale) => {}
-            Err(err) => {
-                clear_pending_palette_refresh(raw_input_key);
-                warn(&format!("palette refresh failed: {err}"));
-            }
-        },
-    );
+            Ok(PaletteRefreshOutcome::ReusedCommitted) => {}
+            Err(err) => warn(&format!("palette refresh failed: {err}")),
+        }
+    }
+}
+
+fn defer_palette_refresh(expected_epoch: u64) {
+    // Palette churn should only retain the latest pending request; the callback drains that
+    // single-flight queue instead of capturing a fresh spec per schedule.
+    schedule_guarded("palette_refresh", move || {
+        drain_deferred_palette_refresh(expected_epoch);
+    });
 }
 
 pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()> {
     let raw_input_key = raw_palette_input_key_for_spec(spec);
-    let disposition = with_palette_state_mut(|state| stage_palette_refresh(state, raw_input_key));
+    let disposition = with_palette_state_mut(|state| state.core.stage_refresh(spec, raw_input_key));
 
     match disposition {
-        PaletteRefreshDisposition::Ready | PaletteRefreshDisposition::RefreshAlreadyPending => {
+        PaletteRefreshDisposition::Ready | PaletteRefreshDisposition::DeferredAlreadyScheduled => {
             Ok(())
         }
         PaletteRefreshDisposition::BootstrapSynchronously => {
@@ -652,8 +512,8 @@ pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()
             refresh_highlight_palette_for_spec(spec, raw_input_key)?;
             Ok(())
         }
-        PaletteRefreshDisposition::ScheduleDeferred => {
-            defer_palette_refresh(spec.clone(), raw_input_key);
+        PaletteRefreshDisposition::ScheduleDeferred { epoch } => {
+            defer_palette_refresh(epoch);
             Ok(())
         }
     }
@@ -673,12 +533,9 @@ mod tests {
     use crate::types::RenderFrame;
     use crate::types::StaticRenderConfig;
     use pretty_assertions::assert_eq;
-    use proptest::collection::vec;
-    use proptest::option;
     use proptest::prelude::*;
 
     const RAW_KEY_COMMON_AXIS_COUNT: usize = 7;
-    const RESOLVED_PALETTE_AXIS_COUNT: usize = 8;
 
     fn test_frame() -> RenderFrame {
         RenderFrame {
@@ -796,120 +653,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct ResolvedPaletteFixture {
-        cursor_color: u32,
-        normal_background: Option<u32>,
-        transparent_fallback: u32,
-        non_inverted_blend: u8,
-        color_levels: u32,
-        gamma_bits: u64,
-        cterm_cursor_colors: Option<Vec<u16>>,
-        cterm_bg: Option<u16>,
-    }
-
-    impl ResolvedPaletteFixture {
-        fn borrowed(&self) -> ResolvedPalette<'_> {
-            ResolvedPalette {
-                cursor_color: self.cursor_color,
-                normal_background: self.normal_background,
-                transparent_fallback: self.transparent_fallback,
-                non_inverted_blend: self.non_inverted_blend,
-                color_levels: self.color_levels,
-                gamma_bits: self.gamma_bits,
-                cterm_cursor_colors: self.cterm_cursor_colors.as_deref(),
-                cterm_bg: self.cterm_bg,
-            }
-        }
-    }
-
-    fn resolved_palette_fixture() -> BoxedStrategy<ResolvedPaletteFixture> {
-        (
-            0_u32..=0x00FF_FFFF,
-            option::of(0_u32..=0x00FF_FFFF),
-            0_u32..=0x00FF_FFFF,
-            any::<u8>(),
-            1_u32..=32_u32,
-            0.5_f64..4.0_f64,
-            option::of(vec(any::<u16>(), 1..=4)),
-            option::of(any::<u16>()),
-        )
-            .prop_map(
-                |(
-                    cursor_color,
-                    normal_background,
-                    transparent_fallback,
-                    non_inverted_blend,
-                    color_levels,
-                    gamma,
-                    cterm_cursor_colors,
-                    cterm_bg,
-                )| ResolvedPaletteFixture {
-                    cursor_color,
-                    normal_background,
-                    transparent_fallback,
-                    non_inverted_blend,
-                    color_levels,
-                    gamma_bits: gamma.to_bits(),
-                    cterm_cursor_colors,
-                    cterm_bg,
-                },
-            )
-            .boxed()
-    }
-
-    fn different_raw_key(raw_key: RawPaletteInputKey) -> RawPaletteInputKey {
-        RawPaletteInputKey {
-            fingerprint: raw_key.fingerprint ^ 1,
-        }
-    }
-
-    fn mutate_palette_key_axis(
-        fixture: &ResolvedPaletteFixture,
-        axis: usize,
-    ) -> HighlightPaletteKey {
-        let mut cached = fixture.borrowed().into_owned();
-        match axis {
-            0 => cached.cursor_color ^= 1,
-            1 => {
-                cached.normal_background = Some(
-                    fixture
-                        .normal_background
-                        .map_or(0x0012_3456, |background| background ^ 1),
-                );
-            }
-            2 => cached.transparent_fallback ^= 1,
-            3 => cached.non_inverted_blend = cached.non_inverted_blend.wrapping_add(1),
-            4 => cached.color_levels = cached.color_levels.saturating_add(1),
-            5 => {
-                cached.gamma_bits = if cached.gamma_bits == 1.0_f64.to_bits() {
-                    2.0_f64.to_bits()
-                } else {
-                    1.0_f64.to_bits()
-                };
-            }
-            6 => {
-                cached.cterm_cursor_colors = Some(match fixture.cterm_cursor_colors.as_deref() {
-                    Some(colors) => {
-                        let mut mutated = colors.to_vec();
-                        mutated[0] = mutated[0].wrapping_add(1);
-                        mutated
-                    }
-                    None => vec![7_u16, 11_u16],
-                });
-            }
-            7 => {
-                cached.cterm_bg = Some(
-                    fixture
-                        .cterm_bg
-                        .map_or(1_u16, |value| value.wrapping_add(1)),
-                );
-            }
-            _ => panic!("unexpected resolved palette axis {axis}"),
-        }
-        cached
-    }
-
     proptest! {
         #![proptest_config(pure_config())]
 
@@ -953,173 +696,6 @@ mod tests {
 
             prop_assert_eq!(raw_palette_input_key(&base), raw_palette_input_key(&mutated));
         }
-
-        #[test]
-        fn prop_resolved_palette_matches_owned_form_and_rejects_single_axis_mismatches(
-            fixture in resolved_palette_fixture(),
-            axis in cache_key_mutation_axis(RESOLVED_PALETTE_AXIS_COUNT),
-        ) {
-            let resolved = fixture.borrowed();
-            let cached = resolved.into_owned();
-
-            prop_assert!(resolved_palette_matches(&cached, &resolved));
-            prop_assert!(!resolved_palette_matches(
-                &mutate_palette_key_axis(&fixture, axis.index()),
-                &resolved,
-            ));
-        }
-
-        #[test]
-        fn prop_lookup_cached_palette_distinguishes_raw_resolved_and_miss_paths(
-            fixture in resolved_palette_fixture(),
-            raw_matches in any::<bool>(),
-            provide_resolved in any::<bool>(),
-            resolved_matches in any::<bool>(),
-            mismatch_axis in cache_key_mutation_axis(RESOLVED_PALETTE_AXIS_COUNT),
-            query_fingerprint in any::<u64>(),
-        ) {
-            let raw_key = RawPaletteInputKey {
-                fingerprint: query_fingerprint,
-            };
-            let resolved = fixture.borrowed();
-            let palette_key = if resolved_matches {
-                resolved.into_owned()
-            } else {
-                mutate_palette_key_axis(&fixture, mismatch_axis.index())
-            };
-            let state = PaletteState {
-                raw_input_key: Some(if raw_matches {
-                    raw_key
-                } else {
-                    different_raw_key(raw_key)
-                }),
-                palette_key: Some(palette_key),
-                pending_refresh_key: None,
-                group_name_cache: HashMap::new(),
-            };
-            let expected = if raw_matches {
-                PaletteCacheLookup::RawHit
-            } else if provide_resolved && resolved_matches {
-                PaletteCacheLookup::ResolvedHit
-            } else {
-                PaletteCacheLookup::Miss
-            };
-
-            prop_assert_eq!(
-                lookup_cached_palette(
-                    &state,
-                    raw_key,
-                    provide_resolved.then_some(&resolved),
-                ),
-                expected
-            );
-        }
-
-        #[test]
-        fn prop_stage_palette_refresh_returns_ready_without_changing_pending_state(
-            fixture in resolved_palette_fixture(),
-            query_fingerprint in any::<u64>(),
-            pending_matches in any::<bool>(),
-        ) {
-            let raw_key = RawPaletteInputKey {
-                fingerprint: query_fingerprint,
-            };
-            let pending_refresh_key = Some(if pending_matches {
-                raw_key
-            } else {
-                different_raw_key(raw_key)
-            });
-            let mut state = PaletteState {
-                raw_input_key: Some(raw_key),
-                palette_key: Some(fixture.borrowed().into_owned()),
-                pending_refresh_key,
-                group_name_cache: HashMap::new(),
-            };
-
-            prop_assert_eq!(
-                stage_palette_refresh(&mut state, raw_key),
-                PaletteRefreshDisposition::Ready
-            );
-            prop_assert_eq!(state.pending_refresh_key, pending_refresh_key);
-        }
-
-        #[test]
-        fn prop_stage_palette_refresh_deduplicates_matching_pending_requests(
-            fixture in resolved_palette_fixture(),
-            query_fingerprint in any::<u64>(),
-            has_committed_palette in any::<bool>(),
-        ) {
-            let raw_key = RawPaletteInputKey {
-                fingerprint: query_fingerprint,
-            };
-            let mut state = PaletteState {
-                raw_input_key: Some(different_raw_key(raw_key)),
-                palette_key: has_committed_palette.then(|| fixture.borrowed().into_owned()),
-                pending_refresh_key: Some(raw_key),
-                group_name_cache: HashMap::new(),
-            };
-
-            prop_assert_eq!(
-                stage_palette_refresh(&mut state, raw_key),
-                PaletteRefreshDisposition::RefreshAlreadyPending
-            );
-            prop_assert_eq!(state.pending_refresh_key, Some(raw_key));
-        }
-
-        #[test]
-        fn prop_stage_palette_refresh_bootstraps_or_defers_based_on_committed_palette(
-            fixture in resolved_palette_fixture(),
-            query_fingerprint in any::<u64>(),
-            has_committed_palette in any::<bool>(),
-            had_other_pending_refresh in any::<bool>(),
-        ) {
-            let raw_key = RawPaletteInputKey {
-                fingerprint: query_fingerprint,
-            };
-            let mut state = PaletteState {
-                raw_input_key: Some(different_raw_key(raw_key)),
-                palette_key: has_committed_palette.then(|| fixture.borrowed().into_owned()),
-                pending_refresh_key: had_other_pending_refresh.then(|| different_raw_key(raw_key)),
-                group_name_cache: HashMap::new(),
-            };
-
-            prop_assert_eq!(
-                stage_palette_refresh(&mut state, raw_key),
-                if has_committed_palette {
-                    PaletteRefreshDisposition::ScheduleDeferred
-                } else {
-                    PaletteRefreshDisposition::BootstrapSynchronously
-                }
-            );
-            prop_assert_eq!(state.pending_refresh_key, Some(raw_key));
-        }
-    }
-
-    #[test]
-    fn clear_highlight_cache_resets_raw_and_resolved_keys() {
-        clear_highlight_cache();
-        with_palette_state_mut(|state| {
-            state.raw_input_key = Some(RawPaletteInputKey { fingerprint: 7 });
-            state.palette_key = Some(HighlightPaletteKey {
-                cursor_color: 0x112233,
-                normal_background: Some(0x202020),
-                transparent_fallback: 0x303030,
-                non_inverted_blend: 0,
-                color_levels: 16,
-                gamma_bits: 2.2_f64.to_bits(),
-                cterm_cursor_colors: Some(vec![17_u16, 42_u16]),
-                cterm_bg: Some(235_u16),
-            });
-            state.pending_refresh_key = Some(RawPaletteInputKey { fingerprint: 9 });
-        });
-
-        clear_highlight_cache();
-
-        with_palette_state(|state| {
-            assert_eq!(state.raw_input_key, None);
-            assert_eq!(state.palette_key, None);
-            assert_eq!(state.pending_refresh_key, None);
-        });
     }
 
     #[test]
@@ -1155,27 +731,5 @@ mod tests {
 
         assert_eq!(oversized.normal, capped.normal);
         assert_eq!(oversized.inverted, capped.inverted);
-    }
-
-    #[test]
-    fn stale_palette_refresh_returns_skipped_stale_directly() {
-        clear_highlight_cache();
-        let spec = PaletteSpec::from_frame(&test_frame());
-        let stale_key = raw_palette_input_key_for_spec(&spec);
-
-        with_palette_state_mut(|state| {
-            state.raw_input_key = Some(RawPaletteInputKey {
-                fingerprint: stale_key.fingerprint.saturating_add(1),
-            });
-            state.pending_refresh_key = Some(RawPaletteInputKey {
-                fingerprint: stale_key.fingerprint.saturating_add(2),
-            });
-        });
-
-        assert_eq!(
-            refresh_highlight_palette_for_spec(&spec, stale_key)
-                .expect("stale refresh should short-circuit"),
-            PaletteRefreshOutcome::SkippedStale
-        );
     }
 }
