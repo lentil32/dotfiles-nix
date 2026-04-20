@@ -196,16 +196,21 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
                 continue;
             }
 
-            let Some(bbox) = latent_field::materialize_swept_occupancy_with_scratch(
+            let materialized_bbox = latent_field::materialize_swept_occupancy_with_scratch(
                 frame.trail_thickness * profile.width_scale,
                 frame.trail_thickness_x * profile.width_scale,
                 &mut sweep_scratch,
-            ) else {
+            );
+            #[cfg(not(test))]
+            if materialized_bbox.is_none() {
+                continue;
+            }
+            #[cfg(test)]
+            let Some(bbox) = materialized_bbox else {
                 continue;
             };
             let support_steps = profile.support_steps(frame.simulation_hz);
             let step_index = state.step_index;
-            let arc_len_q16 = state.arc_len_q16;
             state.latent_cache_mut().insert_materialized_slice(
                 step_index,
                 dt_ms_q16,
@@ -221,7 +226,7 @@ pub(in super::super) fn stage_deposited_samples(state: &mut PlannerState, frame:
                         stroke_id: frame.trail_stroke_id,
                         step_index,
                         dt_ms_q16,
-                        arc_len_q16,
+                        arc_len_q16: state.arc_len_q16,
                         bbox,
                         band: profile.band,
                         support_steps,

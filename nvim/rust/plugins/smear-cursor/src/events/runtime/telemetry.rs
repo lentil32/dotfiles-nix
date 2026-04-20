@@ -383,16 +383,6 @@ pub(crate) fn record_buffer_metadata_read() {
 pub(crate) fn record_buffer_metadata_read() {}
 
 #[cfg(feature = "perf-counters")]
-#[allow(dead_code)]
-pub(crate) fn record_current_buffer_changedtick_read() {
-    event_loop::record_current_buffer_changedtick_read();
-}
-
-#[cfg(not(feature = "perf-counters"))]
-#[allow(dead_code)]
-pub(crate) fn record_current_buffer_changedtick_read() {}
-
-#[cfg(feature = "perf-counters")]
 pub(crate) fn record_editor_bounds_read() {
     event_loop::record_editor_bounds_read();
 }

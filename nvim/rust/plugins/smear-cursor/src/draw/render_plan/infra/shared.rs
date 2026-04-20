@@ -250,6 +250,7 @@ impl PartialEq for PlannerState {
 pub(crate) struct PlannerOutput {
     pub(crate) plan: RenderPlan,
     pub(crate) next_state: PlannerState,
+    #[cfg(test)]
     pub(crate) signature: Option<u64>,
 }
 

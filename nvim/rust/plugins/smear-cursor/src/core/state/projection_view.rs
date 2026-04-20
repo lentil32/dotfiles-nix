@@ -1,4 +1,5 @@
 use super::ProjectionHandle;
+#[cfg(test)]
 use super::ProjectionReuseKey;
 use super::ProjectionWitness;
 use super::RetainedProjection;

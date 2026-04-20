@@ -29,6 +29,7 @@ pub(crate) struct BackgroundProbeChunkMask {
     packed: Arc<[u8]>,
 }
 
+#[cfg(test)]
 pub(crate) struct BackgroundProbePackedMaskIter<'a> {
     packed: &'a [u8],
     cell_count: usize,
@@ -216,6 +217,7 @@ impl BackgroundProbeChunkMask {
         Some(byte & (1_u8 << (index % 8)) != 0)
     }
 
+    #[cfg(test)]
     pub(crate) fn iter(&self) -> BackgroundProbePackedMaskIter<'_> {
         BackgroundProbePackedMaskIter {
             packed: &self.packed,
@@ -225,6 +227,7 @@ impl BackgroundProbeChunkMask {
     }
 }
 
+#[cfg(test)]
 impl Iterator for BackgroundProbePackedMaskIter<'_> {
     type Item = bool;
 

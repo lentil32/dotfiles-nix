@@ -177,6 +177,7 @@ impl DemandQueue {
         (self, demand)
     }
 
+    #[cfg(test)]
     pub(crate) const fn latest_cursor(&self) -> Option<&QueuedDemand> {
         self.queued(ExternalDemandKind::ExternalCursor)
     }

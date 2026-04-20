@@ -30,8 +30,6 @@ pub(crate) use window_pool::AllocationPolicy;
 pub(crate) use window_pool::CompactRenderWindowsSummary;
 #[cfg(test)]
 pub(crate) use window_pool::TabPoolSnapshot;
-#[cfg(test)]
-pub(crate) use window_pool::WindowPlacement;
 
 pub(crate) const EXTMARK_ID: u32 = 999;
 const PREPAINT_EXTMARK_ID: u32 = 1001;
@@ -526,16 +524,17 @@ fn valid_prepaint_handles(overlay: PrepaintOverlay) -> Option<(api::Window, api:
 fn create_prepaint_overlay(
     placement: PrepaintPlacement,
 ) -> Result<(PrepaintOverlay, api::Window, api::Buffer)> {
-    let mut staged = StagedFloatingWindow::new(
+    let staged = StagedFloatingWindow::new(
         api::create_buf(false, true)?,
         "delete staged prepaint buffer",
         "close staged prepaint window",
     );
     initialize_prepaint_buffer_options(staged.buffer())?;
     let config = prepaint_open_window_config(placement, false);
-    staged.attach_window(api::open_win(staged.buffer(), false, &config)?);
-    initialize_prepaint_window_options(staged.window())?;
-    let (window, buffer) = staged.into_window_and_buffer();
+    let window = api::open_win(staged.buffer(), false, &config)?;
+    let attached = staged.attach_window(window);
+    initialize_prepaint_window_options(attached.window())?;
+    let (window, buffer) = attached.into_window_and_buffer();
 
     let overlay = PrepaintOverlay {
         window_id: window.handle(),

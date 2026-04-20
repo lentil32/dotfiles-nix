@@ -277,6 +277,7 @@ impl RuntimeState {
         self.motion_clock().and_then(|clock| clock.last_tick_ms)
     }
 
+    #[cfg(test)]
     pub(crate) fn set_last_tick_ms(&mut self, value: Option<f64>) {
         let Some(clock) = self.motion_clock_mut() else {
             debug_assert!(
@@ -288,6 +289,7 @@ impl RuntimeState {
         clock.last_tick_ms = value;
     }
 
+    #[cfg(test)]
     pub(crate) fn record_animation_tick(&mut self, now_ms: f64) {
         self.set_last_tick_ms(Some(now_ms));
     }

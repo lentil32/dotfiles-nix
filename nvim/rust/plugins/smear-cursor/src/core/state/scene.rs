@@ -548,6 +548,7 @@ impl SceneState {
         self.projection.retained_projection()
     }
 
+    #[cfg(test)]
     pub(in crate::core) fn retained_projection_handle(&self) -> Option<&ProjectionHandle> {
         self.projection.retained_projection_handle()
     }

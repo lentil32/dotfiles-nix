@@ -86,6 +86,7 @@ pub(crate) fn render_frame_to_plan_with_signature(
     decode_compiled_frame(frame, compiled, viewport, maybe_signature)
 }
 
+#[cfg(test)]
 pub(crate) fn particle_overlay_plan(frame: &RenderFrame, viewport: ViewportBounds) -> RenderPlan {
     let target_row = frame.target.row.round() as i64;
     let target_col = frame.target.col.round() as i64;
@@ -180,14 +181,25 @@ pub(in crate::draw::render_plan) fn decode_compiled_frame(
 
     next_state.previous_cells = std::sync::Arc::new(next_cells);
 
-    PlannerOutput {
-        plan: builder.finish(
-            Some(ClearOp {
-                max_kept_windows: frame.max_kept_windows,
-            }),
-            None,
-        ),
-        next_state,
-        signature: maybe_signature,
+    let plan = builder.finish(
+        Some(ClearOp {
+            max_kept_windows: frame.max_kept_windows,
+        }),
+        None,
+    );
+
+    #[cfg(test)]
+    {
+        PlannerOutput {
+            plan,
+            next_state,
+            signature: maybe_signature,
+        }
+    }
+
+    #[cfg(not(test))]
+    {
+        let _ = maybe_signature;
+        PlannerOutput { plan, next_state }
     }
 }

@@ -126,6 +126,7 @@ impl ProbeRequestId {
 pub(crate) struct MotionRevision(u64);
 
 impl MotionRevision {
+    #[cfg(test)]
     pub(crate) const INITIAL: Self = Self(0);
 }
 
@@ -139,6 +140,7 @@ impl_u64_counter_methods!(
 pub(crate) struct SemanticRevision(u64);
 
 impl SemanticRevision {
+    #[cfg(test)]
     pub(crate) const INITIAL: Self = Self(0);
 }
 
@@ -179,6 +181,7 @@ pub(crate) struct RenderRevision {
 }
 
 impl RenderRevision {
+    #[cfg(test)]
     pub(crate) const INITIAL: Self = Self::new(MotionRevision::INITIAL, SemanticRevision::INITIAL);
 
     pub(crate) const fn new(motion: MotionRevision, semantics: SemanticRevision) -> Self {
@@ -288,6 +291,7 @@ impl<T> TimerSlots<Option<T>> {
         self.replace(timer_id, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn clear(&mut self) {
         for slot in self.iter_mut() {
             *slot = None;

@@ -121,10 +121,12 @@ impl CursorShape {
         Self::from_cell_shape(CursorCellShape::Block)
     }
 
+    #[cfg(test)]
     pub(crate) const fn vertical_bar() -> Self {
         Self::from_cell_shape(CursorCellShape::VerticalBar)
     }
 
+    #[cfg(test)]
     pub(crate) const fn horizontal_bar() -> Self {
         Self::from_cell_shape(CursorCellShape::HorizontalBar)
     }

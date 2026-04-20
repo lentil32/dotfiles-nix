@@ -673,6 +673,7 @@ impl CoreState {
         self.generation.next()
     }
 
+    #[cfg(test)]
     pub(crate) const fn generation(&self) -> Generation {
         self.generation
     }
@@ -752,6 +753,7 @@ impl CoreState {
         self.payload.entropy
     }
 
+    #[cfg(test)]
     pub(in crate::core::state) fn semantic_state(&self) -> &SemanticState {
         self.payload.semantics.as_ref()
     }

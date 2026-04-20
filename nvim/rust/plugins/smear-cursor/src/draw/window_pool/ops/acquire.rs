@@ -381,15 +381,16 @@ pub(crate) fn ensure_capacity_in_tab(
     tab_windows.windows.reserve(create_count);
 
     for _ in 0..create_count {
-        let mut staged = crate::draw::StagedFloatingWindow::new(
+        let staged = crate::draw::StagedFloatingWindow::new(
             api::create_buf(false, true)?,
             "delete staged render buffer",
             "close staged render window",
         );
-        staged.attach_window(api::open_win(staged.buffer(), false, &hidden_config)?);
-        initialize_buffer_options(staged.buffer())?;
-        initialize_window_options(staged.window())?;
-        let (window, buffer) = staged.into_window_and_buffer();
+        let window = api::open_win(staged.buffer(), false, &hidden_config)?;
+        let attached = staged.attach_window(window);
+        initialize_buffer_options(attached.buffer())?;
+        initialize_window_options(attached.window())?;
+        let (window, buffer) = attached.into_window_and_buffer();
 
         let handles = WindowBufferHandle {
             window_id: window.handle(),

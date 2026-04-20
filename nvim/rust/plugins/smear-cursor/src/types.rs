@@ -219,6 +219,7 @@ fn round_lua(value: f64) -> i64 {
     (value + 0.5).floor() as i64
 }
 
+#[cfg(test)]
 pub(crate) fn aggregate_particle_artifacts(
     particles: &[Particle],
     screen_cells_mode: ParticleScreenCellsMode,
@@ -302,6 +303,7 @@ pub(crate) fn aggregate_particle_artifacts_with_scratch(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn aggregate_particle_cells(particles: &[Particle]) -> SharedAggregatedParticleCells {
     aggregate_particle_artifacts(particles, ParticleScreenCellsMode::Skip).aggregated_particle_cells
 }
@@ -324,6 +326,7 @@ impl RenderStepSample {
 }
 
 pub(crate) type SharedRenderStepSamples = Arc<[RenderStepSample]>;
+#[cfg(test)]
 pub(crate) type SharedParticles = Arc<Vec<Particle>>;
 pub(crate) type SharedParticleScreenCells = Arc<[ScreenCell]>;
 
@@ -369,6 +372,7 @@ pub(crate) struct StaticRenderConfig {
     pub(crate) windows_zindex: u32,
 }
 
+#[cfg(test)]
 fn particle_artifacts_for_shared_particles(
     particles: SharedParticles,
     particles_over_text: bool,
@@ -429,6 +433,7 @@ impl RenderFrame {
         &self.aggregated_particle_cells
     }
 
+    #[cfg(test)]
     pub(crate) fn set_particles(&mut self, particles: SharedParticles) {
         let (particle_count, aggregated_particle_cells, particle_screen_cells) =
             particle_artifacts_for_shared_particles(particles, self.particles_over_text);

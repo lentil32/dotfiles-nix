@@ -1,32 +1,15 @@
-#![allow(dead_code)]
-
 use crate::animation::corners_for_cursor;
-use crate::core::types::Generation;
-use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
-use crate::core::types::TimerToken;
-use crate::draw::WindowPlacement;
-use crate::events::probe_cache::ConcealWindowState;
 use crate::position::RenderPoint;
-use crate::position::ScreenCell;
-use crate::position::ViewportBounds;
-use crate::state::TrackedCursor;
-use crate::test_support::models::WindowPoolFixture;
-use crate::test_support::models::WindowPoolPlacementSpec;
-use crate::test_support::models::WindowPoolWindowSpec;
 use crate::types::RenderStepSample;
 use proptest::collection::vec;
 use proptest::prelude::*;
 
-pub(crate) const PURE_PROPTEST_CASES: u32 = 96;
-pub(crate) const STATEFUL_PROPTEST_CASES: u32 = 48;
+const PURE_PROPTEST_CASES: u32 = 96;
+const STATEFUL_PROPTEST_CASES: u32 = 48;
 pub(crate) const DEFAULT_FLOAT_EPSILON: f64 = 1.0e-6;
 
 const FINITE_POINT_LIMIT: f64 = 4096.0;
-const SCREEN_CELL_LIMIT: i64 = 512;
-const VIEWPORT_LIMIT: u32 = 512;
-const WINDOW_DIMENSION_LIMIT: i64 = 256;
-const WINDOW_PLACEMENT_WIDTH_LIMIT: u32 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModeFamily {
@@ -40,20 +23,12 @@ pub(crate) enum ModeFamily {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ModeCase {
-    family: ModeFamily,
     mode: String,
 }
 
 impl ModeCase {
-    pub(crate) fn new(family: ModeFamily, mode: impl Into<String>) -> Self {
-        Self {
-            family,
-            mode: mode.into(),
-        }
-    }
-
-    pub(crate) const fn family(&self) -> ModeFamily {
-        self.family
+    pub(crate) fn new(mode: impl Into<String>) -> Self {
+        Self { mode: mode.into() }
     }
 
     pub(crate) fn mode(&self) -> &str {
@@ -129,15 +104,15 @@ pub(crate) const fn representative_mode(family: ModeFamily) -> &'static str {
 
 pub(crate) fn mode_case() -> BoxedStrategy<ModeCase> {
     prop_oneof![
-        Just(ModeCase::new(ModeFamily::Normal, "n")),
-        Just(ModeCase::new(ModeFamily::Normal, "no")),
-        Just(ModeCase::new(ModeFamily::Insert, "i")),
-        Just(ModeCase::new(ModeFamily::Insert, "ic")),
-        Just(ModeCase::new(ModeFamily::Replace, "R")),
-        Just(ModeCase::new(ModeFamily::Replace, "Rc")),
-        Just(ModeCase::new(ModeFamily::Terminal, "t")),
-        Just(ModeCase::new(ModeFamily::Cmdline, "cv")),
-        Just(ModeCase::new(ModeFamily::Other, "v")),
+        Just(ModeCase::new("n")),
+        Just(ModeCase::new("no")),
+        Just(ModeCase::new("i")),
+        Just(ModeCase::new("ic")),
+        Just(ModeCase::new("R")),
+        Just(ModeCase::new("Rc")),
+        Just(ModeCase::new("t")),
+        Just(ModeCase::new("cv")),
+        Just(ModeCase::new("v")),
     ]
     .boxed()
 }
@@ -149,66 +124,6 @@ pub(crate) fn finite_point() -> BoxedStrategy<RenderPoint> {
     )
         .prop_map(|(row, col)| RenderPoint { row, col })
         .boxed()
-}
-
-pub(crate) fn screen_cell() -> BoxedStrategy<ScreenCell> {
-    (1_i64..=SCREEN_CELL_LIMIT, 1_i64..=SCREEN_CELL_LIMIT)
-        .prop_map(|(row, col)| ScreenCell::new(row, col).expect("one-based cell strategy"))
-        .boxed()
-}
-
-pub(crate) fn tracked_cursor() -> BoxedStrategy<TrackedCursor> {
-    (
-        1_i16..=i16::MAX,
-        1_i16..=i16::MAX,
-        1_i64..=SCREEN_CELL_LIMIT,
-        1_i64..=SCREEN_CELL_LIMIT,
-        0_i64..=WINDOW_DIMENSION_LIMIT,
-        0_i64..=16_i64,
-        any::<i16>(),
-        any::<i16>(),
-        0_i64..=WINDOW_DIMENSION_LIMIT,
-        0_i64..=WINDOW_DIMENSION_LIMIT,
-    )
-        .prop_map(
-            |(
-                window_handle,
-                buffer_handle,
-                top_row,
-                line,
-                left_col,
-                text_offset,
-                window_row,
-                window_col,
-                window_width,
-                window_height,
-            )| {
-                TrackedCursor::fixture(
-                    i64::from(window_handle),
-                    i64::from(buffer_handle),
-                    top_row,
-                    line,
-                )
-                .with_viewport_columns(left_col, text_offset)
-                .with_window_origin(i64::from(window_row), i64::from(window_col))
-                .with_window_dimensions(window_width, window_height)
-            },
-        )
-        .boxed()
-}
-
-fn viewport_snapshot_from_dimensions(max_row: u32, max_col: u32) -> ViewportBounds {
-    ViewportBounds::new(i64::from(max_row), i64::from(max_col)).expect("positive viewport bounds")
-}
-
-pub(crate) fn viewport_snapshot() -> BoxedStrategy<ViewportBounds> {
-    (1_u32..=VIEWPORT_LIMIT, 1_u32..=VIEWPORT_LIMIT)
-        .prop_map(|(max_row, max_col)| viewport_snapshot_from_dimensions(max_row, max_col))
-        .boxed()
-}
-
-pub(crate) fn generation() -> BoxedStrategy<Generation> {
-    any::<u64>().prop_map(Generation::new).boxed()
 }
 
 pub(crate) fn positive_aspect_ratio() -> BoxedStrategy<f64> {
@@ -255,98 +170,8 @@ pub(crate) fn timer_id() -> BoxedStrategy<TimerId> {
     proptest::sample::select(Vec::from(TimerId::ALL)).boxed()
 }
 
-pub(crate) fn timer_token() -> BoxedStrategy<TimerToken> {
-    (timer_id(), any::<u64>())
-        .prop_map(|(timer_id, generation)| {
-            TimerToken::new(timer_id, TimerGeneration::new(generation))
-        })
-        .boxed()
-}
-
-pub(crate) fn window_placement() -> BoxedStrategy<WindowPlacement> {
-    (
-        -WINDOW_DIMENSION_LIMIT..=WINDOW_DIMENSION_LIMIT,
-        -WINDOW_DIMENSION_LIMIT..=WINDOW_DIMENSION_LIMIT,
-        1_u32..=WINDOW_PLACEMENT_WIDTH_LIMIT,
-        50_u32..=350_u32,
-    )
-        .prop_map(|(row, col, width, zindex)| WindowPlacement {
-            row,
-            col,
-            width,
-            zindex,
-        })
-        .boxed()
-}
-
-pub(crate) fn conceal_window_state() -> BoxedStrategy<ConcealWindowState> {
-    (
-        -1_i64..=4_i64,
-        vec(
-            prop_oneof![
-                Just('n'),
-                Just('i'),
-                Just('v'),
-                Just('c'),
-                Just('x'),
-                Just('y'),
-            ],
-            0..=4,
-        ),
-    )
-        .prop_map(|(conceallevel, concealcursor)| {
-            ConcealWindowState::new(conceallevel, concealcursor.into_iter().collect::<String>())
-        })
-        .boxed()
-}
-
 pub(crate) fn cache_key_mutation_axis(axis_count: usize) -> BoxedStrategy<CacheKeyMutationAxis> {
     (0..axis_count).prop_map(CacheKeyMutationAxis).boxed()
-}
-
-pub(crate) fn window_pool_fixture(max_windows: usize) -> BoxedStrategy<WindowPoolFixture> {
-    (
-        0_usize..=max_windows,
-        vec(
-            (
-                0_i64..80_i64,
-                0_i64..240_i64,
-                1_u16..16_u16,
-                50_u32..350_u32,
-                any::<u64>(),
-                any::<bool>(),
-            ),
-            0..=max_windows,
-        ),
-    )
-        .prop_map(|(expected_demand, entries)| {
-            let windows = entries
-                .into_iter()
-                .enumerate()
-                .map(
-                    |(index, (row, col, width, zindex, last_used_epoch, visible))| {
-                        let offset = i32::try_from(index).unwrap_or(i32::MAX);
-                        let placement = WindowPoolPlacementSpec::builder()
-                            .origin(row, col)
-                            .width(width)
-                            .zindex(zindex)
-                            .build();
-                        WindowPoolWindowSpec::builder()
-                            .ids(
-                                100_i32.saturating_add(offset),
-                                200_i32.saturating_add(offset),
-                            )
-                            .last_used_epoch(last_used_epoch)
-                            .visible(visible)
-                            .placement(placement)
-                            .build()
-                    },
-                )
-                .collect();
-
-            WindowPoolFixture::new(expected_demand, windows)
-        })
-        .boxed()
 }
 
 pub(crate) fn staged_render_step_samples(max_steps: usize) -> BoxedStrategy<Vec<RenderStepSample>> {
@@ -358,19 +183,4 @@ pub(crate) fn staged_render_step_samples(max_steps: usize) -> BoxedStrategy<Vec<
                 .collect()
         })
         .boxed()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::viewport_snapshot_from_dimensions;
-    use crate::position::ViewportBounds;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn viewport_snapshot_strategy_constructs_snapshots_from_canonical_bounds() {
-        assert_eq!(
-            viewport_snapshot_from_dimensions(24, 80),
-            ViewportBounds::new(24, 80).expect("positive viewport bounds")
-        );
-    }
 }

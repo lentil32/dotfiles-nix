@@ -616,17 +616,23 @@ fn validation_counters_report_renders_particle_counter_summary() {
     crate::events::record_planner_compiled_cells_emitted_count(5);
     crate::events::record_planner_candidate_cells_built_count(13);
     crate::events::record_planner_candidate_cells_built_count(2);
-    super::telemetry::record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinEnter);
-    super::telemetry::record_cursor_autocmd_fast_path_continued(AutocmdIngress::WinEnter);
-    super::telemetry::record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinScrolled);
-    super::telemetry::record_cursor_autocmd_fast_path_continued(AutocmdIngress::BufEnter);
+    super::super::event_loop::with_event_loop_state_for_test(|state| {
+        let metrics = state.runtime_metrics_mut();
+        metrics.record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinEnter);
+        metrics.record_cursor_autocmd_fast_path_continued(AutocmdIngress::WinEnter);
+        metrics.record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinScrolled);
+        metrics.record_cursor_autocmd_fast_path_continued(AutocmdIngress::BufEnter);
+    });
     crate::events::record_particle_overlay_refresh(4);
-    crate::events::runtime::record_buffer_metadata_read();
-    crate::events::runtime::record_current_buffer_changedtick_read();
-    crate::events::runtime::record_current_buffer_changedtick_read();
-    super::telemetry::record_editor_bounds_read();
-    super::telemetry::record_editor_bounds_read();
-    super::telemetry::record_command_row_read();
+    super::super::event_loop::with_event_loop_state_for_test(|state| {
+        let metrics = state.runtime_metrics_mut();
+        metrics.record_buffer_metadata_read();
+        metrics.record_current_buffer_changedtick_read();
+        metrics.record_current_buffer_changedtick_read();
+        metrics.record_editor_bounds_read();
+        metrics.record_editor_bounds_read();
+        metrics.record_command_row_read();
+    });
 
     let report = test_validation_counters_report();
     assert!(report.starts_with("smear_cursor_validation "));

@@ -44,6 +44,7 @@ pub(crate) use frame::RenderFrameRequest;
 #[cfg(test)]
 pub(crate) use frame::build_render_frame;
 pub(crate) use policy::select_event_source;
+#[cfg(test)]
 pub(crate) use reducer::reduce_cursor_event;
 pub(crate) use reducer::reduce_cursor_event_for_perf_class;
 

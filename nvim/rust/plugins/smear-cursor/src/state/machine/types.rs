@@ -205,6 +205,7 @@ impl RuntimeTargetSnapshot {
         Self::new(position, shape, Some(tracked_cursor.clone()))
     }
 
+    #[cfg(test)]
     pub(crate) fn preserving_tracking(
         position: RenderPoint,
         shape: CursorShape,

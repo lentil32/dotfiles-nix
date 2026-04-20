@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "perf-counters"))]
 use super::super::ingress::AutocmdIngress;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
@@ -27,14 +28,12 @@ impl ValidationReadTelemetry {
             command_row_reads: 0,
         }
     }
+}
 
+#[cfg(any(test, feature = "perf-counters"))]
+impl ValidationReadTelemetry {
     pub(super) fn record_buffer_metadata_read(&mut self) {
         self.buffer_metadata_reads = self.buffer_metadata_reads.saturating_add(1);
-    }
-
-    pub(super) fn record_current_buffer_changedtick_read(&mut self) {
-        self.current_buffer_changedtick_reads =
-            self.current_buffer_changedtick_reads.saturating_add(1);
     }
 
     pub(super) fn record_editor_bounds_read(&mut self) {
@@ -43,6 +42,14 @@ impl ValidationReadTelemetry {
 
     pub(super) fn record_command_row_read(&mut self) {
         self.command_row_reads = self.command_row_reads.saturating_add(1);
+    }
+}
+
+#[cfg(test)]
+impl ValidationReadTelemetry {
+    pub(super) fn record_current_buffer_changedtick_read(&mut self) {
+        self.current_buffer_changedtick_reads =
+            self.current_buffer_changedtick_reads.saturating_add(1);
     }
 }
 
@@ -286,7 +293,10 @@ impl DropContinueTelemetry {
             continued: 0,
         }
     }
+}
 
+#[cfg(any(test, feature = "perf-counters"))]
+impl DropContinueTelemetry {
     pub(super) fn record_dropped(&mut self) {
         self.dropped = self.dropped.saturating_add(1);
     }
@@ -311,7 +321,10 @@ impl CursorAutocmdFastPathTelemetry {
             buf_enter: DropContinueTelemetry::new(),
         }
     }
+}
 
+#[cfg(any(test, feature = "perf-counters"))]
+impl CursorAutocmdFastPathTelemetry {
     fn ingress_metrics_mut(
         &mut self,
         ingress: AutocmdIngress,
@@ -444,7 +457,9 @@ impl PlannerTelemetry {
             compiled_field_cache: HitMissTelemetry::new(),
         }
     }
+}
 
+impl PlannerTelemetry {
     pub(super) fn record_local_query(
         &mut self,
         bucket_maps_scanned: usize,
@@ -485,7 +500,10 @@ impl PlannerTelemetry {
     pub(super) fn record_local_query_compile(&mut self) {
         self.local_query_compiles = self.local_query_compiles.saturating_add(1);
     }
+}
 
+#[cfg(any(test, feature = "perf-counters"))]
+impl PlannerTelemetry {
     pub(super) fn record_projection_reuse_hit(&mut self) {
         self.projection_reuse.record_hit();
     }
@@ -662,7 +680,10 @@ impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_ingress_applied(&mut self) {
         self.ingress_applied = self.ingress_applied.saturating_add(1);
     }
+}
 
+#[cfg(any(test, feature = "perf-counters"))]
+impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_cursor_autocmd_fast_path_dropped(
         &mut self,
         ingress: AutocmdIngress,
@@ -676,11 +697,15 @@ impl RuntimeBehaviorMetrics {
     ) {
         self.cursor_autocmd_fast_path.record_continued(ingress);
     }
+}
 
+impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_observation_request_executed(&mut self) {
         self.observation_requests_executed = self.observation_requests_executed.saturating_add(1);
     }
+}
 
+impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_degraded_draw_application(&mut self) {
         self.degraded_draw_applications = self.degraded_draw_applications.saturating_add(1);
     }
@@ -884,7 +909,10 @@ impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_planner_local_query_compile(&mut self) {
         self.planner.record_local_query_compile();
     }
+}
 
+#[cfg(any(test, feature = "perf-counters"))]
+impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_projection_reuse_hit(&mut self) {
         self.planner.record_projection_reuse_hit();
     }
@@ -900,7 +928,9 @@ impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_compiled_field_cache_miss(&mut self) {
         self.planner.record_compiled_field_cache_miss();
     }
+}
 
+impl RuntimeBehaviorMetrics {
     #[cfg(feature = "perf-counters")]
     pub(in crate::events) fn record_planning_preview_invocation(&mut self) {
         self.planning_preview.record_invocation();
@@ -934,14 +964,12 @@ impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_particle_overlay_refresh(&mut self, cell_count: usize) {
         self.particle_path.record_overlay_refresh(cell_count);
     }
+}
 
+#[cfg(any(test, feature = "perf-counters"))]
+impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_buffer_metadata_read(&mut self) {
         self.validation_reads.record_buffer_metadata_read();
-    }
-
-    pub(in crate::events) fn record_current_buffer_changedtick_read(&mut self) {
-        self.validation_reads
-            .record_current_buffer_changedtick_read();
     }
 
     pub(in crate::events) fn record_editor_bounds_read(&mut self) {
@@ -950,5 +978,13 @@ impl RuntimeBehaviorMetrics {
 
     pub(in crate::events) fn record_command_row_read(&mut self) {
         self.validation_reads.record_command_row_read();
+    }
+}
+
+#[cfg(test)]
+impl RuntimeBehaviorMetrics {
+    pub(in crate::events) fn record_current_buffer_changedtick_read(&mut self) {
+        self.validation_reads
+            .record_current_buffer_changedtick_read();
     }
 }

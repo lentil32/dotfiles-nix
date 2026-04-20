@@ -118,11 +118,6 @@ pub(super) use timers::dispatch_core_timer_fired;
 pub(super) use timers::now_ms;
 pub(super) use timers::to_core_millis;
 
-#[allow(dead_code)]
-pub(super) fn record_current_buffer_changedtick_read() {
-    telemetry::record_current_buffer_changedtick_read();
-}
-
 #[cfg(test)]
 use super::event_loop::reset_for_test as reset_event_loop_for_test;
 #[cfg(test)]

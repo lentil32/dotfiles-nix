@@ -1,16 +1,21 @@
+#[cfg(test)]
 use super::CellRect;
 use super::MICRO_TILE_SAMPLES;
 use super::MaterializedTile;
 use super::MicroTile;
+#[cfg(test)]
 use super::TailBand;
 use super::spatial_index::CellRows;
+#[cfg(test)]
 use crate::core::types::ArcLenQ16;
 use crate::core::types::StepIndex;
+#[cfg(test)]
 use crate::core::types::StrokeId;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::VecDeque;
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub(in super::super) struct DepositedSlice {
     pub(in super::super) stroke_id: StrokeId,
@@ -21,7 +26,6 @@ pub(in super::super) struct DepositedSlice {
     pub(in super::super) band: TailBand,
     pub(in super::super) support_steps: usize,
     pub(in super::super) intensity_q16: u32,
-    #[cfg(test)]
     pub(in super::super) microtiles: BTreeMap<(i64, i64), MicroTile>,
 }
 

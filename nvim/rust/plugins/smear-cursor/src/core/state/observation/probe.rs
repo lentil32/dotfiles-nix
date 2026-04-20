@@ -317,6 +317,7 @@ impl BackgroundProbeState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn reuse(&self) -> Option<ProbeReuse> {
         match self {
             Self::Ready { reuse, .. } => Some(*reuse),

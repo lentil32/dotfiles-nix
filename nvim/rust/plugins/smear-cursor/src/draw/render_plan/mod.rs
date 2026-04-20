@@ -48,6 +48,7 @@ pub(crate) use self::infra::shared::TargetCellOverlay;
 use self::infra::shared::*;
 use self::latent_field::AgeMoment;
 use self::latent_field::CompiledCell;
+#[cfg(test)]
 use self::latent_field::DepositedSlice;
 use self::latent_field::MICRO_H;
 use self::latent_field::MICRO_W;

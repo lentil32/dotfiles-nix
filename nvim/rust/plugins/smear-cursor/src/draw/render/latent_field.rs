@@ -29,6 +29,7 @@ pub(super) use spatial_index::BorrowedCellRows;
 pub(super) use spatial_index::BorrowedCellRowsScratch;
 pub(super) use spatial_index::CellRowQueryStats;
 pub(super) use spatial_index::CellRows;
+#[cfg(test)]
 pub(super) use store::DepositedSlice;
 pub(super) use store::LatentFieldCache;
 pub(super) use weights::comet_tail_profiles;

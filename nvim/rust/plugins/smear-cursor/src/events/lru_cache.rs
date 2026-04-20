@@ -178,6 +178,7 @@ impl<K: Eq + Hash + Clone, V> LruCache<K, V> {
 }
 
 impl<K: Eq + Hash, V: Clone> LruCache<K, V> {
+    #[cfg(test)]
     pub(super) fn peek_cloned(&self, key: &K) -> Option<V> {
         let index = *self.indices_by_key.get(key)?;
         self.nodes

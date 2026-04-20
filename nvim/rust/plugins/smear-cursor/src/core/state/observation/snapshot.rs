@@ -1,5 +1,6 @@
 use super::cursor_context::CursorColorProbeGenerations;
 use super::cursor_context::CursorColorProbeWitness;
+#[cfg(test)]
 use super::cursor_context::CursorTextContextBoundary;
 use super::cursor_context::CursorTextContextState;
 use super::probe::BackgroundProbeState;

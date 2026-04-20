@@ -38,7 +38,7 @@ pub(super) fn start_timer_once(
     HostTimerId::try_new(host_bridge.start_timer_once(host_callback_id, timeout_ms)?)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(not(test))]
 pub(super) fn stop_timer(timer_id: HostTimerId) -> Result<()> {
     Ok(InstalledHostBridge.stop_timer(timer_id.get())?)
 }

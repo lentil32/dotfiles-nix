@@ -11,11 +11,6 @@ mod tests;
 pub(crate) use background_probe::BackgroundProbeBatch;
 pub(crate) use background_probe::BackgroundProbeChunk;
 pub(crate) use background_probe::BackgroundProbeChunkMask;
-#[allow(
-    unused_imports,
-    reason = "Returned from crate-visible APIs in this module tree."
-)]
-pub(crate) use background_probe::BackgroundProbePackedMaskIter;
 pub(crate) use background_probe::BackgroundProbePlan;
 #[cfg(test)]
 pub(crate) use background_probe::BackgroundProbeProgress;

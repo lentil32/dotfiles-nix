@@ -85,12 +85,9 @@ fn surface_snapshot(
     textoff: i64,
 ) -> WindowSurfaceSnapshot {
     surface_snapshot_with_handles(
-        11,
-        17,
-        window_row,
-        window_col,
-        window_width,
-        window_height,
+        (11, 17),
+        (window_row, window_col),
+        (window_width, window_height),
         topline,
         leftcol,
         textoff,
@@ -98,23 +95,20 @@ fn surface_snapshot(
 }
 
 fn surface_snapshot_with_handles(
-    window_handle: i64,
-    buffer_handle: i64,
-    window_row: i64,
-    window_col: i64,
-    window_width: i64,
-    window_height: i64,
+    handles: (i64, i64),
+    window_origin: (i64, i64),
+    window_size: (i64, i64),
     topline: i64,
     leftcol: i64,
     textoff: i64,
 ) -> WindowSurfaceSnapshot {
     WindowSurfaceSnapshot::new(
-        SurfaceId::new(window_handle, buffer_handle).expect("positive handles"),
+        SurfaceId::new(handles.0, handles.1).expect("positive handles"),
         BufferLine::new(topline).expect("positive top buffer line"),
         u32::try_from(leftcol).expect("non-negative left column"),
         u32::try_from(textoff).expect("non-negative text offset"),
-        screen_cell(window_row, window_col),
-        ViewportBounds::new(window_height, window_width).expect("positive viewport bounds"),
+        screen_cell(window_origin.0, window_origin.1),
+        ViewportBounds::new(window_size.1, window_size.0).expect("positive viewport bounds"),
     )
 }
 
@@ -488,78 +482,99 @@ fn mutate_surface(
     let surface_id = snapshot.id();
     match axis {
         0 => surface_snapshot_with_handles(
-            surface_id.window_handle(),
-            surface_id.buffer_handle(),
-            snapshot.window_origin().row().saturating_add(1),
-            snapshot.window_origin().col(),
-            snapshot.window_size().max_col(),
-            snapshot.window_size().max_row(),
+            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (
+                snapshot.window_origin().row().saturating_add(1),
+                snapshot.window_origin().col(),
+            ),
+            (
+                snapshot.window_size().max_col(),
+                snapshot.window_size().max_row(),
+            ),
             snapshot.top_buffer_line().value(),
             i64::from(snapshot.left_col0()),
             i64::from(snapshot.text_offset0()),
         ),
         1 => surface_snapshot_with_handles(
-            surface_id.window_handle(),
-            surface_id.buffer_handle(),
-            snapshot.window_origin().row(),
-            snapshot.window_origin().col().saturating_add(1),
-            snapshot.window_size().max_col(),
-            snapshot.window_size().max_row(),
+            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (
+                snapshot.window_origin().row(),
+                snapshot.window_origin().col().saturating_add(1),
+            ),
+            (
+                snapshot.window_size().max_col(),
+                snapshot.window_size().max_row(),
+            ),
             snapshot.top_buffer_line().value(),
             i64::from(snapshot.left_col0()),
             i64::from(snapshot.text_offset0()),
         ),
         2 => surface_snapshot_with_handles(
-            surface_id.window_handle(),
-            surface_id.buffer_handle(),
-            snapshot.window_origin().row(),
-            snapshot.window_origin().col(),
-            snapshot.window_size().max_col().saturating_add(1),
-            snapshot.window_size().max_row(),
+            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (
+                snapshot.window_origin().row(),
+                snapshot.window_origin().col(),
+            ),
+            (
+                snapshot.window_size().max_col().saturating_add(1),
+                snapshot.window_size().max_row(),
+            ),
             snapshot.top_buffer_line().value(),
             i64::from(snapshot.left_col0()),
             i64::from(snapshot.text_offset0()),
         ),
         3 => surface_snapshot_with_handles(
-            surface_id.window_handle(),
-            surface_id.buffer_handle(),
-            snapshot.window_origin().row(),
-            snapshot.window_origin().col(),
-            snapshot.window_size().max_col(),
-            snapshot.window_size().max_row().saturating_add(1),
+            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (
+                snapshot.window_origin().row(),
+                snapshot.window_origin().col(),
+            ),
+            (
+                snapshot.window_size().max_col(),
+                snapshot.window_size().max_row().saturating_add(1),
+            ),
             snapshot.top_buffer_line().value(),
             i64::from(snapshot.left_col0()),
             i64::from(snapshot.text_offset0()),
         ),
         4 => surface_snapshot_with_handles(
-            surface_id.window_handle(),
-            surface_id.buffer_handle(),
-            snapshot.window_origin().row(),
-            snapshot.window_origin().col(),
-            snapshot.window_size().max_col(),
-            snapshot.window_size().max_row(),
+            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (
+                snapshot.window_origin().row(),
+                snapshot.window_origin().col(),
+            ),
+            (
+                snapshot.window_size().max_col(),
+                snapshot.window_size().max_row(),
+            ),
             snapshot.top_buffer_line().value().saturating_add(1),
             i64::from(snapshot.left_col0()),
             i64::from(snapshot.text_offset0()),
         ),
         5 => surface_snapshot_with_handles(
-            surface_id.window_handle(),
-            surface_id.buffer_handle(),
-            snapshot.window_origin().row(),
-            snapshot.window_origin().col(),
-            snapshot.window_size().max_col(),
-            snapshot.window_size().max_row(),
+            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (
+                snapshot.window_origin().row(),
+                snapshot.window_origin().col(),
+            ),
+            (
+                snapshot.window_size().max_col(),
+                snapshot.window_size().max_row(),
+            ),
             snapshot.top_buffer_line().value(),
             i64::from(snapshot.left_col0()).saturating_add(1),
             i64::from(snapshot.text_offset0()),
         ),
         6 => surface_snapshot_with_handles(
-            surface_id.window_handle(),
-            surface_id.buffer_handle(),
-            snapshot.window_origin().row(),
-            snapshot.window_origin().col(),
-            snapshot.window_size().max_col(),
-            snapshot.window_size().max_row(),
+            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (
+                snapshot.window_origin().row(),
+                snapshot.window_origin().col(),
+            ),
+            (
+                snapshot.window_size().max_col(),
+                snapshot.window_size().max_row(),
+            ),
             snapshot.top_buffer_line().value(),
             i64::from(snapshot.left_col0()),
             i64::from(snapshot.text_offset0())
@@ -698,12 +713,9 @@ proptest! {
         let conceal_key =
             conceal_key(buffer_handle, changedtick, line, conceallevel, concealcursor);
         let base_surface = surface_snapshot_with_handles(
-            window_handle,
-            buffer_handle,
-            window_row,
-            window_col,
-            window_width,
-            window_height,
+            (window_handle, buffer_handle),
+            (window_row, window_col),
+            (window_width, window_height),
             topline,
             leftcol,
             textoff,
@@ -747,12 +759,9 @@ proptest! {
         let conceal_key =
             conceal_key(buffer_handle, changedtick, line, conceallevel, concealcursor);
         let base_surface = surface_snapshot_with_handles(
-            window_handle,
-            buffer_handle,
-            window_row,
-            window_col,
-            window_width,
-            window_height,
+            (window_handle, buffer_handle),
+            (window_row, window_col),
+            (window_width, window_height),
             topline,
             leftcol,
             textoff,

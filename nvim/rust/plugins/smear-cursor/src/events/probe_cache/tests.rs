@@ -68,23 +68,20 @@ pub(super) fn cursor_text_context(
 }
 
 pub(super) fn conceal_surface_snapshot(
-    window_handle: i64,
-    buffer_handle: i64,
+    handles: (i64, i64),
     top_buffer_line: i64,
     left_col0: u32,
     text_offset0: u32,
-    window_row: i64,
-    window_col: i64,
-    window_height: i64,
-    window_width: i64,
+    window_origin: (i64, i64),
+    window_size: (i64, i64),
 ) -> WindowSurfaceSnapshot {
     WindowSurfaceSnapshot::new(
-        SurfaceId::new(window_handle, buffer_handle).expect("positive handles"),
+        SurfaceId::new(handles.0, handles.1).expect("positive handles"),
         BufferLine::new(top_buffer_line).expect("positive top buffer line"),
         left_col0,
         text_offset0,
-        ScreenCell::new(window_row, window_col).expect("one-based window origin"),
-        ViewportBounds::new(window_height, window_width).expect("positive window size"),
+        ScreenCell::new(window_origin.0, window_origin.1).expect("one-based window origin"),
+        ViewportBounds::new(window_size.0, window_size.1).expect("positive window size"),
     )
 }
 

@@ -9,6 +9,12 @@ use std::collections::HashMap;
 
 pub(crate) struct StagedFloatingWindow {
     buffer: Option<api::Buffer>,
+    delete_buffer_context: &'static str,
+    close_window_context: &'static str,
+}
+
+pub(crate) struct AttachedFloatingWindow {
+    buffer: Option<api::Buffer>,
     window: Option<api::Window>,
     delete_buffer_context: &'static str,
     close_window_context: &'static str,
@@ -22,46 +28,70 @@ impl StagedFloatingWindow {
     ) -> Self {
         Self {
             buffer: Some(buffer),
-            window: None,
             delete_buffer_context,
             close_window_context,
         }
     }
 
-    pub(crate) fn attach_window(&mut self, window: api::Window) {
-        debug_assert!(
-            self.window.is_none(),
-            "staged floating window already owns a window"
-        );
-        self.window = Some(window);
+    pub(crate) fn buffer(&self) -> &api::Buffer {
+        match self.buffer.as_ref() {
+            Some(buffer) => buffer,
+            None => unreachable!("staged floating window lost its buffer before attachment"),
+        }
     }
 
+    pub(crate) fn attach_window(mut self, window: api::Window) -> AttachedFloatingWindow {
+        let buffer = match self.buffer.take() {
+            Some(buffer) => buffer,
+            None => unreachable!("staged floating window lost its buffer before attachment"),
+        };
+        AttachedFloatingWindow {
+            buffer: Some(buffer),
+            window: Some(window),
+            delete_buffer_context: self.delete_buffer_context,
+            close_window_context: self.close_window_context,
+        }
+    }
+}
+
+impl AttachedFloatingWindow {
     pub(crate) fn buffer(&self) -> &api::Buffer {
-        self.buffer
-            .as_ref()
-            .expect("staged floating window should always own a buffer before commit")
+        match self.buffer.as_ref() {
+            Some(buffer) => buffer,
+            None => unreachable!("attached floating window lost its buffer before commit"),
+        }
     }
 
     pub(crate) fn window(&self) -> &api::Window {
-        self.window
-            .as_ref()
-            .expect("staged floating window should own a window after attachment")
+        match self.window.as_ref() {
+            Some(window) => window,
+            None => unreachable!("attached floating window lost its window before commit"),
+        }
     }
 
     pub(crate) fn into_window_and_buffer(mut self) -> (api::Window, api::Buffer) {
-        let window = self
-            .window
-            .take()
-            .expect("staged floating window should own a window before commit");
-        let buffer = self
-            .buffer
-            .take()
-            .expect("staged floating window should own a buffer before commit");
+        let window = match self.window.take() {
+            Some(window) => window,
+            None => unreachable!("attached floating window lost its window before commit"),
+        };
+        let buffer = match self.buffer.take() {
+            Some(buffer) => buffer,
+            None => unreachable!("attached floating window lost its buffer before commit"),
+        };
         (window, buffer)
     }
 }
 
 impl Drop for StagedFloatingWindow {
+    fn drop(&mut self) {
+        let Some(buffer) = self.buffer.take() else {
+            return;
+        };
+        delete_floating_buffer(buffer, self.delete_buffer_context);
+    }
+}
+
+impl Drop for AttachedFloatingWindow {
     fn drop(&mut self) {
         if let Some(window) = self.window.take()
             && let Err(err) = window.close(true)

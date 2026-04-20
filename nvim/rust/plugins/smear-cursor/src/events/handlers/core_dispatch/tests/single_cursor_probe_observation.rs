@@ -9,6 +9,33 @@ fn setup_cursor_probe_ingress() -> (CoreDispatchTestContext, PendingObservation)
     (scope, request)
 }
 
+fn same_wave_cursor_probe_executor(request: &PendingObservation) -> RecordingExecutor {
+    let mut executor = RecordingExecutor::default();
+    executor
+        .planned_follow_ups
+        .push_back(vec![observation_base_collected(
+            request,
+            observation_basis(Some(cursor(7, 8)), 26),
+        )]);
+    executor.planned_follow_ups.push_back(Vec::new());
+    executor
+        .planned_follow_ups
+        .push_back(vec![compatible_probe_report(request)]);
+    executor
+}
+
+fn run_same_wave_cursor_probe_edge() -> (
+    CoreDispatchTestContext,
+    PendingObservation,
+    RecordingExecutor,
+    bool,
+) {
+    let (scope, request) = setup_cursor_probe_ingress();
+    let mut executor = same_wave_cursor_probe_executor(&request);
+    let has_more_items = drain_next_edge(&mut executor);
+    (scope, request, executor, has_more_items)
+}
+
 #[test]
 fn ingress_dispatch_queues_one_observation_base_batch() {
     let (_scope, _request) = setup_cursor_probe_ingress();
@@ -30,21 +57,8 @@ fn ingress_dispatch_queues_one_observation_base_batch() {
 }
 
 #[test]
-fn observation_base_edge_executes_the_same_wave_cursor_probe() {
-    let (_scope, request) = setup_cursor_probe_ingress();
-    let mut executor = RecordingExecutor::default();
-    executor
-        .planned_follow_ups
-        .push_back(vec![observation_base_collected(
-            &request,
-            observation_basis(Some(cursor(7, 8)), 26),
-        )]);
-    executor.planned_follow_ups.push_back(Vec::new());
-    executor
-        .planned_follow_ups
-        .push_back(vec![compatible_probe_report(&request)]);
-
-    let has_more_items = drain_next_edge(&mut executor);
+fn observation_base_edge_executes_the_same_wave_cursor_probe_and_updates_observation() {
+    let (_scope, _request, executor, has_more_items) = run_same_wave_cursor_probe_edge();
 
     assert!(
         has_more_items,
@@ -61,25 +75,6 @@ fn observation_base_edge_executes_the_same_wave_cursor_probe() {
             })
         ]
     ));
-}
-
-#[test]
-fn observation_base_edge_updates_the_retained_observation_from_same_wave_probe() {
-    let (_scope, request) = setup_cursor_probe_ingress();
-    let mut executor = RecordingExecutor::default();
-    executor
-        .planned_follow_ups
-        .push_back(vec![observation_base_collected(
-            &request,
-            observation_basis(Some(cursor(7, 8)), 26),
-        )]);
-    executor.planned_follow_ups.push_back(Vec::new());
-    executor
-        .planned_follow_ups
-        .push_back(vec![compatible_probe_report(&request)]);
-
-    let _ = drain_next_edge(&mut executor);
-
     assert_eq!(
         current_core_state()
             .observation()
@@ -88,43 +83,15 @@ fn observation_base_edge_updates_the_retained_observation_from_same_wave_probe()
     );
 }
 
-fn setup_after_same_wave_cursor_probe() -> (
-    CoreDispatchTestContext,
-    PendingObservation,
-    RecordingExecutor,
-) {
-    let (scope, request) = setup_cursor_probe_ingress();
-    let mut executor = RecordingExecutor::default();
-    executor
-        .planned_follow_ups
-        .push_back(vec![observation_base_collected(
-            &request,
-            observation_basis(Some(cursor(7, 8)), 26),
-        )]);
-    executor.planned_follow_ups.push_back(Vec::new());
-    executor
-        .planned_follow_ups
-        .push_back(vec![compatible_probe_report(&request)]);
-    let _ = drain_next_edge(&mut executor);
-    (scope, request, executor)
-}
-
 #[test]
-fn same_wave_cursor_probe_keeps_apply_work_deferred() {
-    let (_scope, _request, executor) = setup_after_same_wave_cursor_probe();
+fn same_wave_cursor_probe_defers_apply_work_and_leaves_only_non_probe_follow_up_work_queued() {
+    let (_scope, _request, executor, has_more_items) = run_same_wave_cursor_probe_edge();
+    let queued_follow_up = queued_front_work_item();
 
     assert!(
         !executor.executed_effects.iter().any(is_apply_proposal),
         "apply work must remain deferred after the same-wave probe finishes because planning still runs first"
     );
-}
-
-#[test]
-fn same_wave_cursor_probe_leaves_only_non_probe_follow_up_work_queued() {
-    let (_scope, _request, _executor) = setup_after_same_wave_cursor_probe();
-    let has_more_items = queued_work_count() > 0;
-    let queued_follow_up = queued_front_work_item();
-
     assert!(
         if has_more_items {
             matches!(

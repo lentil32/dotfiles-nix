@@ -48,6 +48,22 @@ fn setup_after_cursor_color_probe_edge() -> (
     (scope, request, basis, first_background_chunk, executor)
 }
 
+fn execute_first_background_chunk_edge(
+    request: &PendingObservation,
+    basis: &ObservationBasis,
+    first_background_chunk: &BackgroundProbeChunk,
+    executor: &mut RecordingExecutor,
+) -> bool {
+    executor
+        .planned_follow_ups
+        .push_back(vec![background_chunk_probe_report(
+            request,
+            first_background_chunk,
+            basis.viewport(),
+        )]);
+    drain_next_edge(executor)
+}
+
 #[test]
 fn observation_base_edge_queues_only_the_cursor_color_probe() {
     let (_scope, _request, _basis, executor) = setup_after_observation_base_edge();
@@ -92,15 +108,12 @@ fn cursor_color_probe_edge_queues_the_first_background_chunk() {
 fn background_chunk_edge_queues_the_next_background_chunk() {
     let (_scope, request, basis, first_background_chunk, mut executor) =
         setup_after_cursor_color_probe_edge();
-    executor
-        .planned_follow_ups
-        .push_back(vec![background_chunk_probe_report(
-            &request,
-            &first_background_chunk,
-            basis.viewport(),
-        )]);
-
-    let has_more_items = drain_next_edge(&mut executor);
+    let has_more_items = execute_first_background_chunk_edge(
+        &request,
+        &basis,
+        &first_background_chunk,
+        &mut executor,
+    );
     let second_background_chunk = current_core_state()
         .observation()
         .and_then(|observation| observation.probes().background().next_chunk())
@@ -128,47 +141,25 @@ fn background_chunk_edge_queues_the_next_background_chunk() {
 }
 
 #[test]
-fn final_background_edge_transitions_the_runtime_to_planning() {
+fn final_background_edge_transitions_to_planning_and_queues_render_plan_work() {
     let (_scope, request, basis, first_background_chunk, mut executor) =
         setup_after_cursor_color_probe_edge();
-    executor
-        .planned_follow_ups
-        .push_back(vec![background_chunk_probe_report(
-            &request,
-            &first_background_chunk,
-            basis.viewport(),
-        )]);
-    let _ = drain_next_edge(&mut executor);
-    executor
-        .planned_follow_ups
-        .push_back(vec![background_probe_report(&request, basis.viewport())]);
-
-    let _ = drain_next_edge(&mut executor);
-    let after_completion = current_core_state();
-
-    assert_eq!(after_completion.lifecycle(), Lifecycle::Planning);
-    assert!(after_completion.pending_proposal().is_none());
-    assert!(after_completion.pending_plan_proposal_id().is_some());
-}
-
-#[test]
-fn final_background_edge_queues_render_plan_work_for_a_later_edge() {
-    let (_scope, request, basis, first_background_chunk, mut executor) =
-        setup_after_cursor_color_probe_edge();
-    executor
-        .planned_follow_ups
-        .push_back(vec![background_chunk_probe_report(
-            &request,
-            &first_background_chunk,
-            basis.viewport(),
-        )]);
-    let _ = drain_next_edge(&mut executor);
+    let _ = execute_first_background_chunk_edge(
+        &request,
+        &basis,
+        &first_background_chunk,
+        &mut executor,
+    );
     executor
         .planned_follow_ups
         .push_back(vec![background_probe_report(&request, basis.viewport())]);
 
     let has_more_items = drain_next_edge(&mut executor);
+    let after_completion = current_core_state();
 
+    assert_eq!(after_completion.lifecycle(), Lifecycle::Planning);
+    assert!(after_completion.pending_proposal().is_none());
+    assert!(after_completion.pending_plan_proposal_id().is_some());
     assert!(
         has_more_items,
         "planning work should remain deferred to a later edge"

@@ -22,12 +22,12 @@ proptest! {
         let conceal_key = conceal_key(22, 14, 7, 2, &concealcursor);
         let screen_cell_key = ConcealScreenCellCacheKey::from_surface(
             &conceal_key,
-            conceal_surface_snapshot(8, 22, 11, 0, 4, 2, 3, 40, 120),
+            conceal_surface_snapshot((8, 22), 11, 0, 4, (2, 3), (40, 120)),
             5,
         );
         let delta_key = ConcealDeltaCacheKey::from_surface(
             &conceal_key,
-            conceal_surface_snapshot(8, 22, 11, 0, 4, 2, 3, 40, 120),
+            conceal_surface_snapshot((8, 22), 11, 0, 4, (2, 3), (40, 120)),
         );
 
         cache.store_cursor_color_sample(color_witness.clone(), color_sample);

@@ -5,6 +5,7 @@ mod projection_view;
 mod protocol;
 mod realization;
 mod scene;
+#[cfg(test)]
 mod semantic_view;
 
 pub(crate) use ingress::*;

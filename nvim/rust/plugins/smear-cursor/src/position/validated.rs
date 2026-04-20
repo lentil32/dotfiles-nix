@@ -25,6 +25,7 @@ impl ScreenCell {
     }
 
     /// Validates an exact host-reported screen cell without rounding.
+    #[cfg(test)]
     pub(crate) fn from_host_point(point: RenderPoint) -> Option<Self> {
         if !point.row.is_finite()
             || !point.col.is_finite()

@@ -167,7 +167,7 @@ mod testing_taxonomy_doc_sync {
 mod position_spec_doc_sync {
     use pretty_assertions::assert_eq;
 
-    const POSITION_SPEC_DOC: &str = include_str!("../../../plans/position-spec.md");
+    const POSITION_SPEC_DOC: &str = include_str!("../../../docs/position-spec.md");
 
     fn normalized_position_spec_doc() -> String {
         POSITION_SPEC_DOC

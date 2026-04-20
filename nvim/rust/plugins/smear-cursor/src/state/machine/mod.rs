@@ -28,8 +28,10 @@ use self::types::TransientRuntimeState;
 
 pub(crate) use prepared_motion::PreparedRuntimeMotion;
 pub(crate) use preview::RuntimePreview;
+#[cfg(test)]
 pub(crate) use semantic::RuntimeSemanticView;
 pub(crate) use types::AnimationClockSample;
+#[cfg(test)]
 pub(crate) use types::RuntimeTargetRetargetKey;
 pub(crate) use types::RuntimeTargetSnapshot;
 

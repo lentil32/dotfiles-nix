@@ -1,11 +1,8 @@
-#![allow(dead_code)]
-
 use crate::core::effect::CursorColorFallbackMode;
 use crate::core::effect::CursorColorReuseMode;
 use crate::core::effect::CursorPositionProbeMode;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::ProbeQuality;
-use crate::position::ScreenCell;
 use pretty_assertions::assert_eq;
 
 pub(crate) fn assert_tracking_consistent<T>(bookkeeping: &T, lifecycle_truth: &T)
@@ -16,10 +13,6 @@ where
         bookkeeping, lifecycle_truth,
         "render window bookkeeping drifted from lifecycle truth"
     );
-}
-
-pub(crate) fn assert_same_visible_cells(actual: &[ScreenCell], expected: &[ScreenCell]) {
-    assert_eq!(actual, expected);
 }
 
 pub(crate) fn assert_probe_policy_shape(
@@ -65,11 +58,4 @@ pub(crate) fn assert_queue_disarmed(queued_work_count: usize, queue_is_scheduled
         !queue_is_scheduled,
         "scheduled queue should clear its armed state"
     );
-}
-
-pub(crate) fn assert_no_output_drift<T>(actual: &T, expected: &T)
-where
-    T: PartialEq + std::fmt::Debug,
-{
-    assert_eq!(actual, expected);
 }

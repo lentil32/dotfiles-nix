@@ -63,7 +63,7 @@ pub(super) enum HostBridgeError {
     RevisionDecode { value: i64 },
     #[error("failed to start smear cursor host bridge timer: {0}")]
     StartTimerOnce(#[source] nvim_oxi::Error),
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg(not(test))]
     #[error("failed to stop smear cursor host bridge timer: {0}")]
     StopTimer(#[source] nvim_oxi::Error),
     #[error("failed to install smear cursor probe helpers: {0}")]
@@ -99,7 +99,7 @@ impl InstalledHostBridge {
             .map_err(|error| HostBridgeError::StartTimerOnce(error.into()))
     }
 
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg(not(test))]
     pub(super) fn stop_timer(self, timer_id: i64) -> HostBridgeResult<()> {
         let args = Array::from_iter([Object::from(timer_id)]);
         let _: i64 = api::call_function(STOP_TIMER_FUNCTION_NAME, args)

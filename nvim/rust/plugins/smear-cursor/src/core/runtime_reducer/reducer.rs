@@ -326,6 +326,7 @@ fn draw_drain_frame(
     .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
 
+#[cfg(test)]
 pub(crate) fn reduce_cursor_event(
     state: &mut RuntimeState,
     mode: &str,
