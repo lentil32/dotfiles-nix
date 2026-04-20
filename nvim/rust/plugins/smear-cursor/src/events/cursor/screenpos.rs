@@ -59,6 +59,10 @@ pub(super) fn parse_screenpos_cell_from_dict(
 
     match (row, col) {
         (None, None) => Ok(None),
+        // `:help screenpos()` documents an all-zero tuple when the requested text position is not
+        // visible. Treat that lifecycle sentinel as an unavailable observation instead of a parse
+        // failure, while still rejecting malformed mixed zero/positive pairs.
+        (Some(0), Some(0)) => Ok(None),
         (Some(row), Some(col)) => ScreenCell::new(row, col)
             .map(Some)
             .ok_or(CursorParseError::ScreenposInvalidCell { row, col }.into()),
@@ -527,7 +531,7 @@ mod tests {
         #![proptest_config(pure_config())]
 
         #[test]
-        fn prop_parse_screenpos_cell_rejects_invalid_present_coordinates_and_missing_pairs(
+        fn prop_parse_screenpos_cell_accepts_the_all_zero_invisible_sentinel_and_rejects_other_invalid_pairs(
             row in proptest::option::of(-4_i64..=8),
             col in proptest::option::of(-4_i64..=8),
         ) {
@@ -535,6 +539,7 @@ mod tests {
 
             match (row, col) {
                 (None, None) => prop_assert_eq!(result?, None),
+                (Some(0), Some(0)) => prop_assert_eq!(result?, None),
                 (Some(row), Some(col)) if row > 0 && col > 0 => {
                     prop_assert_eq!(result?, Some(ScreenCell::new(row, col).expect("one-based cell")));
                 }
@@ -552,7 +557,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_screenpos_cell_rejects_zero_row_instead_of_treating_it_as_hidden() {
+    fn parse_screenpos_cell_treats_the_all_zero_tuple_as_an_unavailable_cursor() {
+        let result = parse_screenpos_cell(screenpos_object(Some(0), Some(0), Some(0), Some(0)))
+            .expect("all-zero screenpos sentinel should parse");
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_screenpos_cell_rejects_mixed_zero_and_positive_coordinates() {
         let result = parse_screenpos_cell(screenpos_object(Some(0), Some(3), None, None));
 
         assert!(result.is_err());
