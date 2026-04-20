@@ -140,7 +140,9 @@ in
     onActivation = {
       autoUpdate = true;
       upgrade = true;
-      cleanup = "zap";
+      # Keep Homebrew declarative without zapping per-app data from protected
+      # macOS Library paths during darwin-rebuild activation.
+      cleanup = "uninstall";
     };
 
     masApps = {

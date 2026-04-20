@@ -1,5 +1,6 @@
-use super::EXTMARK_ID;
-use super::log_draw_error;
+use super::constants::EXTMARK_ID;
+use super::context::log_draw_error;
+use super::context::with_render_tab;
 use super::palette::HighlightGroupNames;
 use super::palette::highlight_group_names;
 use super::render_plan::HighlightRef;
@@ -10,7 +11,6 @@ use super::window_pool::AllocationPolicy;
 use super::window_pool::TabPoolSnapshot;
 use super::window_pool::WindowPlacement;
 use super::window_pool::{self};
-use super::with_render_tab;
 use crate::config::normalize_color_levels;
 use crate::core::realization::RealizationProjection;
 use crate::core::realization::RealizationSpan;
@@ -121,10 +121,6 @@ pub(crate) fn redraw() -> Result<()> {
     }
 
     Ok(api::command("redraw!")?)
-}
-
-pub(crate) fn err_writeln(message: &str) {
-    api::err_writeln(message);
 }
 
 pub(crate) fn clear_namespace_in_buffer(buffer: &mut api::Buffer, namespace_id: u32) -> bool {

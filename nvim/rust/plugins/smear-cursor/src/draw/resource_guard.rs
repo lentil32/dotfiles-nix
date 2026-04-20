@@ -1,9 +1,9 @@
-use super::PrepaintOverlay;
-use super::PrepaintPlacement;
-use super::close_prepaint_overlay;
-use super::delete_floating_buffer;
-use super::log_draw_error;
-use super::valid_prepaint_handles;
+use super::context::log_draw_error;
+use super::floating_windows::delete_floating_buffer;
+use super::prepaint::PrepaintOverlay;
+use super::prepaint::PrepaintPlacement;
+use super::prepaint::close_prepaint_overlay;
+use super::prepaint::valid_prepaint_handles;
 use nvim_oxi::api;
 use std::collections::HashMap;
 

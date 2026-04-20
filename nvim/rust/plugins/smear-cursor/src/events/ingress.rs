@@ -119,17 +119,13 @@ impl AutocmdIngress {
     pub(super) const fn supports_unchanged_fast_path(self) -> bool {
         matches!(self, Self::WinEnter | Self::WinScrolled | Self::BufEnter)
     }
-
-    pub(super) const fn is_colorscheme(self) -> bool {
-        matches!(self, Self::ColorScheme)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AutocmdIngress;
     use super::parse_autocmd_ingress;
     use super::registered_autocmd_event_names;
+    use super::AutocmdIngress;
 
     #[test]
     fn known_autocmd_names_round_trip_to_typed_ingress() {
