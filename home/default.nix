@@ -70,8 +70,9 @@ in
     };
 
     sessionPath = [
-      # Ensure `make nvim` activations are picked up in new shells.
-      "${config.xdg.stateHome}/nix/profiles/home-manager/home-path/bin"
+      # Prefer the nix-darwin managed Home Manager profile so `make darwin`
+      # and `make deploy-all` control the package set visible in new shells.
+      "${config.home.profileDirectory}/bin"
       # Ensure mise-managed tools are reachable in non-interactive shells.
       "${config.xdg.dataHome}/mise/shims"
       "$BUNBIN"

@@ -34,7 +34,7 @@ nvim:
 	nix build .#darwinConfigurations.${hostname}.config.home-manager.users.${user}.home.activationPackage \
 	  --extra-experimental-features 'nix-command flakes'
 
-	./result/activate
+	./result/activate --driver-version 1
 
 nvim-profile:
 	bash ./home/scripts/nvim-profile.sh $(ARGS)

@@ -189,6 +189,30 @@
                 ]; # F19
               };
             };
+            # 64 = Show Spotlight search
+            "64" = {
+              enabled = false;
+              value = {
+                type = "standard";
+                parameters = [
+                  65535
+                  49
+                  1048576
+                ]; # Command-Space
+              };
+            };
+            # 65 = Show Finder search window
+            "65" = {
+              enabled = false;
+              value = {
+                type = "standard";
+                parameters = [
+                  65535
+                  49
+                  1572864
+                ]; # Option-Command-Space
+              };
+            };
           };
         };
         "com.apple.finder" = {
