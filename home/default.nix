@@ -70,6 +70,10 @@ in
     };
 
     sessionPath = [
+      # Allow narrow command overrides without patching upstream packages.
+      # `codex` is overridden here so process-name-based integrations can still
+      # see `codex` even though the packaged launcher hands off to `codex-raw`.
+      "${config.xdg.stateHome}/path-overrides/bin"
       # Prefer the nix-darwin managed Home Manager profile so `make darwin`
       # and `make deploy-all` control the package set visible in new shells.
       "${config.home.profileDirectory}/bin"
