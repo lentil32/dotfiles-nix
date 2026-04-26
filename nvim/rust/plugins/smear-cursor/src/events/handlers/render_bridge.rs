@@ -38,24 +38,30 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
             Ok(namespace_id) => namespace_id,
             Err(err) => {
                 warn(&format!(
-                    "engine state re-entered while resolving render namespace; applying typed failure: {err}"
+                    "runtime lane re-entered while resolving render namespace; applying typed failure: {err}"
                 ));
-                return CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
-                    proposal_id,
-                    reason: ApplyFailureKind::ShellError,
-                    divergence: RealizationDivergence::ShellStateUnknown,
-                    observed_at,
-                });
+                return (
+                    CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
+                        proposal_id,
+                        reason: ApplyFailureKind::ShellError,
+                        divergence: RealizationDivergence::ShellStateUnknown,
+                        observed_at,
+                    }),
+                    0,
+                );
             }
         };
 
         if let Some(failure) = proposal.failure_reason() {
-            return CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
-                proposal_id,
-                reason: failure.reason(),
-                divergence: failure.divergence(),
-                observed_at,
-            });
+            return (
+                CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
+                    proposal_id,
+                    reason: failure.reason(),
+                    divergence: failure.divergence(),
+                    observed_at,
+                }),
+                0,
+            );
         }
 
         let apply_result = apply_render_action(namespace_id, &proposal);
@@ -70,43 +76,47 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
                 record_degraded_draw_application();
                 if should_log_apply_perf {
                     let mode = current_mode();
-                    let mode = mode.to_string_lossy();
                     let details = metrics.perf_details();
                     log_slow_callback(
                         "core_render_apply",
-                        mode.as_ref(),
+                        &mode,
                         apply_duration_ms,
                         apply_duration_estimate_ms,
                         &details,
                     );
                 }
-                CoreEvent::ApplyReported(ApplyReport::AppliedDegraded {
-                    proposal_id,
-                    divergence: RealizationDivergence::ApplyMetrics(
-                        metrics.degraded_apply_metrics(),
-                    ),
-                    observed_at,
-                    visual_change: metrics.had_visual_change(),
-                })
+                (
+                    CoreEvent::ApplyReported(ApplyReport::AppliedDegraded {
+                        proposal_id,
+                        divergence: RealizationDivergence::ApplyMetrics(
+                            metrics.degraded_apply_metrics(),
+                        ),
+                        observed_at,
+                        visual_change: metrics.had_visual_change(),
+                    }),
+                    metrics.retained_cleanup_resources,
+                )
             }
             Ok(metrics) => {
                 if should_log_apply_perf {
                     let mode = current_mode();
-                    let mode = mode.to_string_lossy();
                     let details = metrics.perf_details();
                     log_slow_callback(
                         "core_render_apply",
-                        mode.as_ref(),
+                        &mode,
                         apply_duration_ms,
                         apply_duration_estimate_ms,
                         &details,
                     );
                 }
-                CoreEvent::ApplyReported(ApplyReport::AppliedFully {
-                    proposal_id,
-                    observed_at,
-                    visual_change: metrics.had_visual_change(),
-                })
+                (
+                    CoreEvent::ApplyReported(ApplyReport::AppliedFully {
+                        proposal_id,
+                        observed_at,
+                        visual_change: metrics.had_visual_change(),
+                    }),
+                    metrics.retained_cleanup_resources,
+                )
             }
             Err(err) => {
                 let (reason, divergence) = match err {
@@ -137,24 +147,30 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
                         (failure.reason(), failure.divergence())
                     }
                 };
-                CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
-                    proposal_id,
-                    reason,
-                    divergence,
-                    observed_at,
-                })
+                (
+                    CoreEvent::ApplyReported(ApplyReport::ApplyFailed {
+                        proposal_id,
+                        reason,
+                        divergence,
+                        observed_at,
+                    }),
+                    0,
+                )
             }
         }
     }));
 
-    let follow_up = apply_outcome.unwrap_or_else(|_| {
+    let (follow_up, retained_resources) = apply_outcome.unwrap_or_else(|_| {
         // Surprising: apply effect panicked after the reducer committed the proposal.
         // Emit a typed failure so recovery can preserve divergence from the acknowledged basis.
         warn("core render apply panicked");
-        CoreEvent::EffectFailed(EffectFailedEvent {
-            proposal_id: Some(proposal_id),
-            observed_at,
-        })
+        (
+            CoreEvent::EffectFailed(EffectFailedEvent {
+                proposal_id: Some(proposal_id),
+                observed_at,
+            }),
+            0,
+        )
     });
     super::super::logging::trace_lazy(|| {
         let report_summary = match &follow_up {
@@ -172,5 +188,11 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
         format!("apply_proposal_result {proposal_trace} {report_summary}")
     });
 
-    vec![follow_up]
+    let mut follow_ups = vec![follow_up];
+    if let Some(event) =
+        super::retained_resource_cleanup_retry_event(retained_resources, observed_at)
+    {
+        follow_ups.push(event);
+    }
+    follow_ups
 }

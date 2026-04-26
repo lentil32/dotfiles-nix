@@ -114,7 +114,7 @@ proptest! {
         prop_assert!(state.trail_stroke_id() > before_stroke_id);
         if expected_clear {
             prop_assert!(matches!(render_action(&transition), RenderAction::ClearAll));
-            prop_assert!(!transition.should_schedule_next_animation);
+            prop_assert!(!transition.should_schedule_next_animation());
             prop_assert_eq!(
                 render_cleanup_action(&transition),
                 RenderCleanupAction::Schedule
@@ -125,7 +125,7 @@ proptest! {
                 .expect("surface hop with smearing enabled should keep drawing");
 
             prop_assert!(matches!(render_action(&transition), RenderAction::Draw(_)));
-            prop_assert!(transition.should_schedule_next_animation);
+            prop_assert!(transition.should_schedule_next_animation());
             prop_assert_eq!(
                 render_cleanup_action(&transition),
                 RenderCleanupAction::Invalidate

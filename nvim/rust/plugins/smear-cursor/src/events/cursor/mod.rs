@@ -56,13 +56,15 @@ impl From<CursorReadError> for nvim_oxi::Error {
     fn from(error: CursorReadError) -> Self {
         match error {
             CursorReadError::Shell(error) => error,
-            CursorReadError::Parse(error) => nvim_oxi::api::Error::Other(error.to_string()).into(),
+            CursorReadError::Parse(error) => {
+                crate::host::api::Error::Other(error.to_string()).into()
+            }
         }
     }
 }
 
-impl From<nvim_oxi::api::Error> for CursorReadError {
-    fn from(error: nvim_oxi::api::Error) -> Self {
+impl From<crate::host::api::Error> for CursorReadError {
+    fn from(error: crate::host::api::Error) -> Self {
         Self::Shell(error.into())
     }
 }

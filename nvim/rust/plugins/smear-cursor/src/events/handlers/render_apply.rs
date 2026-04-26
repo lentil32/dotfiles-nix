@@ -23,6 +23,7 @@ use crate::core::runtime_reducer::RenderAllocationPolicy;
 use crate::core::state::InFlightProposal;
 use crate::core::state::ProposalExecution;
 use crate::core::state::RealizationFailure;
+use crate::core::state::RenderCleanupCompactionProgress;
 use crate::core::state::ShellProjection;
 use crate::draw::AllocationPolicy;
 use crate::draw::ClearPrepaintOverlaysSummary;
@@ -37,6 +38,7 @@ use crate::draw::editor_bounds;
 use crate::draw::prepaint_cursor_cell;
 use crate::draw::purge_render_windows;
 use crate::draw::redraw;
+use crate::host::NamespaceId;
 use crate::position::ViewportBounds;
 use nvim_oxi::Result;
 
@@ -52,7 +54,10 @@ pub(super) enum ApplyRenderActionError {
     FailureProposalReachedShell(RealizationFailure),
 }
 
-pub(crate) fn apply_ingress_cursor_presentation_effect(effect: IngressCursorPresentationEffect) {
+pub(crate) fn apply_ingress_cursor_presentation_effect(
+    effect: IngressCursorPresentationEffect,
+) -> Vec<CoreEvent> {
+    let mut retained_resources = 0_usize;
     match effect {
         IngressCursorPresentationEffect::HideCursor => {
             hide_real_cursor();
@@ -64,13 +69,19 @@ pub(crate) fn apply_ingress_cursor_presentation_effect(effect: IngressCursorPres
         } => {
             hide_real_cursor();
             match ensure_namespace_id() {
-                Ok(namespace_id) => prepaint_cursor_cell(namespace_id, cell, shape, zindex),
+                Ok(namespace_id) => {
+                    retained_resources = prepaint_cursor_cell(namespace_id, cell, shape, zindex)
+                        .retained_resources();
+                }
                 Err(err) => warn(&format!(
-                    "engine state re-entered while preparing ingress prepaint; skipping overlay: {err}"
+                    "runtime lane re-entered while preparing ingress prepaint; skipping overlay: {err}"
                 )),
             }
         }
     }
+    super::retained_resource_cleanup_retry_event(retained_resources, to_core_millis(now_ms()))
+        .into_iter()
+        .collect()
 }
 
 pub(crate) fn execute_redraw_cmdline_effect() {
@@ -105,13 +116,26 @@ enum RenderCleanupOutcome {
 impl RenderCleanupOutcome {
     fn action(self) -> crate::core::event::RenderCleanupAppliedAction {
         match self {
-            Self::SoftClear { .. } => crate::core::event::RenderCleanupAppliedAction::SoftCleared,
+            Self::SoftClear { prepaint, .. } => {
+                crate::core::event::RenderCleanupAppliedAction::SoftCleared {
+                    retained_resources: prepaint.retained_resources(),
+                }
+            }
             Self::CompactToBudget(summary) => {
                 crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
                     converged_to_idle: summary.converged_to_idle(),
+                    progress: if summary.made_progress() {
+                        RenderCleanupCompactionProgress::MadeProgress
+                    } else {
+                        RenderCleanupCompactionProgress::NoProgress
+                    },
                 }
             }
-            Self::HardPurge(_) => crate::core::event::RenderCleanupAppliedAction::HardPurged,
+            Self::HardPurge(summary) => {
+                crate::core::event::RenderCleanupAppliedAction::HardPurged {
+                    retained_resources: summary.retained_resources(),
+                }
+            }
         }
     }
 
@@ -134,7 +158,7 @@ pub(crate) fn execute_core_apply_render_cleanup_effect(
         Ok(namespace_id) => namespace_id,
         Err(err) => {
             warn(&format!(
-                "engine state re-entered while applying render cleanup; emitting effect failure: {err}"
+                "runtime lane re-entered while applying render cleanup; emitting effect failure: {err}"
             ));
             return vec![CoreEvent::EffectFailed(EffectFailedEvent {
                 proposal_id: None,
@@ -187,7 +211,7 @@ pub(crate) fn execute_core_apply_render_cleanup_effect(
         && let Err(err) = release_cleanup_cold_shell_storage()
     {
         warn(&format!(
-            "engine state re-entered while releasing cold cleanup shell storage; keeping retained scratch: {err}"
+            "runtime lane re-entered while releasing cold cleanup shell storage; keeping retained scratch: {err}"
         ));
     }
     trace_lazy(|| {
@@ -252,7 +276,7 @@ fn live_viewport_matches_projection(projection: ShellProjection<'_>) -> Result<b
 }
 
 pub(super) fn apply_render_action(
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     proposal: &InFlightProposal,
 ) -> std::result::Result<RenderExecutionMetrics, ApplyRenderActionError> {
     let realization = proposal.realization();
@@ -265,8 +289,11 @@ pub(super) fn apply_render_action(
             "render_apply_start namespace_id={namespace_id} realization={realization_summary} patch={patch_summary} side_effects=({side_effects_summary})"
         )
     });
-    clear_prepaint_for_current_tab(namespace_id);
-    let mut metrics = RenderExecutionMetrics::default();
+    let prepaint_close_summary = clear_prepaint_for_current_tab(namespace_id);
+    let mut metrics = RenderExecutionMetrics {
+        retained_cleanup_resources: prepaint_close_summary.retained_resources(),
+        ..RenderExecutionMetrics::default()
+    };
     match proposal.execution() {
         ProposalExecution::Draw {
             realization: draw, ..
@@ -367,6 +394,7 @@ mod tests {
     use crate::core::state::RealizationClear;
     use crate::core::state::RealizationDivergence;
     use crate::core::state::RealizationFailure;
+    use crate::core::state::RenderCleanupCompactionProgress;
     use crate::core::state::RetainedProjection;
     use crate::core::state::ScenePatch;
     use crate::core::types::IngressSeq;
@@ -380,6 +408,7 @@ mod tests {
     use crate::draw::CompactRenderWindowsSummary;
     use crate::draw::PurgeRenderWindowsSummary;
     use crate::draw::render_plan::CellOp;
+    use crate::host::NamespaceId;
     use crate::position::ViewportBounds;
     use crate::test_support::proptest::pure_config;
     use proptest::prelude::*;
@@ -409,18 +438,27 @@ mod tests {
         outcome: RenderCleanupOutcome,
     ) -> crate::core::event::RenderCleanupAppliedAction {
         match outcome {
-            RenderCleanupOutcome::SoftClear { .. } => {
-                crate::core::event::RenderCleanupAppliedAction::SoftCleared
+            RenderCleanupOutcome::SoftClear { prepaint, .. } => {
+                crate::core::event::RenderCleanupAppliedAction::SoftCleared {
+                    retained_resources: prepaint.retained_resources(),
+                }
             }
             RenderCleanupOutcome::CompactToBudget(summary) => {
                 crate::core::event::RenderCleanupAppliedAction::CompactedToBudget {
                     converged_to_idle: summary.total_windows_after <= summary.target_budget
                         && !summary.has_visible_windows_after
                         && !summary.has_pending_work_after,
+                    progress: if summary.made_progress() {
+                        RenderCleanupCompactionProgress::MadeProgress
+                    } else {
+                        RenderCleanupCompactionProgress::NoProgress
+                    },
                 }
             }
-            RenderCleanupOutcome::HardPurge(_) => {
-                crate::core::event::RenderCleanupAppliedAction::HardPurged
+            RenderCleanupOutcome::HardPurge(summary) => {
+                crate::core::event::RenderCleanupAppliedAction::HardPurged {
+                    retained_resources: summary.retained_resources(),
+                }
             }
         }
     }
@@ -432,14 +470,18 @@ mod tests {
                     && (render.pruned_windows > 0
                         || render.hidden_windows > 0
                         || render.invalid_removed_windows > 0))
-                    || (prepaint.had_visible_prepaint_before_clear
-                        && prepaint.cleared_prepaint_overlays > 0)
+                    || prepaint.had_visual_change()
             }
             RenderCleanupOutcome::CompactToBudget(summary) => summary.closed_visible_windows > 0,
             RenderCleanupOutcome::HardPurge(summary) => {
-                (summary.had_visible_render_windows_before_purge && summary.purged_windows > 0)
+                (summary.had_visible_render_windows_before_purge
+                    && summary
+                        .purged_windows
+                        .saturating_sub(summary.retained_render_windows)
+                        > 0)
                     || (summary.had_visible_prepaint_before_purge
-                        && summary.cleared_prepaint_overlays > 0)
+                        && summary.closed_visible_prepaint_overlays > 0)
+                    || summary.closed_orphan_windows > 0
             }
         }
     }
@@ -453,6 +495,8 @@ mod tests {
                 0_usize..8_usize,
                 any::<bool>(),
                 0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
             )
                 .prop_map(
                     |(
@@ -462,6 +506,8 @@ mod tests {
                         invalid_removed_windows,
                         had_visible_prepaint_before_clear,
                         cleared_prepaint_overlays,
+                        closed_visible_prepaint_overlays,
+                        retained_prepaint_overlays,
                     )| {
                         RenderCleanupOutcome::SoftClear {
                             render: ClearActiveRenderWindowsSummary {
@@ -473,11 +519,14 @@ mod tests {
                             prepaint: ClearPrepaintOverlaysSummary {
                                 had_visible_prepaint_before_clear,
                                 cleared_prepaint_overlays,
+                                closed_visible_prepaint_overlays,
+                                retained_prepaint_overlays,
                             },
                         }
                     },
                 ),
             (
+                0_usize..8_usize,
                 0_usize..8_usize,
                 0_usize..8_usize,
                 0_usize..8_usize,
@@ -490,6 +539,7 @@ mod tests {
                         target_budget,
                         total_windows_after,
                         closed_visible_windows,
+                        pruned_windows,
                         invalid_removed_windows,
                         has_visible_windows_after,
                         has_pending_work_after,
@@ -498,7 +548,7 @@ mod tests {
                             target_budget,
                             total_windows_after,
                             closed_visible_windows,
-                            pruned_windows: 0,
+                            pruned_windows,
                             invalid_removed_windows,
                             has_visible_windows_after,
                             has_pending_work_after,
@@ -509,6 +559,11 @@ mod tests {
                 any::<bool>(),
                 any::<bool>(),
                 0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
+                0_usize..8_usize,
                 0_usize..8_usize
             )
                 .prop_map(
@@ -517,12 +572,22 @@ mod tests {
                         had_visible_prepaint_before_purge,
                         purged_windows,
                         cleared_prepaint_overlays,
+                        closed_visible_prepaint_overlays,
+                        retained_render_windows,
+                        retained_prepaint_overlays,
+                        closed_orphan_windows,
+                        retained_orphan_resources,
                     )| {
                         RenderCleanupOutcome::HardPurge(PurgeRenderWindowsSummary {
                             had_visible_render_windows_before_purge,
                             had_visible_prepaint_before_purge,
                             purged_windows,
                             cleared_prepaint_overlays,
+                            closed_visible_prepaint_overlays,
+                            retained_render_windows,
+                            retained_prepaint_overlays,
+                            closed_orphan_windows,
+                            retained_orphan_resources,
                         })
                     },
                 ),
@@ -574,7 +639,7 @@ mod tests {
         )
         .expect("clear proposal should accept a noop patch basis");
 
-        let result = apply_render_action(0, &proposal);
+        let result = apply_render_action(NamespaceId::new(/*value*/ 0), &proposal);
 
         assert!(result.is_ok());
     }
@@ -663,7 +728,7 @@ mod tests {
             crate::core::state::AnimationSchedule::Idle,
         );
 
-        let result = apply_render_action(0, &proposal);
+        let result = apply_render_action(NamespaceId::new(/*value*/ 0), &proposal);
 
         assert!(matches!(
             result,

@@ -3,6 +3,7 @@ use crate::core::effect::ProbePolicy;
 use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
 use crate::core::state::ProbeReuse;
+use crate::host::BufferHandle;
 
 pub(super) const CURSOR_COLOR_CACHE_CAPACITY: usize = 16;
 const CURSOR_COLOR_MOTION_CACHE_CAPACITY: usize = 16;
@@ -36,7 +37,7 @@ impl CachedCursorColorProbeSample {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct CursorColorMotionCacheKey {
     window_handle: i64,
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     changedtick: u64,
     mode: String,
     line: i64,

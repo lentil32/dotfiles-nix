@@ -43,7 +43,7 @@ impl From<StepInputError> for nvim_oxi::Error {
     fn from(error: StepInputError) -> Self {
         match error {
             StepInputError::Validation(error) => to_nvim_error(&error),
-            other => nvim_oxi::api::Error::Other(other.to_string()).into(),
+            other => crate::host::api::Error::Other(other.to_string()).into(),
         }
     }
 }

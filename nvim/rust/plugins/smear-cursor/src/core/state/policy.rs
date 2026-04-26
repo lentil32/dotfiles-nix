@@ -96,6 +96,12 @@ pub(crate) enum RenderThermalState {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RenderCleanupCompactionProgress {
+    MadeProgress,
+    NoProgress,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct HotRenderCleanupState {
     next_compaction_due_at: Millis,
     hard_purge_due_at: Millis,
@@ -148,9 +154,34 @@ impl CoolingRenderCleanupState {
         self.hard_purge_due_at
     }
 
-    pub(crate) const fn continue_cooling(self, observed_at: Millis) -> Self {
+    const fn schedule_immediate_compaction(self, observed_at: Millis) -> Self {
         Self {
             next_compaction_due_at: observed_at,
+            ..self
+        }
+    }
+
+    fn schedule_progress_compaction(self, observed_at: Millis, cadence_delay_ms: u64) -> Self {
+        Self {
+            next_compaction_due_at: Millis::new(
+                observed_at.value().saturating_add(cadence_delay_ms.max(1)),
+            ),
+            ..self
+        }
+    }
+
+    const fn await_hard_purge(self) -> Self {
+        Self {
+            next_compaction_due_at: self.hard_purge_due_at,
+            ..self
+        }
+    }
+
+    fn retry_hard_purge(self, observed_at: Millis, retry_delay_ms: u64) -> Self {
+        let retry_due_at = Millis::new(observed_at.value().saturating_add(retry_delay_ms.max(1)));
+        Self {
+            next_compaction_due_at: retry_due_at,
+            hard_purge_due_at: retry_due_at,
             ..self
         }
     }
@@ -236,16 +267,86 @@ impl RenderCleanupState {
     pub(crate) fn enter_cooling(self, observed_at: Millis) -> Self {
         match self {
             Self::Hot(schedule) => Self::Cooling(schedule.enter_cooling(observed_at)),
-            Self::Cooling(schedule) => Self::Cooling(schedule.continue_cooling(observed_at)),
+            Self::Cooling(schedule) => {
+                Self::Cooling(schedule.schedule_immediate_compaction(observed_at))
+            }
             Self::Cold => Self::Cold,
         }
     }
 
-    pub(crate) fn continue_cooling(self, observed_at: Millis) -> Self {
+    pub(crate) fn continue_cooling_after_progress(
+        self,
+        observed_at: Millis,
+        cadence_delay_ms: u64,
+    ) -> Self {
         match self {
-            Self::Hot(_) => self.enter_cooling(observed_at),
-            Self::Cooling(schedule) => Self::Cooling(schedule.continue_cooling(observed_at)),
+            Self::Hot(schedule) => Self::Cooling(
+                schedule
+                    .enter_cooling(observed_at)
+                    .schedule_progress_compaction(observed_at, cadence_delay_ms),
+            ),
+            Self::Cooling(schedule) => {
+                Self::Cooling(schedule.schedule_progress_compaction(observed_at, cadence_delay_ms))
+            }
             Self::Cold => Self::Cold,
+        }
+    }
+
+    pub(crate) fn await_hard_purge_after_stalled_compaction(self, observed_at: Millis) -> Self {
+        match self {
+            Self::Hot(schedule) => {
+                Self::Cooling(schedule.enter_cooling(observed_at).await_hard_purge())
+            }
+            Self::Cooling(schedule) => Self::Cooling(schedule.await_hard_purge()),
+            Self::Cold => Self::Cold,
+        }
+    }
+
+    pub(crate) fn retry_hard_purge_after_retained_resources(
+        self,
+        observed_at: Millis,
+        retry_delay_ms: u64,
+    ) -> Self {
+        match self {
+            Self::Hot(schedule) => Self::Cooling(
+                schedule
+                    .enter_cooling(observed_at)
+                    .retry_hard_purge(observed_at, retry_delay_ms),
+            ),
+            Self::Cooling(schedule) => {
+                Self::Cooling(schedule.retry_hard_purge(observed_at, retry_delay_ms))
+            }
+            Self::Cold => {
+                let retry_due_at =
+                    Millis::new(observed_at.value().saturating_add(retry_delay_ms.max(1)));
+                Self::Cooling(CoolingRenderCleanupState {
+                    entered_cooling_at: observed_at,
+                    next_compaction_due_at: retry_due_at,
+                    hard_purge_due_at: retry_due_at,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn retry_hard_purge_after_observed_retained_resources(
+        self,
+        observed_at: Millis,
+        retry_delay_ms: u64,
+    ) -> Self {
+        match self {
+            Self::Hot(schedule) => Self::Hot(schedule),
+            Self::Cooling(schedule) => {
+                Self::Cooling(schedule.retry_hard_purge(observed_at, retry_delay_ms))
+            }
+            Self::Cold => {
+                let retry_due_at =
+                    Millis::new(observed_at.value().saturating_add(retry_delay_ms.max(1)));
+                Self::Cooling(CoolingRenderCleanupState {
+                    entered_cooling_at: observed_at,
+                    next_compaction_due_at: retry_due_at,
+                    hard_purge_due_at: retry_due_at,
+                })
+            }
         }
     }
 }
@@ -353,6 +454,37 @@ mod tests {
     use crate::test_support::proptest::timer_id;
     use proptest::collection::vec;
     use proptest::prelude::*;
+
+    #[derive(Debug, Clone, Copy)]
+    enum CoolingTransitionInput {
+        Enter {
+            observed_at: Millis,
+        },
+        Progress {
+            observed_at: Millis,
+            cadence_delay_ms: u64,
+        },
+        Stalled {
+            observed_at: Millis,
+        },
+    }
+
+    fn cooling_transition_input() -> impl Strategy<Value = CoolingTransitionInput> {
+        prop_oneof![
+            any::<u64>().prop_map(|observed_at| CoolingTransitionInput::Enter {
+                observed_at: Millis::new(observed_at),
+            }),
+            (any::<u64>(), any::<u64>()).prop_map(|(observed_at, cadence_delay_ms)| {
+                CoolingTransitionInput::Progress {
+                    observed_at: Millis::new(observed_at),
+                    cadence_delay_ms,
+                }
+            }),
+            any::<u64>().prop_map(|observed_at| CoolingTransitionInput::Stalled {
+                observed_at: Millis::new(observed_at),
+            }),
+        ]
+    }
 
     proptest! {
         #![proptest_config(stateful_config())]
@@ -462,7 +594,7 @@ mod tests {
             soft_delay_ms in any::<u64>(),
             hard_delay_ms in any::<u64>(),
             entered_cooling_at in any::<u64>(),
-            rearm_sequence in vec((any::<bool>(), any::<u64>()), 0..=32),
+            rearm_sequence in vec(cooling_transition_input(), 0..=32),
         ) {
             let scheduled = RenderCleanupState::scheduled(
                 Millis::new(observed_at),
@@ -473,14 +605,31 @@ mod tests {
             let mut cleanup = scheduled.enter_cooling(entered_cooling_at);
             let mut expected_next_compaction_due_at = entered_cooling_at;
 
-            for (use_enter_cooling, observed_at) in rearm_sequence {
-                let observed_at = Millis::new(observed_at);
-                cleanup = if use_enter_cooling {
-                    cleanup.enter_cooling(observed_at)
-                } else {
-                    cleanup.continue_cooling(observed_at)
-                };
-                expected_next_compaction_due_at = observed_at;
+            for transition in rearm_sequence {
+                match transition {
+                    CoolingTransitionInput::Enter { observed_at } => {
+                        cleanup = cleanup.enter_cooling(observed_at);
+                        expected_next_compaction_due_at = observed_at;
+                    }
+                    CoolingTransitionInput::Progress {
+                        observed_at,
+                        cadence_delay_ms,
+                    } => {
+                        cleanup = cleanup
+                            .continue_cooling_after_progress(observed_at, cadence_delay_ms);
+                        expected_next_compaction_due_at = Millis::new(
+                            observed_at
+                                .value()
+                                .saturating_add(cadence_delay_ms.max(1)),
+                        );
+                    }
+                    CoolingTransitionInput::Stalled { observed_at } => {
+                        cleanup = cleanup.await_hard_purge_after_stalled_compaction(observed_at);
+                        expected_next_compaction_due_at = scheduled
+                            .hard_purge_due_at()
+                            .expect("scheduled cleanup should always arm a hard purge deadline");
+                    }
+                }
             }
 
             let expected_hard_purge_due_at = scheduled

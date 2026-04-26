@@ -22,6 +22,7 @@ use crate::core::types::ObservationId;
 use crate::core::types::ProbeRequestId;
 use crate::core::types::ProposalId;
 use crate::core::types::TimerToken;
+use crate::host::BufferHandle;
 use crate::position::BufferLine;
 use crate::position::CursorObservation;
 use crate::position::RenderPoint;
@@ -73,7 +74,7 @@ impl IngressObservationSurface {
         self.surface.id().window_handle()
     }
 
-    pub(crate) const fn buffer_handle(&self) -> i64 {
+    pub(crate) const fn buffer_handle(&self) -> BufferHandle {
         self.surface.id().buffer_handle()
     }
 
@@ -309,19 +310,23 @@ impl ProbePolicy {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct TrackedBufferPosition {
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     buffer_line: BufferLine,
 }
 
 impl TrackedBufferPosition {
-    pub(crate) fn new(buffer_handle: i64, buffer_line: BufferLine) -> Option<Self> {
-        (buffer_handle > 0).then_some(Self {
+    pub(crate) fn new(
+        buffer_handle: impl Into<BufferHandle>,
+        buffer_line: BufferLine,
+    ) -> Option<Self> {
+        let buffer_handle = buffer_handle.into();
+        buffer_handle.is_valid().then_some(Self {
             buffer_handle,
             buffer_line,
         })
     }
 
-    pub(crate) const fn buffer_handle(self) -> i64 {
+    pub(crate) const fn buffer_handle(self) -> BufferHandle {
         self.buffer_handle
     }
 
@@ -486,7 +491,7 @@ impl CursorColorFallback {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ApplyProposalEffect {
     pub(crate) proposal: InFlightProposal,
-    pub(crate) buffer_handle: Option<i64>,
+    pub(crate) buffer_handle: Option<BufferHandle>,
     pub(crate) requested_at: Millis,
 }
 
@@ -577,34 +582,49 @@ pub(crate) struct RequestRenderPlanEffect {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum IngressCursorModeAdmission {
+    Allowed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum IngressCursorCommandLineLocation {
+    Outside,
+    Inside,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct IngressCursorPresentationRequest {
-    mode_allowed: bool,
-    outside_cmdline: bool,
+    mode_admission: IngressCursorModeAdmission,
+    command_line_location: IngressCursorCommandLineLocation,
     prepaint_cell: Option<ScreenCell>,
     prepaint_shape: CursorCellShape,
 }
 
 impl IngressCursorPresentationRequest {
     pub(crate) const fn new(
-        mode_allowed: bool,
-        outside_cmdline: bool,
+        mode_admission: IngressCursorModeAdmission,
+        command_line_location: IngressCursorCommandLineLocation,
         prepaint_cell: Option<ScreenCell>,
         prepaint_shape: CursorCellShape,
     ) -> Self {
         Self {
-            mode_allowed,
-            outside_cmdline,
+            mode_admission,
+            command_line_location,
             prepaint_cell,
             prepaint_shape,
         }
     }
 
     pub(crate) const fn mode_allowed(self) -> bool {
-        self.mode_allowed
+        matches!(self.mode_admission, IngressCursorModeAdmission::Allowed)
     }
 
     pub(crate) const fn outside_cmdline(self) -> bool {
-        self.outside_cmdline
+        matches!(
+            self.command_line_location,
+            IngressCursorCommandLineLocation::Outside
+        )
     }
 
     pub(crate) const fn prepaint_cell(self) -> Option<ScreenCell> {
@@ -667,6 +687,70 @@ pub(crate) enum Effect {
     ApplyIngressCursorPresentation(IngressCursorPresentationEffect),
     RecordEventLoopMetric(EventLoopMetricEffect),
     RedrawCmdline,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OrderedEffect {
+    ScheduleTimer(ScheduleTimerEffect),
+    RequestObservationBase(RequestObservationBaseEffect),
+    RequestProbe(RequestProbeEffect),
+    RequestRenderPlan(Box<RequestRenderPlanEffect>),
+    ApplyProposal(Box<ApplyProposalEffect>),
+    ApplyRenderCleanup(ApplyRenderCleanupEffect),
+    ApplyIngressCursorPresentation(IngressCursorPresentationEffect),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ShellOnlyEffect {
+    RecordEventLoopMetric(EventLoopMetricEffect),
+    RedrawCmdline,
+}
+
+impl Effect {
+    pub(crate) fn into_ordered_or_shell_only(self) -> Result<OrderedEffect, ShellOnlyEffect> {
+        match self {
+            Self::ScheduleTimer(payload) => Ok(OrderedEffect::ScheduleTimer(payload)),
+            Self::RequestObservationBase(payload) => {
+                Ok(OrderedEffect::RequestObservationBase(payload))
+            }
+            Self::RequestProbe(payload) => Ok(OrderedEffect::RequestProbe(payload)),
+            Self::RequestRenderPlan(payload) => Ok(OrderedEffect::RequestRenderPlan(payload)),
+            Self::ApplyProposal(payload) => Ok(OrderedEffect::ApplyProposal(payload)),
+            Self::ApplyRenderCleanup(payload) => Ok(OrderedEffect::ApplyRenderCleanup(payload)),
+            Self::ApplyIngressCursorPresentation(payload) => {
+                Ok(OrderedEffect::ApplyIngressCursorPresentation(payload))
+            }
+            Self::RecordEventLoopMetric(metric) => {
+                Err(ShellOnlyEffect::RecordEventLoopMetric(metric))
+            }
+            Self::RedrawCmdline => Err(ShellOnlyEffect::RedrawCmdline),
+        }
+    }
+}
+
+impl From<OrderedEffect> for Effect {
+    fn from(effect: OrderedEffect) -> Self {
+        match effect {
+            OrderedEffect::ScheduleTimer(payload) => Self::ScheduleTimer(payload),
+            OrderedEffect::RequestObservationBase(payload) => Self::RequestObservationBase(payload),
+            OrderedEffect::RequestProbe(payload) => Self::RequestProbe(payload),
+            OrderedEffect::RequestRenderPlan(payload) => Self::RequestRenderPlan(payload),
+            OrderedEffect::ApplyProposal(payload) => Self::ApplyProposal(payload),
+            OrderedEffect::ApplyRenderCleanup(payload) => Self::ApplyRenderCleanup(payload),
+            OrderedEffect::ApplyIngressCursorPresentation(payload) => {
+                Self::ApplyIngressCursorPresentation(payload)
+            }
+        }
+    }
+}
+
+impl From<ShellOnlyEffect> for Effect {
+    fn from(effect: ShellOnlyEffect) -> Self {
+        match effect {
+            ShellOnlyEffect::RecordEventLoopMetric(metric) => Self::RecordEventLoopMetric(metric),
+            ShellOnlyEffect::RedrawCmdline => Self::RedrawCmdline,
+        }
+    }
 }
 
 #[cfg(test)]

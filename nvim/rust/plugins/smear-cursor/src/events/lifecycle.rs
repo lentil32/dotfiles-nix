@@ -5,7 +5,6 @@
 //! instead of leaving stale callbacks behind.
 
 use super::AUTOCMD_GROUP_NAME;
-use super::cursor::current_mode;
 use super::cursor::cursor_observation_for_mode_with_probe_policy;
 use super::host_bridge::DISPATCH_AUTOCMD_FUNCTION_NAME;
 use super::host_bridge::ensure_namespace_id;
@@ -15,61 +14,67 @@ use super::ingress::registered_autocmd_event_names;
 use super::logging::debug;
 use super::logging::ensure_hideable_guicursor;
 use super::logging::invalidate_real_cursor_visibility;
-use super::logging::set_log_level;
 use super::logging::unhide_real_cursor;
 use super::logging::warn;
-use super::options::apply_runtime_options;
+use super::runtime::apply_core_setup_options;
 use super::runtime::diagnostics_report;
-use super::runtime::mutate_engine_state;
-use super::runtime::read_engine_state;
+use super::runtime::disable_core_runtime;
+use super::runtime::namespace_id;
 use super::runtime::refresh_editor_viewport_cache;
 use super::runtime::reset_transient_event_state;
+use super::runtime::set_namespace_id;
+use super::runtime::sync_core_runtime_to_current_cursor;
+use super::runtime::toggle_core_runtime;
+use super::runtime::with_core_read;
 use super::surface::current_window_surface_snapshot;
 use crate::core::effect::ProbePolicy;
 use crate::draw::clear_highlight_cache;
 use crate::draw::initialize_runtime_capabilities;
 use crate::draw::purge_render_windows;
+use crate::host::BufferHandle;
+use crate::host::CurrentEditorPort;
+use crate::host::LifecyclePort;
+use crate::host::NeovimHost;
 use crate::lua::i64_from_object;
 use crate::lua::parse_optional_with;
 use crate::lua::require_with_typed;
 use crate::lua::string_from_object;
 use crate::lua::string_from_object_typed;
-use crate::state::CursorShape;
 use crate::state::TrackedCursor;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
 use nvim_oxi::Result;
 use nvim_oxi::String as NvimString;
-use nvim_oxi::api;
-use nvim_oxi::api::opts::CreateAugroupOpts;
-use nvim_oxi::api::opts::CreateAutocmdOpts;
-use nvim_oxi::api::opts::CreateCommandOpts;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct RegisteredAutocmdPayload {
     event: String,
-    buffer_handle: Option<i64>,
+    buffer_handle: Option<BufferHandle>,
     match_name: Option<String>,
 }
 
 fn jump_to_current_cursor() -> Result<()> {
+    jump_to_current_cursor_with(&NeovimHost)
+}
+
+fn jump_to_current_cursor_with(host: &impl CurrentEditorPort) -> Result<()> {
     let namespace_id = ensure_namespace_id()?;
-    let mode = current_mode();
-    let mode = mode.to_string_lossy();
-    let window = api::get_current_win();
-    if !window.is_valid() {
+    let mode = host.current_mode();
+    let window = host.current_window();
+    if !host.window_is_valid(&window) {
         return Ok(());
     }
 
-    if !api::get_current_buf().is_valid() {
+    let buffer = host.current_buffer();
+    if !host.buffer_is_valid(&buffer) {
         return Ok(());
     }
 
-    let smear_to_cmd = read_engine_state(|state| state.core_state().runtime().config.smear_to_cmd)?;
+    let smear_to_cmd = with_core_read(|state| state.runtime().config.smear_to_cmd)?;
     let surface_snapshot = current_window_surface_snapshot(&window).ok();
     let observation = cursor_observation_for_mode_with_probe_policy(
         &window,
-        mode.as_ref(),
+        &mode,
         smear_to_cmd,
         ProbePolicy::exact(),
         surface_snapshot.as_ref(),
@@ -87,14 +92,8 @@ fn jump_to_current_cursor() -> Result<()> {
     };
     let tracked_cursor = TrackedCursor::new(surface_snapshot, observation.buffer_line());
 
-    let hide_target_hack = mutate_engine_state(|state| {
-        state.shell.set_namespace_id(namespace_id);
-        let runtime = state.core_state_mut().runtime_mut();
-        let cursor_shape =
-            CursorShape::from_cell_shape(runtime.config.cursor_cell_shape(mode.as_ref()));
-        runtime.sync_to_current_cursor(position, cursor_shape, &tracked_cursor);
-        runtime.config.hide_target_hack
-    })?;
+    set_namespace_id(namespace_id)?;
+    let hide_target_hack = sync_core_runtime_to_current_cursor(position, &mode, &tracked_cursor)?;
 
     reset_transient_event_state();
     let _ = purge_render_windows(namespace_id);
@@ -106,8 +105,11 @@ fn jump_to_current_cursor() -> Result<()> {
 }
 
 fn clear_autocmd_group() {
-    let opts = CreateAugroupOpts::builder().clear(true).build();
-    if let Err(err) = api::create_augroup(AUTOCMD_GROUP_NAME, &opts) {
+    clear_autocmd_group_with(&NeovimHost);
+}
+
+fn clear_autocmd_group_with(host: &impl LifecyclePort) {
+    if let Err(err) = host.clear_autocmd_group(AUTOCMD_GROUP_NAME) {
         warn(&format!("clear autocmd group failed: {err}"));
     }
 }
@@ -116,9 +118,8 @@ fn raw_payload_field(payload: &Dictionary, key: &str) -> Option<Object> {
     payload.get(&NvimString::from(key)).cloned()
 }
 
-fn parse_optional_buffer_handle(raw: Option<Object>) -> Result<Option<i64>> {
-    Ok(parse_optional_with(raw, "buffer", i64_from_object)?
-        .and_then(|buffer_handle| (buffer_handle > 0).then_some(buffer_handle)))
+fn parse_optional_buffer_handle(raw: Option<Object>) -> Result<Option<BufferHandle>> {
+    Ok(parse_optional_with(raw, "buffer", i64_from_object)?.and_then(BufferHandle::new))
 }
 
 fn parse_optional_match_name(raw: Option<Object>) -> Result<Option<String>> {
@@ -160,44 +161,44 @@ pub(crate) fn on_autocmd_payload_event(payload: &Dictionary) -> Result<()> {
 }
 
 fn setup_autocmds() -> Result<()> {
-    let group = api::create_augroup(
-        AUTOCMD_GROUP_NAME,
-        &CreateAugroupOpts::builder().clear(true).build(),
-    )?;
+    setup_autocmds_with(&NeovimHost)
+}
+
+fn setup_autocmds_with(host: &impl LifecyclePort) -> Result<()> {
+    let group = host.create_autocmd_group(AUTOCMD_GROUP_NAME)?;
 
     for event in registered_autocmd_event_names() {
-        let opts = CreateAutocmdOpts::builder()
-            .group(group)
-            // Use the host bridge command path so failed registrations cannot leak
-            // callback-backed Lua registry refs.
-            .command(autocmd_dispatch_command(event))
-            .build();
-        api::create_autocmd([event], &opts)?;
+        // Use the host bridge command path so failed registrations cannot leak
+        // callback-backed Lua registry refs.
+        let command = autocmd_dispatch_command(event);
+        host.create_autocmd_dispatch(group, event, &command)?;
     }
 
     Ok(())
 }
 
 fn setup_user_command() -> Result<()> {
-    if let Err(err) = api::del_user_command("SmearCursorToggle") {
+    setup_user_command_with(&NeovimHost)
+}
+
+fn setup_user_command_with(host: &impl LifecyclePort) -> Result<()> {
+    if let Err(err) = host.delete_user_command("SmearCursorToggle") {
         debug(&format!(
             "delete existing SmearCursorToggle failed (continuing): {err}"
         ));
     }
-    if let Err(err) = api::del_user_command("SmearCursorDiagnostics") {
+    if let Err(err) = host.delete_user_command("SmearCursorDiagnostics") {
         debug(&format!(
             "delete existing SmearCursorDiagnostics failed (continuing): {err}"
         ));
     }
-    api::create_user_command(
+    host.create_string_user_command(
         "SmearCursorToggle",
         "lua require('nvimrs_smear_cursor').toggle()",
-        &CreateCommandOpts::builder().build(),
     )?;
-    api::create_user_command(
+    host.create_string_user_command(
         "SmearCursorDiagnostics",
         "lua print(require('nvimrs_smear_cursor').diagnostics())",
-        &CreateCommandOpts::builder().build(),
     )?;
     Ok(())
 }
@@ -212,45 +213,21 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
     unhide_real_cursor();
     clear_highlight_cache();
 
-    mutate_engine_state(|state| {
-        state.shell.set_namespace_id(namespace_id);
-        state.core_state_mut().runtime_mut().disable();
-    })?;
+    set_namespace_id(namespace_id)?;
+    disable_core_runtime()?;
     refresh_editor_viewport_cache()?;
     clear_autocmd_group();
     reset_transient_event_state();
 
-    let has_enabled_option = opts.get(&NvimString::from("enabled")).is_some();
-    let (enabled, setup_warning) = mutate_engine_state(|state| {
-        state.shell.set_namespace_id(namespace_id);
-        let runtime = state.core_state_mut().runtime_mut();
-        if !has_enabled_option {
-            runtime.set_enabled(true);
-        }
-        match apply_runtime_options(runtime, opts) {
-            Ok(()) => {
-                set_log_level(runtime.config.logging_level);
-                runtime.clear_runtime_state();
-                (runtime.is_enabled(), None)
-            }
-            Err(err) => {
-                runtime.disable();
-                (
-                    false,
-                    Some(format!(
-                        "setup rejected options; smear cursor remains disabled: {err}"
-                    )),
-                )
-            }
-        }
-    })?;
+    set_namespace_id(namespace_id)?;
+    let setup = apply_core_setup_options(opts)?;
 
     setup_user_command()?;
-    if enabled {
+    if setup.enabled {
         setup_autocmds()?;
     }
     jump_to_current_cursor()?;
-    if let Some(message) = setup_warning {
+    if let Some(message) = setup.warning {
         warn(&message);
     }
     Ok(())
@@ -258,24 +235,11 @@ pub(crate) fn setup(opts: &Dictionary) -> Result<()> {
 
 pub(crate) fn toggle() -> Result<()> {
     let _host_bridge = installed_host_bridge()?;
-    let (is_enabled, namespace_id, hide_target_hack) = mutate_engine_state(|state| {
-        let namespace_id = state.shell.namespace_id();
-        let runtime = state.core_state_mut().runtime_mut();
-        let toggled_enabled = !runtime.is_enabled();
-        if toggled_enabled {
-            runtime.set_enabled(true);
-        } else {
-            runtime.disable();
-        }
-        (
-            runtime.is_enabled(),
-            namespace_id,
-            runtime.config.hide_target_hack,
-        )
-    })?;
+    let namespace_id = namespace_id()?;
+    let toggle = toggle_core_runtime()?;
 
     if let Some(namespace_id) = namespace_id {
-        if is_enabled {
+        if toggle.is_enabled {
             refresh_editor_viewport_cache()?;
             setup_autocmds()?;
             jump_to_current_cursor()?;
@@ -283,7 +247,7 @@ pub(crate) fn toggle() -> Result<()> {
             clear_autocmd_group();
             reset_transient_event_state();
             let _ = purge_render_windows(namespace_id);
-            if !hide_target_hack {
+            if !toggle.hide_target_hack {
                 unhide_real_cursor();
             }
         }
@@ -305,8 +269,14 @@ mod tests {
     use super::DISPATCH_AUTOCMD_FUNCTION_NAME;
     use super::RegisteredAutocmdPayload;
     use super::autocmd_dispatch_command;
+    use super::clear_autocmd_group_with;
     use super::parse_registered_autocmd_payload;
+    use super::setup_autocmds_with;
+    use super::setup_user_command_with;
     use crate::events::handlers::on_autocmd_event;
+    use crate::events::ingress::registered_autocmd_event_names;
+    use crate::host::FakeLifecyclePort;
+    use crate::host::LifecycleCall;
     use nvim_oxi::Dictionary;
     use nvim_oxi::Object;
     use pretty_assertions::assert_eq;
@@ -323,6 +293,83 @@ mod tests {
             format!(
                 "call {DISPATCH_AUTOCMD_FUNCTION_NAME}('OptionSet', str2nr(expand('<abuf>')), expand('<amatch>'))",
             )
+        );
+    }
+
+    #[test]
+    fn clear_autocmd_group_routes_through_lifecycle_port() {
+        let host = FakeLifecyclePort::default();
+
+        clear_autocmd_group_with(&host);
+
+        assert_eq!(
+            host.calls(),
+            vec![LifecycleCall::ClearAutocmdGroup {
+                group_name: "RsSmearCursor".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn setup_autocmds_routes_registrations_through_lifecycle_port() {
+        let host = FakeLifecyclePort::default();
+        host.set_group_id(29);
+
+        setup_autocmds_with(&host).expect("fake lifecycle port should accept registrations");
+
+        let calls = host.calls();
+        assert!(matches!(
+            calls.first(),
+            Some(LifecycleCall::CreateAutocmdGroup { group_name }) if group_name == "RsSmearCursor"
+        ));
+        let registered = calls
+            .iter()
+            .filter_map(|call| match call {
+                LifecycleCall::CreateAutocmdDispatch { event, command, .. } => {
+                    Some((event.as_str(), command.as_str()))
+                }
+                LifecycleCall::CreateAutocmdGroup { .. }
+                | LifecycleCall::ClearAutocmdGroup { .. }
+                | LifecycleCall::DeleteUserCommand { .. }
+                | LifecycleCall::CreateStringUserCommand { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let expected = registered_autocmd_event_names()
+            .map(|event| (event, autocmd_dispatch_command(event)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            registered,
+            expected
+                .iter()
+                .map(|(event, command)| (*event, command.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn setup_user_commands_routes_through_lifecycle_port() {
+        let host = FakeLifecyclePort::default();
+
+        setup_user_command_with(&host).expect("fake lifecycle port should accept user commands");
+
+        assert_eq!(
+            host.calls(),
+            vec![
+                LifecycleCall::DeleteUserCommand {
+                    name: "SmearCursorToggle".to_string(),
+                },
+                LifecycleCall::DeleteUserCommand {
+                    name: "SmearCursorDiagnostics".to_string(),
+                },
+                LifecycleCall::CreateStringUserCommand {
+                    name: "SmearCursorToggle".to_string(),
+                    command: "lua require('nvimrs_smear_cursor').toggle()".to_string(),
+                },
+                LifecycleCall::CreateStringUserCommand {
+                    name: "SmearCursorDiagnostics".to_string(),
+                    command: "lua print(require('nvimrs_smear_cursor').diagnostics())".to_string(),
+                },
+            ]
         );
     }
 

@@ -1,3 +1,4 @@
+use super::ProbeDispatchWave;
 use super::base::CurrentEditorSnapshot;
 use super::base::current_core_cursor_position;
 use crate::core::effect::CursorColorFallback;
@@ -15,11 +16,12 @@ use crate::events::cursor::sampled_cursor_color_at_current_position;
 use crate::events::runtime::cached_cursor_color_sample_for_probe;
 use crate::events::runtime::cursor_color_cache_generation;
 use crate::events::runtime::cursor_color_colorscheme_generation;
-use crate::events::runtime::read_engine_state;
 use crate::events::runtime::record_cursor_color_cache_hit;
 use crate::events::runtime::record_cursor_color_cache_miss;
 use crate::events::runtime::record_cursor_color_probe_reuse;
 use crate::events::runtime::store_cursor_color_sample;
+use crate::events::runtime::with_core_read;
+use crate::host::BufferHandle;
 use nvim_oxi::Result;
 
 pub(super) fn current_cursor_color_probe_generations() -> Result<CursorColorProbeGenerations> {
@@ -30,9 +32,8 @@ pub(super) fn current_cursor_color_probe_generations() -> Result<CursorColorProb
 }
 
 pub(super) fn mode_requires_cursor_color_sampling(mode: &str) -> Result<bool> {
-    read_engine_state(|state| {
+    with_core_read(|state| {
         state
-            .core_state()
             .runtime()
             .config
             .requires_cursor_color_sampling_for_mode(mode)
@@ -140,7 +141,7 @@ fn current_cursor_color_probe_validation(
     let current_buffer = editor.current_buffer()?;
     let current_window = editor.current_window()?;
     let current_window_handle = i64::from(current_window.handle());
-    let current_buffer_handle = i64::from(current_buffer.handle());
+    let current_buffer_handle = BufferHandle::from_buffer(current_buffer);
     let current_text_revision = editor.current_text_revision()?.value();
     let current_colorscheme_generation = cursor_color_colorscheme_generation()?;
     let current_cache_generation = cursor_color_cache_generation()?;
@@ -181,17 +182,18 @@ fn cursor_color_failed_event(payload: &RequestProbeEffect) -> CoreEvent {
 
 pub(super) fn collect_cursor_color_report(
     payload: &RequestProbeEffect,
-    same_reducer_wave: bool,
+    dispatch_wave: ProbeDispatchWave,
 ) -> CoreEvent {
     let Some(expected_witness) = payload.cursor_color_probe_witness() else {
         crate::events::logging::warn("cursor color probe missing boundary-derived witness");
         return cursor_color_failed_event(payload);
     };
     let probe_policy = payload.probe_policy();
-    let validation = if same_reducer_wave {
-        CursorColorProbeValidation::Exact(expected_witness.clone())
-    } else {
-        match current_cursor_color_probe_validation(
+    let validation = match dispatch_wave {
+        ProbeDispatchWave::SameReducerWave => {
+            CursorColorProbeValidation::Exact(expected_witness.clone())
+        }
+        ProbeDispatchWave::NewReducerWave => match current_cursor_color_probe_validation(
             &expected_witness,
             payload.cursor_position_policy,
             probe_policy,
@@ -203,7 +205,7 @@ pub(super) fn collect_cursor_color_report(
                 ));
                 return cursor_color_failed_event(payload);
             }
-        }
+        },
     };
     let reuse = validation.reuse();
     record_cursor_color_probe_reuse(reuse);

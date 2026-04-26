@@ -42,7 +42,7 @@ fn cached_window(index: usize, lifecycle: WindowLifecycleSpec) -> CachedRenderWi
     let offset = i32::try_from(index).unwrap_or(i32::MAX);
     let handles = WindowBufferHandle {
         window_id: 1_i32.saturating_add(offset),
-        buffer_id: 101_i32.saturating_add(offset),
+        buffer_id: BufferHandle::from(101_i32.saturating_add(offset)),
     };
 
     match lifecycle {
@@ -87,6 +87,103 @@ fn tab_windows_from_specs(specs: &[WindowLifecycleSpec], cached_budget: usize) -
         cached_budget,
         ..TabWindows::default()
     }
+}
+
+#[test]
+fn remove_window_in_tab_prunes_only_the_matching_window() {
+    let mut tab_windows = TabWindows::default();
+    tab_windows.push_test_visible_window(
+        WindowBufferHandle {
+            window_id: -11,
+            buffer_id: BufferHandle::from_raw_for_test(/*value*/ -111),
+        },
+        test_placement(0),
+        1,
+    );
+    tab_windows.push_test_visible_window(
+        WindowBufferHandle {
+            window_id: -12,
+            buffer_id: BufferHandle::from_raw_for_test(/*value*/ -112),
+        },
+        test_placement(1),
+        2,
+    );
+    tab_windows.cache_payload(-11, 111);
+    tab_windows.cache_payload(-12, 222);
+
+    let close_summary = remove_window_in_tab(
+        &mut tab_windows,
+        NamespaceId::new(/*value*/ 99),
+        /*window_id*/ -11,
+    );
+
+    assert_eq!(
+        close_summary,
+        TrackedResourceCloseSummary {
+            closed_or_gone: 1,
+            retained: 0,
+        }
+    );
+    assert_eq!(tab_pool_snapshot_from_tab(&tab_windows).total_windows, 1);
+    assert!(!tab_windows.cached_payload_matches(-11, 111));
+    assert!(tab_windows.cached_payload_matches(-12, 222));
+    tab_windows.assert_tracking_consistent();
+}
+
+#[test]
+fn purge_tab_retains_failed_window_close_as_invalid_retry_state() {
+    let retained_handles = WindowBufferHandle {
+        window_id: 11,
+        buffer_id: BufferHandle::from_raw_for_test(/*value*/ 111),
+    };
+    let released_handles = WindowBufferHandle {
+        window_id: 12,
+        buffer_id: BufferHandle::from_raw_for_test(/*value*/ 112),
+    };
+    let mut tab_windows = TabWindows::default();
+    tab_windows.push_test_visible_window(retained_handles, test_placement(0), 1);
+    tab_windows.push_test_visible_window(released_handles, test_placement(1), 2);
+    tab_windows.cache_payload(retained_handles.window_id, 111);
+    tab_windows.cache_payload(released_handles.window_id, 222);
+
+    let mut close_cached_window = |_: NamespaceId, handles: WindowBufferHandle| {
+        if handles == retained_handles {
+            TrackedResourceCloseOutcome::Retained
+        } else {
+            TrackedResourceCloseOutcome::ClosedOrGone
+        }
+    };
+
+    let summary = purge_tab_with_closer(
+        &mut tab_windows,
+        NamespaceId::new(/*value*/ 99),
+        &mut close_cached_window,
+    );
+
+    assert_eq!(
+        summary,
+        TrackedResourceCloseSummary {
+            closed_or_gone: 1,
+            retained: 1,
+        }
+    );
+    assert_eq!(
+        tab_pool_snapshot_from_tab(&tab_windows),
+        TabPoolSnapshot {
+            total_windows: 1,
+            available_windows: 0,
+            in_use_windows: 0,
+            cached_budget: ADAPTIVE_POOL_MIN_BUDGET,
+            last_frame_demand: 0,
+            peak_total_windows: 1,
+            peak_frame_demand: 0,
+            peak_requested_capacity: 0,
+            capacity_cap_hits: 0,
+        }
+    );
+    assert!(!tab_windows.cached_payload_matches(retained_handles.window_id, 111));
+    assert!(!tab_windows.cached_payload_matches(released_handles.window_id, 222));
+    tab_windows.assert_tracking_consistent();
 }
 
 proptest! {

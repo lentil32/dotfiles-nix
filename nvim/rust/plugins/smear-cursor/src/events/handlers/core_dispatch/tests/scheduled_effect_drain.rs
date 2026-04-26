@@ -11,6 +11,7 @@ use super::scheduled_effect_drain_support::scheduled_drain_operation;
 use super::scheduled_effect_drain_support::scheduled_drain_thermal;
 use super::*;
 use crate::core::effect::EventLoopMetricEffect;
+use crate::core::effect::OrderedEffect;
 use crate::core::state::RenderThermalState;
 use crate::core::types::TimerId;
 use crate::test_support::proptest::stateful_config;
@@ -105,7 +106,7 @@ fn first_edge_leaves_new_follow_up_work_for_a_later_edge() {
     assert!(
         matches!(
             harness.queued_front_work_item(),
-            Some(ScheduledWorkUnit::EffectBatch(ref effects))
+            Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
                 if contains_observation_base_request(effects)
         ),
         "newly staged follow-up work should remain queued for the next scheduled edge"
@@ -117,7 +118,7 @@ fn first_edge_leaves_new_follow_up_work_for_a_later_edge() {
 }
 
 #[test]
-fn staging_effect_only_work_keeps_payloads_out_of_core_state() {
+fn staging_shell_only_work_keeps_payloads_out_of_core_state() {
     let _context = CoreDispatchTestContext::new();
     let initial = ready_state();
     replace_core_state(initial.clone());
@@ -131,19 +132,21 @@ fn staging_effect_only_work_keeps_payloads_out_of_core_state() {
     assert_eq!(queued_work_count(), 2);
     assert!(matches!(
         queued_front_work_item(),
-        Some(ScheduledWorkUnit::EffectOnlyStep(_))
+        Some(ScheduledWorkUnit::ShellOnlyStep(_))
     ));
 }
 
 #[test]
-fn hot_edge_continues_through_cleanup_follow_up_waves() {
+fn hot_edge_defers_cleanup_follow_up_waves_because_they_feed_the_reducer() {
     let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
     assert!(harness.stage_batch(vec![cleanup_effect(12)]));
     let mut executor = ExecutorPlan::new()
         .follow_up(vec![CoreEvent::RenderCleanupApplied(
             crate::core::event::RenderCleanupAppliedEvent {
                 observed_at: Millis::new(65),
-                action: crate::core::event::RenderCleanupAppliedAction::SoftCleared,
+                action: crate::core::event::RenderCleanupAppliedAction::SoftCleared {
+                    retained_resources: 0,
+                },
             },
         )])
         .build();
@@ -151,22 +154,36 @@ fn hot_edge_continues_through_cleanup_follow_up_waves() {
     let has_more_items = harness.drain_next_edge(&mut executor);
 
     assert!(
-        !has_more_items,
-        "hot drain should finish cleanup-only follow-up waves without rearming"
+        has_more_items,
+        "hot drain should defer cleanup follow-up work that can feed the reducer"
     );
     assert_eq!(
         executor.executed_effects.len(),
-        2,
-        "follow-up cleanup work should run in the same scheduled callback"
+        1,
+        "only the original cleanup effect should run in this scheduled callback"
     );
     assert!(
         matches!(
-            executor.executed_effects.get(1),
+            executor.executed_effects.first(),
             Some(Effect::ApplyRenderCleanup(_))
         ),
-        "follow-up compaction should stay ordered after the original cleanup effect"
+        "the original cleanup effect should execute"
     );
-    harness.assert_disarmed();
+    assert_eq!(
+        harness.queued_work_count(),
+        1,
+        "follow-up cleanup should remain queued as ordered work"
+    );
+    assert!(
+        matches!(
+            harness.queued_front_work_item(),
+            Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
+                if effects
+                    .iter()
+                    .any(|effect| matches!(effect, OrderedEffect::ApplyRenderCleanup(_)))
+        ),
+        "follow-up cleanup should stay in an ordered effect batch"
+    );
 }
 
 #[test]
@@ -300,7 +317,7 @@ fn scheduled_drain_budget_shapes_match_expected_tables() {
 }
 
 #[test]
-fn hot_effect_only_snapshot_still_defers_mid_pass_follow_up_work() {
+fn hot_ordered_cleanup_snapshot_still_defers_mid_pass_follow_up_work() {
     let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
     harness.stage_cleanup_backlog([12_usize, 13]);
     let mut executor = ExecutorPlan::new()
@@ -312,7 +329,7 @@ fn hot_effect_only_snapshot_still_defers_mid_pass_follow_up_work() {
         &harness,
         &mut executor,
         DrainEdgeExpectation {
-            label: "hot effect-only snapshot with mid-pass follow-up work",
+            label: "hot ordered cleanup snapshot with mid-pass follow-up work",
             executed_effects: &[cleanup_effect(12), cleanup_effect(13)],
             queued_work_count: 1,
             queue_is_marked_scheduled: true,
@@ -322,7 +339,7 @@ fn hot_effect_only_snapshot_still_defers_mid_pass_follow_up_work() {
     assert!(
         matches!(
             harness.queued_front_work_item(),
-            Some(ScheduledWorkUnit::EffectBatch(ref effects))
+            Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
                 if contains_observation_base_request(effects)
         ),
         "mid-pass reducer follow-up work should remain queued for the next edge"
@@ -330,19 +347,20 @@ fn hot_effect_only_snapshot_still_defers_mid_pass_follow_up_work() {
 }
 
 #[test]
-fn hot_mixed_snapshot_continues_when_remaining_tail_is_effect_only() {
+fn hot_mixed_snapshot_continues_when_remaining_tail_is_shell_only() {
     let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
     harness.stage_non_coalescible_backlog(16);
-    harness.stage_cleanup_backlog([12_usize, 13]);
+    harness.stage_metric_batches([EventLoopMetricEffect::StaleToken]);
+    harness.stage_redraw_waves(1);
     let mut executor = RecordingExecutor::default();
     let mut expected_effects = repeated_effects(non_coalescible_effect(), 16);
-    expected_effects.extend([cleanup_effect(12), cleanup_effect(13)]);
+    expected_effects.push(Effect::RedrawCmdline);
 
     assert_drain_edge(
         &harness,
         &mut executor,
         DrainEdgeExpectation {
-            label: "hot mixed snapshot that collapses to an effect-only tail",
+            label: "hot mixed snapshot that collapses to a shell-only tail",
             executed_effects: &expected_effects,
             queued_work_count: 0,
             queue_is_marked_scheduled: false,
@@ -353,7 +371,7 @@ fn hot_mixed_snapshot_continues_when_remaining_tail_is_effect_only() {
         executor.executed_effects[..16]
             .iter()
             .all(|effect| *effect == non_coalescible_effect()),
-        "the bounded mixed prefix should preserve FIFO order before the effect-only tail"
+        "the bounded mixed prefix should preserve FIFO order before the shell-only tail"
     );
 }
 
@@ -418,14 +436,14 @@ fn adjacent_metric_batches_share_one_work_unit() {
 }
 
 #[test]
-fn adjacent_timer_rearms_for_the_same_kind_keep_only_the_newest_effect() {
+fn adjacent_timer_rearms_for_the_same_kind_remain_ordered() {
     let harness = ScheduledDrainHarness::new();
     harness.stage_timer_rearms(TimerId::Cleanup, [1_u64, 2]);
 
     assert_eq!(
         harness.queued_work_count(),
-        1,
-        "same-kind timer rearm should replace in place"
+        2,
+        "same-kind timer rearm should not be coalesced by the shell-only agenda"
     );
 
     let mut executor = RecordingExecutor::default();
@@ -434,7 +452,7 @@ fn adjacent_timer_rearms_for_the_same_kind_keep_only_the_newest_effect() {
         &mut executor,
         DrainEdgeExpectation {
             label: "same-kind timer rearm",
-            executed_effects: &[cleanup_timer_effect(2)],
+            executed_effects: &[cleanup_timer_effect(1), cleanup_timer_effect(2)],
             queued_work_count: 0,
             queue_is_marked_scheduled: false,
             has_more_items: false,
@@ -514,7 +532,7 @@ fn cooling_snapshot_drain_still_defers_mid_pass_follow_up_work() {
     assert!(
         matches!(
             harness.queued_front_work_item(),
-            Some(ScheduledWorkUnit::EffectBatch(ref effects))
+            Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
                 if contains_observation_base_request(effects)
         ),
         "mid-pass follow-up work should stay queued after the cooling snapshot drains"

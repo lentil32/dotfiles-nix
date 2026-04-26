@@ -119,8 +119,8 @@ fn retargeting_while_settling_on_a_tick_after_the_previous_deadline_refreshes_in
     );
 
     assert!(matches!(render_action(&retarget), RenderAction::Noop));
-    assert!(retarget.should_schedule_next_animation);
-    assert_eq!(retarget.next_animation_at_ms, Some(160));
+    assert!(retarget.should_schedule_next_animation());
+    assert_eq!(retarget.next_animation_at_ms(), Some(160));
     assert!(state.is_settling());
     assert!(!state.is_animating());
     assert_eq!(
@@ -155,8 +155,8 @@ fn shape_change_while_settling_resets_the_deadline_before_promotion() {
     );
 
     assert!(matches!(render_action(&reshaped), RenderAction::Noop));
-    assert!(reshaped.should_schedule_next_animation);
-    assert_eq!(reshaped.next_animation_at_ms, Some(156));
+    assert!(reshaped.should_schedule_next_animation());
+    assert_eq!(reshaped.next_animation_at_ms(), Some(156));
     assert!(state.is_settling());
     assert!(!state.is_animating());
     assert_eq!(
@@ -213,8 +213,8 @@ fn same_key_tracking_update_while_settling_preserves_stable_since() {
     );
 
     assert!(matches!(render_action(&refresh), RenderAction::Noop));
-    assert!(refresh.should_schedule_next_animation);
-    assert_eq!(refresh.next_animation_at_ms, Some(150));
+    assert!(refresh.should_schedule_next_animation());
+    assert_eq!(refresh.next_animation_at_ms(), Some(150));
     assert!(state.is_settling());
     assert_eq!(
         state.target_position(),
@@ -250,8 +250,8 @@ proptest! {
         let (mut state, kickoff) = delayed_settling_scenario(case.delay_ms, case.target_col);
 
         prop_assert!(matches!(render_action(&kickoff), RenderAction::Noop));
-        prop_assert!(kickoff.should_schedule_next_animation);
-        prop_assert_eq!(kickoff.next_animation_at_ms, Some(u64::from(116_u16 + case.delay_ms)));
+        prop_assert!(kickoff.should_schedule_next_animation());
+        prop_assert_eq!(kickoff.next_animation_at_ms(), Some(u64::from(116_u16 + case.delay_ms)));
         prop_assert_eq!(
             render_side_effects(&kickoff).cursor_visibility,
             CursorVisibilityEffect::Show
@@ -286,9 +286,9 @@ proptest! {
             expected_deadline_ms = now_ms + delay_ms;
 
             prop_assert!(matches!(render_action(&refresh), RenderAction::Noop));
-            prop_assert!(refresh.should_schedule_next_animation);
+            prop_assert!(refresh.should_schedule_next_animation());
             prop_assert_eq!(
-                refresh.next_animation_at_ms,
+                refresh.next_animation_at_ms(),
                 Some(expected_deadline_ms as u64)
             );
             prop_assert_eq!(
@@ -323,8 +323,8 @@ proptest! {
                 );
 
                 prop_assert!(matches!(render_action(&ready_tick), RenderAction::Draw(_)));
-                prop_assert!(ready_tick.should_schedule_next_animation);
-                prop_assert!(ready_tick.next_animation_at_ms.is_some());
+                prop_assert!(ready_tick.should_schedule_next_animation());
+                prop_assert!(ready_tick.next_animation_at_ms().is_some());
                 prop_assert_eq!(
                     render_side_effects(&ready_tick).cursor_visibility,
                     CursorVisibilityEffect::Hide
@@ -351,8 +351,8 @@ proptest! {
                 );
 
                 prop_assert!(matches!(render_action(&returned), RenderAction::Noop));
-                prop_assert!(!returned.should_schedule_next_animation);
-                prop_assert_eq!(returned.next_animation_at_ms, None);
+                prop_assert!(!returned.should_schedule_next_animation());
+                prop_assert_eq!(returned.next_animation_at_ms(), None);
                 prop_assert_eq!(
                     render_side_effects(&returned).cursor_visibility,
                     CursorVisibilityEffect::Show

@@ -1,3 +1,7 @@
+use super::recovery::RuntimeRecoveryAction;
+use super::recovery::RuntimeRecoveryPlan;
+use super::recovery::start_runtime_recovery_action_log_for_test;
+use super::recovery::take_runtime_recovery_action_log_for_test;
 use super::*;
 use crate::config::BufferPerfMode;
 use crate::core::state::BufferPerfClass;
@@ -29,6 +33,9 @@ use crate::events::policy::BufferPerfTelemetry;
 use crate::events::timer_protocol::FiredHostTimer;
 use crate::events::timer_protocol::HostCallbackId;
 use crate::events::timer_protocol::HostTimerId;
+use crate::host::BufferHandle;
+use crate::host::NamespaceId;
+use crate::host::api;
 use crate::position::BufferLine;
 use crate::position::CursorObservation;
 use crate::position::ObservedCell;
@@ -38,8 +45,18 @@ use crate::position::WindowSurfaceSnapshot;
 use crate::test_support::cursor;
 use insta::assert_snapshot;
 use nvim_oxi::Object;
-use nvim_oxi::api;
 use pretty_assertions::assert_eq;
+
+#[path = "tests/shell_purge_invariance.rs"]
+mod shell_purge_invariance;
+#[path = "tests/telemetry_non_interference.rs"]
+mod telemetry_non_interference;
+#[path = "tests/timer_retry_linearizability.rs"]
+mod timer_retry_linearizability;
+
+fn buffer_handle(value: i64) -> BufferHandle {
+    BufferHandle::from_raw_for_test(value)
+}
 
 fn host_callback_id(value: i64) -> HostCallbackId {
     HostCallbackId::try_new(value).expect("test host callback id must be positive")
@@ -87,11 +104,61 @@ impl ShellScratchStorageResidency {
     };
 }
 
-fn shell_scratch_storage_residency() -> EngineAccessResult<ShellScratchStorageResidency> {
-    read_engine_state(|state| ShellScratchStorageResidency {
-        background_probe_request_retained: state.shell.background_probe_request_scratch_capacity()
-            > 0,
-        conceal_regions_retained: state.shell.conceal_regions_scratch_capacity() > 0,
+fn shell_scratch_storage_residency() -> RuntimeAccessResult<ShellScratchStorageResidency> {
+    read_shell_state(|state| ShellScratchStorageResidency {
+        background_probe_request_retained: state.background_probe_request_scratch_capacity() > 0,
+        conceal_regions_retained: state.conceal_regions_scratch_capacity() > 0,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RuntimeRecoverySnapshot {
+    core_state: crate::core::state::CoreState,
+    real_cursor_visibility: Option<RealCursorVisibility>,
+    viewport: Option<EditorViewportSnapshot>,
+    outstanding_animation_timer: bool,
+    outstanding_ingress_timer: bool,
+    pending_timer_retries: usize,
+    queued_work_units: usize,
+    queued_items: usize,
+    drain_scheduled: bool,
+    palette_epoch: u64,
+}
+
+fn runtime_recovery_snapshot() -> RuntimeAccessResult<RuntimeRecoverySnapshot> {
+    let (real_cursor_visibility, viewport) = read_shell_state(|state| {
+        (
+            state.real_cursor_visibility(),
+            state.editor_viewport_cache.cached_for_test(),
+        )
+    })?;
+    let (outstanding_animation_timer, outstanding_ingress_timer, pending_timer_retries) =
+        super::timers::mutate_timer_bridge_for_test(|bridge| {
+            (
+                bridge.has_timer_id(TimerId::Animation),
+                bridge.has_timer_id(TimerId::Ingress),
+                bridge.pending_retry_len(),
+            )
+        })?;
+    let (queued_work_units, queued_items, drain_scheduled) = with_dispatch_queue(|queue| {
+        (
+            queue.pending_work_units,
+            queue.items.len(),
+            queue.drain_scheduled,
+        )
+    });
+
+    Ok(RuntimeRecoverySnapshot {
+        core_state: core_state()?,
+        real_cursor_visibility,
+        viewport,
+        outstanding_animation_timer,
+        outstanding_ingress_timer,
+        pending_timer_retries,
+        queued_work_units,
+        queued_items,
+        drain_scheduled,
+        palette_epoch: crate::draw::palette_epoch_for_test(),
     })
 }
 
@@ -112,112 +179,108 @@ fn prime_shell_scratch_storage() {
 }
 
 #[test]
-fn core_timer_handles_smoke_replace_lookup_and_clear_each_slot() {
-    let mut handles = CoreTimerHandles::default();
+fn timer_bridge_smoke_replace_lookup_and_clear_each_slot() {
+    let mut bridge = super::timer_bridge::TimerBridge::default();
     let animation = handle(11, TimerId::Animation, 3);
     let animation_replaced = handle(12, TimerId::Animation, 4);
     let ingress = handle(21, TimerId::Ingress, 8);
 
-    assert_eq!(handles.replace(animation), None);
-    assert!(handles.has_timer_id(TimerId::Animation));
-    assert_eq!(handles.replace(animation_replaced), Some(animation));
-    assert_eq!(handles.take_by_host_timer_id(animation.host_timer_id), None);
+    assert_eq!(bridge.replace_handle(animation), None);
+    assert!(bridge.has_timer_id(TimerId::Animation));
+    assert_eq!(bridge.replace_handle(animation_replaced), Some(animation));
+    assert_eq!(bridge.take_by_host_timer_id(animation.host_timer_id), None);
     assert_eq!(
-        handles.take_by_host_timer_id(animation_replaced.host_timer_id),
+        bridge.take_by_host_timer_id(animation_replaced.host_timer_id),
         Some(animation_replaced)
     );
-    assert!(!handles.has_timer_id(TimerId::Animation));
+    assert!(!bridge.has_timer_id(TimerId::Animation));
 
-    assert_eq!(handles.replace(ingress), None);
-    assert!(handles.has_timer_id(TimerId::Ingress));
+    assert_eq!(bridge.replace_handle(ingress), None);
+    assert!(bridge.has_timer_id(TimerId::Ingress));
 
-    let cleared = normalize_handles(handles.clear_all());
+    let cleared = normalize_handles(bridge.clear_handles());
     assert_eq!(cleared, vec![ingress]);
 
     for timer_id in TimerId::ALL {
-        assert!(!handles.has_timer_id(timer_id));
+        assert!(!bridge.has_timer_id(timer_id));
     }
 }
 
 #[test]
-fn core_timer_handles_only_consume_matching_callback_and_host_timer_for_persistent_slots() {
-    let mut handles = CoreTimerHandles::default();
+fn timer_bridge_only_consumes_matching_callback_and_host_timer_for_persistent_slots() {
+    let mut bridge = super::timer_bridge::TimerBridge::default();
     let original = handle(11, TimerId::Animation, 3);
     let rearmed = handle(12, TimerId::Animation, 4);
 
-    assert_eq!(handles.replace(original), None);
-    assert_eq!(handles.replace(rearmed), Some(original));
-    assert!(handles.has_timer_id(TimerId::Animation));
+    assert_eq!(bridge.replace_handle(original), None);
+    assert_eq!(bridge.replace_handle(rearmed), Some(original));
+    assert!(bridge.has_timer_id(TimerId::Animation));
     assert_eq!(
-        handles.take_fired(FiredHostTimer::new(
+        bridge.take_fired(FiredHostTimer::new(
             original.host_callback_id,
             original.host_timer_id
         )),
         None
     );
-    assert!(handles.has_timer_id(TimerId::Animation));
+    assert!(bridge.has_timer_id(TimerId::Animation));
     assert_eq!(
-        handles.take_fired(FiredHostTimer::new(
+        bridge.take_fired(FiredHostTimer::new(
             rearmed.host_callback_id,
             original.host_timer_id
         )),
         None
     );
-    assert!(handles.has_timer_id(TimerId::Animation));
+    assert!(bridge.has_timer_id(TimerId::Animation));
     assert_eq!(
-        handles.take_fired(FiredHostTimer::new(
+        bridge.take_fired(FiredHostTimer::new(
             rearmed.host_callback_id,
             rearmed.host_timer_id
         )),
         Some(rearmed)
     );
-    assert!(!handles.has_timer_id(TimerId::Animation));
+    assert!(!bridge.has_timer_id(TimerId::Animation));
 }
 
 #[test]
-fn nested_engine_state_access_returns_reentry_error_and_preserves_state() {
-    let nested = mutate_engine_state(|state| {
-        state.shell.set_namespace_id(77);
-        read_engine_state(|inner| inner.shell.namespace_id())
+fn nested_shell_state_access_returns_reentry_error_and_preserves_state() {
+    let nested = mutate_shell_state(|state| {
+        state.set_namespace_id(NamespaceId::new(/*value*/ 77));
+        read_shell_state(super::super::ShellState::namespace_id)
     });
 
-    assert_eq!(nested, Ok(Err(super::super::EngineAccessError::Reentered)));
+    assert_eq!(nested, Ok(Err(super::super::RuntimeAccessError::Reentered)));
     assert_eq!(
-        read_engine_state(|state| state.shell.namespace_id()),
-        Ok(Some(77))
+        read_shell_state(super::super::ShellState::namespace_id),
+        Ok(Some(NamespaceId::new(/*value*/ 77)))
     );
 }
 
 #[test]
 fn colorscheme_boundary_clears_real_cursor_visibility_cache() {
-    mutate_engine_state(|state| {
-        state
-            .shell
-            .note_real_cursor_visibility(RealCursorVisibility::Hidden);
+    mutate_shell_state(|state| {
+        state.note_real_cursor_visibility(RealCursorVisibility::Hidden);
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     note_cursor_color_colorscheme_change().expect("colorscheme boundary should succeed");
 
     assert_eq!(
-        read_engine_state(|state| state.shell.real_cursor_visibility()),
+        read_shell_state(super::super::ShellState::real_cursor_visibility),
         Ok(None)
     );
 }
 
 #[test]
 fn transient_reset_clears_real_cursor_visibility_cache() {
-    mutate_engine_state(|state| {
-        state
-            .shell
-            .note_real_cursor_visibility(RealCursorVisibility::Visible);
+    mutate_shell_state(|state| {
+        state.note_real_cursor_visibility(RealCursorVisibility::Visible);
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     reset_transient_event_state();
 
     assert_eq!(
-        read_engine_state(|state| state.shell.real_cursor_visibility()),
+        read_shell_state(super::super::ShellState::real_cursor_visibility),
         Ok(None)
     );
 }
@@ -228,10 +291,10 @@ fn draw_editor_bounds_matches_the_cached_editor_viewport_owner() {
     let viewport = EditorViewportSnapshot::from_dimensions(40, 2, 120);
     let expected = ViewportBounds::new(39, 120).expect("command row math should produce bounds");
 
-    mutate_engine_state(|state| {
-        state.shell.editor_viewport_cache.store_for_test(viewport);
+    mutate_shell_state(|state| {
+        state.editor_viewport_cache.store_for_test(viewport);
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     assert_eq!(
         editor_viewport_for_bounds()
@@ -265,39 +328,31 @@ fn colorscheme_boundary_clears_only_color_dependent_shell_caches() {
         cache_generation,
         cached_context,
         cached_color,
-    ) = mutate_engine_state(|state| {
+    ) = mutate_shell_state(|state| {
         (
-            state.shell.real_cursor_visibility(),
-            state.shell.editor_viewport_cache.cached_for_test(),
+            state.real_cursor_visibility(),
+            state.editor_viewport_cache.cached_for_test(),
             state
-                .shell
                 .buffer_metadata_cache
                 .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_policy_cache
                 .cached_policy(SHELL_CACHE_TEST_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .telemetry(SHELL_CACHE_TEST_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_text_revision_cache
                 .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
-            state.shell.probe_cache.colorscheme_generation(),
-            state.shell.probe_cache.cursor_color_cache_generation(),
+            state.probe_cache.colorscheme_generation(),
+            state.probe_cache.cursor_color_cache_generation(),
+            state.probe_cache.cached_cursor_text_context(&context_key),
             state
-                .shell
-                .probe_cache
-                .cached_cursor_text_context(&context_key),
-            state
-                .shell
                 .probe_cache
                 .cached_cursor_color_sample(&cleared_color_witness),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     assert_eq!(real_cursor_visibility, None);
     assert_eq!(
@@ -324,25 +379,22 @@ fn colorscheme_boundary_clears_only_color_dependent_shell_caches() {
 }
 
 #[test]
-fn transient_reset_purges_shell_caches_and_core_timer_handles_but_preserves_host_bridge_verification()
- {
+fn transient_reset_purges_shell_caches_and_timer_bridge_but_preserves_host_bridge_verification() {
     let context_key = prime_shell_boundary_state().2;
     let cleared_color_witness = shell_cache_color_witness(Generation::INITIAL, Generation::INITIAL);
     let animation_handle = handle(11, TimerId::Animation, 3);
     let ingress_handle = handle(21, TimerId::Ingress, 8);
 
-    mutate_engine_state(|state| {
-        state.shell.set_namespace_id(77);
-        state
-            .shell
-            .note_host_bridge_verified(super::super::HostBridgeRevision::CURRENT);
-        assert_eq!(
-            state.shell.core_timer_handles.replace(animation_handle),
-            None
-        );
-        assert_eq!(state.shell.core_timer_handles.replace(ingress_handle), None);
+    mutate_shell_state(|state| {
+        state.set_namespace_id(NamespaceId::new(/*value*/ 77));
+        state.note_host_bridge_verified(super::super::HostBridgeRevision::CURRENT);
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
+    super::timers::mutate_timer_bridge_for_test(|bridge| {
+        assert_eq!(bridge.replace_handle(animation_handle), None);
+        assert_eq!(bridge.replace_handle(ingress_handle), None);
+    })
+    .expect("timer bridge access should succeed");
 
     reset_transient_event_state();
 
@@ -361,51 +413,60 @@ fn transient_reset_purges_shell_caches_and_core_timer_handles_but_preserves_host
         cache_generation,
         cached_context,
         cached_color,
-    ) = mutate_engine_state(|state| {
+    ) = {
+        let shell_state = mutate_shell_state(|state| {
+            (
+                state.namespace_id(),
+                state.host_bridge_state(),
+                state.real_cursor_visibility(),
+                state.editor_viewport_cache.cached_for_test(),
+                state
+                    .buffer_metadata_cache
+                    .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
+                state
+                    .buffer_perf_policy_cache
+                    .cached_policy(SHELL_CACHE_TEST_BUFFER_HANDLE),
+                state
+                    .buffer_perf_telemetry_cache
+                    .telemetry(SHELL_CACHE_TEST_BUFFER_HANDLE),
+                state
+                    .buffer_text_revision_cache
+                    .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
+                state.probe_cache.colorscheme_generation(),
+                state.probe_cache.cursor_color_cache_generation(),
+                state.probe_cache.cached_cursor_text_context(&context_key),
+                state
+                    .probe_cache
+                    .cached_cursor_color_sample(&cleared_color_witness),
+            )
+        })
+        .expect("shell state access should succeed");
+        let timer_bridge_state = super::timers::mutate_timer_bridge_for_test(|bridge| {
+            (
+                bridge.has_timer_id(TimerId::Animation),
+                bridge.has_timer_id(TimerId::Ingress),
+            )
+        })
+        .expect("timer bridge access should succeed");
         (
-            state.shell.namespace_id(),
-            state.shell.host_bridge_state(),
-            state.shell.real_cursor_visibility(),
-            state.shell.editor_viewport_cache.cached_for_test(),
-            state
-                .shell
-                .core_timer_handles
-                .has_timer_id(TimerId::Animation),
-            state
-                .shell
-                .core_timer_handles
-                .has_timer_id(TimerId::Ingress),
-            state
-                .shell
-                .buffer_metadata_cache
-                .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
-            state
-                .shell
-                .buffer_perf_policy_cache
-                .cached_policy(SHELL_CACHE_TEST_BUFFER_HANDLE),
-            state
-                .shell
-                .buffer_perf_telemetry_cache
-                .telemetry(SHELL_CACHE_TEST_BUFFER_HANDLE),
-            state
-                .shell
-                .buffer_text_revision_cache
-                .cached_entry_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE),
-            state.shell.probe_cache.colorscheme_generation(),
-            state.shell.probe_cache.cursor_color_cache_generation(),
-            state
-                .shell
-                .probe_cache
-                .cached_cursor_text_context(&context_key),
-            state
-                .shell
-                .probe_cache
-                .cached_cursor_color_sample(&cleared_color_witness),
+            shell_state.0,
+            shell_state.1,
+            shell_state.2,
+            shell_state.3,
+            timer_bridge_state.0,
+            timer_bridge_state.1,
+            shell_state.4,
+            shell_state.5,
+            shell_state.6,
+            shell_state.7,
+            shell_state.8,
+            shell_state.9,
+            shell_state.10,
+            shell_state.11,
         )
-    })
-    .expect("engine state access should succeed");
+    };
 
-    assert_eq!(namespace_id, Some(77));
+    assert_eq!(namespace_id, Some(NamespaceId::new(/*value*/ 77)));
     assert_eq!(
         host_bridge_state,
         super::super::HostBridgeState::Verified {
@@ -429,6 +490,190 @@ fn transient_reset_purges_shell_caches_and_core_timer_handles_but_preserves_host
     assert_eq!(
         cached_color,
         super::super::probe_cache::CursorColorCacheLookup::Miss
+    );
+}
+
+#[test]
+fn runtime_lane_panic_recovery_plan_names_the_documented_order() {
+    let plan = RuntimeRecoveryPlan::runtime_lane_panic(
+        super::shell::ShellRecoveryState::default(),
+        super::timer_bridge::TimerBridgeRecoveryState::default(),
+    );
+
+    assert_eq!(
+        plan.actions(),
+        &[
+            RuntimeRecoveryAction::RestoreDefaultLogLevel,
+            RuntimeRecoveryAction::EmitPanicRecoveryWarning,
+            RuntimeRecoveryAction::RecoverDrawResources,
+            RuntimeRecoveryAction::StopRecoveredCoreTimerHandles,
+            RuntimeRecoveryAction::ClearRecoveredTimerBridge,
+            RuntimeRecoveryAction::ResetDispatchQueue,
+            RuntimeRecoveryAction::ResetRecoveredShellState,
+            RuntimeRecoveryAction::ClearTelemetryTimestamps,
+            RuntimeRecoveryAction::RecoverPaletteEpoch,
+            RuntimeRecoveryAction::ResetCoreState,
+        ]
+    );
+}
+
+#[test]
+fn reducer_panic_path_applies_runtime_recovery_plan_in_documented_order() {
+    reset_transient_event_state();
+    start_runtime_recovery_action_log_for_test();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: RuntimeAccessResult<()> = with_core_transition(|state| {
+            let _ = state.into_primed();
+            panic!("forced reducer failure after state mutation");
+        });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(
+        take_runtime_recovery_action_log_for_test(),
+        vec![
+            RuntimeRecoveryAction::RestoreDefaultLogLevel,
+            RuntimeRecoveryAction::EmitPanicRecoveryWarning,
+            RuntimeRecoveryAction::RecoverDrawResources,
+            RuntimeRecoveryAction::StopRecoveredCoreTimerHandles,
+            RuntimeRecoveryAction::ClearRecoveredTimerBridge,
+            RuntimeRecoveryAction::ResetDispatchQueue,
+            RuntimeRecoveryAction::ResetRecoveredShellState,
+            RuntimeRecoveryAction::ClearTelemetryTimestamps,
+            RuntimeRecoveryAction::RecoverPaletteEpoch,
+            RuntimeRecoveryAction::ResetCoreState,
+        ]
+    );
+}
+
+#[test]
+fn shell_panic_path_applies_runtime_recovery_plan_in_documented_order() {
+    reset_transient_event_state();
+    start_runtime_recovery_action_log_for_test();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = mutate_shell_state(|state| {
+            state.note_real_cursor_visibility(RealCursorVisibility::Visible);
+            panic!("forced shell failure after state mutation");
+        });
+    }));
+
+    assert!(result.is_err());
+    assert_eq!(
+        take_runtime_recovery_action_log_for_test(),
+        vec![
+            RuntimeRecoveryAction::RestoreDefaultLogLevel,
+            RuntimeRecoveryAction::EmitPanicRecoveryWarning,
+            RuntimeRecoveryAction::RecoverDrawResources,
+            RuntimeRecoveryAction::StopRecoveredCoreTimerHandles,
+            RuntimeRecoveryAction::ClearRecoveredTimerBridge,
+            RuntimeRecoveryAction::ResetDispatchQueue,
+            RuntimeRecoveryAction::ResetRecoveredShellState,
+            RuntimeRecoveryAction::ClearTelemetryTimestamps,
+            RuntimeRecoveryAction::RecoverPaletteEpoch,
+            RuntimeRecoveryAction::ResetCoreState,
+        ]
+    );
+}
+
+#[test]
+fn runtime_lane_panic_recovery_plan_is_idempotent_for_runtime_state() {
+    reset_transient_event_state();
+    crate::draw::recover_palette_to_epoch(/*epoch*/ 41);
+    set_core_state(crate::core::state::CoreState::default().into_primed())
+        .expect("core state write should succeed");
+    mutate_shell_state(|state| {
+        state.note_real_cursor_visibility(RealCursorVisibility::Visible);
+        state
+            .editor_viewport_cache
+            .store_for_test(EditorViewportSnapshot::from_dimensions(
+                /*lines*/ 24, /*cmdheight*/ 1, /*columns*/ 80,
+            ));
+    })
+    .expect("shell state access should succeed");
+    super::timers::mutate_timer_bridge_for_test(|bridge| {
+        assert_eq!(
+            bridge.replace_handle(handle(
+                /*value*/ 11,
+                TimerId::Animation,
+                /*generation*/ 3,
+            )),
+            None
+        );
+        assert_eq!(
+            bridge.replace_handle(handle(
+                /*value*/ 21,
+                TimerId::Ingress,
+                /*generation*/ 8,
+            )),
+            None
+        );
+        let _ = bridge.stage_retry(FiredHostTimer::new(
+            host_callback_id(/*value*/ 31),
+            host_timer_id(/*value*/ 32),
+        ));
+    })
+    .expect("timer bridge access should succeed");
+    with_dispatch_queue(|queue| {
+        queue.pending_work_units = 3;
+        queue.drain_scheduled = true;
+    });
+
+    let plan = RuntimeRecoveryPlan::runtime_lane_panic(
+        super::shell::ShellRecoveryState::default(),
+        super::timer_bridge::TimerBridgeRecoveryState {
+            core_timer_handles: vec![handle(
+                /*value*/ 41,
+                TimerId::Animation,
+                /*generation*/ 13,
+            )],
+        },
+    );
+
+    plan.apply();
+    let once = runtime_recovery_snapshot().expect("recovery snapshot should be readable");
+    plan.apply();
+    let twice = runtime_recovery_snapshot().expect("recovery snapshot should be readable");
+
+    assert_eq!(twice, once);
+}
+
+#[test]
+fn runtime_recovery_runs_after_partial_shell_failure() {
+    reset_transient_event_state();
+    set_core_state(crate::core::state::CoreState::default())
+        .expect("core state write should succeed");
+    crate::draw::recover_palette_to_epoch(/*epoch*/ 9);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = mutate_shell_state(|state| {
+            state.note_real_cursor_visibility(RealCursorVisibility::Hidden);
+            state
+                .editor_viewport_cache
+                .store_for_test(EditorViewportSnapshot::from_dimensions(
+                    /*lines*/ 24, /*cmdheight*/ 1, /*columns*/ 80,
+                ));
+            panic!("forced shell failure");
+        });
+    }));
+
+    assert!(result.is_err());
+    let snapshot = runtime_recovery_snapshot().expect("recovery snapshot should be readable");
+    assert_eq!(
+        snapshot,
+        RuntimeRecoverySnapshot {
+            core_state: crate::core::state::CoreState::default(),
+            real_cursor_visibility: None,
+            viewport: None,
+            outstanding_animation_timer: false,
+            outstanding_ingress_timer: false,
+            pending_timer_retries: 0,
+            queued_work_units: 0,
+            queued_items: 0,
+            drain_scheduled: false,
+            palette_epoch: 10,
+        }
     );
 }
 
@@ -458,14 +703,14 @@ fn cleanup_cold_storage_release_drops_shell_scratch_buffer_capacity() {
     prime_shell_scratch_storage();
 
     assert_eq!(
-        shell_scratch_storage_residency().expect("engine state access should succeed"),
+        shell_scratch_storage_residency().expect("runtime access should succeed"),
         ShellScratchStorageResidency::RETAINED
     );
 
     release_cleanup_cold_shell_storage().expect("cold cleanup storage release should succeed");
 
     assert_eq!(
-        shell_scratch_storage_residency().expect("engine state access should succeed"),
+        shell_scratch_storage_residency().expect("runtime access should succeed"),
         ShellScratchStorageResidency::RELEASED
     );
 }
@@ -704,12 +949,12 @@ fn investigation_counters_are_noops_without_the_perf_counter_feature() {
 }
 
 fn reset_buffer_event_policy_state() {
-    mutate_engine_state(|state| {
-        state.shell.buffer_metadata_cache.clear();
-        state.shell.buffer_perf_policy_cache.clear();
-        state.shell.buffer_perf_telemetry_cache.clear();
+    mutate_shell_state(|state| {
+        state.buffer_metadata_cache.clear();
+        state.buffer_perf_policy_cache.clear();
+        state.buffer_perf_telemetry_cache.clear();
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 }
 
 const SHELL_CACHE_TEST_BUFFER_HANDLE: i64 = 91;
@@ -768,16 +1013,13 @@ fn prime_shell_boundary_state() -> (
     let context = shell_cache_context();
     let color_witness = shell_cache_color_witness(Generation::INITIAL, Generation::INITIAL);
 
-    mutate_engine_state(|state| {
-        state
-            .shell
-            .buffer_perf_telemetry_cache
-            .record_callback_duration(
-                SHELL_CACHE_TEST_BUFFER_HANDLE,
-                SHELL_CACHE_TEST_CALLBACK_DURATION_MS,
-            );
+    mutate_shell_state(|state| {
+        state.buffer_perf_telemetry_cache.record_callback_duration(
+            SHELL_CACHE_TEST_BUFFER_HANDLE,
+            SHELL_CACHE_TEST_CALLBACK_DURATION_MS,
+        );
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     let policy = resolve_policy_for_test(
         &snapshot,
@@ -786,32 +1028,25 @@ fn prime_shell_boundary_state() -> (
         1_000.0,
     );
 
-    mutate_engine_state(|state| {
+    mutate_shell_state(|state| {
         state
-            .shell
             .editor_viewport_cache
             .store_for_test(EditorViewportSnapshot::from_dimensions(24, 1, 80));
         state
-            .shell
             .buffer_metadata_cache
             .store_for_test(SHELL_CACHE_TEST_BUFFER_HANDLE, metadata.clone());
         state
-            .shell
             .buffer_text_revision_cache
             .advance(SHELL_CACHE_TEST_BUFFER_HANDLE);
         state
-            .shell
             .probe_cache
             .store_cursor_text_context(context_key.clone(), Some(context.clone()));
         state
-            .shell
             .probe_cache
             .store_cursor_color_sample(color_witness, Some(CursorColorSample::new(0x00AB_CDEF)));
-        state
-            .shell
-            .note_real_cursor_visibility(RealCursorVisibility::Hidden);
+        state.note_real_cursor_visibility(RealCursorVisibility::Hidden);
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     (metadata, policy, context_key, context)
 }
@@ -823,26 +1058,24 @@ fn callback_duration_telemetry_uses_the_supplied_buffer_handle() {
 
     super::reset_event_loop_for_test();
     clear_cursor_callback_duration_estimate();
-    mutate_engine_state(|state| {
-        state.shell.buffer_perf_telemetry_cache.clear();
+    mutate_shell_state(|state| {
+        state.buffer_perf_telemetry_cache.clear();
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
-    record_cursor_callback_duration(Some(TARGET_BUFFER_HANDLE), 12.0);
+    record_cursor_callback_duration(Some(buffer_handle(TARGET_BUFFER_HANDLE)), 12.0);
 
-    let telemetry = read_engine_state(|state| {
+    let telemetry = read_shell_state(|state| {
         (
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .telemetry(TARGET_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .telemetry(OTHER_BUFFER_HANDLE),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     assert_eq!(
         telemetry
@@ -852,7 +1085,7 @@ fn callback_duration_telemetry_uses_the_supplied_buffer_handle() {
     );
     assert_eq!(telemetry.1, None);
     assert_eq!(
-        cursor_callback_duration_estimate_ms(Some(TARGET_BUFFER_HANDLE)),
+        cursor_callback_duration_estimate_ms(Some(buffer_handle(TARGET_BUFFER_HANDLE))),
         12.0
     );
 }
@@ -892,18 +1125,16 @@ fn ingress_snapshot_capture_with_current_buffer_uses_the_supplied_handle_for_cal
     runtime.set_enabled(false);
     set_core_state(crate::core::state::CoreState::default().with_runtime(runtime))
         .expect("core state write should succeed");
-    mutate_engine_state(|state| {
-        state.shell.buffer_perf_telemetry_cache.clear();
+    mutate_shell_state(|state| {
+        state.buffer_perf_telemetry_cache.clear();
         state
-            .shell
             .buffer_perf_telemetry_cache
             .record_callback_duration(i64::from(TARGET_BUFFER_HANDLE), 12.0);
         state
-            .shell
             .buffer_perf_telemetry_cache
             .record_callback_duration(OTHER_BUFFER_HANDLE, 5.0);
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 
     let buffer = api::Buffer::from(TARGET_BUFFER_HANDLE);
     let snapshot = IngressReadSnapshot::capture_with_current_buffer(Some(&buffer))
@@ -945,61 +1176,53 @@ fn resolve_policy_for_test(
         .expect("runtime policy resolution should succeed")
 }
 
-fn record_pressure_samples_in_engine(
+fn record_pressure_samples_in_shell(
     buffer_handle: i64,
     extmark_count: u8,
     conceal_scan_count: u8,
     conceal_deferred_count: u8,
     observed_at_ms: f64,
 ) {
-    mutate_engine_state(|state| {
+    mutate_shell_state(|state| {
         for _ in 0..extmark_count {
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .record_cursor_color_extmark_fallback(buffer_handle, observed_at_ms);
         }
         for _ in 0..conceal_scan_count {
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .record_conceal_full_scan(buffer_handle, observed_at_ms);
         }
         for _ in 0..conceal_deferred_count {
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .record_conceal_deferred_projection(buffer_handle, observed_at_ms);
         }
     })
-    .expect("engine state access should succeed");
+    .expect("shell state access should succeed");
 }
 
 #[test]
-fn runtime_policy_resolution_smoke_uses_engine_telemetry_and_caches_the_result() {
+fn runtime_policy_resolution_smoke_uses_shell_telemetry_and_caches_the_result() {
     const BUFFER_HANDLE: i64 = 41;
 
     reset_buffer_event_policy_state();
 
     let snapshot = snapshot_for_perf_mode(BufferPerfMode::Auto);
     let metadata = listed_buffer_metadata(1);
-    record_pressure_samples_in_engine(BUFFER_HANDLE, 2, 0, 0, 1_000.0);
+    record_pressure_samples_in_shell(BUFFER_HANDLE, 2, 0, 0, 1_000.0);
 
     let first_policy = resolve_policy_for_test(&snapshot, BUFFER_HANDLE, &metadata, 1_000.0);
 
     assert!(first_policy.observed_reason_bits() != 0);
     assert_eq!(
-        read_engine_state(|state| {
-            state
-                .shell
-                .buffer_perf_policy_cache
-                .cached_policy(BUFFER_HANDLE)
-        })
-        .expect("engine state access should succeed"),
+        read_shell_state(|state| { state.buffer_perf_policy_cache.cached_policy(BUFFER_HANDLE) })
+            .expect("shell state access should succeed"),
         Some(first_policy)
     );
 
-    record_pressure_samples_in_engine(BUFFER_HANDLE, 0, 2, 0, 1_500.0);
+    record_pressure_samples_in_shell(BUFFER_HANDLE, 0, 2, 0, 1_500.0);
     let second_policy = resolve_policy_for_test(&snapshot, BUFFER_HANDLE, &metadata, 1_500.0);
 
     assert!(second_policy.observed_reason_bits() != 0);
@@ -1008,13 +1231,8 @@ fn runtime_policy_resolution_smoke_uses_engine_telemetry_and_caches_the_result()
             == first_policy.observed_reason_bits()
     );
     assert_eq!(
-        read_engine_state(|state| {
-            state
-                .shell
-                .buffer_perf_policy_cache
-                .cached_policy(BUFFER_HANDLE)
-        })
-        .expect("engine state access should succeed"),
+        read_shell_state(|state| { state.buffer_perf_policy_cache.cached_policy(BUFFER_HANDLE) })
+            .expect("shell state access should succeed"),
         Some(second_policy)
     );
 }

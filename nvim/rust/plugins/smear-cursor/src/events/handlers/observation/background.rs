@@ -10,7 +10,7 @@ use crate::draw::BRAILLE_CODE_MAX;
 use crate::draw::BRAILLE_CODE_MIN;
 use crate::draw::OCTANT_CODE_MAX;
 use crate::draw::OCTANT_CODE_MIN;
-use crate::events::EngineAccessError;
+use crate::events::RuntimeAccessError;
 use crate::events::host_bridge::installed_host_bridge;
 use crate::events::runtime::reclaim_background_probe_request_scratch;
 use crate::events::runtime::take_background_probe_request_scratch;
@@ -24,8 +24,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 enum BackgroundProbeMaskError {
-    #[error("background probe engine state access failed: {0}")]
-    EngineAccess(#[source] EngineAccessError),
+    #[error("background probe runtime access failed: {0}")]
+    RuntimeAccess(#[source] RuntimeAccessError),
     #[error("background probe host bridge call failed: {0}")]
     BridgeCall(#[source] nvim_oxi::Error),
     #[error("background probe mask shape mismatch: {0}")]
@@ -59,10 +59,10 @@ fn with_background_probe_request_scratch<R>(
     body: impl FnOnce(&mut Vec<Object>) -> std::result::Result<R, BackgroundProbeMaskError>,
 ) -> std::result::Result<R, BackgroundProbeMaskError> {
     let mut request =
-        take_background_probe_request_scratch().map_err(BackgroundProbeMaskError::EngineAccess)?;
+        take_background_probe_request_scratch().map_err(BackgroundProbeMaskError::RuntimeAccess)?;
     let result = body(&mut request);
     let reclaim = reclaim_background_probe_request_scratch(request)
-        .map_err(BackgroundProbeMaskError::EngineAccess);
+        .map_err(BackgroundProbeMaskError::RuntimeAccess);
     match (result, reclaim) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(err), Ok(())) => Err(err),
@@ -216,8 +216,8 @@ mod tests {
 
     #[test]
     fn background_probe_request_scratch_reuses_larger_shell_buffer() {
-        let initial_capacity = crate::events::runtime::read_engine_state(|state| {
-            state.shell.background_probe_request_scratch_capacity()
+        let initial_capacity = crate::events::runtime::read_shell_state(|state| {
+            state.background_probe_request_scratch_capacity()
         })
         .expect("shell state should be readable");
         let scratch_capacity = initial_capacity.max(32);

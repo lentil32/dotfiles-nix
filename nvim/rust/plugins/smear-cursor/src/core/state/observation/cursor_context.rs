@@ -1,22 +1,25 @@
 use crate::core::types::Generation;
+use crate::host::BufferHandle;
 use crate::position::ScreenCell;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct CursorTextContextBoundary {
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     changedtick: u64,
 }
 
 impl CursorTextContextBoundary {
-    pub(crate) const fn new(buffer_handle: i64, changedtick: u64) -> Self {
+    pub(crate) fn new(buffer_handle: impl Into<BufferHandle>, changedtick: u64) -> Self {
+        let buffer_handle = buffer_handle.into();
         Self {
             buffer_handle,
             changedtick,
         }
     }
 
-    pub(crate) const fn matches(self, buffer_handle: i64, changedtick: u64) -> bool {
+    pub(crate) fn matches(self, buffer_handle: impl Into<BufferHandle>, changedtick: u64) -> bool {
+        let buffer_handle = buffer_handle.into();
         self.buffer_handle == buffer_handle && self.changedtick == changedtick
     }
 }
@@ -43,7 +46,7 @@ impl CursorTextContextState {
         }
     }
 
-    pub(crate) const fn boundary(&self) -> Option<CursorTextContextBoundary> {
+    pub(crate) fn boundary(&self) -> Option<CursorTextContextBoundary> {
         match self {
             Self::Unavailable => None,
             Self::BoundaryOnly(boundary) => Some(*boundary),
@@ -65,7 +68,7 @@ impl CursorTextContextState {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct CursorColorProbeWitness {
     window_handle: i64,
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     changedtick: u64,
     mode: String,
     cursor_position: Option<ScreenCell>,
@@ -102,7 +105,7 @@ impl CursorColorProbeGenerations {
 impl CursorColorProbeWitness {
     pub(crate) fn new(
         window_handle: i64,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         changedtick: u64,
         mode: String,
         cursor_position: Option<ScreenCell>,
@@ -111,7 +114,7 @@ impl CursorColorProbeWitness {
     ) -> Self {
         Self {
             window_handle,
-            buffer_handle,
+            buffer_handle: buffer_handle.into(),
             changedtick,
             mode,
             cursor_position,
@@ -124,7 +127,7 @@ impl CursorColorProbeWitness {
         self.window_handle
     }
 
-    pub(crate) const fn buffer_handle(&self) -> i64 {
+    pub(crate) const fn buffer_handle(&self) -> BufferHandle {
         self.buffer_handle
     }
 
@@ -166,7 +169,7 @@ impl ObservedTextRow {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct CursorTextContext {
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     changedtick: u64,
     cursor_line: i64,
     nearby_rows: Arc<[ObservedTextRow]>,
@@ -176,7 +179,7 @@ pub(crate) struct CursorTextContext {
 impl CursorTextContext {
     #[cfg(test)]
     pub(crate) fn new(
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         changedtick: u64,
         cursor_line: i64,
         nearby_rows: Vec<ObservedTextRow>,
@@ -192,14 +195,14 @@ impl CursorTextContext {
     }
 
     pub(crate) fn from_shared(
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         changedtick: u64,
         cursor_line: i64,
         nearby_rows: Arc<[ObservedTextRow]>,
         tracked_nearby_rows: Option<Arc<[ObservedTextRow]>>,
     ) -> Self {
         Self {
-            buffer_handle,
+            buffer_handle: buffer_handle.into(),
             changedtick,
             cursor_line,
             nearby_rows,
@@ -207,7 +210,7 @@ impl CursorTextContext {
         }
     }
 
-    pub(crate) const fn buffer_handle(&self) -> i64 {
+    pub(crate) const fn buffer_handle(&self) -> BufferHandle {
         self.buffer_handle
     }
 

@@ -1,4 +1,5 @@
 use crate::config::BufferPerfMode;
+use crate::config::LogLevel;
 use crate::config::MAX_COLOR_LEVELS;
 use crate::lua::ParsedOptionalChange;
 use crate::lua::bool_from_object;
@@ -435,6 +436,10 @@ fn parse_optional_buffer_perf_mode(
         .transpose()
 }
 
+fn parse_optional_log_level(raw: Option<Object>, key: &'static str) -> Result<Option<LogLevel>> {
+    Ok(parse_optional_non_negative_i64(raw, key)?.map(LogLevel::from_i64))
+}
+
 fn parse_optional_change_string(
     raw: Option<Object>,
     key: &'static str,
@@ -613,7 +618,7 @@ define_option_spec!(
     spec_logging_level_apply,
     SPEC_LOGGING_LEVEL,
     LoggingLevel,
-    parse_optional_non_negative_i64,
+    parse_optional_log_level,
     runtime.logging_level
 );
 define_option_spec!(

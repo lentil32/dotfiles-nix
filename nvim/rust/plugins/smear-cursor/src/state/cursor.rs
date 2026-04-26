@@ -1,4 +1,5 @@
 use crate::animation::corners_for_cursor;
+use crate::host::BufferHandle;
 use crate::position::BufferLine;
 use crate::position::RenderPoint;
 use crate::position::WindowSurfaceSnapshot;
@@ -30,7 +31,7 @@ impl TrackedCursor {
         self.surface.id().window_handle()
     }
 
-    pub(crate) const fn buffer_handle(&self) -> i64 {
+    pub(crate) const fn buffer_handle(&self) -> BufferHandle {
         self.surface.id().buffer_handle()
     }
 

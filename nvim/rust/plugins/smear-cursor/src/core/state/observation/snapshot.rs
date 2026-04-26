@@ -15,7 +15,6 @@ use crate::core::types::ObservationId;
 use crate::position::CursorObservation;
 use crate::position::ObservedCell;
 use crate::position::ScreenCell;
-use crate::position::SurfaceId;
 use crate::position::ViewportBounds;
 use crate::position::WindowSurfaceSnapshot;
 
@@ -123,7 +122,7 @@ impl ObservationBasis {
     }
 
     #[cfg(test)]
-    pub(crate) const fn cursor_text_context_boundary(&self) -> Option<CursorTextContextBoundary> {
+    pub(crate) fn cursor_text_context_boundary(&self) -> Option<CursorTextContextBoundary> {
         self.cursor_text_context_state.boundary()
     }
 
@@ -152,8 +151,8 @@ impl ObservationBasis {
         // exact/deferred split tracks freshness only; reducer state does not
         // distinguish raw versus projected cursor coordinates.
         debug_assert!(
-            SurfaceId::new(surface.id().window_handle(), surface.id().buffer_handle()).is_some(),
-            "observation surfaces must retain positive window and buffer handles"
+            surface.id().buffer_handle().is_valid(),
+            "observation surfaces must retain positive buffer handles"
         );
         match cursor.cell() {
             ObservedCell::Unavailable => {

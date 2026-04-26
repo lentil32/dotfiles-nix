@@ -1,14 +1,16 @@
 use crate::events::lru_cache::LruCache;
+use crate::host::BufferHandle;
+use crate::host::BufferMetadataPort;
+use crate::host::BufferMetadataSnapshot;
+use crate::host::api;
 use nvim_oxi::Result;
-use nvim_oxi::api;
-use nvim_oxi::api::opts::OptionOpts;
 use std::sync::Arc;
 
 const BUFFER_METADATA_CACHE_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::events) struct BufferMetadataCache {
-    entries: LruCache<i64, BufferMetadata>,
+    entries: LruCache<BufferHandle, BufferMetadata>,
 }
 
 impl Default for BufferMetadataCache {
@@ -20,19 +22,24 @@ impl Default for BufferMetadataCache {
 }
 
 impl BufferMetadataCache {
-    pub(in crate::events) fn read(&mut self, buffer: &api::Buffer) -> Result<BufferMetadata> {
-        let buffer_handle = i64::from(buffer.handle());
+    pub(in crate::events) fn read(
+        &mut self,
+        host: &impl BufferMetadataPort,
+        buffer: &api::Buffer,
+    ) -> Result<BufferMetadata> {
+        let buffer_handle = BufferHandle::from_buffer(buffer);
         match self.entries.get_cloned(&buffer_handle) {
             Some(metadata) => Ok(metadata),
             None => {
-                let metadata = BufferMetadata::read_uncached(buffer)?;
+                let metadata = BufferMetadata::read_uncached(host, buffer)?;
                 self.store(buffer_handle, metadata.clone());
                 Ok(metadata)
             }
         }
     }
 
-    pub(in crate::events) fn invalidate_buffer(&mut self, buffer_handle: i64) {
+    pub(in crate::events) fn invalidate_buffer(&mut self, buffer_handle: impl Into<BufferHandle>) {
+        let buffer_handle = buffer_handle.into();
         let _ = self.entries.remove(&buffer_handle);
     }
 
@@ -40,14 +47,15 @@ impl BufferMetadataCache {
         self.entries.clear();
     }
 
-    fn store(&mut self, buffer_handle: i64, metadata: BufferMetadata) {
+    fn store(&mut self, buffer_handle: impl Into<BufferHandle>, metadata: BufferMetadata) {
+        let buffer_handle = buffer_handle.into();
         self.entries.insert(buffer_handle, metadata);
     }
 
     #[cfg(test)]
     pub(in crate::events) fn store_for_test(
         &mut self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         metadata: BufferMetadata,
     ) {
         self.store(buffer_handle, metadata);
@@ -56,8 +64,9 @@ impl BufferMetadataCache {
     #[cfg(test)]
     pub(in crate::events) fn cached_entry_for_test(
         &self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
     ) -> Option<BufferMetadata> {
+        let buffer_handle = buffer_handle.into();
         self.entries.peek_cloned(&buffer_handle)
     }
 }
@@ -71,19 +80,19 @@ pub(crate) struct BufferMetadata {
 }
 
 impl BufferMetadata {
-    fn read_uncached(buffer: &api::Buffer) -> Result<Self> {
+    fn read_uncached(host: &impl BufferMetadataPort, buffer: &api::Buffer) -> Result<Self> {
         crate::events::runtime::record_buffer_metadata_read();
-        let opts = OptionOpts::builder().buf(buffer.clone()).build();
-        let filetype: String = api::get_option_value("filetype", &opts)?;
-        let buftype: String = api::get_option_value("buftype", &opts)?;
-        let buflisted: bool = api::get_option_value("buflisted", &opts)?;
+        Ok(Self::from_host_snapshot(host.buffer_metadata(buffer)?))
+    }
 
-        Ok(Self {
+    fn from_host_snapshot(snapshot: BufferMetadataSnapshot) -> Self {
+        let (filetype, buftype, buflisted, line_count) = snapshot.into_parts();
+        Self {
             filetype: Arc::from(filetype),
             buftype: Arc::from(buftype),
             buflisted,
-            line_count: buffer.line_count()?,
-        })
+            line_count,
+        }
     }
 
     #[cfg(test)]
@@ -121,6 +130,10 @@ impl BufferMetadata {
 mod tests {
     use super::BufferMetadata;
     use super::BufferMetadataCache;
+    use crate::host::BufferMetadataCall;
+    use crate::host::BufferMetadataSnapshot;
+    use crate::host::FakeBufferMetadataPort;
+    use crate::host::api;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -130,6 +143,38 @@ mod tests {
         cache.store_for_test(11, metadata.clone());
 
         assert_eq!(cache.cached_entry_for_test(11), Some(metadata));
+    }
+
+    #[test]
+    fn cache_miss_reads_once_through_buffer_metadata_port() {
+        let host = FakeBufferMetadataPort::default();
+        host.push_buffer_metadata(BufferMetadataSnapshot::new("lua", "", true, 42));
+        let buffer = api::Buffer::from(11);
+        let mut cache = BufferMetadataCache::default();
+
+        let metadata = cache
+            .read(&host, &buffer)
+            .expect("metadata cache miss should read through host port");
+
+        assert_eq!(metadata, BufferMetadata::new_for_test("lua", "", true, 42));
+        assert_eq!(
+            host.calls(),
+            vec![BufferMetadataCall::BufferMetadata {
+                buffer_handle: 11.into()
+            }]
+        );
+
+        let cached = cache
+            .read(&host, &buffer)
+            .expect("metadata cache hit should not reread host port");
+
+        assert_eq!(cached, metadata);
+        assert_eq!(
+            host.calls(),
+            vec![BufferMetadataCall::BufferMetadata {
+                buffer_handle: 11.into()
+            }]
+        );
     }
 
     #[test]

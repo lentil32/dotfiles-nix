@@ -270,19 +270,6 @@ impl RuntimeState {
             AnimationPhase::Uninitialized | AnimationPhase::Idle | AnimationPhase::Settling(_) => {}
         }
         debug_assert_eq!(
-            self.target.cell,
-            crate::position::ScreenCell::from_rounded_point(self.target.position),
-            "runtime target cell must stay derived from the retained target position"
-        );
-        debug_assert_eq!(
-            self.target.retarget_surface,
-            self.target
-                .tracked_cursor
-                .as_ref()
-                .map(super::types::RetargetSurfaceKey::from_tracked_cursor),
-            "retarget surface facts must stay in sync with tracked cursor ownership"
-        );
-        debug_assert_eq!(
             self.target.retarget_key(),
             super::types::RuntimeTargetRetargetKey::from_snapshot(
                 self.target.position,

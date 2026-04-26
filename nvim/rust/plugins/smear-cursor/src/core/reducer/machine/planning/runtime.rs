@@ -7,7 +7,6 @@ use crate::core::runtime_reducer::EventSource;
 use crate::core::runtime_reducer::MotionTarget;
 use crate::core::runtime_reducer::RenderAction;
 use crate::core::runtime_reducer::select_event_source;
-use crate::core::state::AnimationSchedule;
 use crate::core::state::BackgroundProbePlan;
 use crate::core::state::CoreState;
 use crate::core::state::ObservationSnapshot;
@@ -170,8 +169,7 @@ fn plan_ready_state_with_transition(
     let crate::core::runtime_reducer::CursorTransition {
         render_decision,
         motion_class: _,
-        should_schedule_next_animation,
-        next_animation_at_ms,
+        animation_schedule,
     } = cursor_transition;
 
     let Some(planning_observation) = state.observation().map(render_planning_observation) else {
@@ -180,10 +178,6 @@ fn plan_ready_state_with_transition(
     };
 
     let (state, proposal_id) = state.allocate_proposal_id();
-    let animation_schedule = AnimationSchedule::from_parts(
-        should_schedule_next_animation,
-        next_animation_at_ms.map(Millis::new),
-    );
     if state.lifecycle() != crate::core::types::Lifecycle::Ready {
         // Surprising: `plan_ready_state` was invoked outside the ready lifecycle boundary.
         return Transition::stay(&state);
@@ -371,7 +365,7 @@ mod tests {
             }
         );
         assert!(runtime.is_settling() || runtime.is_animating());
-        assert!(planned.transition.should_schedule_next_animation);
+        assert!(planned.transition.should_schedule_next_animation());
     }
 
     #[test]
@@ -424,7 +418,7 @@ mod tests {
             }
         );
         assert!(runtime.is_settling() || runtime.is_animating());
-        assert!(planned.transition.should_schedule_next_animation);
+        assert!(planned.transition.should_schedule_next_animation());
     }
 
     #[test]
@@ -490,7 +484,7 @@ mod tests {
             planned.transition.render_decision.render_action,
             RenderAction::Draw(_)
         ));
-        assert!(planned.transition.should_schedule_next_animation);
+        assert!(planned.transition.should_schedule_next_animation());
     }
 
     #[test]
@@ -539,7 +533,7 @@ mod tests {
             }
         );
         assert!(runtime.is_settling() || runtime.is_animating());
-        assert!(planned.transition.should_schedule_next_animation);
+        assert!(planned.transition.should_schedule_next_animation());
     }
 
     #[test]

@@ -1,11 +1,12 @@
 use super::lru_cache::LruCache;
 use crate::core::types::Generation;
+use crate::host::BufferHandle;
 
 const BUFFER_TEXT_REVISION_CACHE_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::events) struct BufferTextRevisionCache {
-    entries: LruCache<i64, Generation>,
+    entries: LruCache<BufferHandle, Generation>,
 }
 
 impl Default for BufferTextRevisionCache {
@@ -17,19 +18,28 @@ impl Default for BufferTextRevisionCache {
 }
 
 impl BufferTextRevisionCache {
-    pub(in crate::events) fn current(&mut self, buffer_handle: i64) -> Generation {
+    pub(in crate::events) fn current(
+        &mut self,
+        buffer_handle: impl Into<BufferHandle>,
+    ) -> Generation {
+        let buffer_handle = buffer_handle.into();
         self.entries
             .get_copy(&buffer_handle)
             .unwrap_or(Generation::INITIAL)
     }
 
-    pub(in crate::events) fn advance(&mut self, buffer_handle: i64) -> Generation {
+    pub(in crate::events) fn advance(
+        &mut self,
+        buffer_handle: impl Into<BufferHandle>,
+    ) -> Generation {
+        let buffer_handle = buffer_handle.into();
         let next = self.current(buffer_handle).next();
         self.entries.insert(buffer_handle, next);
         next
     }
 
-    pub(in crate::events) fn clear_buffer(&mut self, buffer_handle: i64) {
+    pub(in crate::events) fn clear_buffer(&mut self, buffer_handle: impl Into<BufferHandle>) {
+        let buffer_handle = buffer_handle.into();
         let _ = self.entries.remove(&buffer_handle);
     }
 
@@ -40,8 +50,9 @@ impl BufferTextRevisionCache {
     #[cfg(test)]
     pub(in crate::events) fn cached_entry_for_test(
         &self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
     ) -> Option<Generation> {
+        let buffer_handle = buffer_handle.into();
         self.entries.peek_copy(&buffer_handle)
     }
 }

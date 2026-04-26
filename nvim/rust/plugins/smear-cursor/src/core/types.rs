@@ -373,6 +373,33 @@ impl Millis {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AnimationSchedule {
+    Idle,
+    DefaultDelay,
+    Deadline(Millis),
+}
+
+impl AnimationSchedule {
+    pub(crate) const fn should_schedule(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    pub(crate) const fn deadline(self) -> Option<Millis> {
+        match self {
+            Self::Idle | Self::DefaultDelay => None,
+            Self::Deadline(deadline) => Some(deadline),
+        }
+    }
+
+    pub(crate) const fn next_animation_at_ms(self) -> Option<u64> {
+        match self {
+            Self::Idle | Self::DefaultDelay => None,
+            Self::Deadline(deadline) => Some(deadline.value()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct StepIndex(u64);
 

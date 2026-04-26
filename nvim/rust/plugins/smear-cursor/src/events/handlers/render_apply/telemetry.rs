@@ -25,6 +25,7 @@ pub(crate) struct RenderExecutionMetrics {
     pub(crate) pool_peak_frame_demand: usize,
     pub(crate) pool_peak_requested_capacity: usize,
     pub(crate) pool_capacity_cap_hits: usize,
+    pub(crate) retained_cleanup_resources: usize,
     pub(crate) had_visual_change: bool,
 }
 
@@ -279,6 +280,7 @@ mod tests {
             pool_peak_frame_demand: 0,
             pool_peak_requested_capacity: 0,
             pool_capacity_cap_hits: 0,
+            retained_cleanup_resources: 0,
             had_visual_change: true,
         };
 

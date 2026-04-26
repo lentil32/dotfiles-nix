@@ -1,17 +1,16 @@
-use super::ENGINE_CONTEXT;
-use super::LOG_LEVEL_DEBUG;
-use super::LOG_LEVEL_ERROR;
-use super::LOG_LEVEL_INFO;
-use super::LOG_LEVEL_TRACE;
-use super::LOG_LEVEL_WARN;
 use super::LOG_SOURCE_NAME;
 use super::RealCursorVisibility;
-use super::runtime::mutate_engine_state;
-use super::runtime::read_engine_state;
-use nvim_oxi::Array;
-use nvim_oxi::Object;
-use nvim_oxi::api;
-use std::cell::RefCell;
+use super::runtime::clear_real_cursor_visibility;
+use super::runtime::note_real_cursor_visibility;
+use super::runtime::real_cursor_visibility_matches;
+use super::runtime::set_runtime_log_level;
+use super::runtime::should_runtime_log;
+use super::runtime::with_runtime_log_file_handle;
+use crate::config::LogLevel;
+use crate::host::CursorVisibilityPort;
+use crate::host::HostCursorVisibility;
+use crate::host::HostLoggingPort;
+use crate::host::NeovimHost;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::BufWriter;
@@ -62,7 +61,8 @@ impl LogFileFlushPolicy {
     }
 }
 
-struct LogFileWriter {
+#[derive(Debug)]
+pub(super) struct LogFileWriter {
     file: BufWriter<File>,
 }
 
@@ -87,33 +87,16 @@ impl LogFileWriter {
     }
 }
 
-thread_local! {
-    static LOG_FILE_HANDLE: RefCell<Option<LogFileWriter>> = const { RefCell::new(None) };
+pub(super) fn set_log_level(level: LogLevel) {
+    set_runtime_log_level(level);
 }
 
-pub(super) fn set_log_level(level: i64) {
-    let normalized = if level < 0 { 0 } else { level };
-    ENGINE_CONTEXT.with(|context| {
-        context.log_level.set(normalized);
-    });
+fn should_log(level: LogLevel) -> bool {
+    should_runtime_log(level)
 }
 
-fn should_log(level: i64) -> bool {
-    ENGINE_CONTEXT.with(|context| context.log_level.get() <= level)
-}
-
-fn log_level_name(level: i64) -> &'static str {
-    match level {
-        LOG_LEVEL_TRACE => "TRACE",
-        LOG_LEVEL_DEBUG => "DEBUG",
-        LOG_LEVEL_WARN => "WARNING",
-        LOG_LEVEL_ERROR => "ERROR",
-        _ => "INFO",
-    }
-}
-
-fn should_notify(level: i64) -> bool {
-    level >= LOG_LEVEL_INFO
+fn should_notify(level: LogLevel) -> bool {
+    level.should_notify()
 }
 
 fn log_timestamp_ms() -> u128 {
@@ -123,24 +106,18 @@ fn log_timestamp_ms() -> u128 {
     }
 }
 
-fn append_log_line(level_name: &str, message: &str) {
+fn append_log_line_with(host: &impl HostLoggingPort, level_name: &str, message: &str) {
     let Some(path) = LOG_FILE_PATH.as_ref() else {
         return;
     };
-    LOG_FILE_HANDLE.with(|file_handle| {
-        // File logging is best-effort diagnostics. If a nested callback is already writing, skip
-        // this line instead of panicking the plugin on a RefCell borrow failure.
-        let Ok(mut file_guard) = file_handle.try_borrow_mut() else {
-            return;
-        };
-
-        if file_guard.is_none() {
+    with_runtime_log_file_handle(|file_handle| {
+        if file_handle.is_none() {
             match LogFileWriter::open(path) {
                 Ok(file_writer) => {
-                    *file_guard = Some(file_writer);
+                    *file_handle = Some(file_writer);
                 }
                 Err(err) => {
-                    api::err_writeln(&format!(
+                    host.write_error(&format!(
                         "[{LOG_SOURCE_NAME}] failed to open log file {}: {err}",
                         path.display()
                     ));
@@ -149,52 +126,55 @@ fn append_log_line(level_name: &str, message: &str) {
             }
         }
 
-        if let Some(file_writer) = file_guard.as_mut()
+        if let Some(file_writer) = file_handle.as_mut()
             && let Err(err) = file_writer.append_line(level_name, message)
         {
-            api::err_writeln(&format!(
+            host.write_error(&format!(
                 "[{LOG_SOURCE_NAME}] failed to write log file: {err}"
             ));
-            *file_guard = None;
+            *file_handle = None;
         }
     });
 }
 
-fn notify_log(level: i64, message: &str) {
+fn notify_log(level: LogLevel, message: &str) {
+    notify_log_with(&NeovimHost, level, message);
+}
+
+fn notify_log_with(host: &impl HostLoggingPort, level: LogLevel, message: &str) {
     if !should_log(level) {
         return;
     }
 
-    let level_name = log_level_name(level);
-    append_log_line(level_name, message);
+    append_log_line_with(host, level.name(), message);
     if !should_notify(level) {
         return;
     }
 
+    notify_host_with(host, level, message);
+}
+
+fn notify_host_with(host: &impl HostLoggingPort, level: LogLevel, message: &str) {
+    let level_name = level.name();
     let payload_message = format!("[{LOG_SOURCE_NAME}][{level_name}] {message}");
-    let payload = Array::from_iter([Object::from(payload_message), Object::from(level)]);
-    let args = Array::from_iter([
-        Object::from("vim.notify(_A[1], _A[2])"),
-        Object::from(payload),
-    ]);
-    if let Err(err) = api::call_function::<_, Object>("luaeval", args) {
-        api::err_writeln(&format!("[{LOG_SOURCE_NAME}] vim.notify failed: {err}"));
+    if let Err(err) = host.notify(&payload_message, level) {
+        host.write_error(&format!("[{LOG_SOURCE_NAME}] vim.notify failed: {err}"));
     }
 }
 
 pub(crate) fn warn(message: &str) {
-    notify_log(LOG_LEVEL_WARN, message);
+    notify_log(LogLevel::Warn, message);
 }
 
 pub(super) fn trace_lazy(message: impl FnOnce() -> String) {
-    if !should_log(LOG_LEVEL_TRACE) {
+    if !should_log(LogLevel::Trace) {
         return;
     }
-    notify_log(LOG_LEVEL_TRACE, &message());
+    notify_log(LogLevel::Trace, &message());
 }
 
 pub(super) fn debug(message: &str) {
-    notify_log(LOG_LEVEL_DEBUG, message);
+    notify_log(LogLevel::Debug, message);
 }
 
 pub(super) fn should_log_slow_callback(callback_duration_ms: f64) -> bool {
@@ -215,12 +195,15 @@ pub(super) fn log_slow_callback(
     let message = format!(
         "slow-callback source={source} mode={mode} callback_ms={callback_duration_ms:.3} estimate_ms={callback_duration_estimate_ms:.3} {details}",
     );
-    append_log_line("PERF", &message);
+    append_log_line_with(&NeovimHost, "PERF", &message);
 }
 
 pub(super) fn ensure_hideable_guicursor() {
-    let opts = nvim_oxi::api::opts::OptionOpts::builder().build();
-    let Ok(mut guicursor) = api::get_option_value::<String>("guicursor", &opts) else {
+    ensure_hideable_guicursor_with(&NeovimHost);
+}
+
+fn ensure_hideable_guicursor_with(host: &impl CursorVisibilityPort) {
+    let Ok(mut guicursor) = host.guicursor() else {
         return;
     };
     if guicursor
@@ -233,48 +216,46 @@ pub(super) fn ensure_hideable_guicursor() {
         guicursor.push(',');
     }
     guicursor.push_str("a:SmearCursorHideable");
-    if let Err(err) = api::set_option_value("guicursor", guicursor, &opts) {
+    if let Err(err) = host.set_guicursor(&guicursor) {
         warn(&format!("set guicursor failed: {err}"));
     }
 }
 
 fn should_skip_real_cursor_visibility_update(visibility: RealCursorVisibility) -> bool {
-    read_engine_state(|state| state.shell.real_cursor_visibility() == Some(visibility))
-        .unwrap_or(false)
+    real_cursor_visibility_matches(visibility).unwrap_or(false)
 }
 
 fn apply_real_cursor_visibility(visibility: RealCursorVisibility) {
+    apply_real_cursor_visibility_with(&NeovimHost, visibility);
+}
+
+fn apply_real_cursor_visibility_with(
+    host: &impl CursorVisibilityPort,
+    visibility: RealCursorVisibility,
+) {
     if should_skip_real_cursor_visibility_update(visibility) {
         return;
     }
 
-    let (opts, error_message) = match visibility {
-        RealCursorVisibility::Hidden => (
-            nvim_oxi::api::opts::SetHighlightOpts::builder()
-                .foreground("white")
-                .blend(100)
-                .build(),
-            "set highlight failed",
-        ),
-        RealCursorVisibility::Visible => (
-            nvim_oxi::api::opts::SetHighlightOpts::builder()
-                .foreground("none")
-                .blend(0)
-                .build(),
-            "restore highlight failed",
-        ),
+    let host_visibility = match visibility {
+        RealCursorVisibility::Hidden => HostCursorVisibility::Hidden,
+        RealCursorVisibility::Visible => HostCursorVisibility::Visible,
+    };
+    let error_message = match visibility {
+        RealCursorVisibility::Hidden => "set highlight failed",
+        RealCursorVisibility::Visible => "restore highlight failed",
     };
 
-    if let Err(err) = api::set_hl(0, "SmearCursorHideable", &opts) {
+    if let Err(err) = host.set_cursor_highlight_visibility(host_visibility) {
         warn(&format!("{error_message}: {err}"));
         return;
     }
 
-    let _ = mutate_engine_state(|state| state.shell.note_real_cursor_visibility(visibility));
+    let _ = note_real_cursor_visibility(visibility);
 }
 
 pub(super) fn invalidate_real_cursor_visibility() {
-    let _ = mutate_engine_state(|state| state.shell.clear_real_cursor_visibility());
+    let _ = clear_real_cursor_visibility();
 }
 
 pub(super) fn hide_real_cursor() {
@@ -289,9 +270,20 @@ pub(super) fn unhide_real_cursor() {
 mod tests {
     use super::LogFileFlushPolicy;
     use super::RealCursorVisibility;
+    use super::apply_real_cursor_visibility_with;
+    use super::ensure_hideable_guicursor_with;
+    use super::notify_host_with;
     use super::should_notify;
     use super::should_skip_real_cursor_visibility_update;
-    use crate::events::runtime::mutate_engine_state;
+    use crate::config::LogLevel;
+    use crate::events::runtime::clear_real_cursor_visibility;
+    use crate::events::runtime::note_real_cursor_visibility;
+    use crate::host::CursorVisibilityCall;
+    use crate::host::FakeCursorVisibilityPort;
+    use crate::host::FakeHostLoggingPort;
+    use crate::host::HostCursorVisibility;
+    use crate::host::HostLoggingCall;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn log_file_flush_policy_accepts_only_the_canonical_opt_in() {
@@ -321,21 +313,96 @@ mod tests {
 
     #[test]
     fn trace_and_debug_logs_are_file_only() {
-        assert!(!should_notify(super::LOG_LEVEL_TRACE));
-        assert!(!should_notify(super::LOG_LEVEL_DEBUG));
+        assert!(!should_notify(LogLevel::Trace));
+        assert!(!should_notify(LogLevel::Debug));
     }
 
     #[test]
     fn info_and_above_still_notify() {
-        assert!(should_notify(super::LOG_LEVEL_INFO));
-        assert!(should_notify(super::LOG_LEVEL_WARN));
-        assert!(should_notify(super::LOG_LEVEL_ERROR));
+        assert!(should_notify(LogLevel::Info));
+        assert!(should_notify(LogLevel::Warn));
+        assert!(should_notify(LogLevel::Error));
+    }
+
+    #[test]
+    fn warning_notifications_route_through_host_logging_port() {
+        let host = FakeHostLoggingPort::default();
+
+        notify_host_with(&host, LogLevel::Warn, "low contrast cursor");
+
+        assert_eq!(
+            host.calls(),
+            vec![HostLoggingCall::Notify {
+                message: "[smear_cursor][WARNING] low contrast cursor".to_string(),
+                level: LogLevel::Warn,
+            }]
+        );
+    }
+
+    #[test]
+    fn notification_failure_routes_diagnostic_error_through_host_logging_port() {
+        let host = FakeHostLoggingPort::default();
+        host.push_notify_error("notify unavailable");
+
+        notify_host_with(&host, LogLevel::Warn, "low contrast cursor");
+
+        assert_eq!(
+            host.calls(),
+            vec![
+                HostLoggingCall::Notify {
+                    message: "[smear_cursor][WARNING] low contrast cursor".to_string(),
+                    level: LogLevel::Warn,
+                },
+                HostLoggingCall::WriteError {
+                    message: "[smear_cursor] vim.notify failed: notify unavailable".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_hideable_guicursor_routes_option_reads_and_writes_through_cursor_port() {
+        let host = FakeCursorVisibilityPort::default();
+        host.set_initial_guicursor("n-v-c:block");
+
+        ensure_hideable_guicursor_with(&host);
+
+        assert_eq!(
+            host.calls(),
+            vec![
+                CursorVisibilityCall::Guicursor,
+                CursorVisibilityCall::SetGuicursor {
+                    value: "n-v-c:block,a:SmearCursorHideable".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn real_cursor_visibility_routes_highlight_writes_through_cursor_port() {
+        clear_real_cursor_visibility().expect("shell state access should succeed");
+        let host = FakeCursorVisibilityPort::default();
+
+        apply_real_cursor_visibility_with(&host, RealCursorVisibility::Hidden);
+        apply_real_cursor_visibility_with(&host, RealCursorVisibility::Hidden);
+        apply_real_cursor_visibility_with(&host, RealCursorVisibility::Visible);
+
+        assert_eq!(
+            host.calls(),
+            vec![
+                CursorVisibilityCall::SetCursorHighlightVisibility {
+                    visibility: HostCursorVisibility::Hidden,
+                },
+                CursorVisibilityCall::SetCursorHighlightVisibility {
+                    visibility: HostCursorVisibility::Visible,
+                },
+            ]
+        );
     }
 
     #[test]
     fn real_cursor_visibility_skip_only_matches_the_cached_state() {
-        mutate_engine_state(|state| state.shell.clear_real_cursor_visibility())
-            .expect("engine state access should succeed");
+        clear_real_cursor_visibility().expect("shell state access should succeed");
         assert!(!should_skip_real_cursor_visibility_update(
             RealCursorVisibility::Hidden
         ));
@@ -343,12 +410,8 @@ mod tests {
             RealCursorVisibility::Visible
         ));
 
-        mutate_engine_state(|state| {
-            state
-                .shell
-                .note_real_cursor_visibility(RealCursorVisibility::Hidden);
-        })
-        .expect("engine state access should succeed");
+        note_real_cursor_visibility(RealCursorVisibility::Hidden)
+            .expect("shell state access should succeed");
         assert!(should_skip_real_cursor_visibility_update(
             RealCursorVisibility::Hidden
         ));

@@ -1,10 +1,11 @@
-use crate::events::ingress::parse_autocmd_ingress;
 use crate::events::ingress::AutocmdIngress;
 use crate::events::ingress::Ingress;
+use crate::events::ingress::parse_autocmd_ingress;
 use crate::events::runtime::record_ingress_applied;
 use crate::events::runtime::record_ingress_coalesced;
 use crate::events::runtime::record_ingress_dropped;
 use crate::events::runtime::record_ingress_received;
+use crate::host::BufferHandle;
 use nvim_oxi::Result;
 
 mod cursor_autocmd;
@@ -12,6 +13,10 @@ mod non_cursor_autocmd;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+use self::cursor_autocmd::CursorAutocmdFastPathSnapshot;
+#[cfg(test)]
+use self::cursor_autocmd::CursorAutocmdPreflight;
 #[cfg(test)]
 use self::cursor_autocmd::build_cursor_autocmd_events;
 #[cfg(test)]
@@ -25,9 +30,7 @@ use self::cursor_autocmd::should_drop_unchanged_cursor_autocmd;
 #[cfg(test)]
 use self::cursor_autocmd::tracked_cursor_matches_live_surface_handles;
 #[cfg(test)]
-use self::cursor_autocmd::CursorAutocmdFastPathSnapshot;
-#[cfg(test)]
-use self::cursor_autocmd::CursorAutocmdPreflight;
+use self::non_cursor_autocmd::LiveTabSnapshot;
 #[cfg(test)]
 use self::non_cursor_autocmd::advance_buffer_text_revision;
 #[cfg(test)]
@@ -39,11 +42,21 @@ use self::non_cursor_autocmd::invalidate_buffer_metadata;
 #[cfg(test)]
 use self::non_cursor_autocmd::invalidate_conceal_probe_caches;
 #[cfg(test)]
+use self::non_cursor_autocmd::live_tab_snapshot_with;
+#[cfg(test)]
+use self::non_cursor_autocmd::parse_closed_tab_number;
+#[cfg(test)]
+use self::non_cursor_autocmd::parse_closed_window_id;
+#[cfg(test)]
 use self::non_cursor_autocmd::should_invalidate_buffer_metadata_for_option;
 #[cfg(test)]
 use self::non_cursor_autocmd::should_invalidate_conceal_probe_cache_for_option;
 #[cfg(test)]
 use self::non_cursor_autocmd::should_refresh_editor_viewport_for_option;
+#[cfg(test)]
+use self::non_cursor_autocmd::stale_tracked_tab_handles;
+#[cfg(test)]
+use super::retained_resource_cleanup_retry_event;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum IngressDispatchOutcome {
@@ -54,7 +67,7 @@ enum IngressDispatchOutcome {
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 struct AutocmdDispatchContext<'a> {
-    buffer_handle: Option<i64>,
+    buffer_handle: Option<BufferHandle>,
     match_name: Option<&'a str>,
 }
 
@@ -66,9 +79,11 @@ fn on_autocmd_ingress(
         AutocmdIngress::ColorScheme => non_cursor_autocmd::on_colorscheme_ingress(),
         AutocmdIngress::BufWipeout
         | AutocmdIngress::OptionSet
+        | AutocmdIngress::TabClosed
         | AutocmdIngress::TextChanged
         | AutocmdIngress::TextChangedInsert
         | AutocmdIngress::VimResized
+        | AutocmdIngress::WinClosed
         | AutocmdIngress::Unknown => {
             non_cursor_autocmd::on_non_cursor_autocmd_ingress(ingress, context)
         }
@@ -115,7 +130,7 @@ pub(crate) fn on_autocmd_event(event: &str) -> Result<()> {
 
 pub(in crate::events) fn on_autocmd_payload_event(
     event: &str,
-    buffer_handle: Option<i64>,
+    buffer_handle: Option<BufferHandle>,
     match_name: Option<&str>,
 ) -> Result<()> {
     dispatch_ingress(

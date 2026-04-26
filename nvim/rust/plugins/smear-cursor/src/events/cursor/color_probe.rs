@@ -5,6 +5,8 @@ use crate::core::effect::ProbePolicy;
 use crate::core::state::ProbeKind;
 use crate::events::host_bridge::installed_host_bridge;
 use crate::events::runtime::record_probe_extmark_fallback;
+use crate::host::BufferHandle;
+use crate::host::CursorColorExtmarkFallback;
 use crate::lua::bool_from_object_typed;
 use crate::lua::i64_from_object_typed;
 use nvim_oxi::Dictionary;
@@ -29,11 +31,15 @@ impl CursorColorProbeResult {
 }
 
 fn cursor_color_at_current_position(
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     probe_policy: ProbePolicy,
 ) -> Result<Option<u32>> {
-    let value = installed_host_bridge()?
-        .cursor_color_at_cursor(probe_policy.allows_cursor_color_extmark_fallback())?;
+    let extmark_fallback = if probe_policy.allows_cursor_color_extmark_fallback() {
+        CursorColorExtmarkFallback::SyntaxThenExtmarks
+    } else {
+        CursorColorExtmarkFallback::SyntaxOnly
+    };
+    let value = installed_host_bridge()?.cursor_color_at_cursor(extmark_fallback)?;
     let probe_result = parse_cursor_color_probe_result(value)?;
     if probe_result.used_extmark_fallback {
         record_probe_extmark_fallback(buffer_handle, ProbeKind::CursorColor);
@@ -81,14 +87,14 @@ fn parse_cursor_color_host_bridge_color(value: Object) -> Result<u32> {
         nvim_oxi::Error::from(cursor_parse_error("cursor_color_host_bridge", source))
     })?;
     Ok(u32::try_from(parsed).map_err(|_| {
-        nvim_oxi::api::Error::Other(
+        crate::host::api::Error::Other(
             "cursor_color_host_bridge parse failed: color out of range".into(),
         )
     })?)
 }
 
 pub(crate) fn sampled_cursor_color_at_current_position(
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     probe_policy: ProbePolicy,
 ) -> Result<Option<u32>> {
     cursor_color_at_current_position(buffer_handle, probe_policy)

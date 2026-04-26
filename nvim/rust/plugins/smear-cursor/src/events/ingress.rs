@@ -11,10 +11,12 @@ pub(super) enum AutocmdIngress {
     CursorMovedInsert,
     ModeChanged,
     OptionSet,
+    TabClosed,
     TextChanged,
     TextChangedInsert,
     VimResized,
     WinEnter,
+    WinClosed,
     WinScrolled,
     BufEnter,
     ColorScheme,
@@ -27,7 +29,7 @@ struct AutocmdIngressMapping {
     ingress: AutocmdIngress,
 }
 
-const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 13] = [
+const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 15] = [
     AutocmdIngressMapping {
         event_name: "BufWipeout",
         ingress: AutocmdIngress::BufWipeout,
@@ -53,6 +55,10 @@ const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 13] = [
         ingress: AutocmdIngress::OptionSet,
     },
     AutocmdIngressMapping {
+        event_name: "TabClosed",
+        ingress: AutocmdIngress::TabClosed,
+    },
+    AutocmdIngressMapping {
         event_name: "TextChanged",
         ingress: AutocmdIngress::TextChanged,
     },
@@ -68,6 +74,10 @@ const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 13] = [
     AutocmdIngressMapping {
         event_name: "WinEnter",
         ingress: AutocmdIngress::WinEnter,
+    },
+    AutocmdIngressMapping {
+        event_name: "WinClosed",
+        ingress: AutocmdIngress::WinClosed,
     },
     AutocmdIngressMapping {
         event_name: "WinScrolled",
@@ -123,9 +133,11 @@ impl AutocmdIngress {
 
 #[cfg(test)]
 mod tests {
+    use super::AutocmdIngress;
     use super::parse_autocmd_ingress;
     use super::registered_autocmd_event_names;
-    use super::AutocmdIngress;
+    use pretty_assertions::assert_eq;
+    use pretty_assertions::assert_ne;
 
     #[test]
     fn known_autocmd_names_round_trip_to_typed_ingress() {
@@ -144,12 +156,26 @@ mod tests {
     }
 
     #[test]
+    fn close_autocmd_names_map_to_resource_lifecycle_ingress() {
+        assert_eq!(
+            parse_autocmd_ingress("TabClosed"),
+            AutocmdIngress::TabClosed
+        );
+        assert_eq!(
+            parse_autocmd_ingress("WinClosed"),
+            AutocmdIngress::WinClosed
+        );
+    }
+
+    #[test]
     fn unchanged_fast_path_stays_limited_to_window_surface_events() {
         for (ingress, expected) in [
             (AutocmdIngress::CursorMoved, false),
             (AutocmdIngress::CursorMovedInsert, false),
             (AutocmdIngress::ModeChanged, false),
+            (AutocmdIngress::TabClosed, false),
             (AutocmdIngress::WinEnter, true),
+            (AutocmdIngress::WinClosed, false),
             (AutocmdIngress::WinScrolled, true),
             (AutocmdIngress::BufEnter, true),
         ] {

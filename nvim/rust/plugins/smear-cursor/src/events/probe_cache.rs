@@ -5,6 +5,7 @@ use crate::core::state::CursorColorSample;
 use crate::core::state::CursorTextContext;
 use crate::core::state::ProbeReuse;
 use crate::core::types::Generation;
+use crate::host::BufferHandle;
 use crate::position::ScreenCell;
 use crate::position::WindowSurfaceSnapshot;
 use std::sync::Arc;
@@ -56,7 +57,7 @@ impl ConcealWindowState {
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct ConcealCacheKey {
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     text_revision: u64,
     line: usize,
     window_state: ConcealWindowState,
@@ -64,20 +65,20 @@ pub(crate) struct ConcealCacheKey {
 
 impl ConcealCacheKey {
     pub(crate) fn new(
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         text_revision: u64,
         line: usize,
         window_state: ConcealWindowState,
     ) -> Self {
         Self {
-            buffer_handle,
+            buffer_handle: buffer_handle.into(),
             text_revision,
             line,
             window_state,
         }
     }
 
-    pub(super) const fn buffer_handle(&self) -> i64 {
+    pub(super) const fn buffer_handle(&self) -> BufferHandle {
         self.buffer_handle
     }
 
@@ -97,7 +98,7 @@ impl ConcealCacheKey {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(super) struct ConcealScreenCellCacheKey {
     window_handle: i64,
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     text_revision: u64,
     line: usize,
     col1: i64,
@@ -142,7 +143,7 @@ impl ConcealScreenCellCacheKey {
         }
     }
 
-    pub(super) const fn buffer_handle(&self) -> i64 {
+    pub(super) const fn buffer_handle(&self) -> BufferHandle {
         self.buffer_handle
     }
 }
@@ -150,7 +151,7 @@ impl ConcealScreenCellCacheKey {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(super) struct ConcealDeltaCacheKey {
     window_handle: i64,
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     text_revision: u64,
     line: usize,
     window_row: i64,
@@ -192,7 +193,7 @@ impl ConcealDeltaCacheKey {
         }
     }
 
-    pub(super) const fn buffer_handle(&self) -> i64 {
+    pub(super) const fn buffer_handle(&self) -> BufferHandle {
         self.buffer_handle
     }
 }
@@ -213,28 +214,28 @@ fn surface_cache_fields(
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(super) struct CursorTextContextCacheKey {
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     changedtick: u64,
     cursor_line: i64,
     tracked_line: Option<i64>,
 }
 
 impl CursorTextContextCacheKey {
-    pub(super) const fn new(
-        buffer_handle: i64,
+    pub(super) fn new(
+        buffer_handle: impl Into<BufferHandle>,
         changedtick: u64,
         cursor_line: i64,
         tracked_line: Option<i64>,
     ) -> Self {
         Self {
-            buffer_handle,
+            buffer_handle: buffer_handle.into(),
             changedtick,
             cursor_line,
             tracked_line,
         }
     }
 
-    pub(super) const fn buffer_handle(&self) -> i64 {
+    pub(super) const fn buffer_handle(&self) -> BufferHandle {
         self.buffer_handle
     }
 }
@@ -392,7 +393,8 @@ impl ProbeCacheState {
         self.cursor_text_context.insert(key, context);
     }
 
-    pub(super) fn invalidate_buffer(&mut self, buffer_handle: i64) {
+    pub(super) fn invalidate_buffer(&mut self, buffer_handle: impl Into<BufferHandle>) {
+        let buffer_handle = buffer_handle.into();
         self.cursor_text_context
             .remove_where(|key, _| key.buffer_handle() == buffer_handle);
         self.invalidate_conceal_buffer(buffer_handle);
@@ -451,7 +453,8 @@ impl ProbeCacheState {
             .insert(key, CachedConcealDelta::new(current_col1, delta));
     }
 
-    pub(super) fn invalidate_conceal_buffer(&mut self, buffer_handle: i64) {
+    pub(super) fn invalidate_conceal_buffer(&mut self, buffer_handle: impl Into<BufferHandle>) {
+        let buffer_handle = buffer_handle.into();
         self.conceal_lines
             .remove_where(|key, _| key.buffer_handle() == buffer_handle);
         self.conceal_deltas

@@ -20,7 +20,7 @@ fn same_cell_external_retarget_updates_target_position_without_bumping_the_retar
         draw_frame(&retarget).expect("same-cell external retarget should still draw immediately");
 
     assert!(matches!(render_action(&retarget), RenderAction::Draw(_)));
-    assert!(retarget.should_schedule_next_animation);
+    assert!(retarget.should_schedule_next_animation());
     assert_eq!(
         render_cleanup_action(&retarget),
         RenderCleanupAction::Invalidate
@@ -63,7 +63,7 @@ fn changed_cell_external_retarget_draws_immediately_and_bumps_the_retarget_epoch
         draw_frame(&retarget).expect("changed-cell external retarget should draw immediately");
 
     assert!(matches!(render_action(&retarget), RenderAction::Draw(_)));
-    assert!(retarget.should_schedule_next_animation);
+    assert!(retarget.should_schedule_next_animation());
     assert_eq!(
         render_cleanup_action(&retarget),
         RenderCleanupAction::Invalidate

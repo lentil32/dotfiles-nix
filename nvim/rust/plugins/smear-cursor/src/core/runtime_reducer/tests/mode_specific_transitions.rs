@@ -300,7 +300,7 @@ fn insert_mode_immediate_snap_emits_a_discontinuous_jump_bridge_frame_and_update
         .expect("insert immediate mode should still emit a jump bridge frame");
 
     assert_eq!(transition.motion_class, MotionClass::DiscontinuousJump);
-    assert!(transition.should_schedule_next_animation);
+    assert!(transition.should_schedule_next_animation());
     assert!(state.is_draining());
     assert!(frame.step_samples.len() >= 3);
     assert_eq!(
@@ -335,7 +335,7 @@ fn text_mutation_snap_clears_existing_smear_instead_of_animating() {
     let (state, transition) = text_mutation_snap();
 
     assert!(matches!(render_action(&transition), RenderAction::ClearAll));
-    assert!(!transition.should_schedule_next_animation);
+    assert!(!transition.should_schedule_next_animation());
     assert!(!state.is_animating());
     assert_eq!(
         state.target_position(),
@@ -354,7 +354,7 @@ fn cmdline_boundary_snap_emits_an_immediate_jump_bridge_frame_and_intra_cmdline_
         .expect("cmdline boundary snap should emit an immediate jump bridge frame");
 
     assert_eq!(boundary.motion_class, MotionClass::DiscontinuousJump);
-    assert!(boundary.should_schedule_next_animation);
+    assert!(boundary.should_schedule_next_animation());
     assert!(state.is_draining());
     assert!(boundary_frame.step_samples.len() >= 3);
 
@@ -390,7 +390,7 @@ fn animation_tick_retargets_update_target_and_location_while_keeping_frames_sche
     let (state, _, effects) = animation_tick_retarget();
 
     assert!(matches!(render_action(&effects), RenderAction::Draw(_)));
-    assert!(effects.should_schedule_next_animation);
+    assert!(effects.should_schedule_next_animation());
     assert!(state.is_animating() || state.is_draining());
     assert_eq!(
         state.target_position(),

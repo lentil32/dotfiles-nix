@@ -2,6 +2,8 @@
 
 use std::num::NonZeroI64;
 
+use crate::host::BufferHandle;
+
 use super::render::RenderPoint;
 
 pub(super) fn positive_i64(value: i64) -> Option<NonZeroI64> {
@@ -111,14 +113,14 @@ impl ViewportBounds {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SurfaceId {
     window_handle: NonZeroI64,
-    buffer_handle: NonZeroI64,
+    buffer_handle: BufferHandle,
 }
 
 impl SurfaceId {
     pub(crate) fn new(window_handle: i64, buffer_handle: i64) -> Option<Self> {
         Some(Self {
             window_handle: positive_i64(window_handle)?,
-            buffer_handle: positive_i64(buffer_handle)?,
+            buffer_handle: BufferHandle::new(buffer_handle)?,
         })
     }
 
@@ -126,7 +128,7 @@ impl SurfaceId {
         self.window_handle.get()
     }
 
-    pub(crate) const fn buffer_handle(self) -> i64 {
-        self.buffer_handle.get()
+    pub(crate) const fn buffer_handle(self) -> BufferHandle {
+        self.buffer_handle
     }
 }

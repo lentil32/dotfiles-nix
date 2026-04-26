@@ -641,6 +641,11 @@ pub(super) fn core_event_summary(event: &CoreEvent) -> String {
             millis_summary(payload.observed_at),
             payload.action,
         ),
+        CoreEvent::RenderCleanupRetainedResourcesObserved(payload) => format!(
+            "observed_at={} retained_resources={}",
+            millis_summary(payload.observed_at),
+            payload.retained_resources,
+        ),
         CoreEvent::TimerFiredWithToken(payload) => format!(
             "kind={} token={} observed_at={}",
             payload.token.id().name(),

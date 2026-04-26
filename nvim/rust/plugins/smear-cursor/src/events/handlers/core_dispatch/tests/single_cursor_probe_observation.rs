@@ -51,7 +51,7 @@ fn ingress_dispatch_queues_one_observation_base_batch() {
     );
     assert!(matches!(
         queued_front_work_item(),
-        Some(ScheduledWorkUnit::EffectBatch(ref effects))
+        Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
             if contains_observation_base_request(effects)
     ));
 }
@@ -89,14 +89,17 @@ fn same_wave_cursor_probe_defers_apply_work_and_leaves_only_non_probe_follow_up_
     let queued_follow_up = queued_front_work_item();
 
     assert!(
-        !executor.executed_effects.iter().any(is_apply_proposal),
+        !executor
+            .executed_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ApplyProposal(_))),
         "apply work must remain deferred after the same-wave probe finishes because planning still runs first"
     );
     assert!(
         if has_more_items {
             matches!(
                 queued_follow_up,
-                Some(ScheduledWorkUnit::EffectBatch(ref effects))
+                Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
                     if !contains_probe_request(effects)
                         && (contains_render_plan_request(effects)
                             || effects.iter().any(is_apply_proposal))

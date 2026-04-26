@@ -1,10 +1,10 @@
+use super::super::CursorAutocmdPreflight;
 use super::super::build_cursor_autocmd_events;
 use super::super::cursor_autocmd_preflight;
 use super::super::demand_kind_for_autocmd;
 use super::super::should_coalesce_window_follow_up_autocmd;
 use super::super::should_drop_unchanged_cursor_autocmd;
 use super::super::tracked_cursor_matches_live_surface_handles;
-use super::super::CursorAutocmdPreflight;
 use super::autocmd_ingress_strategy;
 use super::fast_path_snapshot;
 use super::perf_class_strategy;

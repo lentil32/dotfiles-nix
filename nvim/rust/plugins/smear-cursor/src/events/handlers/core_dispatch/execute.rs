@@ -1,6 +1,7 @@
 use super::super::super::logging::trace_lazy;
 use super::super::super::runtime::EffectExecutor;
-use super::super::super::runtime::read_engine_state;
+use super::super::super::runtime::PendingMetricEffects;
+use super::super::super::runtime::ShellOnlyStep;
 use super::super::super::runtime::record_delayed_ingress_pending_update_count;
 use super::super::super::runtime::record_ingress_coalesced_count;
 use super::super::super::runtime::record_post_burst_convergence;
@@ -8,41 +9,43 @@ use super::super::super::runtime::record_probe_refresh_budget_exhausted_count;
 use super::super::super::runtime::record_probe_refresh_retried_count;
 use super::super::super::runtime::record_stale_token_event_count;
 use super::super::super::trace::effect_summary;
+use super::super::ProbeDispatchWave;
 use super::super::labels::core_event_label;
 use super::super::labels::effect_label;
 use super::dispatch_core_event;
 use super::stage_core_event_on_default_queue;
 use super::stage_effect_batch_on_default_queue;
 use crate::core::effect::Effect;
+use crate::core::effect::OrderedEffect;
 use crate::core::effect::RequestProbeEffect;
+use crate::core::effect::ShellOnlyEffect;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ProbeReportedEvent;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
-use crate::events::EngineAccessError;
+use crate::events::RuntimeAccessError;
 use nvim_oxi::Result;
 use std::collections::VecDeque;
-
-use super::queue::EffectOnlyStep;
-use super::queue::PendingMetricEffects;
 
 pub(super) fn dispatch_core_event_with_effect_handler<E>(
     initial_event: CoreEvent,
     handle_effects: &mut impl FnMut(Vec<Effect>) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), E>
 where
-    E: From<EngineAccessError>,
+    E: From<RuntimeAccessError>,
 {
     let event_label = core_event_label(&initial_event);
     let event_summary = super::core_event_summary(&initial_event);
     let (effects, previous_state_summary, next_state_summary) =
-        super::mutate_engine_state(|state| {
-            let previous_state_summary = super::core_state_summary(state.core_state());
-            let transition = super::reduce_core_event_owned(state.take_core_state(), initial_event);
+        super::with_core_transition(|state| {
+            let previous_state_summary = super::core_state_summary(&state);
+            let transition = super::reduce_core_event_owned(state, initial_event);
             let next_state_summary = super::core_state_summary(&transition.next);
             let effects = transition.effects;
-            state.set_core_state(transition.next);
-            (effects, previous_state_summary, next_state_summary)
+            (
+                transition.next,
+                (effects, previous_state_summary, next_state_summary),
+            )
         })
         .map_err(E::from)?;
     let effect_count = effects.len();
@@ -73,8 +76,8 @@ impl From<nvim_oxi::Error> for ScheduledWorkExecutionError {
     }
 }
 
-impl From<EngineAccessError> for ScheduledWorkExecutionError {
-    fn from(error: EngineAccessError) -> Self {
+impl From<RuntimeAccessError> for ScheduledWorkExecutionError {
+    fn from(error: RuntimeAccessError) -> Self {
         Self::from(nvim_oxi::Error::from(error))
     }
 }
@@ -105,12 +108,17 @@ fn execute_pending_metric_effects(metrics: PendingMetricEffects) {
 }
 
 pub(super) fn execute_scheduled_effect_batch(
-    effects: Vec<Effect>,
+    effects: Vec<OrderedEffect>,
     executor: &mut impl EffectExecutor,
 ) -> std::result::Result<(), ScheduledWorkExecutionError> {
     let mut follow_ups = VecDeque::new();
     for effect in effects {
-        execute_effect_and_collect_follow_ups(effect, executor, false, &mut follow_ups)?;
+        execute_effect_and_collect_follow_ups(
+            effect.into(),
+            executor,
+            ProbeDispatchWave::NewReducerWave,
+            &mut follow_ups,
+        )?;
     }
 
     if follow_ups.is_empty() {
@@ -124,22 +132,30 @@ fn execute_single_effect(
     effect: Effect,
     executor: &mut impl EffectExecutor,
 ) -> std::result::Result<(), ScheduledWorkExecutionError> {
-    execute_scheduled_effect_batch(vec![effect], executor)
+    let mut follow_ups = VecDeque::new();
+    execute_effect_and_collect_follow_ups(
+        effect,
+        executor,
+        ProbeDispatchWave::NewReducerWave,
+        &mut follow_ups,
+    )?;
+    if follow_ups.is_empty() {
+        return Ok(());
+    }
+    dispatch_effect_follow_ups(follow_ups, executor)
 }
 
 fn execute_effect_and_collect_follow_ups(
     effect: Effect,
     executor: &mut impl EffectExecutor,
-    same_reducer_wave_probe: bool,
+    dispatch_wave: ProbeDispatchWave,
     follow_ups: &mut VecDeque<CoreEvent>,
 ) -> std::result::Result<(), ScheduledWorkExecutionError> {
     let effect_name = effect_label(&effect);
     let effect_details = effect_summary(&effect);
     trace_lazy(|| format!("effect_dispatch effect={effect_name} details={effect_details}"));
     let outcome = match effect {
-        Effect::RequestProbe(payload) => {
-            executor.execute_probe_effect(payload, same_reducer_wave_probe)
-        }
+        Effect::RequestProbe(payload) => executor.execute_probe_effect(payload, dispatch_wave),
         other => executor.execute_effect(other),
     };
 
@@ -183,7 +199,7 @@ fn execute_same_wave_cursor_color_probe(
     execute_effect_and_collect_follow_ups(
         Effect::RequestProbe(payload),
         executor,
-        true,
+        ProbeDispatchWave::SameReducerWave,
         &mut follow_ups,
     )?;
     dispatch_effect_follow_ups(follow_ups, executor)
@@ -246,34 +262,27 @@ fn observation_base_allows_same_wave_probe(
         return Ok(false);
     };
 
-    read_engine_state(|state| {
-        state
-            .core_state()
-            .pending_observation()
-            .is_some_and(|pending| {
-                pending.observation_id() == payload.observation_id
-                    && !pending.requested_probes().background()
-            })
+    super::with_core_read(|state| {
+        state.pending_observation().is_some_and(|pending| {
+            pending.observation_id() == payload.observation_id
+                && !pending.requested_probes().background()
+        })
     })
     .map_err(ScheduledWorkExecutionError::from)
 }
 
-pub(super) fn execute_effect_only_step(
-    step: EffectOnlyStep,
+pub(super) fn execute_shell_only_step(
+    step: ShellOnlyStep,
     executor: &mut impl EffectExecutor,
 ) -> std::result::Result<(), ScheduledWorkExecutionError> {
     match step {
-        EffectOnlyStep::ApplyRenderCleanup(payload) => {
-            execute_single_effect(Effect::ApplyRenderCleanup(payload), executor)
-        }
-        EffectOnlyStep::ScheduleTimer(payload) => {
-            execute_single_effect(Effect::ScheduleTimer(payload), executor)
-        }
-        EffectOnlyStep::RecordMetrics(metrics) => {
+        ShellOnlyStep::RecordMetrics(metrics) => {
             execute_pending_metric_effects(metrics);
             Ok(())
         }
-        EffectOnlyStep::RedrawCmdline => execute_single_effect(Effect::RedrawCmdline, executor),
+        ShellOnlyStep::RedrawCmdline => {
+            execute_single_effect(ShellOnlyEffect::RedrawCmdline.into(), executor)
+        }
     }
 }
 

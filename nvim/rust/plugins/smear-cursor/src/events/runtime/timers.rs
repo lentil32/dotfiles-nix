@@ -3,19 +3,22 @@ use super::super::logging::trace_lazy;
 use super::super::logging::warn;
 use super::super::timer_protocol::FiredHostTimer;
 use super::super::timer_protocol::HostCallbackId;
-use super::super::timer_protocol::HostTimerId;
 use super::super::timers::schedule_guarded;
 use super::super::timers::start_timer_once;
-#[cfg(not(test))]
-use super::super::timers::stop_timer;
 use super::super::trace::timer_token_summary;
-use super::EngineAccessResult;
-use super::engine::mutate_engine_state;
-use super::engine::read_engine_state;
+use super::RuntimeAccessResult;
+use super::cell::restore_timer_bridge;
+use super::cell::take_timer_bridge;
 use super::telemetry::record_host_timer_rearm;
 use super::telemetry::record_stale_token_event;
 use super::telemetry::record_timer_fire_duration;
 use super::telemetry::record_timer_schedule_duration;
+use super::timer_bridge::CoreTimerHandle;
+use super::timer_bridge::FiredCoreTimerLookup;
+use super::timer_bridge::TimerBridge;
+use super::timer_bridge::TimerBridgeRecoveryState;
+use super::timer_bridge::TimerRetryTransition;
+use super::with_core_read;
 use crate::core::event::Event;
 use crate::core::event::TimerFiredWithTokenEvent;
 use crate::core::event::TimerLostWithTokenEvent;
@@ -23,185 +26,65 @@ use crate::core::runtime_reducer::as_delay_ms;
 use crate::core::types::DelayBudgetMs;
 use crate::core::types::Millis;
 use crate::core::types::TimerId;
-use crate::core::types::TimerSlots;
 use crate::core::types::TimerToken;
-use std::cell::RefCell;
+use crate::host::HostBridgePort;
+#[cfg(not(test))]
+use crate::host::NeovimHost;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
+use std::panic::resume_unwind;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct CoreTimerHandle {
-    pub(crate) host_callback_id: HostCallbackId,
-    pub(crate) host_timer_id: HostTimerId,
-    pub(crate) token: TimerToken,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct CoreTimerHandles {
-    // One active host callback per reducer timer kind. The reducer token stays
-    // authoritative; the callback id resolves the fired callback and the host
-    // timer id remains the cancellation witness.
-    slots: TimerSlots<Option<CoreTimerHandle>>,
-}
-
-impl CoreTimerHandles {
-    fn slot(&self, timer_id: TimerId) -> Option<CoreTimerHandle> {
-        self.slots.copied(timer_id)
+fn with_timer_bridge<R>(accessor: impl FnOnce(&mut TimerBridge) -> R) -> RuntimeAccessResult<R> {
+    let mut bridge = take_timer_bridge()?;
+    let output = catch_unwind(AssertUnwindSafe(|| accessor(&mut bridge)));
+    restore_timer_bridge(bridge);
+    match output {
+        Ok(output) => Ok(output),
+        Err(panic_payload) => resume_unwind(panic_payload),
     }
-
-    pub(crate) fn replace(&mut self, handle: CoreTimerHandle) -> Option<CoreTimerHandle> {
-        self.slots.replace(handle.token.id(), Some(handle))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_timer_id(&self, timer_id: TimerId) -> bool {
-        self.slot(timer_id).is_some()
-    }
-
-    pub(crate) fn clear_all(&mut self) -> Vec<CoreTimerHandle> {
-        self.slots.take_all()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_by_host_timer_id(
-        &mut self,
-        host_timer_id: HostTimerId,
-    ) -> Option<CoreTimerHandle> {
-        for slot in self.slots.iter_mut() {
-            if slot
-                .as_ref()
-                .is_some_and(|handle| handle.host_timer_id == host_timer_id)
-            {
-                return slot.take();
-            }
-        }
-
-        None
-    }
-
-    fn resolve_fired(&mut self, fired_timer: FiredHostTimer) -> FiredCoreTimerLookup {
-        for timer_id in TimerId::ALL {
-            let Some(handle) = self.slot(timer_id) else {
-                continue;
-            };
-            if handle.host_callback_id != fired_timer.host_callback_id() {
-                continue;
-            }
-
-            if handle.host_timer_id != fired_timer.host_timer_id() {
-                return FiredCoreTimerLookup::MismatchedHostTimerId {
-                    timer_id,
-                    expected: handle.host_timer_id,
-                };
-            }
-
-            let Some(handle) = self.slots.take(timer_id) else {
-                warn("matched host timer slot unexpectedly lost its timer handle");
-                return FiredCoreTimerLookup::MissingHandle;
-            };
-            return FiredCoreTimerLookup::Matched(handle);
-        }
-
-        FiredCoreTimerLookup::MissingHandle
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_fired(&mut self, fired_timer: FiredHostTimer) -> Option<CoreTimerHandle> {
-        match self.resolve_fired(fired_timer) {
-            FiredCoreTimerLookup::Matched(handle) => Some(handle),
-            FiredCoreTimerLookup::MismatchedHostTimerId { .. }
-            | FiredCoreTimerLookup::MissingHandle => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum FiredCoreTimerLookup {
-    Matched(CoreTimerHandle),
-    MismatchedHostTimerId {
-        timer_id: TimerId,
-        expected: HostTimerId,
-    },
-    MissingHandle,
-}
-
-#[derive(Debug, Default)]
-struct PendingCoreTimerRetries {
-    retries: Vec<FiredHostTimer>,
-}
-
-impl PendingCoreTimerRetries {
-    fn insert(&mut self, retry: FiredHostTimer) -> bool {
-        if self.retries.contains(&retry) {
-            return false;
-        }
-
-        self.retries.push(retry);
-        true
-    }
-
-    fn remove(&mut self, retry: FiredHostTimer) {
-        if let Some(index) = self.retries.iter().position(|pending| *pending == retry) {
-            let _ = self.retries.swap_remove(index);
-        }
-    }
-
-    fn clear(&mut self) {
-        self.retries.clear();
-    }
-
-    #[cfg(test)]
-    fn contains(&self, retry: FiredHostTimer) -> bool {
-        self.retries.contains(&retry)
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.retries.len()
-    }
-}
-
-thread_local! {
-    // Retry coalescing must live outside engine state because the reentry path cannot safely
-    // borrow engine state just to decide whether another scheduled callback would be redundant.
-    static PENDING_CORE_TIMER_RETRIES: RefCell<PendingCoreTimerRetries> =
-        RefCell::new(PendingCoreTimerRetries::default());
-}
-
-fn with_pending_core_timer_retries<R>(
-    mutator: impl FnOnce(&mut PendingCoreTimerRetries) -> R,
-) -> R {
-    PENDING_CORE_TIMER_RETRIES.with(|retries| {
-        let mut retries = retries.borrow_mut();
-        mutator(&mut retries)
-    })
-}
-
-#[cfg(not(test))]
-fn stop_host_timer(host_timer_id: HostTimerId) -> nvim_oxi::Result<()> {
-    stop_timer(host_timer_id)
 }
 
 #[cfg(test)]
-fn stop_host_timer(_host_timer_id: HostTimerId) -> nvim_oxi::Result<()> {
-    Ok(())
+pub(super) fn mutate_timer_bridge_for_test<R>(
+    mutator: impl FnOnce(&mut TimerBridge) -> R,
+) -> RuntimeAccessResult<R> {
+    with_timer_bridge(mutator)
 }
 
-fn allocate_host_callback_id() -> EngineAccessResult<HostCallbackId> {
-    mutate_engine_state(|state| state.shell.allocate_host_callback_id())
+fn allocate_host_callback_id() -> RuntimeAccessResult<HostCallbackId> {
+    with_timer_bridge(TimerBridge::allocate_host_callback_id)
 }
 
-fn set_core_timer_handle(handle: CoreTimerHandle) -> EngineAccessResult<bool> {
-    let displaced = mutate_engine_state(|state| state.shell.core_timer_handles.replace(handle))?;
+#[cfg(not(test))]
+fn set_core_timer_handle(handle: CoreTimerHandle) -> RuntimeAccessResult<bool> {
+    set_core_timer_handle_with(&NeovimHost, handle)
+}
+
+#[cfg(test)]
+fn set_core_timer_handle(handle: CoreTimerHandle) -> RuntimeAccessResult<bool> {
+    set_core_timer_handle_with(&crate::host::FakeHostBridgePort::default(), handle)
+}
+
+fn set_core_timer_handle_with(
+    host: &impl HostBridgePort,
+    handle: CoreTimerHandle,
+) -> RuntimeAccessResult<bool> {
+    let displaced = with_timer_bridge(|bridge| bridge.replace_handle(handle))?;
     if let Some(displaced) = displaced.filter(|displaced| *displaced != handle) {
-        stop_core_timer_handle(displaced, "replace");
+        stop_core_timer_handle_with(host, displaced, "replace");
     }
     Ok(displaced.is_some())
 }
 
-fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
+fn stop_core_timer_handle_with(
+    host: &impl HostBridgePort,
+    handle: CoreTimerHandle,
+    context: &'static str,
+) {
     let timer_id = handle.token.id();
     trace_lazy(|| {
         format!(
@@ -213,7 +96,7 @@ fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
             handle.host_timer_id.get(),
         )
     });
-    if let Err(err) = stop_host_timer(handle.host_timer_id) {
+    if let Err(err) = InstalledHostBridge.stop_timer_with(host, handle.host_timer_id.get()) {
         warn(&format!(
             "failed to stop core timer (context={context}, kind={}, token={:?}, callback_id={}): {err}",
             timer_id.name(),
@@ -223,53 +106,108 @@ fn stop_core_timer_handle(handle: CoreTimerHandle, context: &'static str) {
     }
 }
 
-fn stop_core_timer_handles(handles: Vec<CoreTimerHandle>, context: &'static str) {
+fn stop_core_timer_handles_with(
+    host: &impl HostBridgePort,
+    handles: Vec<CoreTimerHandle>,
+    context: &'static str,
+) {
     for handle in handles {
-        stop_core_timer_handle(handle, context);
+        stop_core_timer_handle_with(host, handle, context);
     }
 }
 
+#[cfg(not(test))]
 pub(super) fn stop_recovered_core_timer_handles(handles: Vec<CoreTimerHandle>) {
-    stop_core_timer_handles(handles, "panic_recovery");
+    stop_recovered_core_timer_handles_with(&NeovimHost, handles);
 }
 
-pub(crate) fn clear_all_core_timer_handles() {
-    match mutate_engine_state(|state| state.shell.core_timer_handles.clear_all()) {
-        Ok(drained) => stop_core_timer_handles(drained, "reset"),
+#[cfg(test)]
+pub(super) fn stop_recovered_core_timer_handles(handles: Vec<CoreTimerHandle>) {
+    stop_recovered_core_timer_handles_with(&crate::host::FakeHostBridgePort::default(), handles);
+}
+
+fn stop_recovered_core_timer_handles_with(
+    host: &impl HostBridgePort,
+    handles: Vec<CoreTimerHandle>,
+) {
+    stop_core_timer_handles_with(host, handles, "panic_recovery");
+}
+
+#[cfg(not(test))]
+pub(crate) fn reset_core_timer_bridge() {
+    reset_core_timer_bridge_with(&NeovimHost);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_core_timer_bridge() {
+    reset_core_timer_bridge_with(&crate::host::FakeHostBridgePort::default());
+}
+
+fn reset_core_timer_bridge_with(host: &impl HostBridgePort) {
+    match with_timer_bridge(TimerBridge::reset_transient) {
+        Ok(drained) => stop_core_timer_handles_with(host, drained, "reset"),
         Err(err) => {
             warn(&format!(
-                "engine state re-entered while draining core timers during reset: {err}"
+                "timer bridge re-entered while resetting core timer bridge: {err}"
             ));
         }
     }
 }
 
-pub(crate) fn clear_pending_core_timer_dispatch_retries() {
-    with_pending_core_timer_retries(PendingCoreTimerRetries::clear);
+pub(super) fn capture_runtime_timer_bridge_recovery_state() -> TimerBridgeRecoveryState {
+    match with_timer_bridge(|bridge| bridge.recovery_state()) {
+        Ok(recovery_state) => recovery_state,
+        Err(err) => {
+            warn(&format!(
+                "timer bridge re-entered while capturing core timer recovery state: {err}"
+            ));
+            TimerBridgeRecoveryState::default()
+        }
+    }
+}
+
+pub(super) fn clear_recovered_runtime_timer_bridge() {
+    if let Err(err) = with_timer_bridge(TimerBridge::clear_recovered_transient) {
+        warn(&format!(
+            "timer bridge re-entered while clearing recovered core timers: {err}"
+        ));
+    }
 }
 
 fn resolve_fired_core_timer(
     fired_timer: FiredHostTimer,
-) -> EngineAccessResult<FiredCoreTimerLookup> {
-    mutate_engine_state(|state| state.shell.core_timer_handles.resolve_fired(fired_timer))
+) -> RuntimeAccessResult<FiredCoreTimerLookup> {
+    with_timer_bridge(|bridge| bridge.resolve_fired(fired_timer))
 }
 
 fn stage_core_timer_dispatch_retry(retry: FiredHostTimer) {
-    if !with_pending_core_timer_retries(|retries| retries.insert(retry)) {
-        trace_lazy(|| {
-            format!(
-                "timer_fire_retry_coalesced callback_id={} host_timer_id={}",
-                retry.host_callback_id().get(),
-                retry.host_timer_id().get(),
-            )
-        });
-        return;
+    match with_timer_bridge(|bridge| bridge.stage_retry(retry)) {
+        Ok(TimerRetryTransition::Staged) => {}
+        Ok(TimerRetryTransition::Coalesced) => {
+            trace_lazy(|| {
+                format!(
+                    "timer_fire_retry_coalesced callback_id={} host_timer_id={}",
+                    retry.host_callback_id().get(),
+                    retry.host_timer_id().get(),
+                )
+            });
+            return;
+        }
+        Err(err) => {
+            warn(&format!(
+                "timer bridge re-entered while staging timer retry; scheduling uncoalesced retry: {err}"
+            ));
+        }
     }
 
     schedule_guarded("core timer dispatch retry", move || {
         // Release the single-flight slot before dispatch so a persistent reentry can enqueue
         // exactly one successor retry instead of wedging recovery behind a stale token.
-        with_pending_core_timer_retries(|retries| retries.remove(retry));
+        if let Err(err) = with_timer_bridge(|bridge| bridge.release_retry(retry)) {
+            warn(&format!(
+                "timer bridge re-entered while releasing timer retry: {err}"
+            ));
+        }
         dispatch_core_timer_fired(retry);
     });
 }
@@ -309,7 +247,7 @@ pub(crate) fn dispatch_core_timer_fired(fired_timer: FiredHostTimer) {
         }
         Err(err) => {
             warn(&format!(
-                "engine state re-entered while resolving timer fire; re-staging callback: {err}"
+                "timer bridge re-entered while resolving timer fire; re-staging callback: {err}"
             ));
             stage_core_timer_dispatch_retry(fired_timer);
             return;
@@ -337,7 +275,7 @@ pub(crate) fn dispatch_core_timer_fired(fired_timer: FiredHostTimer) {
         Event::TimerFiredWithToken(event),
     ) {
         warn(&format!(
-            "engine state re-entered while dispatching timer event; re-staging for recovery: {err}"
+            "runtime lane re-entered while dispatching timer event; re-staging for recovery: {err}"
         ));
         super::super::handlers::stage_core_event_with_default_scheduler(
             Event::TimerFiredWithToken(event),
@@ -357,7 +295,7 @@ pub(crate) fn schedule_core_timer_effect(
         Ok(host_callback_id) => host_callback_id,
         Err(err) => {
             warn(&format!(
-                "engine state re-entered while allocating core timer callback id; dropping timer effect: {err}"
+                "timer bridge re-entered while allocating core timer callback id; dropping timer effect: {err}"
             ));
             return vec![Event::TimerLostWithToken(TimerLostWithTokenEvent {
                 token,
@@ -399,9 +337,17 @@ pub(crate) fn schedule_core_timer_effect(
                 }
                 Err(err) => {
                     warn(&format!(
-                        "engine state re-entered while recording core timer handle; stopping scheduled timer: {err}"
+                        "timer bridge re-entered while recording core timer handle; stopping scheduled timer: {err}"
                     ));
-                    if let Err(stop_err) = stop_host_timer(host_timer_id) {
+                    #[cfg(not(test))]
+                    let stop_result =
+                        InstalledHostBridge.stop_timer_with(&NeovimHost, host_timer_id.get());
+                    #[cfg(test)]
+                    let stop_result = InstalledHostBridge.stop_timer_with(
+                        &crate::host::FakeHostBridgePort::default(),
+                        host_timer_id.get(),
+                    );
+                    if let Err(stop_err) = stop_result {
                         warn(&format!(
                             "failed to stop unslotted core timer after state re-entry: {stop_err}"
                         ));
@@ -426,14 +372,14 @@ pub(crate) fn schedule_core_timer_effect(
 
 pub(crate) fn resolved_timer_delay_ms(timer_id: TimerId, delay: DelayBudgetMs) -> u64 {
     if timer_id == TimerId::Animation && delay == DelayBudgetMs::DEFAULT_ANIMATION {
-        return match read_engine_state(|state| {
-            let configured_interval_ms = state.core_state.runtime().config.time_interval;
+        return match with_core_read(|state| {
+            let configured_interval_ms = state.runtime().config.time_interval;
             as_delay_ms(configured_interval_ms).max(1)
         }) {
             Ok(delay_ms) => delay_ms,
             Err(err) => {
                 warn(&format!(
-                    "engine state re-entered while resolving animation delay; using default timer budget: {err}"
+                    "runtime lane re-entered while resolving animation delay; using default timer budget: {err}"
                 ));
                 delay.value()
             }
@@ -467,6 +413,10 @@ pub(crate) fn now_ms() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::types::TimerGeneration;
+    use crate::events::timer_protocol::HostTimerId;
+    use crate::host::FakeHostBridgePort;
+    use crate::host::HostBridgeCall;
     use pretty_assertions::assert_eq;
 
     fn host_callback_id(value: i64) -> HostCallbackId {
@@ -484,104 +434,230 @@ mod tests {
         )
     }
 
+    fn core_timer_handle(
+        host_callback_id_value: i64,
+        host_timer_id_value: i64,
+        timer_id: TimerId,
+        generation: u64,
+    ) -> CoreTimerHandle {
+        CoreTimerHandle {
+            host_callback_id: host_callback_id(host_callback_id_value),
+            host_timer_id: host_timer_id(host_timer_id_value),
+            token: TimerToken::new(timer_id, TimerGeneration::new(generation)),
+        }
+    }
+
     #[test]
-    fn pending_core_timer_retry_coalesces_matching_callback_payloads() {
+    fn timer_bridge_retry_coalesces_matching_callback_payloads() {
         let retry = fired_timer(3, 7);
-        clear_pending_core_timer_dispatch_retries();
+        let mut bridge = TimerBridge::default();
 
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(retry)
-        ));
-        assert!(!with_pending_core_timer_retries(
-            |retries| retries.insert(retry)
-        ));
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.contains(retry)
-        ));
-
-        clear_pending_core_timer_dispatch_retries();
+        assert_eq!(bridge.stage_retry(retry), TimerRetryTransition::Staged);
+        assert_eq!(bridge.stage_retry(retry), TimerRetryTransition::Coalesced);
+        assert_eq!(bridge.pending_retry_contains(retry), true);
     }
 
     #[test]
-    fn pending_core_timer_retry_remove_releases_the_retry_entry() {
+    fn timer_bridge_retry_release_reopens_the_retry_slot() {
         let retry = fired_timer(5, 11);
-        clear_pending_core_timer_dispatch_retries();
+        let mut bridge = TimerBridge::default();
 
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(retry)
-        ));
-        with_pending_core_timer_retries(|retries| retries.remove(retry));
-
-        assert!(!with_pending_core_timer_retries(
-            |retries| retries.contains(retry)
-        ));
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(retry)
-        ));
-
-        clear_pending_core_timer_dispatch_retries();
+        assert_eq!(bridge.stage_retry(retry), TimerRetryTransition::Staged);
+        bridge.release_retry(retry);
+        assert_eq!(bridge.pending_retry_contains(retry), false);
+        assert_eq!(bridge.stage_retry(retry), TimerRetryTransition::Staged);
     }
 
     #[test]
-    fn pending_core_timer_retry_keeps_distinct_callback_witnesses() {
+    fn timer_bridge_retry_keeps_distinct_callback_witnesses() {
         let first = fired_timer(7, 11);
         let second = fired_timer(8, 17);
-        clear_pending_core_timer_dispatch_retries();
+        let mut bridge = TimerBridge::default();
 
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(first)
-        ));
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(second)
-        ));
-        assert_eq!(with_pending_core_timer_retries(|retries| retries.len()), 2);
-
-        clear_pending_core_timer_dispatch_retries();
+        assert_eq!(bridge.stage_retry(first), TimerRetryTransition::Staged);
+        assert_eq!(bridge.stage_retry(second), TimerRetryTransition::Staged);
+        assert_eq!(bridge.pending_retry_len(), 2);
     }
 
     #[test]
-    fn clearing_pending_core_timer_retries_drops_all_host_timer_witnesses() {
+    fn timer_bridge_clear_pending_retries_drops_all_host_timer_witnesses() {
         let animation = fired_timer(11, 3);
         let cleanup = fired_timer(19, 29);
+        let mut bridge = TimerBridge::default();
 
-        clear_pending_core_timer_dispatch_retries();
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(animation)
-        ));
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(cleanup)
-        ));
-
-        clear_pending_core_timer_dispatch_retries();
+        assert_eq!(bridge.stage_retry(animation), TimerRetryTransition::Staged);
+        assert_eq!(bridge.stage_retry(cleanup), TimerRetryTransition::Staged);
+        bridge.clear_pending_retries();
 
         assert_eq!(
-            with_pending_core_timer_retries(|retries| {
-                (retries.contains(animation), retries.contains(cleanup))
-            }),
+            (
+                bridge.pending_retry_contains(animation),
+                bridge.pending_retry_contains(cleanup)
+            ),
             (false, false)
         );
     }
 
     #[test]
-    fn transient_reset_clears_pending_core_timer_dispatch_retries() {
+    fn replacing_core_timer_handle_stops_displaced_host_timer_through_host_port() {
+        mutate_timer_bridge_for_test(TimerBridge::reset_transient)
+            .expect("timer bridge should be available before host-port replacement test");
+        let host = FakeHostBridgePort::default();
+        let first = core_timer_handle(
+            /*host_callback_id_value*/ 41,
+            /*host_timer_id_value*/ 43,
+            TimerId::Animation,
+            /*generation*/ 1,
+        );
+        let replacement = core_timer_handle(
+            /*host_callback_id_value*/ 47,
+            /*host_timer_id_value*/ 53,
+            TimerId::Animation,
+            /*generation*/ 2,
+        );
+
+        let first_replaced = set_core_timer_handle_with(&host, first)
+            .expect("initial timer handle insert should succeed");
+        let replacement_replaced = set_core_timer_handle_with(&host, replacement)
+            .expect("replacement timer handle insert should succeed");
+        let drained = mutate_timer_bridge_for_test(TimerBridge::reset_transient)
+            .expect("timer bridge should be clearable after host-port replacement test");
+
+        assert_eq!(
+            (first_replaced, replacement_replaced, drained, host.calls()),
+            (
+                false,
+                true,
+                vec![replacement],
+                vec![HostBridgeCall::StopTimer { timer_id: 43 }]
+            )
+        );
+    }
+
+    #[test]
+    fn reset_core_timer_bridge_stops_drained_host_timers_through_host_port() {
+        mutate_timer_bridge_for_test(TimerBridge::reset_transient)
+            .expect("timer bridge should be available before host-port reset test");
+        let host = FakeHostBridgePort::default();
+        let animation = core_timer_handle(
+            /*host_callback_id_value*/ 59,
+            /*host_timer_id_value*/ 61,
+            TimerId::Animation,
+            /*generation*/ 3,
+        );
+        let recovery = core_timer_handle(
+            /*host_callback_id_value*/ 67,
+            /*host_timer_id_value*/ 71,
+            TimerId::Recovery,
+            /*generation*/ 5,
+        );
+        mutate_timer_bridge_for_test(|bridge| {
+            assert_eq!(bridge.replace_handle(animation), None);
+            assert_eq!(bridge.replace_handle(recovery), None);
+        })
+        .expect("timer bridge should accept primed handles");
+
+        reset_core_timer_bridge_with(&host);
+
+        let live_slots = mutate_timer_bridge_for_test(|bridge| {
+            TimerId::ALL
+                .into_iter()
+                .map(|timer_id| (timer_id, bridge.has_timer_id(timer_id)))
+                .collect::<Vec<_>>()
+        })
+        .expect("timer bridge should be readable after reset");
+        assert_eq!(
+            (live_slots, host.calls()),
+            (
+                vec![
+                    (TimerId::Animation, false),
+                    (TimerId::Ingress, false),
+                    (TimerId::Recovery, false),
+                    (TimerId::Cleanup, false),
+                ],
+                vec![
+                    HostBridgeCall::StopTimer { timer_id: 61 },
+                    HostBridgeCall::StopTimer { timer_id: 71 },
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn recovered_core_timer_handles_stop_through_host_port() {
+        let host = FakeHostBridgePort::default();
+        let animation = core_timer_handle(
+            /*host_callback_id_value*/ 79,
+            /*host_timer_id_value*/ 83,
+            TimerId::Animation,
+            /*generation*/ 8,
+        );
+        let cleanup = core_timer_handle(
+            /*host_callback_id_value*/ 89,
+            /*host_timer_id_value*/ 97,
+            TimerId::Cleanup,
+            /*generation*/ 13,
+        );
+
+        stop_recovered_core_timer_handles_with(&host, vec![animation, cleanup]);
+
+        assert_eq!(
+            host.calls(),
+            vec![
+                HostBridgeCall::StopTimer { timer_id: 83 },
+                HostBridgeCall::StopTimer { timer_id: 97 },
+            ]
+        );
+    }
+
+    #[test]
+    fn transient_reset_clears_timer_bridge_pending_dispatch_retries() {
         let animation = fired_timer(13, 5);
         let ingress = fired_timer(17, 8);
 
-        clear_pending_core_timer_dispatch_retries();
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(animation)
-        ));
-        assert!(with_pending_core_timer_retries(
-            |retries| retries.insert(ingress)
-        ));
+        mutate_timer_bridge_for_test(TimerBridge::clear_pending_retries)
+            .expect("timer bridge should be available");
+        mutate_timer_bridge_for_test(|bridge| {
+            assert_eq!(bridge.stage_retry(animation), TimerRetryTransition::Staged);
+            assert_eq!(bridge.stage_retry(ingress), TimerRetryTransition::Staged);
+        })
+        .expect("timer bridge should be available");
 
         super::super::diagnostics::reset_transient_event_state();
 
         assert_eq!(
-            with_pending_core_timer_retries(|retries| {
-                (retries.contains(animation), retries.contains(ingress))
-            }),
+            mutate_timer_bridge_for_test(|bridge| {
+                (
+                    bridge.pending_retry_contains(animation),
+                    bridge.pending_retry_contains(ingress),
+                )
+            })
+            .expect("timer bridge should be available"),
             (false, false)
         );
+    }
+
+    #[test]
+    fn timer_bridge_reset_clears_handles_retries_and_callback_allocator() {
+        let mut bridge = TimerBridge::default();
+        let retry = fired_timer(23, 29);
+        let handle = CoreTimerHandle {
+            host_callback_id: host_callback_id(31),
+            host_timer_id: host_timer_id(37),
+            token: TimerToken::new(
+                TimerId::Animation,
+                crate::core::types::TimerGeneration::new(5),
+            ),
+        };
+
+        assert_eq!(bridge.allocate_host_callback_id().get(), 1);
+        assert_eq!(bridge.replace_handle(handle), None);
+        assert_eq!(bridge.stage_retry(retry), TimerRetryTransition::Staged);
+
+        assert_eq!(bridge.reset_transient(), vec![handle]);
+
+        assert_eq!(bridge.has_timer_id(TimerId::Animation), false);
+        assert_eq!(bridge.pending_retry_contains(retry), false);
+        assert_eq!(bridge.allocate_host_callback_id().get(), 1);
     }
 }

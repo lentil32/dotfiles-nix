@@ -1,8 +1,17 @@
-fn remove_cached_window_at(tab_windows: &mut TabWindows, namespace_id: u32, remove_index: usize) {
-    let Some(cached) = tab_windows.swap_remove_window(remove_index) else {
-        return;
+fn remove_cached_window_at(
+    tab_windows: &mut TabWindows,
+    namespace_id: NamespaceId,
+    remove_index: usize,
+) -> TrackedResourceCloseOutcome {
+    let Some(mut cached) = tab_windows.swap_remove_window(remove_index) else {
+        return TrackedResourceCloseOutcome::ClosedOrGone;
     };
-    close_cached_window(namespace_id, cached.handles);
+    let outcome = close_cached_window(namespace_id, cached.handles);
+    if outcome.should_retain() {
+        cached.mark_invalid();
+        tab_windows.push_cached_window(cached);
+    }
+    outcome
 }
 
 fn mark_cached_window_invalid(tab_windows: &mut TabWindows, index: usize) -> bool {
@@ -34,7 +43,7 @@ fn mark_cached_window_invalid(tab_windows: &mut TabWindows, index: usize) -> boo
     true
 }
 
-fn remove_invalid_windows(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
+fn remove_invalid_windows(tab_windows: &mut TabWindows, namespace_id: NamespaceId) -> usize {
     let mut remove_indices = Vec::new();
     for (index, cached) in tab_windows.windows.iter().enumerate() {
         if matches!(cached.lifecycle, CachedWindowLifecycle::Invalid) {
@@ -46,15 +55,20 @@ fn remove_invalid_windows(tab_windows: &mut TabWindows, namespace_id: u32) -> us
     }
 
     let _event_ignore = EventIgnoreGuard::set_all();
+    let mut removed_windows = 0_usize;
     for remove_index in remove_indices.iter().copied().rev() {
-        remove_cached_window_at(tab_windows, namespace_id, remove_index);
+        if remove_cached_window_at(tab_windows, namespace_id, remove_index)
+            == TrackedResourceCloseOutcome::ClosedOrGone
+        {
+            removed_windows = removed_windows.saturating_add(1);
+        }
     }
-    remove_indices.len()
+    removed_windows
 }
 
 fn remove_invalid_window_at(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     index: usize,
     expected_window_id: i32,
 ) -> bool {
@@ -81,8 +95,8 @@ fn remove_invalid_window_at(
         // Hot acquire already knows which candidate it invalidated; removing that slot directly
         // keeps failure recovery linear and leaves bulk invalid sweeps to cleanup/prewarm paths.
         let _event_ignore = EventIgnoreGuard::set_all();
-        remove_cached_window_at(tab_windows, namespace_id, index);
-        true
+        remove_cached_window_at(tab_windows, namespace_id, index)
+            == TrackedResourceCloseOutcome::ClosedOrGone
     }
 }
 
@@ -209,7 +223,7 @@ fn try_reuse_cached_window_at_index(
         }
     }
 
-    if cached.handles.buffer_id <= 0 {
+    if !cached.handles.buffer_id.is_valid() {
         let _ = mark_cached_window_invalid(tab_windows, index);
         return ReuseAttempt::Failed {
             reason: ReuseFailureReason::MissingBuffer,
@@ -218,7 +232,14 @@ fn try_reuse_cached_window_at_index(
         };
     }
     // Hot path: skip nvim_buf_is_valid and rely on set_extmark failure recovery.
-    let buffer = buffer_from_handle_i32_unchecked(cached.handles.buffer_id);
+    let Some(buffer) = buffer_from_handle_unchecked(cached.handles.buffer_id) else {
+        let _ = mark_cached_window_invalid(tab_windows, index);
+        return ReuseAttempt::Failed {
+            reason: ReuseFailureReason::MissingBuffer,
+            index,
+            window_id: cached.handles.window_id,
+        };
+    };
     ReuseAttempt::Reused(AcquiredWindow {
         window_id: cached.handles.window_id,
         buffer,
@@ -229,7 +250,7 @@ fn try_reuse_cached_window_at_index(
 
 fn record_reuse_failure(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     reuse_failures: &mut ReuseFailureCounters,
     reason: ReuseFailureReason,
     index: usize,
@@ -288,9 +309,9 @@ pub(crate) fn record_frame_capacity_target(
 
 #[cfg(test)]
 pub(crate) fn acquire(
-    tabs: &mut HashMap<i32, TabWindows>,
-    namespace_id: u32,
-    tab_handle: i32,
+    tabs: &mut HashMap<TabHandle, TabWindows>,
+    namespace_id: NamespaceId,
+    tab_handle: TabHandle,
     placement: WindowPlacement,
     allocation_policy: AllocationPolicy,
 ) -> std::result::Result<AcquiredWindow, AcquireError> {
@@ -300,7 +321,7 @@ pub(crate) fn acquire(
 
 pub(crate) fn acquire_in_tab(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     placement: WindowPlacement,
     allocation_policy: AllocationPolicy,
 ) -> std::result::Result<AcquiredWindow, AcquireError> {
@@ -359,7 +380,7 @@ pub(crate) fn acquire_in_tab(
 
 pub(crate) fn ensure_capacity_in_tab(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     desired_capacity: usize,
     max_kept_windows: usize,
 ) -> Result<usize> {
@@ -376,17 +397,19 @@ pub(crate) fn ensure_capacity_in_tab(
         return Ok(0);
     }
 
-    let _event_ignore = EventIgnoreGuard::set_all();
+    let host = NeovimHost;
+    let _event_ignore = EventIgnoreGuard::set_all_with(&host);
     let hidden_config = open_hidden_window_config();
     tab_windows.windows.reserve(create_count);
 
     for _ in 0..create_count {
         let staged = crate::draw::StagedFloatingWindow::new(
-            api::create_buf(false, true)?,
+            host.create_scratch_buffer()?,
             "delete staged render buffer",
             "close staged render window",
         );
-        let window = api::open_win(staged.buffer(), false, &hidden_config)?;
+        let window =
+            host.open_floating_window(staged.buffer(), FloatingWindowEnter::DoNotEnter, &hidden_config)?;
         let attached = staged.attach_window(window);
         initialize_buffer_options(attached.buffer())?;
         initialize_window_options(attached.window())?;
@@ -394,7 +417,7 @@ pub(crate) fn ensure_capacity_in_tab(
 
         let handles = WindowBufferHandle {
             window_id: window.handle(),
-            buffer_id: buffer.handle(),
+            buffer_id: BufferHandle::from_buffer(&buffer),
         };
         let cached = CachedRenderWindow::new_available_hidden(handles, tab_windows.current_epoch);
         tab_windows.push_cached_window(cached);

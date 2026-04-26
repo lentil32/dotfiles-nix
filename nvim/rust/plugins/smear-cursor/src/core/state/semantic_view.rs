@@ -318,8 +318,7 @@ mod tests {
                     render_side_effects: RenderSideEffects::default(),
                 },
                 motion_class: MotionClass::Continuous,
-                should_schedule_next_animation: false,
-                next_animation_at_ms: None,
+                animation_schedule: crate::core::state::AnimationSchedule::Idle,
             },
         )
     }

@@ -1,6 +1,7 @@
 use super::CursorShape;
 use super::TrackedCursor;
 use crate::core::types::StrokeId;
+use crate::host::BufferHandle;
 use crate::position::RenderPoint;
 use crate::position::ScreenCell;
 use crate::types::Particle;
@@ -114,7 +115,7 @@ impl AnimationPhase {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) struct RetargetSurfaceKey {
     window_handle: i64,
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     window_width: i64,
     window_height: i64,
 }
@@ -169,11 +170,8 @@ impl RuntimeTargetRetargetKey {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimeTargetSnapshot {
     position: RenderPoint,
-    cell: Option<ScreenCell>,
     shape: CursorShape,
-    retarget_surface: Option<RetargetSurfaceKey>,
     tracked_cursor: Option<TrackedCursor>,
-    retarget_key: RuntimeTargetRetargetKey,
 }
 
 impl RuntimeTargetSnapshot {
@@ -182,18 +180,10 @@ impl RuntimeTargetSnapshot {
         shape: CursorShape,
         tracked_cursor: Option<TrackedCursor>,
     ) -> Self {
-        let cell = ScreenCell::from_rounded_point(position);
-        let retarget_surface = tracked_cursor
-            .as_ref()
-            .map(RetargetSurfaceKey::from_tracked_cursor);
-        let retarget_key = RuntimeTargetRetargetKey::new(cell, shape, retarget_surface);
         Self {
             position,
-            cell,
             shape,
-            retarget_surface,
             tracked_cursor,
-            retarget_key,
         }
     }
 
@@ -218,9 +208,7 @@ impl RuntimeTargetSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct CursorTarget {
     pub(super) position: RenderPoint,
-    pub(super) cell: Option<ScreenCell>,
     pub(super) shape: CursorShape,
-    pub(super) retarget_surface: Option<RetargetSurfaceKey>,
     pub(super) tracked_cursor: Option<TrackedCursor>,
     pub(super) retarget_epoch: u64,
 }
@@ -229,9 +217,7 @@ impl Default for CursorTarget {
     fn default() -> Self {
         Self {
             position: RenderPoint::ZERO,
-            cell: None,
             shape: CursorShape::block(),
-            retarget_surface: None,
             tracked_cursor: None,
             retarget_epoch: 0,
         }
@@ -240,21 +226,23 @@ impl Default for CursorTarget {
 
 impl CursorTarget {
     pub(super) fn retarget_key(&self) -> RuntimeTargetRetargetKey {
-        RuntimeTargetRetargetKey {
-            cell: self.cell,
-            shape: self.shape,
-            surface: self.retarget_surface,
-        }
+        RuntimeTargetRetargetKey::from_snapshot(
+            self.position,
+            self.shape,
+            self.tracked_cursor.as_ref(),
+        )
     }
 
     pub(super) fn apply_snapshot(&mut self, snapshot: RuntimeTargetSnapshot) -> bool {
+        let retarget_key = RuntimeTargetRetargetKey::from_snapshot(
+            snapshot.position,
+            snapshot.shape,
+            snapshot.tracked_cursor.as_ref(),
+        );
         let RuntimeTargetSnapshot {
             position,
-            cell,
             shape,
-            retarget_surface,
             tracked_cursor,
-            retarget_key,
         } = snapshot;
         let geometry_changed = self.position != position || self.shape != shape;
         if self.retarget_key() != retarget_key {
@@ -262,9 +250,7 @@ impl CursorTarget {
         }
 
         self.position = position;
-        self.cell = cell;
         self.shape = shape;
-        self.retarget_surface = retarget_surface;
         self.tracked_cursor = tracked_cursor;
 
         geometry_changed
@@ -378,6 +364,7 @@ mod tests {
     use super::RetargetSurfaceKey;
     use super::RuntimeTargetRetargetKey;
     use super::RuntimeTargetSnapshot;
+    use crate::host::BufferHandle;
     use crate::position::BufferLine;
     use crate::position::RenderPoint;
     use crate::position::ScreenCell;
@@ -423,7 +410,7 @@ mod tests {
             )),
             RetargetSurfaceKey {
                 window_handle: 11,
-                buffer_handle: 17,
+                buffer_handle: BufferHandle::from_raw_for_test(/*value*/ 17),
                 window_width: 80,
                 window_height: 24,
             }

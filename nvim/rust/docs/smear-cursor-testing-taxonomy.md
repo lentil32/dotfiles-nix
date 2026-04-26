@@ -65,8 +65,12 @@ Do not use snapshots or goldens to carry large invariant matrices that belong in
 The position refactor tightened several test owners that should remain single-source going forward.
 
 - `src/position/tests.rs` owns shared position primitives such as `ScreenCell`, `ViewportBounds`, `RenderPoint`, and `ObservedCell`, including positivity, one-based indexing, and canonical conversions.
-- `src/events/runtime/editor_viewport.rs` owns the single command-row formula and `ViewportBounds` projection for shell-side viewport reads.
-- `src/events/surface.rs` owns `getwininfo` parsing and invalid-host-data rejection for `WindowSurfaceSnapshot`.
+- `src/events/runtime/editor_viewport.rs` owns the single command-row formula and `ViewportBounds` projection for shell-side viewport reads, with `FakeEditorViewportPort` covering cache behavior without live Neovim option reads.
+- `src/host/current_editor.rs`, `src/events/handlers/observation/base.rs`, and cursor-autocmd ingress tests own current-editor host reads through `CurrentEditorPort`, with `FakeCurrentEditorPort` covering mode, current-window, current-buffer, and validity reads without live Neovim calls.
+- `src/host/cursor_read.rs`, `src/events/cursor/screenpos.rs`, `src/events/cursor/conceal_tests.rs`, and `src/events/handlers/observation/text_context.rs` own cursor host reads through `CursorReadPort`, with `FakeCursorReadPort` covering cursor position, `screenpos()`, command-line cursor, conceal probe, and cursor text-context line reads without live Neovim calls.
+- `src/events/logging.rs` and `src/draw/context.rs` own diagnostic notification and draw-error routing through `HostLoggingPort`, with `FakeHostLoggingPort` covering host-output behavior without live Neovim notification calls.
+- `src/draw/floating_windows.rs` owns draw-resource host guard behavior through `DrawResourcePort`, with `FakeDrawResourcePort` covering eventignore suppression without live Neovim option calls.
+- `src/events/surface.rs` owns `getwininfo` parsing and invalid-host-data rejection for `WindowSurfaceSnapshot`, with `FakeWindowSurfacePort` covering surface reads without live Neovim `getwininfo`, window-buffer, or text-height calls.
 - `src/core/state/observation/tests/` together with `src/core/reducer/tests/observation_base_collection.rs` own exact, deferred, and unavailable cursor-sample behavior, including exact-anchor retention.
 - `src/events/cursor/conceal_tests.rs` owns the full conceal-delta projection matrix for Oil-shaped cursor reads; `src/events/cursor/screenpos.rs` and reducer suites keep only boundary smokes for projected selection, exact-anchor retention, and follow-up exact refresh.
 - `src/events/probe_cache/tests/` owns probe-witness reuse and invalidation boundaries for conceal and text-context facts that now depend on the shared surface and cursor vocabulary.

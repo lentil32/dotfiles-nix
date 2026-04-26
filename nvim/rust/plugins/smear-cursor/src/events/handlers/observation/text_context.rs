@@ -8,11 +8,18 @@ use crate::events::probe_cache::CursorTextContextCacheKey;
 use crate::events::probe_cache::CursorTextContextCacheLookup;
 use crate::events::runtime::cached_cursor_text_context;
 use crate::events::runtime::store_cursor_text_context;
+use crate::host::BufferHandle;
+use crate::host::CursorReadPort;
+use crate::host::NeovimHost;
+use crate::host::api;
 use nvim_oxi::Result;
-use nvim_oxi::api;
 use std::sync::Arc;
 
-fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Arc<[ObservedTextRow]>> {
+fn observed_text_rows(
+    host: &impl CursorReadPort,
+    buffer: &api::Buffer,
+    center_line: i64,
+) -> Result<Arc<[ObservedTextRow]>> {
     if center_line < 1 {
         return Ok(Arc::default());
     }
@@ -25,15 +32,16 @@ fn observed_text_rows(buffer: &api::Buffer, center_line: i64) -> Result<Arc<[Obs
         return Ok(Arc::default());
     };
 
-    let rows = buffer
-        .get_lines(start_index..end_index, false)?
-        .map(|line| Ok(ObservedTextRow::new(line.to_string_lossy().into_owned())))
-        .collect::<Result<Vec<_>>>()?;
+    let rows = host
+        .buffer_lines(buffer, start_index, end_index)?
+        .into_iter()
+        .map(ObservedTextRow::new)
+        .collect::<Vec<_>>();
     Ok(rows.into())
 }
 
 fn tracked_cursor_text_context_line(
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     tracked_buffer_position: Option<TrackedBufferPosition>,
 ) -> Option<i64> {
     tracked_buffer_position.and_then(|position| {
@@ -43,13 +51,30 @@ fn tracked_cursor_text_context_line(
 
 fn should_skip_cursor_text_context_sampling(
     retained_boundary: Option<CursorTextContextBoundary>,
-    buffer_handle: i64,
+    buffer_handle: impl Into<BufferHandle>,
     text_revision: u64,
 ) -> bool {
+    let buffer_handle = buffer_handle.into();
     retained_boundary.is_some_and(|boundary| boundary.matches(buffer_handle, text_revision))
 }
 
 pub(super) fn current_cursor_text_context(
+    editor: &CurrentEditorSnapshot,
+    cursor_line: i64,
+    tracked_buffer_position: Option<TrackedBufferPosition>,
+    retained_boundary: Option<CursorTextContextBoundary>,
+) -> Result<CursorTextContextState> {
+    current_cursor_text_context_with_cursor_host(
+        &NeovimHost,
+        editor,
+        cursor_line,
+        tracked_buffer_position,
+        retained_boundary,
+    )
+}
+
+fn current_cursor_text_context_with_cursor_host(
+    host: &impl CursorReadPort,
     editor: &CurrentEditorSnapshot,
     cursor_line: i64,
     tracked_buffer_position: Option<TrackedBufferPosition>,
@@ -63,7 +88,7 @@ pub(super) fn current_cursor_text_context(
         return Ok(CursorTextContextState::Unavailable);
     };
 
-    let buffer_handle = i64::from(buffer.handle());
+    let buffer_handle = BufferHandle::from_buffer(buffer);
     let text_revision = editor.current_text_revision()?.value();
     let boundary = Some(CursorTextContextBoundary::new(buffer_handle, text_revision));
     let tracked_line = tracked_cursor_text_context_line(buffer_handle, tracked_buffer_position);
@@ -85,7 +110,7 @@ pub(super) fn current_cursor_text_context(
     // Surprising: embedded Neovim does not expose Neovide's redraw grid here, so semantic
     // mutation detection uses narrow buffer-line snapshots plus a shell-local text revision
     // instead of UI cells.
-    let nearby_rows = observed_text_rows(buffer, cursor_line)?;
+    let nearby_rows = observed_text_rows(host, buffer, cursor_line)?;
     let context = if nearby_rows.is_empty() {
         None
     } else {
@@ -93,7 +118,7 @@ pub(super) fn current_cursor_text_context(
             Some(tracked_line_number) if tracked_line_number != cursor_line => {
                 // Surprising: edits above the cursor renumber absolute lines, so we also sample
                 // the previously tracked cursor footprint and compare by relative row order.
-                let tracked_rows = observed_text_rows(buffer, tracked_line_number)?;
+                let tracked_rows = observed_text_rows(host, buffer, tracked_line_number)?;
                 if tracked_rows.is_empty() {
                     None
                 } else {
@@ -120,8 +145,15 @@ pub(super) fn current_cursor_text_context(
 
 #[cfg(test)]
 mod tests {
+    use super::observed_text_rows;
     use super::should_skip_cursor_text_context_sampling;
     use crate::core::state::CursorTextContextBoundary;
+    use crate::core::state::ObservedTextRow;
+    use crate::host::CursorReadCall;
+    use crate::host::FakeCursorReadPort;
+    use crate::host::api;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
 
     #[test]
     fn sampling_skip_only_matches_the_retained_buffer_changedtick_boundary() {
@@ -131,5 +163,30 @@ mod tests {
         assert!(!should_skip_cursor_text_context_sampling(retained, 23, 14));
         assert!(!should_skip_cursor_text_context_sampling(retained, 22, 15));
         assert!(!should_skip_cursor_text_context_sampling(None, 22, 14));
+    }
+
+    #[test]
+    fn observed_text_rows_read_buffer_lines_through_cursor_read_port() {
+        let host = FakeCursorReadPort::default();
+        host.push_buffer_lines(["above", "center", "below"]);
+
+        let rows = observed_text_rows(&host, &api::Buffer::from(17), 8)
+            .expect("buffer text rows should read through fake host");
+        let expected: Arc<[ObservedTextRow]> = vec![
+            ObservedTextRow::new("above".to_string()),
+            ObservedTextRow::new("center".to_string()),
+            ObservedTextRow::new("below".to_string()),
+        ]
+        .into();
+
+        assert_eq!(rows, expected);
+        assert_eq!(
+            host.calls(),
+            vec![CursorReadCall::BufferLines {
+                buffer_handle: 17.into(),
+                start_index: 6,
+                end_index: 9,
+            }],
+        );
     }
 }

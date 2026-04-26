@@ -1,6 +1,7 @@
 use super::ScrollShift;
 use super::as_delay_ms;
 use crate::core::state::BufferPerfClass;
+use crate::core::types::Millis;
 use crate::position::RenderPoint;
 use crate::state::RuntimeState;
 use crate::types::ModeClass;
@@ -135,15 +136,15 @@ pub(super) fn reset_animation_timing(state: &mut RuntimeState) {
 pub(super) fn next_animation_deadline_from_settling(
     state: &RuntimeState,
     now_ms: f64,
-) -> Option<u64> {
+) -> Option<Millis> {
     state
         .settle_deadline_ms()
-        .map(|deadline| as_delay_ms(deadline.max(now_ms + 1.0)))
+        .map(|deadline| Millis::new(as_delay_ms(deadline.max(now_ms + 1.0))))
 }
 
-pub(super) fn next_animation_deadline_from_clock(state: &mut RuntimeState, now_ms: f64) -> u64 {
+pub(super) fn next_animation_deadline_from_clock(state: &mut RuntimeState, now_ms: f64) -> Millis {
     let next_frame_at_ms = state.advance_next_frame_deadline(now_ms);
-    as_delay_ms(next_frame_at_ms.max(now_ms + 1.0))
+    Millis::new(as_delay_ms(next_frame_at_ms.max(now_ms + 1.0)))
 }
 
 pub(super) fn clamp_row_to_window(row: f64, scroll_shift: ScrollShift) -> f64 {

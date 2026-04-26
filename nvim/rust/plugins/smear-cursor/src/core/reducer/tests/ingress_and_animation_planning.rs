@@ -53,8 +53,8 @@ fn cursor_ingress_emits_explicit_presentation_effect_before_observation_request(
             observed_at: Millis::new(78),
             buffer_perf_class: BufferPerfClass::Full,
             ingress_cursor_presentation: Some(IngressCursorPresentationRequest::new(
-                true,
-                true,
+                IngressCursorModeAdmission::Allowed,
+                IngressCursorCommandLineLocation::Outside,
                 Some(cell),
                 crate::types::CursorCellShape::Block,
             )),
@@ -197,8 +197,8 @@ proptest! {
                 observed_at: Millis::new(78),
                 buffer_perf_class: BufferPerfClass::Full,
                 ingress_cursor_presentation: Some(IngressCursorPresentationRequest::new(
-                    true,
-                    true,
+                    IngressCursorModeAdmission::Allowed,
+                    IngressCursorCommandLineLocation::Outside,
                     Some(cell),
                     shape,
                 )),

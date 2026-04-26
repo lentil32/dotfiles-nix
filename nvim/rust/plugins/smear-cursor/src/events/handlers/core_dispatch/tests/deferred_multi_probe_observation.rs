@@ -79,7 +79,7 @@ fn observation_base_edge_queues_only_the_cursor_color_probe() {
     );
     assert!(matches!(
         queued_front_work_item(),
-        Some(ScheduledWorkUnit::EffectBatch(ref effects))
+        Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
             if only_cursor_color_probe_request(effects)
     ));
 }
@@ -99,7 +99,7 @@ fn cursor_color_probe_edge_queues_the_first_background_chunk() {
     assert_eq!(queued_work_count(), 1);
     assert!(matches!(
         queued_front_work_item(),
-        Some(ScheduledWorkUnit::EffectBatch(ref effects))
+        Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
             if only_background_probe_request_for_chunk(effects, &first_background_chunk)
     ));
 }
@@ -135,7 +135,7 @@ fn background_chunk_edge_queues_the_next_background_chunk() {
     assert_eq!(queued_work_count(), 1);
     assert!(matches!(
         queued_front_work_item(),
-        Some(ScheduledWorkUnit::EffectBatch(ref effects))
+        Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
             if only_background_probe_request_for_chunk(effects, &second_background_chunk)
     ));
 }
@@ -167,7 +167,7 @@ fn final_background_edge_transitions_to_planning_and_queues_render_plan_work() {
     assert_eq!(queued_work_count(), 1, "planning work should remain queued");
     assert!(matches!(
         queued_front_work_item(),
-        Some(ScheduledWorkUnit::EffectBatch(ref effects))
+        Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
             if contains_render_plan_request(effects)
     ));
 }

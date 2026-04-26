@@ -1,14 +1,23 @@
+use super::super::LiveTabSnapshot;
 use super::super::advance_buffer_text_revision;
 use super::super::invalidate_buffer_local_caches;
 use super::super::invalidate_buffer_local_probe_caches;
 use super::super::invalidate_buffer_metadata;
 use super::super::invalidate_conceal_probe_caches;
+use super::super::live_tab_snapshot_with;
+use super::super::parse_closed_tab_number;
+use super::super::parse_closed_window_id;
+use super::super::retained_resource_cleanup_retry_event;
 use super::super::should_invalidate_buffer_metadata_for_option;
 use super::super::should_invalidate_conceal_probe_cache_for_option;
 use super::super::should_refresh_editor_viewport_for_option;
+use super::super::stale_tracked_tab_handles;
 use super::reset_buffer_local_cache_state;
+use crate::core::event::Event as CoreEvent;
+use crate::core::event::RenderCleanupRetainedResourcesObservedEvent;
 use crate::core::state::CursorTextContext;
 use crate::core::types::Generation;
+use crate::core::types::Millis;
 use crate::events::cursor::BufferMetadata;
 use crate::events::handlers::should_request_observation_for_autocmd;
 use crate::events::ingress::AutocmdIngress;
@@ -17,12 +26,20 @@ use crate::events::probe_cache::CachedConcealRegions;
 use crate::events::probe_cache::ConcealCacheLookup;
 use crate::events::probe_cache::CursorTextContextCacheKey;
 use crate::events::probe_cache::CursorTextContextCacheLookup;
-use crate::events::runtime::mutate_engine_state;
-use crate::events::runtime::read_engine_state;
+use crate::events::runtime::mutate_shell_state;
+use crate::events::runtime::read_shell_state;
+use crate::host::FakeTabPagePort;
+use crate::host::HostTabSnapshot;
+use crate::host::TabHandle;
+use crate::host::TabPageCall;
 use crate::test_support::conceal_key;
 use crate::test_support::conceal_region;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+
+fn tab_handle(value: i32) -> TabHandle {
+    TabHandle::from_raw_for_test(value)
+}
 
 #[test]
 fn buffer_metadata_invalidation_only_tracks_the_buffer_local_policy_inputs() {
@@ -69,6 +86,119 @@ fn text_mutation_autocmds_invalidate_metadata_without_requesting_observation() {
 }
 
 #[test]
+fn winclosed_payload_uses_match_name_as_window_id() {
+    assert_eq!(parse_closed_window_id(Some("42")), Some(42));
+    assert_eq!(parse_closed_window_id(Some("0")), None);
+    assert_eq!(parse_closed_window_id(Some("not-a-window")), None);
+    assert_eq!(parse_closed_window_id(None), None);
+}
+
+#[test]
+fn tabclosed_payload_uses_match_name_as_tab_number() {
+    assert_eq!(parse_closed_tab_number(Some("3")), Some(3));
+    assert_eq!(parse_closed_tab_number(Some("0")), None);
+    assert_eq!(parse_closed_tab_number(Some("not-a-tab")), None);
+    assert_eq!(parse_closed_tab_number(None), None);
+}
+
+#[test]
+fn tabclosed_mapping_prunes_tracked_handle_missing_after_tab_numbers_shift() {
+    let live_tabs = [
+        LiveTabSnapshot {
+            tab_handle: tab_handle(101),
+            tab_number: Some(1),
+        },
+        LiveTabSnapshot {
+            tab_handle: tab_handle(303),
+            tab_number: Some(2),
+        },
+    ];
+
+    assert_eq!(
+        stale_tracked_tab_handles(
+            [tab_handle(101), tab_handle(202), tab_handle(303)],
+            &live_tabs
+        ),
+        vec![tab_handle(202)]
+    );
+}
+
+#[test]
+fn tabclosed_mapping_fallback_drops_all_tracked_handles_absent_from_live_handles() {
+    let live_tabs = [
+        LiveTabSnapshot {
+            tab_handle: tab_handle(11),
+            tab_number: None,
+        },
+        LiveTabSnapshot {
+            tab_handle: tab_handle(44),
+            tab_number: None,
+        },
+    ];
+
+    assert_eq!(
+        stale_tracked_tab_handles(
+            [
+                tab_handle(44),
+                tab_handle(22),
+                tab_handle(11),
+                tab_handle(33),
+                tab_handle(22),
+            ],
+            &live_tabs,
+        ),
+        vec![tab_handle(22), tab_handle(33)]
+    );
+}
+
+#[test]
+fn live_tab_snapshot_routes_through_tabpage_port() {
+    let host = FakeTabPagePort::default();
+    host.set_live_tabs(vec![
+        HostTabSnapshot {
+            tab_handle: tab_handle(101),
+            tab_number: Some(1),
+        },
+        HostTabSnapshot {
+            tab_handle: tab_handle(202),
+            tab_number: None,
+        },
+    ]);
+
+    assert_eq!(
+        live_tab_snapshot_with(&host),
+        vec![
+            LiveTabSnapshot {
+                tab_handle: tab_handle(101),
+                tab_number: Some(1),
+            },
+            LiveTabSnapshot {
+                tab_handle: tab_handle(202),
+                tab_number: None,
+            },
+        ]
+    );
+    assert_eq!(host.calls(), vec![TabPageCall::LiveTabSnapshot]);
+}
+
+#[test]
+fn retained_close_resources_schedule_cleanup_retry_lifecycle_event() {
+    assert_eq!(
+        retained_resource_cleanup_retry_event(2, Millis::new(91)),
+        Some(CoreEvent::RenderCleanupRetainedResourcesObserved(
+            RenderCleanupRetainedResourcesObservedEvent {
+                observed_at: Millis::new(91),
+                retained_resources: 2,
+            },
+        ))
+    );
+    assert_eq!(
+        retained_resource_cleanup_retry_event(0, Millis::new(91)),
+        None
+    );
+}
+
+#[test]
 fn option_set_metadata_invalidation_drops_only_target_buffer_metadata_and_policy() {
     const TARGET_BUFFER_HANDLE: i64 = 11;
     const OTHER_BUFFER_HANDLE: i64 = 29;
@@ -79,49 +209,41 @@ fn option_set_metadata_invalidation_drops_only_target_buffer_metadata_and_policy
     let other_metadata = BufferMetadata::new_for_test("rust", "terminal", false, 99);
     let target_policy = BufferEventPolicy::from_buffer_metadata("", true, 42, 0.0);
     let other_policy = BufferEventPolicy::from_buffer_metadata("terminal", false, 99, 0.0);
-    mutate_engine_state(|state| {
+    mutate_shell_state(|state| {
         state
-            .shell
             .buffer_metadata_cache
             .store_for_test(TARGET_BUFFER_HANDLE, target_metadata.clone());
         state
-            .shell
             .buffer_metadata_cache
             .store_for_test(OTHER_BUFFER_HANDLE, other_metadata.clone());
         state
-            .shell
             .buffer_perf_policy_cache
             .store_policy(TARGET_BUFFER_HANDLE, target_policy);
         state
-            .shell
             .buffer_perf_policy_cache
             .store_policy(OTHER_BUFFER_HANDLE, other_policy);
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     invalidate_buffer_metadata(TARGET_BUFFER_HANDLE).expect("metadata invalidation should succeed");
 
-    let cached_entries = read_engine_state(|state| {
+    let cached_entries = read_shell_state(|state| {
         (
             state
-                .shell
                 .buffer_metadata_cache
                 .cached_entry_for_test(TARGET_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_metadata_cache
                 .cached_entry_for_test(OTHER_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_policy_cache
                 .cached_policy(TARGET_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_policy_cache
                 .cached_policy(OTHER_BUFFER_HANDLE),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     assert_eq!(
         cached_entries,
@@ -140,68 +262,56 @@ fn buffer_churn_invalidation_clears_all_target_buffer_local_caches() {
     let other_metadata = BufferMetadata::new_for_test("rust", "terminal", false, 14);
     let target_policy = BufferEventPolicy::from_buffer_metadata("", true, 120, 0.0);
     let other_policy = BufferEventPolicy::from_buffer_metadata("terminal", false, 14, 0.0);
-    let (target_telemetry, other_telemetry) = mutate_engine_state(|state| {
+    let (target_telemetry, other_telemetry) = mutate_shell_state(|state| {
         state
-            .shell
             .buffer_metadata_cache
             .store_for_test(TARGET_BUFFER_HANDLE, target_metadata.clone());
         state
-            .shell
             .buffer_metadata_cache
             .store_for_test(OTHER_BUFFER_HANDLE, other_metadata.clone());
         state
-            .shell
             .buffer_perf_policy_cache
             .store_policy(TARGET_BUFFER_HANDLE, target_policy);
         state
-            .shell
             .buffer_perf_policy_cache
             .store_policy(OTHER_BUFFER_HANDLE, other_policy);
         (
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .record_conceal_full_scan(TARGET_BUFFER_HANDLE, 1_000.0),
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .record_cursor_color_extmark_fallback(OTHER_BUFFER_HANDLE, 1_500.0),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     invalidate_buffer_local_caches(TARGET_BUFFER_HANDLE)
         .expect("buffer-local cache invalidation should succeed");
 
-    let cached_entries = read_engine_state(|state| {
+    let cached_entries = read_shell_state(|state| {
         (
             state
-                .shell
                 .buffer_metadata_cache
                 .cached_entry_for_test(TARGET_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_metadata_cache
                 .cached_entry_for_test(OTHER_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_policy_cache
                 .cached_policy(TARGET_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_policy_cache
                 .cached_policy(OTHER_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .telemetry(TARGET_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_perf_telemetry_cache
                 .telemetry(OTHER_BUFFER_HANDLE),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     assert_eq!(
         cached_entries,
@@ -246,52 +356,44 @@ fn text_mutation_invalidation_clears_only_the_target_buffer_probe_entries() {
     let target_regions: Arc<[_]> = vec![conceal_region(3, 4, 11, 1)].into();
     let other_regions: Arc<[_]> = vec![conceal_region(8, 9, 12, 2)].into();
 
-    mutate_engine_state(|state| {
+    mutate_shell_state(|state| {
         state
-            .shell
             .probe_cache
             .store_cursor_text_context(target_context_key.clone(), target_context.clone());
         state
-            .shell
             .probe_cache
             .store_cursor_text_context(other_context_key.clone(), other_context.clone());
-        state.shell.probe_cache.store_conceal_regions(
+        state.probe_cache.store_conceal_regions(
             target_conceal_key.clone(),
             18,
             Arc::clone(&target_regions),
         );
-        state.shell.probe_cache.store_conceal_regions(
+        state.probe_cache.store_conceal_regions(
             other_conceal_key.clone(),
             18,
             Arc::clone(&other_regions),
         );
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     invalidate_buffer_local_probe_caches(TARGET_BUFFER_HANDLE)
         .expect("probe invalidation should succeed");
 
-    let cached_entries = mutate_engine_state(|state| {
+    let cached_entries = mutate_shell_state(|state| {
         (
             state
-                .shell
                 .probe_cache
                 .cached_cursor_text_context(&target_context_key),
             state
-                .shell
                 .probe_cache
                 .cached_cursor_text_context(&other_context_key),
             state
-                .shell
                 .probe_cache
                 .cached_conceal_regions(&target_conceal_key),
-            state
-                .shell
-                .probe_cache
-                .cached_conceal_regions(&other_conceal_key),
+            state.probe_cache.cached_conceal_regions(&other_conceal_key),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     assert_eq!(
         cached_entries,
@@ -324,44 +426,38 @@ fn conceal_option_invalidation_clears_only_the_target_buffer_conceal_entries() {
     let target_regions: Arc<[_]> = vec![conceal_region(3, 4, 11, 1)].into();
     let other_regions: Arc<[_]> = vec![conceal_region(8, 9, 12, 2)].into();
 
-    mutate_engine_state(|state| {
+    mutate_shell_state(|state| {
         state
-            .shell
             .probe_cache
             .store_cursor_text_context(target_context_key.clone(), target_context.clone());
-        state.shell.probe_cache.store_conceal_regions(
+        state.probe_cache.store_conceal_regions(
             target_conceal_key.clone(),
             18,
             Arc::clone(&target_regions),
         );
-        state.shell.probe_cache.store_conceal_regions(
+        state.probe_cache.store_conceal_regions(
             other_conceal_key.clone(),
             18,
             Arc::clone(&other_regions),
         );
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     invalidate_conceal_probe_caches(TARGET_BUFFER_HANDLE)
         .expect("conceal option invalidation should succeed");
 
-    let cached_entries = mutate_engine_state(|state| {
+    let cached_entries = mutate_shell_state(|state| {
         (
             state
-                .shell
                 .probe_cache
                 .cached_cursor_text_context(&target_context_key),
             state
-                .shell
                 .probe_cache
                 .cached_conceal_regions(&target_conceal_key),
-            state
-                .shell
-                .probe_cache
-                .cached_conceal_regions(&other_conceal_key),
+            state.probe_cache.cached_conceal_regions(&other_conceal_key),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     assert_eq!(
         cached_entries,
@@ -380,30 +476,27 @@ fn text_mutation_revision_advances_only_for_the_target_buffer() {
 
     reset_buffer_local_cache_state();
 
-    mutate_engine_state(|state| {
+    mutate_shell_state(|state| {
         state
-            .shell
             .buffer_text_revision_cache
             .advance(OTHER_BUFFER_HANDLE);
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     advance_buffer_text_revision(TARGET_BUFFER_HANDLE)
         .expect("text revision advance should succeed");
 
-    let revisions = mutate_engine_state(|state| {
+    let revisions = mutate_shell_state(|state| {
         (
             state
-                .shell
                 .buffer_text_revision_cache
                 .cached_entry_for_test(TARGET_BUFFER_HANDLE),
             state
-                .shell
                 .buffer_text_revision_cache
                 .cached_entry_for_test(OTHER_BUFFER_HANDLE),
         )
     })
-    .expect("engine state access should succeed");
+    .expect("runtime access should succeed");
 
     assert_eq!(
         revisions,

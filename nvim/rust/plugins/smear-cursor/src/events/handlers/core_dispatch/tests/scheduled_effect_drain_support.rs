@@ -1,7 +1,9 @@
 use super::*;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressCursorPresentationEffect;
+use crate::core::effect::OrderedEffect;
 use crate::core::effect::ScheduleTimerEffect;
+use crate::core::effect::ShellOnlyEffect;
 use crate::core::state::ProbeKind;
 use crate::core::state::RenderCleanupState;
 use crate::core::state::RenderThermalState;
@@ -9,7 +11,7 @@ use crate::core::types::DelayBudgetMs;
 use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
-use crate::events::handlers::core_dispatch::queue::MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE;
+use crate::events::runtime::MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE;
 use crate::test_support::assertions::assert_queue_disarmed;
 use crate::test_support::proptest::timer_id;
 use nvim_oxi::Result;
@@ -253,8 +255,8 @@ pub(super) struct ScheduledDrainModelOutcome {
 
 #[derive(Clone, Debug, PartialEq)]
 enum ScheduledDrainModelItem {
-    EffectBatch(Vec<Effect>),
-    EffectOnlyAgenda(ScheduledDrainModelAgenda),
+    OrderedEffectBatch(Vec<OrderedEffect>),
+    ShellOnlyAgenda(ScheduledDrainModelAgenda),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -263,39 +265,16 @@ struct ScheduledDrainModelAgenda {
 }
 
 impl ScheduledDrainModelAgenda {
-    fn append_effects(&mut self, effects: Vec<Effect>) -> usize {
+    fn append_effects(&mut self, effects: Vec<ShellOnlyEffect>) -> usize {
         effects
             .into_iter()
             .map(|effect| usize::from(self.append_effect(effect)))
             .sum()
     }
 
-    fn append_effect(&mut self, effect: Effect) -> bool {
+    fn append_effect(&mut self, effect: ShellOnlyEffect) -> bool {
         match effect {
-            Effect::ApplyRenderCleanup(payload) => {
-                if matches!(
-                    self.steps.back(),
-                    Some(ScheduledDrainModelStep::ApplyRenderCleanup(existing)) if *existing == payload
-                ) {
-                    return false;
-                }
-                self.steps
-                    .push_back(ScheduledDrainModelStep::ApplyRenderCleanup(payload));
-                true
-            }
-            Effect::ScheduleTimer(payload) => {
-                if let Some(ScheduledDrainModelStep::ScheduleTimer(existing)) =
-                    self.steps.back_mut()
-                    && existing.token.id() == payload.token.id()
-                {
-                    *existing = payload;
-                    return false;
-                }
-                self.steps
-                    .push_back(ScheduledDrainModelStep::ScheduleTimer(payload));
-                true
-            }
-            Effect::RecordEventLoopMetric(_) => {
+            ShellOnlyEffect::RecordEventLoopMetric(_) => {
                 if matches!(
                     self.steps.back(),
                     Some(ScheduledDrainModelStep::RecordMetrics)
@@ -305,7 +284,7 @@ impl ScheduledDrainModelAgenda {
                 self.steps.push_back(ScheduledDrainModelStep::RecordMetrics);
                 true
             }
-            Effect::RedrawCmdline => {
+            ShellOnlyEffect::RedrawCmdline => {
                 if matches!(
                     self.steps.back(),
                     Some(ScheduledDrainModelStep::RedrawCmdline)
@@ -315,7 +294,6 @@ impl ScheduledDrainModelAgenda {
                 self.steps.push_back(ScheduledDrainModelStep::RedrawCmdline);
                 true
             }
-            _ => unreachable!("model agenda should only hold continuable effect-only steps"),
         }
     }
 
@@ -330,8 +308,6 @@ impl ScheduledDrainModelAgenda {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ScheduledDrainModelStep {
-    ApplyRenderCleanup(crate::core::effect::ApplyRenderCleanupEffect),
-    ScheduleTimer(ScheduleTimerEffect),
     RecordMetrics,
     RedrawCmdline,
 }
@@ -339,12 +315,6 @@ enum ScheduledDrainModelStep {
 impl ScheduledDrainModelStep {
     fn execute(self, executed_effects: &mut Vec<Effect>) {
         match self {
-            Self::ApplyRenderCleanup(payload) => {
-                executed_effects.push(Effect::ApplyRenderCleanup(payload));
-            }
-            Self::ScheduleTimer(payload) => {
-                executed_effects.push(Effect::ScheduleTimer(payload));
-            }
             Self::RecordMetrics => {}
             Self::RedrawCmdline => {
                 executed_effects.push(Effect::RedrawCmdline);
@@ -376,26 +346,31 @@ impl ScheduledDrainModel {
             return false;
         }
 
-        if !effects.iter().all(is_scheduled_drain_effect_only) {
-            self.items
-                .push_back(ScheduledDrainModelItem::EffectBatch(effects));
-            self.pending_work_units = self.pending_work_units.saturating_add(1);
-            return self.finish_stage();
+        for segment in split_effect_batch_by_semantic_power(effects) {
+            match segment {
+                ScheduledDrainModelSegment::Ordered(effects) => {
+                    self.items
+                        .push_back(ScheduledDrainModelItem::OrderedEffectBatch(effects));
+                    self.pending_work_units = self.pending_work_units.saturating_add(1);
+                }
+                ScheduledDrainModelSegment::ShellOnly(effects) => {
+                    let added_work_units = match self.items.back_mut() {
+                        Some(ScheduledDrainModelItem::ShellOnlyAgenda(agenda)) => {
+                            agenda.append_effects(effects)
+                        }
+                        _ => {
+                            let mut agenda = ScheduledDrainModelAgenda::default();
+                            let added_work_units = agenda.append_effects(effects);
+                            self.items
+                                .push_back(ScheduledDrainModelItem::ShellOnlyAgenda(agenda));
+                            added_work_units
+                        }
+                    };
+                    self.pending_work_units =
+                        self.pending_work_units.saturating_add(added_work_units);
+                }
+            }
         }
-
-        let added_work_units = match self.items.back_mut() {
-            Some(ScheduledDrainModelItem::EffectOnlyAgenda(agenda)) => {
-                agenda.append_effects(effects)
-            }
-            _ => {
-                let mut agenda = ScheduledDrainModelAgenda::default();
-                let added_work_units = agenda.append_effects(effects);
-                self.items
-                    .push_back(ScheduledDrainModelItem::EffectOnlyAgenda(agenda));
-                added_work_units
-            }
-        };
-        self.pending_work_units = self.pending_work_units.saturating_add(added_work_units);
         self.finish_stage()
     }
 
@@ -426,10 +401,10 @@ impl ScheduledDrainModel {
                 };
 
                 match work_unit {
-                    ScheduledDrainModelWorkUnit::EffectBatch(effects) => {
-                        executed_effects.extend(effects);
+                    ScheduledDrainModelWorkUnit::OrderedEffectBatch(effects) => {
+                        executed_effects.extend(effects.into_iter().map(Effect::from));
                     }
-                    ScheduledDrainModelWorkUnit::EffectOnlyStep(step) => {
+                    ScheduledDrainModelWorkUnit::ShellOnlyStep(step) => {
                         step.execute(&mut executed_effects);
                     }
                 }
@@ -439,7 +414,7 @@ impl ScheduledDrainModel {
                 remaining_budget -= 1;
             }
 
-            if !self.should_continue_hot_effect_only_tail(
+            if !self.should_continue_hot_shell_only_tail(
                 snapshot_budget,
                 drained_items_this_pass,
                 drained_items,
@@ -474,22 +449,22 @@ impl ScheduledDrainModel {
             return 0;
         }
 
-        if self.thermal == RenderThermalState::Hot && self.has_only_effect_only_agendas() {
+        if self.thermal == RenderThermalState::Hot && self.has_only_shell_only_agendas() {
             return scheduled_drain_budget_for_hot_effect_only_snapshot(self.pending_work_units);
         }
 
         scheduled_drain_budget_for_thermal(self.thermal, self.pending_work_units)
     }
 
-    fn has_only_effect_only_agendas(&self) -> bool {
+    fn has_only_shell_only_agendas(&self) -> bool {
         !self.items.is_empty()
             && self
                 .items
                 .iter()
-                .all(|item| matches!(item, ScheduledDrainModelItem::EffectOnlyAgenda(_)))
+                .all(|item| matches!(item, ScheduledDrainModelItem::ShellOnlyAgenda(_)))
     }
 
-    fn should_continue_hot_effect_only_tail(
+    fn should_continue_hot_shell_only_tail(
         &self,
         snapshot_budget: usize,
         drained_items_this_pass: usize,
@@ -498,28 +473,28 @@ impl ScheduledDrainModel {
         self.thermal == RenderThermalState::Hot
             && drained_items_this_pass == snapshot_budget
             && drained_items_total < MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE
-            && self.has_only_effect_only_agendas()
+            && self.has_only_shell_only_agendas()
     }
 
     fn pop_work_unit(&mut self) -> Option<ScheduledDrainModelWorkUnit> {
         let work_unit = match self.items.front()? {
-            ScheduledDrainModelItem::EffectBatch(_) => match self.items.pop_front()? {
-                ScheduledDrainModelItem::EffectBatch(effects) => {
-                    ScheduledDrainModelWorkUnit::EffectBatch(effects)
+            ScheduledDrainModelItem::OrderedEffectBatch(_) => match self.items.pop_front()? {
+                ScheduledDrainModelItem::OrderedEffectBatch(effects) => {
+                    ScheduledDrainModelWorkUnit::OrderedEffectBatch(effects)
                 }
-                ScheduledDrainModelItem::EffectOnlyAgenda(_) => {
+                ScheduledDrainModelItem::ShellOnlyAgenda(_) => {
                     unreachable!("front model work item should stay stable while borrowed")
                 }
             },
-            ScheduledDrainModelItem::EffectOnlyAgenda(_) => {
+            ScheduledDrainModelItem::ShellOnlyAgenda(_) => {
                 let (step, agenda_is_empty) = match self.items.front_mut() {
-                    Some(ScheduledDrainModelItem::EffectOnlyAgenda(agenda)) => {
+                    Some(ScheduledDrainModelItem::ShellOnlyAgenda(agenda)) => {
                         let Some(step) = agenda.pop_step() else {
                             unreachable!("non-empty model agenda should yield a step");
                         };
                         (step, agenda.is_empty())
                     }
-                    Some(ScheduledDrainModelItem::EffectBatch(_)) => {
+                    Some(ScheduledDrainModelItem::OrderedEffectBatch(_)) => {
                         unreachable!("front model work item should stay stable while borrowed")
                     }
                     None => unreachable!("front model work item should still exist while borrowed"),
@@ -527,7 +502,7 @@ impl ScheduledDrainModel {
                 if agenda_is_empty {
                     let _ = self.items.pop_front();
                 }
-                ScheduledDrainModelWorkUnit::EffectOnlyStep(step)
+                ScheduledDrainModelWorkUnit::ShellOnlyStep(step)
             }
         };
         self.pending_work_units = self.pending_work_units.saturating_sub(1);
@@ -537,18 +512,46 @@ impl ScheduledDrainModel {
 
 #[derive(Debug)]
 enum ScheduledDrainModelWorkUnit {
-    EffectBatch(Vec<Effect>),
-    EffectOnlyStep(ScheduledDrainModelStep),
+    OrderedEffectBatch(Vec<OrderedEffect>),
+    ShellOnlyStep(ScheduledDrainModelStep),
 }
 
-fn is_scheduled_drain_effect_only(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::ApplyRenderCleanup(_)
-            | Effect::ScheduleTimer(_)
-            | Effect::RecordEventLoopMetric(_)
-            | Effect::RedrawCmdline
-    )
+#[derive(Debug)]
+enum ScheduledDrainModelSegment {
+    Ordered(Vec<OrderedEffect>),
+    ShellOnly(Vec<ShellOnlyEffect>),
+}
+
+fn split_effect_batch_by_semantic_power(effects: Vec<Effect>) -> Vec<ScheduledDrainModelSegment> {
+    let mut segments = Vec::new();
+    for effect in effects {
+        match effect.into_ordered_or_shell_only() {
+            Ok(effect) => append_ordered_effect(&mut segments, effect),
+            Err(effect) => append_shell_only_effect(&mut segments, effect),
+        }
+    }
+    segments
+}
+
+fn append_ordered_effect(segments: &mut Vec<ScheduledDrainModelSegment>, effect: OrderedEffect) {
+    match segments.last_mut() {
+        Some(ScheduledDrainModelSegment::Ordered(effects)) => effects.push(effect),
+        Some(ScheduledDrainModelSegment::ShellOnly(_)) | None => {
+            segments.push(ScheduledDrainModelSegment::Ordered(vec![effect]));
+        }
+    }
+}
+
+fn append_shell_only_effect(
+    segments: &mut Vec<ScheduledDrainModelSegment>,
+    effect: ShellOnlyEffect,
+) {
+    match segments.last_mut() {
+        Some(ScheduledDrainModelSegment::ShellOnly(effects)) => effects.push(effect),
+        Some(ScheduledDrainModelSegment::Ordered(_)) | None => {
+            segments.push(ScheduledDrainModelSegment::ShellOnly(vec![effect]));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -582,7 +585,7 @@ pub(super) struct FailingExecutor;
 
 impl EffectExecutor for FailingExecutor {
     fn execute_effect(&mut self, _effect: Effect) -> Result<Vec<CoreEvent>> {
-        Err(nvim_oxi::api::Error::Other("planned scheduled drain failure".to_string()).into())
+        Err(crate::host::api::Error::Other("planned scheduled drain failure".to_string()).into())
     }
 }
 

@@ -1,14 +1,7 @@
 use super::super::event_loop;
-use super::super::logging::warn;
 use super::super::policy::BufferEventPolicy;
-use super::clear_autocmd_event_timestamp;
-use super::clear_cursor_callback_duration_estimate;
-use super::clear_observation_request_timestamp;
-use super::engine::mutate_engine_state;
-use super::engine::read_engine_state;
-use super::engine::reset_core_state;
-use super::timers::clear_all_core_timer_handles;
-use super::timers::clear_pending_core_timer_dispatch_retries;
+use super::recovery::RuntimeRecoveryPlan;
+use super::with_core_read;
 use crate::allocation_counters;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RetainedCursorColorFallback;
@@ -161,8 +154,7 @@ pub(crate) fn perf_diagnostics_report() -> String {
     allocation_counters::with_counting_suspended(|| {
         let loop_diag = event_loop_diagnostics();
         let buffer_perf_policy = current_buffer_perf_policy().ok().flatten();
-        match read_engine_state(|state| {
-            let core = state.core_state();
+        match with_core_read(|core| {
             let runtime = core.runtime();
             let cleanup = core.render_cleanup();
             let ingress_policy = core.ingress_policy();
@@ -387,23 +379,6 @@ fn optional_u64_value(value: Option<u64>) -> String {
     value.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
 
-fn reset_transient_event_state_with_policy() {
-    clear_all_core_timer_handles();
-    clear_pending_core_timer_dispatch_retries();
-    super::super::handlers::reset_scheduled_effect_queue();
-    if let Err(err) = mutate_engine_state(|state| {
-        state.shell.reset_transient_caches();
-    }) {
-        warn(&format!(
-            "engine state re-entered during transient reset; skipping shell cache reset: {err}"
-        ));
-    }
-    clear_autocmd_event_timestamp();
-    clear_observation_request_timestamp();
-    clear_cursor_callback_duration_estimate();
-    reset_core_state();
-}
-
 pub(crate) fn reset_transient_event_state() {
-    reset_transient_event_state_with_policy();
+    RuntimeRecoveryPlan::transient_reset().apply();
 }

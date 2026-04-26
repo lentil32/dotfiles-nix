@@ -3,19 +3,26 @@ mod non_cursor_autocmd;
 
 use super::CursorAutocmdFastPathSnapshot;
 use crate::config::BufferPerfMode;
+use crate::core::effect::IngressCursorCommandLineLocation;
+use crate::core::effect::IngressCursorModeAdmission;
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::state::BufferPerfClass;
 use crate::events::ingress::AutocmdIngress;
-use crate::events::runtime::mutate_engine_state;
 use crate::events::runtime::IngressReadSnapshot;
 use crate::events::runtime::IngressReadSnapshotTestInput;
+use crate::events::runtime::reset_transient_shell_caches;
 use crate::position::RenderPoint;
 use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
 use proptest::prelude::*;
 
 pub(super) fn presentation() -> IngressCursorPresentationRequest {
-    IngressCursorPresentationRequest::new(true, true, None, CursorCellShape::Block)
+    IngressCursorPresentationRequest::new(
+        IngressCursorModeAdmission::Allowed,
+        IngressCursorCommandLineLocation::Outside,
+        None,
+        CursorCellShape::Block,
+    )
 }
 
 pub(super) fn autocmd_ingress_strategy() -> BoxedStrategy<AutocmdIngress> {
@@ -77,8 +84,5 @@ pub(super) fn fast_path_snapshot(
 }
 
 pub(super) fn reset_buffer_local_cache_state() {
-    mutate_engine_state(|state| {
-        state.shell.reset_transient_caches();
-    })
-    .expect("engine state access should succeed");
+    reset_transient_shell_caches().expect("shell state access should succeed");
 }

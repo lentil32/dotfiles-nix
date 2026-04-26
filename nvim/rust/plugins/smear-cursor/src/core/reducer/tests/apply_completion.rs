@@ -1,4 +1,5 @@
 use super::*;
+use crate::host::BufferHandle;
 
 #[test]
 fn render_plan_completion_threads_observation_buffer_handle_into_apply_effect() {
@@ -37,7 +38,7 @@ fn render_plan_completion_threads_observation_buffer_handle_into_apply_effect() 
                     .pending_proposal()
                     .cloned()
                     .expect("render plan completion should stage a proposal"),
-                buffer_handle: Some(22),
+                buffer_handle: Some(BufferHandle::from_raw_for_test(/*value*/ 22)),
                 requested_at: Millis::new(62),
             }
         ))]
@@ -101,7 +102,9 @@ fn render_cleanup_applied_clears_trusted_realization_basis() {
         &ready,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(66),
-            action: RenderCleanupAppliedAction::SoftCleared,
+            action: RenderCleanupAppliedAction::SoftCleared {
+                retained_resources: 0,
+            },
         }),
     );
 
@@ -144,7 +147,9 @@ fn untrusted_target_basis_derives_replace_patch() {
         &ready,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(69),
-            action: RenderCleanupAppliedAction::HardPurged,
+            action: RenderCleanupAppliedAction::HardPurged {
+                retained_resources: 0,
+            },
         }),
     );
 

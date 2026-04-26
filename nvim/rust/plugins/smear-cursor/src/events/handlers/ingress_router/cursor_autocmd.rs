@@ -1,4 +1,6 @@
 use super::IngressDispatchOutcome;
+use crate::core::effect::IngressCursorCommandLineLocation;
+use crate::core::effect::IngressCursorModeAdmission;
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::ProbePolicy;
@@ -8,30 +10,32 @@ use crate::core::event::InitializeEvent;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::ExternalDemandKind;
 use crate::core::types::Millis;
-use crate::events::cursor::current_mode;
 use crate::events::cursor::cursor_observation_for_mode_with_probe_policy;
 use crate::events::cursor::smear_outside_cmd_row;
 use crate::events::handlers::core_dispatch::dispatch_core_events_with_default_scheduler;
 use crate::events::handlers::source_selection::should_request_observation_for_autocmd;
-use crate::events::handlers::viewport::surface_for_ingress_fast_path_with_handles;
+use crate::events::handlers::viewport::surface_for_ingress_fast_path_with_current_editor;
 use crate::events::ingress::AutocmdIngress;
 use crate::events::logging::warn;
+use crate::events::runtime::IngressReadSnapshot;
+use crate::events::runtime::RuntimeAccessResult;
 use crate::events::runtime::ingress_read_snapshot_with_current_buffer;
 use crate::events::runtime::note_autocmd_event_now;
 use crate::events::runtime::now_ms;
-use crate::events::runtime::read_engine_state;
 use crate::events::runtime::record_cursor_autocmd_fast_path_continued;
 use crate::events::runtime::record_cursor_autocmd_fast_path_dropped;
 use crate::events::runtime::to_core_millis;
-use crate::events::runtime::EngineAccessResult;
-use crate::events::runtime::IngressReadSnapshot;
+use crate::events::runtime::with_core_read;
 use crate::events::surface::current_window_surface_snapshot;
+use crate::host::BufferHandle;
+use crate::host::CurrentEditorPort;
+use crate::host::NeovimHost;
+use crate::host::api;
 use crate::position::CursorObservation;
 use crate::position::RenderPoint;
 use crate::position::WindowSurfaceSnapshot;
 use crate::state::TrackedCursor;
 use crate::types::EPSILON;
-use nvim_oxi::api;
 use nvim_oxi::Result;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -70,8 +74,15 @@ pub(super) struct CursorAutocmdFastPathSnapshot {
 pub(super) fn on_cursor_event_core_for_autocmd(
     ingress: AutocmdIngress,
 ) -> Result<IngressDispatchOutcome> {
+    on_cursor_event_core_for_autocmd_with(&NeovimHost, ingress)
+}
+
+fn on_cursor_event_core_for_autocmd_with(
+    host: &impl CurrentEditorPort,
+    ingress: AutocmdIngress,
+) -> Result<IngressDispatchOutcome> {
     let (current_surface, current_cursor, window, buffer) =
-        match maybe_drop_unchanged_cursor_autocmd(ingress)? {
+        match maybe_drop_unchanged_cursor_autocmd_with(host, ingress)? {
             CursorAutocmdFastPathResult::Dropped => return Ok(IngressDispatchOutcome::Dropped),
             CursorAutocmdFastPathResult::Continue {
                 current_surface,
@@ -80,8 +91,8 @@ pub(super) fn on_cursor_event_core_for_autocmd(
                 buffer,
             } => (current_surface, current_cursor, window, buffer),
         };
-    let window_valid = window.is_valid();
-    let buffer_valid = buffer.is_valid();
+    let window_valid = host.window_is_valid(&window);
+    let buffer_valid = host.buffer_is_valid(&buffer);
     let snapshot = ingress_read_snapshot_with_current_buffer(buffer_valid.then_some(&buffer))?;
     let buffer_perf_class = match cursor_autocmd_preflight(&snapshot, window_valid, buffer_valid) {
         CursorAutocmdPreflight::Dropped => return Ok(IngressDispatchOutcome::Dropped),
@@ -95,7 +106,7 @@ pub(super) fn on_cursor_event_core_for_autocmd(
     if should_coalesce_window_follow_up_autocmd(ingress, &snapshot, i64::from(window.handle())) {
         return Ok(IngressDispatchOutcome::Coalesced);
     }
-    let mode = current_mode().to_string_lossy().into_owned();
+    let mode = host.current_mode();
     let ingress_cursor_presentation = if demand_kind_for_autocmd(ingress).is_cursor() {
         match collect_ingress_cursor_presentation_request(&snapshot, &mode) {
             Ok(request) => Some(request),
@@ -109,8 +120,14 @@ pub(super) fn on_cursor_event_core_for_autocmd(
     } else {
         None
     };
-    let ingress_observation_surface =
-        ingress_observation_surface(&window, &buffer, current_surface, current_cursor, mode);
+    let ingress_observation_surface = ingress_observation_surface(
+        host,
+        &window,
+        &buffer,
+        current_surface,
+        current_cursor,
+        mode,
+    );
     let observed_at = to_core_millis(now_ms());
     let events = build_cursor_autocmd_events(
         ingress,
@@ -128,12 +145,12 @@ pub(super) fn on_cursor_event_core_for_autocmd(
     Ok(IngressDispatchOutcome::Applied)
 }
 
-fn cursor_autocmd_fast_path_snapshot() -> EngineAccessResult<CursorAutocmdFastPathSnapshot> {
-    read_engine_state(|state| {
-        let runtime = state.core_state().runtime();
+fn cursor_autocmd_fast_path_snapshot() -> RuntimeAccessResult<CursorAutocmdFastPathSnapshot> {
+    with_core_read(|state| {
+        let runtime = state.runtime();
         CursorAutocmdFastPathSnapshot {
             enabled: runtime.is_enabled(),
-            needs_initialize: state.core_state().needs_initialize(),
+            needs_initialize: state.needs_initialize(),
             tracked_cursor: runtime.tracked_cursor(),
             target_position: runtime.target_position(),
             smear_to_cmd: runtime.config.smear_to_cmd,
@@ -174,8 +191,9 @@ fn current_cursor_observation_for_fast_path(
 pub(super) fn tracked_cursor_matches_live_surface_handles(
     tracked_cursor: &TrackedCursor,
     current_window_handle: i64,
-    current_buffer_handle: i64,
+    current_buffer_handle: impl Into<BufferHandle>,
 ) -> bool {
+    let current_buffer_handle = current_buffer_handle.into();
     tracked_cursor.window_handle() == current_window_handle
         && tracked_cursor.buffer_handle() == current_buffer_handle
 }
@@ -250,9 +268,11 @@ pub(super) fn demand_kind_for_autocmd(ingress: AutocmdIngress) -> ExternalDemand
         | AutocmdIngress::WinScrolled
         | AutocmdIngress::BufWipeout
         | AutocmdIngress::OptionSet
+        | AutocmdIngress::TabClosed
         | AutocmdIngress::TextChanged
         | AutocmdIngress::TextChangedInsert
         | AutocmdIngress::VimResized
+        | AutocmdIngress::WinClosed
         | AutocmdIngress::ColorScheme
         | AutocmdIngress::Unknown => ExternalDemandKind::ExternalCursor,
     }
@@ -263,11 +283,20 @@ fn collect_ingress_cursor_presentation_request(
     mode: &str,
 ) -> Result<IngressCursorPresentationRequest> {
     let current_corners = snapshot.current_corners();
-    let mode_allowed = snapshot.mode_allowed(mode);
+    let mode_admission = if snapshot.mode_allowed(mode) {
+        IngressCursorModeAdmission::Allowed
+    } else {
+        IngressCursorModeAdmission::Blocked
+    };
+    let command_line_location = if smear_outside_cmd_row(&current_corners)? {
+        IngressCursorCommandLineLocation::Outside
+    } else {
+        IngressCursorCommandLineLocation::Inside
+    };
 
     Ok(IngressCursorPresentationRequest::new(
-        mode_allowed,
-        smear_outside_cmd_row(&current_corners)?,
+        mode_admission,
+        command_line_location,
         snapshot.current_visual_cursor_cell(),
         snapshot.current_visual_cursor_shape(),
     ))
@@ -306,11 +335,12 @@ pub(super) fn cursor_autocmd_preflight(
     }
 }
 
-fn maybe_drop_unchanged_cursor_autocmd(
+fn maybe_drop_unchanged_cursor_autocmd_with(
+    host: &impl CurrentEditorPort,
     ingress: AutocmdIngress,
 ) -> Result<CursorAutocmdFastPathResult> {
-    let window = api::get_current_win();
-    let buffer = api::get_current_buf();
+    let window = host.current_window();
+    let buffer = host.current_buffer();
 
     if !ingress.supports_unchanged_fast_path() {
         return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
@@ -324,29 +354,32 @@ fn maybe_drop_unchanged_cursor_autocmd(
     let Some(tracked_cursor) = fast_path_snapshot.tracked_cursor.as_ref() else {
         return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
     };
-    if !window.is_valid() || i64::from(window.handle()) != tracked_cursor.window_handle() {
+    if !host.window_is_valid(&window)
+        || i64::from(window.handle()) != tracked_cursor.window_handle()
+    {
         return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
     }
 
-    if !buffer.is_valid()
+    if !host.buffer_is_valid(&buffer)
         || !tracked_cursor_matches_live_surface_handles(
             tracked_cursor,
             i64::from(window.handle()),
-            i64::from(buffer.handle()),
+            BufferHandle::from_buffer(&buffer),
         )
     {
         return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
     }
 
-    let Some(current_surface) = surface_for_ingress_fast_path_with_handles(&window, &buffer) else {
+    let Some(current_surface) =
+        surface_for_ingress_fast_path_with_current_editor(host, &window, &buffer)
+    else {
         return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
     };
-    let mode = current_mode();
-    let mode = mode.to_string_lossy();
+    let mode = host.current_mode();
     let current_cursor = current_cursor_observation_for_fast_path(
         &window,
         fast_path_snapshot.smear_to_cmd,
-        mode.as_ref(),
+        &mode,
         Some(&current_surface),
     );
     let current_tracked_cursor =
@@ -394,13 +427,14 @@ fn drop_cursor_autocmd_fast_path(ingress: AutocmdIngress) -> CursorAutocmdFastPa
 }
 
 fn ingress_observation_surface(
+    host: &impl CurrentEditorPort,
     window: &api::Window,
     buffer: &api::Buffer,
     current_surface: Option<WindowSurfaceSnapshot>,
     current_cursor: Option<CursorObservation>,
     mode: String,
 ) -> Option<IngressObservationSurface> {
-    if !window.is_valid() || !buffer.is_valid() {
+    if !host.window_is_valid(window) || !host.buffer_is_valid(buffer) {
         return None;
     }
 
@@ -408,7 +442,7 @@ fn ingress_observation_surface(
         Some(surface) => surface,
         None => current_window_surface_snapshot(window)
             .ok()
-            .filter(|surface| surface.id().buffer_handle() == i64::from(buffer.handle()))?,
+            .filter(|surface| surface.id().buffer_handle() == BufferHandle::from_buffer(buffer))?,
     };
 
     Some(IngressObservationSurface::new(
@@ -416,4 +450,39 @@ fn ingress_observation_surface(
         current_cursor,
         mode,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CursorAutocmdFastPathResult;
+    use super::maybe_drop_unchanged_cursor_autocmd_with;
+    use crate::events::ingress::AutocmdIngress;
+    use crate::events::runtime::reset_transient_event_state;
+    use crate::host::CurrentEditorCall;
+    use crate::host::FakeCurrentEditorPort;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn cursor_autocmd_fast_path_reads_current_handles_through_current_editor_port() {
+        reset_transient_event_state();
+        let host = FakeCurrentEditorPort::default();
+        host.set_current_window_handle(11);
+        host.set_current_buffer_handle(17);
+
+        let result = maybe_drop_unchanged_cursor_autocmd_with(&host, AutocmdIngress::CursorMoved)
+            .expect("current handles should be readable");
+        let CursorAutocmdFastPathResult::Continue { window, buffer, .. } = result else {
+            panic!("unsupported unchanged fast-path ingress should continue");
+        };
+
+        assert_eq!((window.handle(), buffer.handle()), (11, 17));
+        assert_eq!(
+            host.calls(),
+            vec![
+                CurrentEditorCall::CurrentWindow,
+                CurrentEditorCall::CurrentBuffer,
+            ],
+        );
+        reset_transient_event_state();
+    }
 }

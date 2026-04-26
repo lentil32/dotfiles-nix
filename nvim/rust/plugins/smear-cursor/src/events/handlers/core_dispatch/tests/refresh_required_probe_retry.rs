@@ -90,10 +90,13 @@ fn retry_edge_stages_a_new_observation_base_request_for_a_later_edge() {
         has_more_items,
         "retry transition should stage a later observation batch"
     );
-    assert_eq!(queued_work_count(), 1);
+    assert_eq!(queued_work_count(), 2);
     assert!(matches!(
         queued_front_work_item(),
-        Some(ScheduledWorkUnit::EffectBatch(ref effects))
-            if contains_observation_base_request(effects)
+        Some(ScheduledWorkUnit::ShellOnlyStep(_))
     ));
+    assert!(
+        queue_contains_observation_base_request(),
+        "ordered observation request should remain queued behind retry telemetry"
+    );
 }

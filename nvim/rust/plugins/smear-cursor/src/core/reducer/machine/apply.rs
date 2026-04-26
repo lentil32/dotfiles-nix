@@ -4,6 +4,7 @@ use super::support::DEFAULT_ANIMATION_DELAY_MS;
 use super::support::advance_cleanup_for_proposal;
 use super::support::apply_proposal_effect;
 use super::support::arm_render_cleanup_timer;
+use super::support::cleanup_effect_for_timer_fire;
 use super::support::cleanup_state_after_applied;
 use super::support::delay_budget_from_ms;
 use super::support::enter_recovering_with_backoff;
@@ -18,8 +19,10 @@ use crate::core::effect::RenderCleanupExecution;
 use crate::core::event::ApplyReport;
 use crate::core::event::EffectFailedEvent;
 use crate::core::event::RenderCleanupAppliedEvent;
+use crate::core::event::RenderCleanupRetainedResourcesObservedEvent;
 use crate::core::event::RenderPlanComputedEvent;
 use crate::core::event::RenderPlanFailedEvent;
+use crate::core::runtime_reducer::render_cleanup_delay_ms;
 use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
 use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
 use crate::core::state::CoreState;
@@ -111,8 +114,13 @@ pub(super) fn reduce_render_cleanup_applied(
     }
 
     let previous_cleanup = state.render_cleanup();
-    let next_cleanup =
-        cleanup_state_after_applied(previous_cleanup, payload.action, payload.observed_at);
+    let next_progress_compaction_delay_ms = render_cleanup_delay_ms(&state.runtime().config);
+    let next_cleanup = cleanup_state_after_applied(
+        previous_cleanup,
+        payload.action,
+        payload.observed_at,
+        next_progress_compaction_delay_ms,
+    );
     let next_realization = state.realization().clone().cleanup_applied();
     let next_cleanup_target_budget = render_cleanup_idle_target_budget(&state.runtime().config);
     let next_cleanup_max_prune_per_tick =
@@ -129,7 +137,7 @@ pub(super) fn reduce_render_cleanup_applied(
     }
     if matches!(
         payload.action,
-        crate::core::event::RenderCleanupAppliedAction::SoftCleared
+        crate::core::event::RenderCleanupAppliedAction::SoftCleared { .. }
     ) && next_cleanup
         .next_compaction_due_at()
         .is_some_and(|due_at| due_at.value() <= payload.observed_at.value())
@@ -145,6 +153,18 @@ pub(super) fn reduce_render_cleanup_applied(
                 },
             )],
         );
+    }
+
+    if next_cleanup
+        .next_deadline()
+        .is_some_and(|deadline| deadline.value() <= payload.observed_at.value())
+        && let Some(effect) = cleanup_effect_for_timer_fire(
+            next_cleanup,
+            &next_state.runtime().config,
+            payload.observed_at,
+        )
+    {
+        return Transition::new(next_state, vec![effect]);
     }
 
     let (next_state, mut effects) = arm_render_cleanup_timer(next_state, payload.observed_at);
@@ -163,6 +183,45 @@ pub(super) fn reduce_render_cleanup_applied(
             },
         ));
     }
+    Transition::new(next_state, effects)
+}
+
+pub(super) fn reduce_render_cleanup_retained_resources_observed(
+    state: CoreState,
+    payload: RenderCleanupRetainedResourcesObservedEvent,
+) -> Transition {
+    if state.needs_initialize() || payload.retained_resources == 0 {
+        return Transition::stay_owned(state);
+    }
+
+    let retry_delay_ms = render_cleanup_delay_ms(&state.runtime().config);
+    let previous_cleanup = state.render_cleanup();
+    let next_cleanup = previous_cleanup
+        .retry_hard_purge_after_observed_retained_resources(payload.observed_at, retry_delay_ms);
+    let next_realization = state.realization().clone().cleanup_applied();
+    let next_state = state
+        .with_realization(next_realization)
+        .with_render_cleanup(next_cleanup);
+
+    if next_cleanup == previous_cleanup
+        && next_state.timers().active_token(TimerId::Cleanup).is_some()
+    {
+        return Transition::new(next_state, Vec::new());
+    }
+
+    if next_cleanup
+        .next_deadline()
+        .is_some_and(|deadline| deadline.value() <= payload.observed_at.value())
+        && let Some(effect) = cleanup_effect_for_timer_fire(
+            next_cleanup,
+            &next_state.runtime().config,
+            payload.observed_at,
+        )
+    {
+        return Transition::new(next_state, vec![effect]);
+    }
+
+    let (next_state, effects) = arm_render_cleanup_timer(next_state, payload.observed_at);
     Transition::new(next_state, effects)
 }
 

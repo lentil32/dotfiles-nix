@@ -8,6 +8,7 @@ pub(in crate::events) struct EventLoopDiagnostics {
     pub(in crate::events) callback_duration_ewma_ms: f64,
 }
 
+#[derive(Debug)]
 pub(in crate::events) struct EventLoopState {
     last_autocmd_event_ms: f64,
     last_observation_request_ms: f64,

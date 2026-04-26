@@ -49,6 +49,17 @@ pub(in crate::core::reducer::tests) fn cleanup_tick_event(
     })
 }
 
+fn animation_schedule_from_test_parts(
+    should_schedule_next_animation: bool,
+    next_animation_at_ms: Option<Millis>,
+) -> crate::core::types::AnimationSchedule {
+    match (should_schedule_next_animation, next_animation_at_ms) {
+        (false, _) => crate::core::types::AnimationSchedule::Idle,
+        (true, None) => crate::core::types::AnimationSchedule::DefaultDelay,
+        (true, Some(deadline)) => crate::core::types::AnimationSchedule::Deadline(deadline),
+    }
+}
+
 pub(in crate::core::reducer::tests) fn planned_state_after_animation_tick(
     state: CoreState,
     observed_at: u64,
@@ -102,6 +113,8 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
     let basis = PatchBasis::new(acknowledged, target);
     let patch = ScenePatch::derive(basis);
     let (state, proposal_id) = state.allocate_proposal_id();
+    let animation_schedule =
+        animation_schedule_from_test_parts(should_schedule_next_animation, next_animation_at_ms);
     let proposal = match realization {
         RealizationPlan::Draw(draw) => InFlightProposal::draw(
             proposal_id,
@@ -109,10 +122,7 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
             draw,
             RenderCleanupAction::NoAction,
             RenderSideEffects::default(),
-            crate::core::state::AnimationSchedule::from_parts(
-                should_schedule_next_animation,
-                next_animation_at_ms,
-            ),
+            animation_schedule,
         )
         .expect("test draw proposal should be constructible"),
         RealizationPlan::Clear(clear) => InFlightProposal::clear(
@@ -121,10 +131,7 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
             clear,
             RenderCleanupAction::NoAction,
             RenderSideEffects::default(),
-            crate::core::state::AnimationSchedule::from_parts(
-                should_schedule_next_animation,
-                next_animation_at_ms,
-            ),
+            animation_schedule,
         )
         .expect("test clear proposal should be constructible"),
         RealizationPlan::Noop => InFlightProposal::noop(
@@ -132,10 +139,7 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
             patch,
             RenderCleanupAction::NoAction,
             RenderSideEffects::default(),
-            crate::core::state::AnimationSchedule::from_parts(
-                should_schedule_next_animation,
-                next_animation_at_ms,
-            ),
+            animation_schedule,
         )
         .expect("test noop proposal should be constructible"),
         RealizationPlan::Failure(failure) => InFlightProposal::failure(
@@ -144,10 +148,7 @@ pub(in crate::core::reducer::tests) fn applying_state_with_realization_plan(
             failure,
             RenderCleanupAction::NoAction,
             RenderSideEffects::default(),
-            crate::core::state::AnimationSchedule::from_parts(
-                should_schedule_next_animation,
-                next_animation_at_ms,
-            ),
+            animation_schedule,
         ),
     };
     (

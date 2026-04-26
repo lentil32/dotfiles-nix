@@ -3,14 +3,21 @@ use super::RawScreenposProjection;
 use super::WrappedScreenCellLayout;
 use super::apply_conceal_delta;
 use super::cached_conceal_drift_hint_from_regions_and_delta;
+use super::capture_conceal_window_state;
 use super::conceal_delta_cache_key;
 use super::conceal_delta_for_regions;
 use super::conceal_screen_cell_cache_key;
 use super::concealcursor_allows_mode;
 use super::exact_observed_cell_from_conceal_delta;
+use super::extend_concealed_regions;
 use super::merge_conceal_region;
 use super::projected_observed_cell_from_cached_conceal;
+use super::screen_cell_for_buffer_column;
 use crate::events::probe_cache::ConcealRegion;
+use crate::events::probe_cache::ConcealWindowState;
+use crate::host::CursorReadCall;
+use crate::host::FakeCursorReadPort;
+use crate::host::api;
 use crate::position::BufferLine;
 use crate::position::ObservedCell;
 use crate::position::ScreenCell;
@@ -21,6 +28,9 @@ use crate::test_support::conceal_key;
 use crate::test_support::conceal_region;
 use crate::test_support::proptest::cache_key_mutation_axis;
 use crate::test_support::proptest::pure_config;
+use nvim_oxi::Array;
+use nvim_oxi::Dictionary;
+use nvim_oxi::Object;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -73,6 +83,36 @@ struct ConcealDeltaFixture {
 
 fn screen_cell(row: i64, col: i64) -> ScreenCell {
     ScreenCell::new(row, col).expect("test screen cells should stay one-based")
+}
+
+fn screenpos_object(
+    row: Option<i64>,
+    col: Option<i64>,
+    endcol: Option<i64>,
+    curscol: Option<i64>,
+) -> Object {
+    let mut dict = Dictionary::new();
+    if let Some(row) = row {
+        dict.insert("row", Object::from(row));
+    }
+    if let Some(col) = col {
+        dict.insert("col", Object::from(col));
+    }
+    if let Some(endcol) = endcol {
+        dict.insert("endcol", Object::from(endcol));
+    }
+    if let Some(curscol) = curscol {
+        dict.insert("curscol", Object::from(curscol));
+    }
+    Object::from(dict)
+}
+
+fn synconcealed_object(concealed: i64, replacement: &str, match_id: i64) -> Object {
+    Object::from(Array::from_iter([
+        Object::from(concealed),
+        Object::from(replacement),
+        Object::from(match_id),
+    ]))
 }
 
 fn surface_snapshot(
@@ -400,6 +440,67 @@ fn conceal_cache_keys_follow_the_caller_supplied_surface_snapshot() {
 }
 
 #[test]
+fn conceal_window_state_reads_through_cursor_read_port() {
+    let host = FakeCursorReadPort::default();
+    host.set_window_conceal_state(11, 2, "nvi");
+
+    assert_eq!(
+        capture_conceal_window_state(&host, &api::Window::from(11))
+            .expect("conceal window state should read through fake host"),
+        ConcealWindowState::new(2, "nvi"),
+    );
+    assert_eq!(
+        host.calls(),
+        vec![
+            CursorReadCall::WindowConceallevel { window_handle: 11 },
+            CursorReadCall::WindowConcealcursor { window_handle: 11 },
+        ],
+    );
+}
+
+#[test]
+fn conceal_region_scan_reads_synconcealed_and_display_width_through_cursor_read_port() {
+    let host = FakeCursorReadPort::default();
+    host.push_synconcealed(synconcealed_object(1, "xx", 91));
+    host.push_string_display_width(Object::from(2_i64));
+    let mut regions = Vec::new();
+
+    extend_concealed_regions(&host, 4, 3, 3, &mut regions)
+        .expect("conceal region scan should use fake host reads");
+
+    assert_eq!(regions, vec![conceal_region(3, 3, 91, 2)]);
+    assert_eq!(
+        host.calls(),
+        vec![
+            CursorReadCall::Synconcealed { line: 4, col1: 3 },
+            CursorReadCall::StringDisplayWidth {
+                text: "xx".to_string(),
+            },
+        ],
+    );
+}
+
+#[test]
+fn conceal_screen_cell_reads_screenpos_through_cursor_read_port() {
+    let host = FakeCursorReadPort::default();
+    host.push_screenpos(screenpos_object(Some(7), Some(18), Some(18), Some(18)));
+
+    assert_eq!(
+        screen_cell_for_buffer_column(&host, &api::Window::from(11), 5, 9)
+            .expect("screenpos-backed conceal cell should parse"),
+        Some(screen_cell(7, 18)),
+    );
+    assert_eq!(
+        host.calls(),
+        vec![CursorReadCall::Screenpos {
+            window_handle: 11,
+            line: 5,
+            col1: 9,
+        }],
+    );
+}
+
+#[test]
 fn oil_style_concealed_prefix_projects_fast_path_into_display_space() {
     let surface = surface_snapshot(7, 11, 80, 24, 23, 0, 0);
     let raw_cell = screen_cell(7, 18);
@@ -482,7 +583,7 @@ fn mutate_surface(
     let surface_id = snapshot.id();
     match axis {
         0 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (surface_id.window_handle(), surface_id.buffer_handle().get()),
             (
                 snapshot.window_origin().row().saturating_add(1),
                 snapshot.window_origin().col(),
@@ -496,7 +597,7 @@ fn mutate_surface(
             i64::from(snapshot.text_offset0()),
         ),
         1 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (surface_id.window_handle(), surface_id.buffer_handle().get()),
             (
                 snapshot.window_origin().row(),
                 snapshot.window_origin().col().saturating_add(1),
@@ -510,7 +611,7 @@ fn mutate_surface(
             i64::from(snapshot.text_offset0()),
         ),
         2 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (surface_id.window_handle(), surface_id.buffer_handle().get()),
             (
                 snapshot.window_origin().row(),
                 snapshot.window_origin().col(),
@@ -524,7 +625,7 @@ fn mutate_surface(
             i64::from(snapshot.text_offset0()),
         ),
         3 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (surface_id.window_handle(), surface_id.buffer_handle().get()),
             (
                 snapshot.window_origin().row(),
                 snapshot.window_origin().col(),
@@ -538,7 +639,7 @@ fn mutate_surface(
             i64::from(snapshot.text_offset0()),
         ),
         4 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (surface_id.window_handle(), surface_id.buffer_handle().get()),
             (
                 snapshot.window_origin().row(),
                 snapshot.window_origin().col(),
@@ -552,7 +653,7 @@ fn mutate_surface(
             i64::from(snapshot.text_offset0()),
         ),
         5 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (surface_id.window_handle(), surface_id.buffer_handle().get()),
             (
                 snapshot.window_origin().row(),
                 snapshot.window_origin().col(),
@@ -566,7 +667,7 @@ fn mutate_surface(
             i64::from(snapshot.text_offset0()),
         ),
         6 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle()),
+            (surface_id.window_handle(), surface_id.buffer_handle().get()),
             (
                 snapshot.window_origin().row(),
                 snapshot.window_origin().col(),

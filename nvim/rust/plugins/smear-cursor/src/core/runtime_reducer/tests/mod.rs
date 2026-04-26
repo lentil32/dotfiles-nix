@@ -17,6 +17,7 @@ use super::next_cleanup_check_delay_ms;
 use super::reduce_cursor_event;
 use crate::config::RuntimeConfig;
 use crate::core::state::SemanticEvent;
+use crate::host::BufferHandle;
 use crate::position::RenderPoint;
 use crate::position::corners_center;
 use crate::state::CursorShape;
@@ -320,7 +321,7 @@ impl ScrollShiftSummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LocationSummary {
     window_handle: i64,
-    buffer_handle: i64,
+    buffer_handle: BufferHandle,
     top_row: i64,
     line: i64,
 }
@@ -440,8 +441,7 @@ impl RenderActionSummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TransitionSummary {
     motion_class: MotionClass,
-    should_schedule_next_animation: bool,
-    next_animation_at_ms: Option<u64>,
+    animation_schedule: crate::core::types::AnimationSchedule,
     render_cleanup_action: RenderCleanupAction,
     render_allocation_policy: RenderAllocationPolicy,
     render_side_effects: RenderSideEffects,
@@ -452,8 +452,7 @@ impl TransitionSummary {
     fn from_transition(transition: &CursorTransition) -> Self {
         Self {
             motion_class: transition.motion_class,
-            should_schedule_next_animation: transition.should_schedule_next_animation,
-            next_animation_at_ms: transition.next_animation_at_ms,
+            animation_schedule: transition.animation_schedule,
             render_cleanup_action: render_cleanup_action(transition),
             render_allocation_policy: render_allocation_policy(transition),
             render_side_effects: render_side_effects(transition),
@@ -619,7 +618,8 @@ impl TrajectoryRecord {
         fields.push(format!(
             "next={}",
             self.transition
-                .next_animation_at_ms
+                .animation_schedule
+                .next_animation_at_ms()
                 .map_or_else(|| "-".to_string(), |deadline| deadline.to_string())
         ));
         fields.push(format!(
@@ -667,7 +667,7 @@ impl TrajectoryRecord {
         }
         fields.push(format!(
             "sched={}",
-            if self.transition.should_schedule_next_animation {
+            if self.transition.animation_schedule.should_schedule() {
                 1
             } else {
                 0

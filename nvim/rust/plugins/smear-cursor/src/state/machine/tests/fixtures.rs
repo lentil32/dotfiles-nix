@@ -111,7 +111,7 @@ pub(super) fn row_bounds(corners: &[RenderPoint; 4]) -> (f64, f64) {
 pub(super) fn perturbed_location(location: &TrackedCursor) -> TrackedCursor {
     TrackedCursor::fixture(
         location.window_handle(),
-        location.buffer_handle(),
+        location.buffer_handle().get(),
         location.surface().top_buffer_line().value(),
         location.buffer_line().value(),
     )

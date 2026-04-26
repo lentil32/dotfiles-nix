@@ -56,6 +56,7 @@ use crate::draw::render_plan::Glyph;
 use crate::draw::render_plan::HighlightLevel;
 use crate::draw::render_plan::HighlightRef;
 use crate::draw::render_plan::PlannerState;
+use crate::host::BufferHandle;
 use crate::position::BufferLine;
 use crate::position::CursorObservation;
 use crate::position::ObservedCell;
@@ -312,7 +313,7 @@ fn trace_summary_snapshot_renders_phase_owned_state_and_effects() {
 
     let apply_effect = Effect::ApplyProposal(Box::new(ApplyProposalEffect {
         proposal,
-        buffer_handle: Some(29),
+        buffer_handle: Some(BufferHandle::from_raw_for_test(/*value*/ 29)),
         requested_at: Millis::new(361),
     }));
     let schedule_timer_effect = Effect::ScheduleTimer(ScheduleTimerEffect {

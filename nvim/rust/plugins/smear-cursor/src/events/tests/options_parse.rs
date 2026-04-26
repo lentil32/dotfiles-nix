@@ -4,6 +4,7 @@ use super::super::options::validated_non_negative_f64;
 use super::cterm_colors_object;
 use super::options_dict;
 use crate::config::BufferPerfMode;
+use crate::config::LogLevel;
 use crate::config::MAX_COLOR_LEVELS;
 use crate::state::OptionalChange;
 use crate::state::RuntimeOptionsPatch;
@@ -154,6 +155,15 @@ fn runtime_options_patch_parse_accepts_buffer_perf_mode() {
     let patch = RuntimeOptionsPatch::parse(&opts).expect("expected parse success");
 
     assert_eq!(patch.runtime.buffer_perf_mode, Some(BufferPerfMode::Fast));
+}
+
+#[test]
+fn runtime_options_patch_parse_normalizes_logging_level_to_enum() {
+    let opts = options_dict([("logging_level", Object::from(5_i64))]);
+
+    let patch = RuntimeOptionsPatch::parse(&opts).expect("expected parse success");
+
+    assert_eq!(patch.runtime.logging_level, Some(LogLevel::Off));
 }
 
 #[test]

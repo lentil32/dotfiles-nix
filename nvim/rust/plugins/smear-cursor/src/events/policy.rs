@@ -5,6 +5,7 @@ use super::lru_cache::LruCache;
 use super::runtime::IngressReadSnapshot;
 use crate::config::BufferPerfMode;
 pub(super) use crate::core::state::BufferPerfClass;
+use crate::host::BufferHandle;
 #[cfg(test)]
 use crate::position::ScreenCell;
 pub(super) use telemetry::BufferPerfSignals;
@@ -122,7 +123,7 @@ pub(super) struct BufferEventPolicyInput<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct BufferEventPolicyCache {
-    entries: LruCache<i64, BufferEventPolicy>,
+    entries: LruCache<BufferHandle, BufferEventPolicy>,
 }
 
 impl Default for BufferEventPolicyCache {
@@ -134,15 +135,25 @@ impl Default for BufferEventPolicyCache {
 }
 
 impl BufferEventPolicyCache {
-    pub(super) fn cached_policy(&self, buffer_handle: i64) -> Option<BufferEventPolicy> {
+    pub(super) fn cached_policy(
+        &self,
+        buffer_handle: impl Into<BufferHandle>,
+    ) -> Option<BufferEventPolicy> {
+        let buffer_handle = buffer_handle.into();
         self.entries.peek_copy(&buffer_handle)
     }
 
-    pub(super) fn invalidate_buffer(&mut self, buffer_handle: i64) {
+    pub(super) fn invalidate_buffer(&mut self, buffer_handle: impl Into<BufferHandle>) {
+        let buffer_handle = buffer_handle.into();
         let _ = self.entries.remove(&buffer_handle);
     }
 
-    pub(super) fn store_policy(&mut self, buffer_handle: i64, policy: BufferEventPolicy) {
+    pub(super) fn store_policy(
+        &mut self,
+        buffer_handle: impl Into<BufferHandle>,
+        policy: BufferEventPolicy,
+    ) {
+        let buffer_handle = buffer_handle.into();
         self.entries.insert(buffer_handle, policy);
     }
 

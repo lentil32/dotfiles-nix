@@ -1,30 +1,3 @@
-struct EventIgnoreGuard {
-    previous: Option<String>,
-}
-
-impl EventIgnoreGuard {
-    fn set_all() -> Self {
-        let opts = OptionOpts::builder().build();
-        let previous = api::get_option_value::<String>("eventignore", &opts).ok();
-        if let Err(err) = api::set_option_value("eventignore", "all", &opts) {
-            log_draw_error("set eventignore=all", &err);
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for EventIgnoreGuard {
-    fn drop(&mut self) {
-        let Some(previous) = self.previous.take() else {
-            return;
-        };
-        let opts = OptionOpts::builder().build();
-        if let Err(err) = api::set_option_value("eventignore", previous, &opts) {
-            log_draw_error("restore eventignore", &err);
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AdaptiveBudgetState {
     ewma_demand_milli: u64,
@@ -85,7 +58,7 @@ pub(crate) fn tab_has_visible_windows(tab_windows: &TabWindows) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn has_visible_windows(tabs: &HashMap<i32, TabWindows>) -> bool {
+pub(crate) fn has_visible_windows(tabs: &HashMap<TabHandle, TabWindows>) -> bool {
     tabs.values().any(tab_has_visible_windows)
 }
 
@@ -107,7 +80,7 @@ pub(crate) fn tab_has_pending_clear_work(
 
 #[cfg(test)]
 pub(crate) fn has_pending_clear_work(
-    tabs: &HashMap<i32, TabWindows>,
+    tabs: &HashMap<TabHandle, TabWindows>,
     max_kept_windows: usize,
 ) -> bool {
     tabs.values()

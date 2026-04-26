@@ -8,7 +8,7 @@ enum CompactionLifecycleSpec {
 
 #[derive(Debug)]
 struct CompactionFixture {
-    render_tabs: HashMap<i32, TabWindows>,
+    render_tabs: HashMap<TabHandle, TabWindows>,
     target_budget: usize,
     max_prune_per_tick: usize,
 }
@@ -31,7 +31,7 @@ fn compaction_window(index: usize, lifecycle: CompactionLifecycleSpec) -> Cached
     let offset = i32::try_from(index).unwrap_or(i32::MAX);
     let handles = WindowBufferHandle {
         window_id: 10_000_i32.saturating_add(offset),
-        buffer_id: 20_000_i32.saturating_add(offset),
+        buffer_id: BufferHandle::from(20_000_i32.saturating_add(offset)),
     };
     let placement = WindowPlacement {
         row: i64::try_from(index).unwrap_or(i64::MAX),
@@ -118,9 +118,10 @@ fn compaction_fixture() -> BoxedStrategy<CompactionFixture> {
             .into_iter()
             .enumerate()
             .map(|(tab_offset, (cached_budget, lifecycles))| {
-                let tab_handle = i32::try_from(tab_offset.saturating_add(1)).unwrap_or(i32::MAX);
+                let raw_tab_handle =
+                    i32::try_from(tab_offset.saturating_add(1)).unwrap_or(i32::MAX);
                 (
-                    tab_handle,
+                    tab_handle(raw_tab_handle),
                     compaction_tab_windows(tab_offset, &lifecycles, cached_budget),
                 )
             })
@@ -188,10 +189,10 @@ proptest! {
 }
 
 fn global_compaction_prune_plan_sort_baseline(
-    render_tabs: &HashMap<i32, TabWindows>,
+    render_tabs: &HashMap<TabHandle, TabWindows>,
     target_budget: usize,
     max_prune_per_tick: usize,
-) -> HashMap<i32, Vec<usize>> {
+) -> HashMap<TabHandle, Vec<usize>> {
     let total_windows = render_tabs
         .values()
         .map(|tab_windows| tab_windows.windows.len())
@@ -220,7 +221,7 @@ fn global_compaction_prune_plan_sort_baseline(
     candidates.sort_unstable();
     candidates.truncate(prune_goal.min(candidates.len()));
 
-    let mut plan = HashMap::<i32, Vec<usize>>::new();
+    let mut plan = HashMap::<TabHandle, Vec<usize>>::new();
     for (_, tab_handle, index) in candidates {
         plan.entry(tab_handle).or_default().push(index);
     }
@@ -230,7 +231,7 @@ fn global_compaction_prune_plan_sort_baseline(
     plan
 }
 
-fn benchmark_fixture_tabs(tab_count: i32, windows_per_tab: usize) -> HashMap<i32, TabWindows> {
+fn benchmark_fixture_tabs(tab_count: i32, windows_per_tab: usize) -> HashMap<TabHandle, TabWindows> {
     let mut next_epoch = 1_u64;
     let mut next_window_id = 1_i32;
 
@@ -253,14 +254,14 @@ fn benchmark_fixture_tabs(tab_count: i32, windows_per_tab: usize) -> HashMap<i32
                 ..TabWindows::default()
             };
             tab_windows.seed_tracking_from_windows_for_test();
-            (tab_offset.saturating_add(1), tab_windows)
+            (tab_handle(tab_offset.saturating_add(1)), tab_windows)
         })
         .collect()
 }
 
 fn run_compaction_planner_benchmark_case(
     case_name: &str,
-    tabs: &HashMap<i32, TabWindows>,
+    tabs: &HashMap<TabHandle, TabWindows>,
     target_budget: usize,
     max_prune_per_tick: usize,
     iterations: usize,

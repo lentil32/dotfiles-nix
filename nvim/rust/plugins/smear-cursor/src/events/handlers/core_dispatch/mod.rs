@@ -1,9 +1,16 @@
 #[cfg(test)]
 use super::super::runtime::EffectExecutor;
-use super::super::runtime::mutate_engine_state;
-use super::super::runtime::read_engine_state;
+use super::super::runtime::ScheduledEffectDrainEntry;
+use super::super::runtime::ScheduledEffectQueueState;
+#[cfg(test)]
+use super::super::runtime::ScheduledWorkItem;
+#[cfg(test)]
+use super::super::runtime::ScheduledWorkUnit;
 use super::super::runtime::record_scheduled_queue_depth;
 use super::super::runtime::record_scheduled_queue_depth_for_thermal;
+use super::super::runtime::with_core_read;
+use super::super::runtime::with_core_transition;
+use super::super::runtime::with_dispatch_queue;
 use super::super::timers::schedule_guarded;
 use super::super::trace::core_event_summary;
 use super::super::trace::core_state_summary;
@@ -15,7 +22,6 @@ use nvim_oxi::Result;
 
 mod drain;
 mod execute;
-mod queue;
 #[cfg(test)]
 mod tests;
 
@@ -33,13 +39,6 @@ use drain::scheduled_drain_budget_for_hot_effect_only_snapshot;
 #[cfg(test)]
 use drain::scheduled_drain_budget_for_thermal;
 use execute::dispatch_core_event_with_effect_handler;
-use queue::ScheduledEffectDrainEntry;
-use queue::ScheduledEffectQueueState;
-#[cfg(test)]
-use queue::ScheduledWorkItem;
-#[cfg(test)]
-use queue::ScheduledWorkUnit;
-use queue::with_scheduled_effect_queue;
 
 fn schedule_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
     schedule_guarded(entrypoint.context(), move || {
@@ -48,7 +47,7 @@ fn schedule_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) {
 }
 
 fn current_cleanup_thermal_state() -> Option<RenderThermalState> {
-    read_engine_state(|state| state.core_state().render_cleanup().thermal()).ok()
+    with_core_read(|state| state.render_cleanup().thermal()).ok()
 }
 
 fn stage_effect_batch_on_default_queue(effects: Vec<Effect>) {
@@ -56,7 +55,7 @@ fn stage_effect_batch_on_default_queue(effects: Vec<Effect>) {
         return;
     }
 
-    let stage = with_scheduled_effect_queue(|queue| queue.stage_batch(effects));
+    let stage = with_dispatch_queue(|queue| queue.stage_batch(effects));
     record_scheduled_queue_depth(stage.depth);
     if let Some(thermal) = current_cleanup_thermal_state() {
         record_scheduled_queue_depth_for_thermal(thermal, stage.depth);
@@ -67,7 +66,7 @@ fn stage_effect_batch_on_default_queue(effects: Vec<Effect>) {
 }
 
 fn stage_core_event_on_default_queue(event: CoreEvent) {
-    let stage = with_scheduled_effect_queue(|queue| queue.stage_core_event(event));
+    let stage = with_dispatch_queue(|queue| queue.stage_core_event(event));
     record_scheduled_queue_depth(stage.depth);
     if let Some(thermal) = current_cleanup_thermal_state() {
         record_scheduled_queue_depth_for_thermal(thermal, stage.depth);
@@ -114,5 +113,5 @@ pub(crate) fn stage_core_event_with_default_scheduler(initial_event: CoreEvent) 
 }
 
 pub(crate) fn reset_scheduled_effect_queue() {
-    with_scheduled_effect_queue(ScheduledEffectQueueState::reset);
+    with_dispatch_queue(ScheduledEffectQueueState::reset);
 }

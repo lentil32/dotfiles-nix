@@ -34,7 +34,7 @@ fn cross_window_large_moves_draw_with_reuse_only_allocation_and_keep_animating()
     let frame = draw_frame(&transition).expect("discontinuous jumps should still draw");
 
     assert_eq!(transition.motion_class, MotionClass::DiscontinuousJump);
-    assert!(transition.should_schedule_next_animation);
+    assert!(transition.should_schedule_next_animation());
     assert!(state.is_animating());
     assert_eq!(
         render_allocation_policy(&transition),
@@ -56,8 +56,8 @@ fn same_window_and_cross_window_large_jumps_share_the_same_discontinuous_draw_pa
         cross_window_transition.motion_class,
         MotionClass::DiscontinuousJump
     );
-    assert!(same_window_transition.should_schedule_next_animation);
-    assert!(cross_window_transition.should_schedule_next_animation);
+    assert!(same_window_transition.should_schedule_next_animation());
+    assert!(cross_window_transition.should_schedule_next_animation());
     assert!(same_window.is_animating());
     assert!(cross_window.is_animating());
     assert_eq!(

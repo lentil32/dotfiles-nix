@@ -125,7 +125,7 @@ fn reuse_cached_window(
     CachedRenderWindow {
         handles: WindowBufferHandle {
             window_id: 1_000_i32.saturating_add(offset),
-            buffer_id: 2_000_i32.saturating_add(offset),
+            buffer_id: BufferHandle::from(2_000_i32.saturating_add(offset)),
         },
         lifecycle: lifecycle.as_cached_window_lifecycle(),
         placement: (!matches!(lifecycle, ReuseLifecycleSpec::Invalid))
@@ -138,7 +138,7 @@ fn reuse_matching_visible_window(index: usize, placement: WindowPlacement) -> Ca
     CachedRenderWindow {
         handles: WindowBufferHandle {
             window_id: 10_000_i32.saturating_add(offset),
-            buffer_id: 20_000_i32.saturating_add(offset),
+            buffer_id: BufferHandle::from(20_000_i32.saturating_add(offset)),
         },
         lifecycle: CachedWindowLifecycle::AvailableVisible {
             last_used_epoch: FrameEpoch(1),
@@ -152,7 +152,7 @@ fn reuse_hidden_warm_spare(index: usize) -> CachedRenderWindow {
     CachedRenderWindow {
         handles: WindowBufferHandle {
             window_id: 30_000_i32.saturating_add(offset),
-            buffer_id: 40_000_i32.saturating_add(offset),
+            buffer_id: BufferHandle::from(40_000_i32.saturating_add(offset)),
         },
         lifecycle: CachedWindowLifecycle::AvailableHidden {
             last_used_epoch: FrameEpoch(1),
@@ -171,7 +171,7 @@ fn reuse_acquire_candidate_window(
         ReuseAcquireCandidateSpec::MatchingValid => CachedRenderWindow {
             handles: WindowBufferHandle {
                 window_id: 50_000_i32.saturating_add(offset),
-                buffer_id: 60_000_i32.saturating_add(offset),
+                buffer_id: BufferHandle::from(60_000_i32.saturating_add(offset)),
             },
             lifecycle: CachedWindowLifecycle::AvailableVisible {
                 last_used_epoch: FrameEpoch(1),
@@ -181,7 +181,7 @@ fn reuse_acquire_candidate_window(
         ReuseAcquireCandidateSpec::MatchingMissingWindow => CachedRenderWindow {
             handles: WindowBufferHandle {
                 window_id: -50_000_i32.saturating_sub(offset),
-                buffer_id: 60_000_i32.saturating_add(offset),
+                buffer_id: BufferHandle::from(60_000_i32.saturating_add(offset)),
             },
             lifecycle: CachedWindowLifecycle::AvailableVisible {
                 last_used_epoch: FrameEpoch(1),
@@ -191,7 +191,7 @@ fn reuse_acquire_candidate_window(
         ReuseAcquireCandidateSpec::MatchingMissingBuffer => CachedRenderWindow {
             handles: WindowBufferHandle {
                 window_id: 50_000_i32.saturating_add(offset),
-                buffer_id: -60_000_i32.saturating_sub(offset),
+                buffer_id: BufferHandle::from(-60_000_i32.saturating_sub(offset)),
             },
             lifecycle: CachedWindowLifecycle::AvailableVisible {
                 last_used_epoch: FrameEpoch(1),
@@ -201,7 +201,7 @@ fn reuse_acquire_candidate_window(
         ReuseAcquireCandidateSpec::Invalid => CachedRenderWindow {
             handles: WindowBufferHandle {
                 window_id: -70_000_i32.saturating_sub(offset),
-                buffer_id: -80_000_i32.saturating_sub(offset),
+                buffer_id: BufferHandle::from(-80_000_i32.saturating_sub(offset)),
             },
             lifecycle: CachedWindowLifecycle::Invalid,
             placement: None,
@@ -233,7 +233,7 @@ fn reuse_tab_windows_from_specs(
 
 fn reuse_window_signature(
     cached: CachedRenderWindow,
-) -> (i32, i32, CachedWindowLifecycle, Option<WindowPlacement>) {
+) -> (i32, BufferHandle, CachedWindowLifecycle, Option<WindowPlacement>) {
     (
         cached.handles.window_id,
         cached.handles.buffer_id,
@@ -244,7 +244,7 @@ fn reuse_window_signature(
 
 fn reuse_window_signatures(
     windows: &[CachedRenderWindow],
-) -> Vec<(i32, i32, CachedWindowLifecycle, Option<WindowPlacement>)> {
+) -> Vec<(i32, BufferHandle, CachedWindowLifecycle, Option<WindowPlacement>)> {
     windows
         .iter()
         .copied()
@@ -323,7 +323,7 @@ fn reuse_single_acquire_reference(
             let _ = windows.swap_remove(index);
             continue;
         }
-        if cached.handles.buffer_id <= 0 {
+        if !cached.handles.buffer_id.is_valid() {
             reuse_failures.missing_buffer = reuse_failures.missing_buffer.saturating_add(1);
             let _ = windows.swap_remove(index);
             continue;
@@ -622,8 +622,14 @@ proptest! {
 
         let acquired_window_ids = (0..matching_visible_count)
             .map(|_| {
-                let acquired = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly)
-                    .expect("prepared matching pool should satisfy expected reuse demand");
+                let acquired = acquire(
+                    &mut tabs,
+                    NamespaceId::new(/*value*/ 1),
+                    tab_handle(1),
+                    placement,
+                    AllocationPolicy::ReuseOnly,
+                )
+                .expect("prepared matching pool should satisfy expected reuse demand");
                 prop_assert_eq!(acquired.reuse_failures, ReuseFailureCounters::default());
                 Ok::<i32, TestCaseError>(acquired.window_id)
             })
@@ -637,7 +643,13 @@ proptest! {
             })
             .collect::<Vec<_>>();
         prop_assert_eq!(acquired_window_ids, expected_window_ids);
-        let exhausted = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly);
+        let exhausted = acquire(
+            &mut tabs,
+            NamespaceId::new(/*value*/ 1),
+            tab_handle(1),
+            placement,
+            AllocationPolicy::ReuseOnly,
+        );
         prop_assert_eq!(
             exhausted.err(),
             Some(AcquireError::Exhausted {
@@ -668,8 +680,14 @@ proptest! {
 
         let acquired_window_ids = (0..matching_visible_count)
             .map(|_| {
-                let acquired = acquire(&mut tabs, 1, 1, placement, AllocationPolicy::ReuseOnly)
-                    .expect("matching visible windows should be reused before any hidden spare");
+                let acquired = acquire(
+                    &mut tabs,
+                    NamespaceId::new(/*value*/ 1),
+                    tab_handle(1),
+                    placement,
+                    AllocationPolicy::ReuseOnly,
+                )
+                .expect("matching visible windows should be reused before any hidden spare");
                 prop_assert_eq!(acquired.reuse_failures, ReuseFailureCounters::default());
                 Ok::<i32, TestCaseError>(acquired.window_id)
             })
@@ -705,7 +723,7 @@ proptest! {
         let (expected_result, expected_windows) = reuse_single_acquire_reference(windows, placement);
         let actual_result = super::acquire_in_tab(
             &mut tab_windows,
-            1,
+            NamespaceId::new(/*value*/ 1),
             placement,
             AllocationPolicy::ReuseOnly,
         );

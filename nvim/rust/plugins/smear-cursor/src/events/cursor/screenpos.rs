@@ -9,6 +9,10 @@ use super::cursor_parse_error;
 use crate::core::effect::ProbePolicy;
 use crate::events::logging::trace_lazy;
 use crate::events::runtime::record_conceal_deferred_projection;
+use crate::host::CurrentEditorPort;
+use crate::host::CursorReadPort;
+use crate::host::NeovimHost;
+use crate::host::api;
 use crate::lua::i64_from_object_ref_with_typed;
 use crate::lua::i64_from_object_typed;
 use crate::position::BufferLine;
@@ -17,19 +21,19 @@ use crate::position::ObservedCell;
 use crate::position::RenderPoint;
 use crate::position::ScreenCell;
 use crate::position::WindowSurfaceSnapshot;
-use nvim_oxi::Array;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
 use nvim_oxi::Result;
 use nvim_oxi::String as NvimString;
-use nvim_oxi::api;
-use nvim_oxi::api::opts::OptionOpts;
-use nvim_oxi::api::types::ModeStr;
 use nvim_oxi::conversion::FromObject;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 
-pub(crate) fn current_mode() -> ModeStr {
-    api::get_mode().mode
+pub(crate) fn current_mode() -> String {
+    current_mode_with(&NeovimHost)
+}
+
+fn current_mode_with(host: &impl CurrentEditorPort) -> String {
+    host.current_mode()
 }
 
 fn dictionary_i64_field(
@@ -227,35 +231,24 @@ const fn observed_cell_freshness_name(observed_cell: ObservedCell) -> &'static s
     }
 }
 
-pub(super) fn current_window_option<T>(window: &api::Window, option_name: &str) -> Result<T>
-where
-    T: FromObject,
-{
-    let opts = OptionOpts::builder().win(window.clone()).build();
-    Ok(api::get_option_value(option_name, &opts)?)
-}
-
 pub(super) fn screenpos_for_buffer_column(
+    host: &impl CursorReadPort,
     window: &api::Window,
     line: usize,
     col1: i64,
 ) -> Result<Object> {
-    let args = Array::from_iter([
-        Object::from(window.handle()),
-        Object::from(i64::try_from(line).unwrap_or(i64::MAX)),
-        Object::from(col1),
-    ]);
-    Ok(api::call_function("screenpos", args)?)
+    host.screenpos(window, line, col1)
 }
 
 fn buffer_screen_cursor_position(
+    host: &impl CursorReadPort,
     window: &api::Window,
     mode: &str,
     probe_policy: ProbePolicy,
     surface_snapshot: Option<&WindowSurfaceSnapshot>,
 ) -> CursorResult<BufferCursorRead> {
-    let (line, column) = window.get_cursor()?;
-    let screenpos = screenpos_for_buffer_column(window, line, buffer_column_to_col1(column))?;
+    let (line, column) = host.window_cursor(window)?;
+    let screenpos = screenpos_for_buffer_column(host, window, line, buffer_column_to_col1(column))?;
     let screenpos = screenpos_dictionary(screenpos)?;
     // `screenpos.curscol` points at the cursor landing column, which is the end of a Tab
     // expansion. The smear target needs the first screen cell that renders the buffer character
@@ -265,6 +258,7 @@ fn buffer_screen_cursor_position(
     let (observed_cell, projection_source) = match raw_cell {
         Some(raw_cell) if probe_policy.allows_deferred_cursor_projection() => {
             match observed_cell_for_raw_screenpos(
+                host,
                 window,
                 line,
                 column,
@@ -285,6 +279,7 @@ fn buffer_screen_cursor_position(
                 ),
                 RawScreenposProjection::NeedsExactProjection => {
                     let exact_projection = resolve_buffer_cursor_position(
+                        host,
                         window,
                         line,
                         column,
@@ -301,6 +296,7 @@ fn buffer_screen_cursor_position(
         }
         Some(raw_cell) => {
             let exact_projection = resolve_buffer_cursor_position(
+                host,
                 window,
                 line,
                 column,
@@ -336,19 +332,24 @@ fn conceal_surface_snapshot(
         .map(|(_raw_cell, surface_snapshot)| *surface_snapshot)
 }
 
-fn buffer_line_for_window_cursor(window: &api::Window) -> CursorResult<BufferLine> {
-    let (line, _) = window.get_cursor()?;
+fn buffer_line_for_window_cursor(
+    host: &impl CursorReadPort,
+    window: &api::Window,
+) -> CursorResult<BufferLine> {
+    let (line, _) = host.window_cursor(window)?;
     BufferLine::new(i64::try_from(line).unwrap_or(i64::MAX))
         .ok_or(CursorParseError::InvalidBufferLine { line }.into())
 }
 
 fn screen_cursor_observation(
+    host: &impl CursorReadPort,
     window: &api::Window,
     mode: &str,
     probe_policy: ProbePolicy,
     surface_snapshot: Option<&WindowSurfaceSnapshot>,
 ) -> CursorResult<CursorObservation> {
-    let buffer_read = buffer_screen_cursor_position(window, mode, probe_policy, surface_snapshot)?;
+    let buffer_read =
+        buffer_screen_cursor_position(host, window, mode, probe_policy, surface_snapshot)?;
     // `screenpos()` is the stable callback-safe base here. The `gg` trace showed
     // `screenrow()`/`screencol()` reporting stale or command-line cells on scheduled edges, so we
     // keep the timing-sensitive live probe out of production selection. The
@@ -360,7 +361,7 @@ fn screen_cursor_observation(
     // projected observation returned by the reader.
     trace_screen_cursor_read(window, &buffer_read, probe_policy);
     if buffer_read.uses_deferred_projection() {
-        record_conceal_deferred_projection(i64::from(window.get_buf()?.handle()));
+        record_conceal_deferred_projection(host.window_buffer_handle(window)?);
     }
     let buffer_line = BufferLine::new(i64::try_from(buffer_read.line).unwrap_or(i64::MAX)).ok_or(
         CursorParseError::InvalidBufferLine {
@@ -373,8 +374,8 @@ fn screen_cursor_observation(
     ))
 }
 
-fn command_type_string() -> CursorResult<String> {
-    let value = api::call_function("getcmdtype", Array::new())?;
+fn command_type_string(host: &impl CursorReadPort) -> CursorResult<String> {
+    let value = host.command_type()?;
     crate::lua::string_from_object_typed("getcmdtype", value)
         .map_err(|source| cursor_parse_error("getcmdtype", source))
 }
@@ -384,21 +385,22 @@ pub(super) fn should_use_real_cmdline_cursor(cmdtype: &str) -> bool {
 }
 
 fn cmdline_cursor_observation(
+    host: &impl CursorReadPort,
     window: &api::Window,
     probe_policy: ProbePolicy,
     surface_snapshot: Option<&WindowSurfaceSnapshot>,
 ) -> CursorResult<CursorObservation> {
-    let buffer_line = buffer_line_for_window_cursor(window)?;
-    let cmdtype = command_type_string()?;
+    let buffer_line = buffer_line_for_window_cursor(host, window)?;
+    let cmdtype = command_type_string(host)?;
     if !should_use_real_cmdline_cursor(&cmdtype) {
         // showcmd and normal-mode prefix keys can transiently report `mode=c` while the rendered
         // cursor is still in the buffer. Falling back to the buffer cursor avoids animating
         // bottom-row showcmd columns for motions like `gg`, while preserving any deferred
         // conceal correction that still needs an exact settle-time pass.
-        return screen_cursor_observation(window, "n", probe_policy, surface_snapshot);
+        return screen_cursor_observation(host, window, "n", probe_policy, surface_snapshot);
     }
 
-    let screen_col_value = api::call_function("getcmdscreenpos", Array::new())?;
+    let screen_col_value = host.command_screenpos()?;
     let screen_col = i64_from_object_typed("getcmdscreenpos", screen_col_value)
         .map_err(|source| cursor_parse_error("getcmdscreenpos", source))?;
     if screen_col <= 0 {
@@ -423,14 +425,32 @@ pub(in crate::events) fn cursor_observation_for_mode_with_probe_policy_typed(
     probe_policy: ProbePolicy,
     surface_snapshot: Option<&WindowSurfaceSnapshot>,
 ) -> CursorResult<CursorObservation> {
+    cursor_observation_for_mode_with_probe_policy_typed_with(
+        &NeovimHost,
+        window,
+        mode,
+        smear_to_cmd,
+        probe_policy,
+        surface_snapshot,
+    )
+}
+
+fn cursor_observation_for_mode_with_probe_policy_typed_with(
+    host: &impl CursorReadPort,
+    window: &api::Window,
+    mode: &str,
+    smear_to_cmd: bool,
+    probe_policy: ProbePolicy,
+    surface_snapshot: Option<&WindowSurfaceSnapshot>,
+) -> CursorResult<CursorObservation> {
     if is_cmdline_mode(mode) {
         if !smear_to_cmd {
-            return buffer_line_for_window_cursor(window)
+            return buffer_line_for_window_cursor(host, window)
                 .map(|buffer_line| CursorObservation::new(buffer_line, ObservedCell::Unavailable));
         }
-        return cmdline_cursor_observation(window, probe_policy, surface_snapshot);
+        return cmdline_cursor_observation(host, window, probe_policy, surface_snapshot);
     }
-    screen_cursor_observation(window, mode, probe_policy, surface_snapshot)
+    screen_cursor_observation(host, window, mode, probe_policy, surface_snapshot)
 }
 
 pub(crate) fn cursor_observation_for_mode_with_probe_policy(
@@ -465,10 +485,24 @@ mod tests {
     use super::BufferCursorRead;
     use super::BufferCursorReadDiagnostics;
     use super::ProjectionSource;
+    use super::buffer_line_for_window_cursor;
+    use super::command_type_string;
     use super::conceal_surface_snapshot;
+    use super::current_mode_with;
+    use super::cursor_observation_for_mode_with_probe_policy_typed_with;
     use super::parse_screenpos_cell;
+    use super::screenpos_for_buffer_column;
     use super::should_use_real_cmdline_cursor;
+    use crate::core::effect::ProbePolicy;
+    use crate::host::BufferHandle;
+    use crate::host::CurrentEditorCall;
+    use crate::host::CursorReadCall;
+    use crate::host::CursorReadPort;
+    use crate::host::FakeCurrentEditorPort;
+    use crate::host::FakeCursorReadPort;
+    use crate::host::api;
     use crate::position::BufferLine;
+    use crate::position::CursorObservation;
     use crate::position::ObservedCell;
     use crate::position::ScreenCell;
     use crate::position::SurfaceId;
@@ -525,6 +559,124 @@ mod tests {
             ScreenCell::new(7, 13).expect("one-based origin"),
             ViewportBounds::new(24, 80).expect("positive viewport"),
         )
+    }
+
+    #[test]
+    fn current_mode_reads_through_current_editor_port() {
+        let host = FakeCurrentEditorPort::default();
+        host.set_current_mode("i");
+
+        assert_eq!(current_mode_with(&host), "i".to_string());
+        assert_eq!(host.calls(), vec![CurrentEditorCall::CurrentMode]);
+    }
+
+    #[test]
+    fn screenpos_for_buffer_column_reads_through_cursor_read_port() {
+        let host = FakeCursorReadPort::default();
+        host.push_screenpos(screenpos_object(Some(9), Some(14), Some(14), Some(14)));
+
+        let result = parse_screenpos_cell(
+            screenpos_for_buffer_column(&host, &api::Window::from(11), 7, 3)
+                .expect("screenpos read should succeed"),
+        )
+        .expect("screenpos should parse");
+
+        assert_eq!(result, Some(screen_cell(9, 14)));
+        assert_eq!(
+            host.calls(),
+            vec![CursorReadCall::Screenpos {
+                window_handle: 11,
+                line: 7,
+                col1: 3,
+            }],
+        );
+    }
+
+    #[test]
+    fn buffer_line_for_window_cursor_reads_through_cursor_read_port() {
+        let host = FakeCursorReadPort::default();
+        host.set_window_cursor(11, 23, 4);
+
+        assert_eq!(
+            buffer_line_for_window_cursor(&host, &api::Window::from(11))
+                .expect("window cursor should produce a buffer line"),
+            BufferLine::new(23).expect("positive buffer line"),
+        );
+        assert_eq!(
+            host.calls(),
+            vec![CursorReadCall::WindowCursor { window_handle: 11 }],
+        );
+    }
+
+    #[test]
+    fn command_type_string_reads_through_cursor_read_port() {
+        let host = FakeCursorReadPort::default();
+        host.push_command_type(Object::from(":"));
+
+        assert_eq!(
+            command_type_string(&host).expect("command type should parse"),
+            ":".to_string(),
+        );
+        assert_eq!(host.calls(), vec![CursorReadCall::CommandType]);
+    }
+
+    #[test]
+    fn window_buffer_handle_reads_through_cursor_read_port() {
+        let host = FakeCursorReadPort::default();
+        host.push_window_buffer_handle(17);
+
+        assert_eq!(
+            host.window_buffer_handle(&api::Window::from(11))
+                .expect("window buffer handle should read through fake host"),
+            BufferHandle::from(17),
+        );
+        assert_eq!(
+            host.calls(),
+            vec![CursorReadCall::WindowBufferHandle { window_handle: 11 }],
+        );
+    }
+
+    #[test]
+    fn cmdline_cursor_observation_reads_command_screenpos_through_cursor_read_port() {
+        crate::events::runtime::reset_transient_event_state();
+        let viewport = crate::events::runtime::EditorViewportSnapshot::from_dimensions(
+            /*lines*/ 40, /*cmdheight*/ 2, /*columns*/ 120,
+        );
+        crate::events::runtime::mutate_shell_state(|state| {
+            state.editor_viewport_cache.store_for_test(viewport);
+        })
+        .expect("shell state access should succeed");
+        let host = FakeCursorReadPort::default();
+        host.set_window_cursor(11, 23, 4);
+        host.push_command_type(Object::from(":"));
+        host.push_command_screenpos(Object::from(42_i64));
+
+        let observation = cursor_observation_for_mode_with_probe_policy_typed_with(
+            &host,
+            &api::Window::from(11),
+            "c",
+            /*smear_to_cmd*/ true,
+            ProbePolicy::exact(),
+            None,
+        )
+        .expect("cmdline cursor observation should succeed");
+
+        assert_eq!(
+            observation,
+            CursorObservation::new(
+                BufferLine::new(23).expect("positive buffer line"),
+                ObservedCell::Exact(screen_cell(39, 42)),
+            ),
+        );
+        assert_eq!(
+            host.calls(),
+            vec![
+                CursorReadCall::WindowCursor { window_handle: 11 },
+                CursorReadCall::CommandType,
+                CursorReadCall::CommandScreenpos,
+            ],
+        );
+        crate::events::runtime::reset_transient_event_state();
     }
 
     proptest! {

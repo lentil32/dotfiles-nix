@@ -72,7 +72,7 @@ fn try_positive_id(value: i64, label: &'static str) -> Result<NonZeroI64> {
         .filter(|id| id.get() > 0)
         .map_or_else(
             || {
-                Err(nvim_oxi::api::Error::Other(format!(
+                Err(crate::host::api::Error::Other(format!(
                     "host bridge returned invalid {label}: {value}"
                 ))
                 .into())

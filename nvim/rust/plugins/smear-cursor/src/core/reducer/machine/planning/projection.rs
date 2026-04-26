@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::render_planning_observation;
 use crate::core::realization::project_particle_overlay_cells;
 use crate::core::realization::project_render_plan;
@@ -5,6 +6,7 @@ use crate::core::runtime_reducer::TargetCellPresentation;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::CursorTrailSemantic;
+#[cfg(test)]
 use crate::core::state::ObservationSnapshot;
 use crate::core::state::ProjectionHandle;
 use crate::core::state::ProjectionPlannerClock;

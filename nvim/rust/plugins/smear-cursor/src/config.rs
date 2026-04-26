@@ -57,6 +57,67 @@ impl BufferPerfMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum LogLevel {
+    Trace,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+    Off,
+}
+
+impl LogLevel {
+    pub(crate) const fn from_i64(level: i64) -> Self {
+        if level <= 0 {
+            Self::Trace
+        } else {
+            match level {
+                1 => Self::Debug,
+                2 => Self::Info,
+                3 => Self::Warn,
+                4 => Self::Error,
+                _ => Self::Off,
+            }
+        }
+    }
+
+    pub(crate) const fn as_vim_level(self) -> i64 {
+        match self {
+            Self::Trace => 0,
+            Self::Debug => 1,
+            Self::Info => 2,
+            Self::Warn => 3,
+            Self::Error => 4,
+            Self::Off => 5,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Trace => "TRACE",
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warn => "WARNING",
+            Self::Error => "ERROR",
+            Self::Off => "OFF",
+        }
+    }
+
+    pub(crate) const fn should_notify(self) -> bool {
+        matches!(self, Self::Info | Self::Warn | Self::Error)
+    }
+
+    pub(crate) const fn allows(self, message_level: Self) -> bool {
+        if matches!(self, Self::Off) {
+            false
+        } else {
+            self.as_vim_level() <= message_level.as_vim_level()
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RuntimeConfig {
     pub(crate) time_interval: f64,
@@ -98,7 +159,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) windows_zindex: u32,
     pub(crate) buffer_perf_mode: BufferPerfMode,
     pub(crate) filetypes_disabled: Arc<HashSet<String>>,
-    pub(crate) logging_level: i64,
+    pub(crate) logging_level: LogLevel,
     pub(crate) cursor_color: Option<String>,
     pub(crate) cursor_color_insert_mode: Option<String>,
     pub(crate) normal_bg: Option<String>,
@@ -236,7 +297,7 @@ impl Default for RuntimeConfig {
             windows_zindex: 300,
             buffer_perf_mode: BufferPerfMode::Auto,
             filetypes_disabled: Arc::default(),
-            logging_level: 2,
+            logging_level: LogLevel::Info,
             cursor_color: None,
             cursor_color_insert_mode: None,
             normal_bg: None,
@@ -277,6 +338,7 @@ mod tests {
     use super::BufferPerfMode;
     use super::DEFAULT_ANIMATION_FPS;
     use super::DEFAULT_MAX_KEPT_WINDOWS;
+    use super::LogLevel;
     use super::RuntimeConfig;
     use crate::test_support::proptest::ModeFamily;
     use crate::test_support::proptest::mode_family;
@@ -381,6 +443,15 @@ mod tests {
             RuntimeConfig::interval_ms_for_fps(DEFAULT_ANIMATION_FPS)
         );
         assert_eq!(config.simulation_hz, 120.0);
+    }
+
+    #[test]
+    fn log_level_from_i64_preserves_vim_threshold_semantics() {
+        assert_eq!(LogLevel::from_i64(-1), LogLevel::Trace);
+        assert_eq!(LogLevel::from_i64(0), LogLevel::Trace);
+        assert_eq!(LogLevel::from_i64(2), LogLevel::Info);
+        assert_eq!(LogLevel::from_i64(4), LogLevel::Error);
+        assert_eq!(LogLevel::from_i64(5), LogLevel::Off);
     }
 
     #[test]

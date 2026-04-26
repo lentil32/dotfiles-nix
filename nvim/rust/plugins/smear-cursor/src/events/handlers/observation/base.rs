@@ -12,7 +12,6 @@ use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationMotion;
 use crate::core::types::Generation;
 use crate::events::cursor::CursorReadError;
-use crate::events::cursor::current_mode;
 use crate::events::cursor::cursor_observation_for_mode_with_probe_policy_typed;
 use crate::events::handlers::viewport::maybe_scroll_shift_for_core_event;
 use crate::events::runtime::buffer_text_revision;
@@ -22,12 +21,15 @@ use crate::events::runtime::now_ms;
 use crate::events::runtime::to_core_millis;
 use crate::events::surface::WindowSurfaceReadError;
 use crate::events::surface::current_window_surface_snapshot;
+use crate::host::BufferHandle;
+use crate::host::CurrentEditorPort;
+use crate::host::NeovimHost;
+use crate::host::api;
 use crate::position::CursorObservation;
 use crate::position::ObservedCell;
 use crate::position::ViewportBounds;
 use crate::position::WindowSurfaceSnapshot;
 use nvim_oxi::Result;
-use nvim_oxi::api;
 
 pub(super) type ObservationReadResult<T> = std::result::Result<T, ObservationReadError>;
 
@@ -49,8 +51,8 @@ pub(super) enum ObservationReadError {
     MissingViewport,
 }
 
-impl From<nvim_oxi::api::Error> for ObservationReadError {
-    fn from(error: nvim_oxi::api::Error) -> Self {
+impl From<crate::host::api::Error> for ObservationReadError {
+    fn from(error: crate::host::api::Error) -> Self {
         Self::Shell(error.into())
     }
 }
@@ -65,7 +67,7 @@ impl From<ObservationReadError> for nvim_oxi::Error {
             | ObservationReadError::MissingBuffer
             | ObservationReadError::MissingBufferTextRevision
             | ObservationReadError::MissingViewport => {
-                nvim_oxi::api::Error::Other(error.to_string()).into()
+                crate::host::api::Error::Other(error.to_string()).into()
             }
         }
     }
@@ -85,6 +87,12 @@ pub(super) struct CurrentEditorSnapshot {
 enum ObservationCaptureSource<'a> {
     Live,
     Ingress(&'a IngressObservationSurface),
+}
+
+#[derive(Clone, Copy)]
+enum ViewportCapture {
+    Omit,
+    Include,
 }
 
 impl<'a> ObservationCaptureSource<'a> {
@@ -111,32 +119,42 @@ impl<'a> ObservationCaptureSource<'a> {
 
 impl CurrentEditorSnapshot {
     pub(super) fn capture() -> ObservationReadResult<Self> {
-        Self::capture_with_viewport(false, None)
+        Self::capture_with_viewport(&NeovimHost, ViewportCapture::Omit, None)
     }
 
     pub(super) fn capture_for_observation_base(
         ingress_observation_surface: Option<&IngressObservationSurface>,
     ) -> ObservationReadResult<Self> {
-        Self::capture_with_viewport(true, ingress_observation_surface)
+        Self::capture_with_viewport(
+            &NeovimHost,
+            ViewportCapture::Include,
+            ingress_observation_surface,
+        )
     }
 
     fn capture_with_viewport(
-        include_viewport: bool,
+        host: &impl CurrentEditorPort,
+        viewport_capture: ViewportCapture,
         ingress_observation_surface: Option<&IngressObservationSurface>,
     ) -> ObservationReadResult<Self> {
         let source = ObservationCaptureSource::from_ingress(ingress_observation_surface);
-        let mode = source.map_or_else(
-            |surface| surface.mode().to_owned(),
-            || current_mode().to_string_lossy().into_owned(),
+        let mode = source.map_or_else(|surface| surface.mode().to_owned(), || host.current_mode());
+        let viewport = match viewport_capture {
+            ViewportCapture::Omit => None,
+            ViewportCapture::Include => Some(current_viewport_snapshot()?),
+        };
+        let window = source.map_or_else(
+            |surface| window_from_ingress_surface(host, surface),
+            || current_window_snapshot(host),
         );
-        let viewport = include_viewport
-            .then(current_viewport_snapshot)
-            .transpose()?;
-        let window = source.map_or_else(window_from_ingress_surface, current_window_snapshot);
-        let buffer = source.map_or_else(buffer_from_ingress_surface, current_buffer_snapshot);
+        let buffer = source.map_or_else(
+            |surface| buffer_from_ingress_surface(host, surface),
+            || current_buffer_snapshot(host),
+        );
         let text_revision = match buffer.as_ref() {
             Some(buffer) => Some(
-                buffer_text_revision(i64::from(buffer.handle())).map_err(nvim_oxi::Error::from)?,
+                buffer_text_revision(BufferHandle::from_buffer(buffer))
+                    .map_err(nvim_oxi::Error::from)?,
             ),
             None => None,
         };
@@ -198,26 +216,28 @@ impl CurrentEditorSnapshot {
     }
 }
 
-fn current_window_snapshot() -> Option<api::Window> {
-    let window = api::get_current_win();
-    window.is_valid().then_some(window)
+fn current_window_snapshot(host: &impl CurrentEditorPort) -> Option<api::Window> {
+    let window = host.current_window();
+    host.window_is_valid(&window).then_some(window)
 }
 
-fn current_buffer_snapshot() -> Option<api::Buffer> {
-    let buffer = api::get_current_buf();
-    buffer.is_valid().then_some(buffer)
+fn current_buffer_snapshot(host: &impl CurrentEditorPort) -> Option<api::Buffer> {
+    let buffer = host.current_buffer();
+    host.buffer_is_valid(&buffer).then_some(buffer)
 }
 
-fn window_from_ingress_surface(surface: &IngressObservationSurface) -> Option<api::Window> {
-    let handle = i32::try_from(surface.window_handle()).ok()?;
-    let window = api::Window::from(handle);
-    window.is_valid().then_some(window)
+fn window_from_ingress_surface(
+    host: &impl CurrentEditorPort,
+    surface: &IngressObservationSurface,
+) -> Option<api::Window> {
+    host.valid_window_from_handle(surface.window_handle())
 }
 
-fn buffer_from_ingress_surface(surface: &IngressObservationSurface) -> Option<api::Buffer> {
-    let handle = i32::try_from(surface.buffer_handle()).ok()?;
-    let buffer = api::Buffer::from(handle);
-    buffer.is_valid().then_some(buffer)
+fn buffer_from_ingress_surface(
+    host: &impl CurrentEditorPort,
+    surface: &IngressObservationSurface,
+) -> Option<api::Buffer> {
+    host.valid_buffer_from_handle(surface.buffer_handle())
 }
 
 pub(super) fn current_core_cursor_position(
@@ -376,13 +396,19 @@ mod tests {
     use super::CurrentEditorSnapshot;
     use super::ObservationCaptureSource;
     use super::ObservationReadError;
+    use super::buffer_from_ingress_surface;
+    use super::current_buffer_snapshot;
     use super::current_viewport_snapshot;
+    use super::current_window_snapshot;
     use super::cursor_observation_from_sources;
     use super::observation_surface_from_sources;
+    use super::window_from_ingress_surface;
     use crate::core::effect::IngressObservationSurface;
     use crate::events::cursor::CursorParseError;
     use crate::events::cursor::CursorReadError;
     use crate::events::surface::WindowSurfaceReadError;
+    use crate::host::CurrentEditorCall;
+    use crate::host::FakeCurrentEditorPort;
     use crate::position::BufferLine;
     use crate::position::CursorObservation;
     use crate::position::ObservedCell;
@@ -442,6 +468,109 @@ mod tests {
     }
 
     #[test]
+    fn current_window_snapshot_reads_through_current_editor_port() {
+        let host = FakeCurrentEditorPort::default();
+        host.set_current_window_handle(11);
+
+        assert_eq!(
+            current_window_snapshot(&host).map(|window| window.handle()),
+            Some(11),
+        );
+        assert_eq!(
+            host.calls(),
+            vec![
+                CurrentEditorCall::CurrentWindow,
+                CurrentEditorCall::WindowIsValid { window_handle: 11 },
+            ],
+        );
+    }
+
+    #[test]
+    fn current_buffer_snapshot_reads_through_current_editor_port() {
+        let host = FakeCurrentEditorPort::default();
+        host.set_current_buffer_handle(17);
+
+        assert_eq!(
+            current_buffer_snapshot(&host).map(|buffer| buffer.handle()),
+            Some(17),
+        );
+        assert_eq!(
+            host.calls(),
+            vec![
+                CurrentEditorCall::CurrentBuffer,
+                CurrentEditorCall::BufferIsValid { buffer_handle: 17 },
+            ],
+        );
+    }
+
+    #[test]
+    fn invalid_current_buffer_snapshot_stays_unavailable() {
+        let host = FakeCurrentEditorPort::default();
+        host.set_current_buffer_handle(17);
+        host.set_buffer_validity(17, false);
+
+        assert_eq!(
+            current_buffer_snapshot(&host).map(|buffer| buffer.handle()),
+            None
+        );
+        assert_eq!(
+            host.calls(),
+            vec![
+                CurrentEditorCall::CurrentBuffer,
+                CurrentEditorCall::BufferIsValid { buffer_handle: 17 },
+            ],
+        );
+    }
+
+    #[test]
+    fn ingress_window_snapshot_validates_through_current_editor_port() {
+        let host = FakeCurrentEditorPort::default();
+        let ingress_surface = ingress_surface();
+
+        assert_eq!(
+            window_from_ingress_surface(&host, &ingress_surface).map(|window| window.handle()),
+            Some(11),
+        );
+        assert_eq!(
+            host.calls(),
+            vec![CurrentEditorCall::ValidWindowFromHandle { window_handle: 11 }],
+        );
+    }
+
+    #[test]
+    fn invalid_ingress_window_snapshot_stays_unavailable() {
+        let host = FakeCurrentEditorPort::default();
+        host.set_window_validity(11, false);
+        let ingress_surface = ingress_surface();
+
+        assert_eq!(
+            window_from_ingress_surface(&host, &ingress_surface).map(|window| window.handle()),
+            None,
+        );
+        assert_eq!(
+            host.calls(),
+            vec![CurrentEditorCall::ValidWindowFromHandle { window_handle: 11 }],
+        );
+    }
+
+    #[test]
+    fn ingress_buffer_snapshot_validates_through_current_editor_port() {
+        let host = FakeCurrentEditorPort::default();
+        let ingress_surface = ingress_surface();
+
+        assert_eq!(
+            buffer_from_ingress_surface(&host, &ingress_surface).map(|buffer| buffer.handle()),
+            Some(17),
+        );
+        assert_eq!(
+            host.calls(),
+            vec![CurrentEditorCall::ValidBufferFromHandle {
+                buffer_handle: 17.into(),
+            }],
+        );
+    }
+
+    #[test]
     fn required_editor_snapshot_facts_return_typed_unavailable_errors() {
         let snapshot = CurrentEditorSnapshot {
             mode: "n".to_string(),
@@ -475,10 +604,10 @@ mod tests {
     fn current_viewport_snapshot_uses_editor_viewport_owner_for_command_row_math() {
         crate::events::runtime::reset_transient_event_state();
         let viewport = crate::events::runtime::EditorViewportSnapshot::from_dimensions(40, 2, 120);
-        crate::events::runtime::mutate_engine_state(|state| {
-            state.shell.editor_viewport_cache.store_for_test(viewport);
+        crate::events::runtime::mutate_shell_state(|state| {
+            state.editor_viewport_cache.store_for_test(viewport);
         })
-        .expect("engine state access should succeed");
+        .expect("shell state access should succeed");
 
         assert_eq!(
             current_viewport_snapshot().expect("cached viewport should yield observation bounds"),

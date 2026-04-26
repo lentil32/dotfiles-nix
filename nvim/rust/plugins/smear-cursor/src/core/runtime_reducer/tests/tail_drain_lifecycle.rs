@@ -1,5 +1,7 @@
 use super::*;
 use crate::core::runtime_reducer::as_delay_ms;
+use crate::core::types::AnimationSchedule;
+use crate::core::types::Millis;
 use crate::test_support::proptest::stateful_config;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
@@ -32,8 +34,7 @@ enum TailDrainExpectedAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TailDrainExpectedTransition {
     action: TailDrainExpectedAction,
-    should_schedule_next_animation: bool,
-    next_animation_at_ms: Option<u64>,
+    animation_schedule: AnimationSchedule,
     render_cleanup_action: RenderCleanupAction,
     remaining_steps: u32,
 }
@@ -77,8 +78,7 @@ impl TailDrainModel {
             self.remaining_steps = 0;
             return TailDrainExpectedTransition {
                 action: TailDrainExpectedAction::ClearAll,
-                should_schedule_next_animation: false,
-                next_animation_at_ms: None,
+                animation_schedule: AnimationSchedule::Idle,
                 render_cleanup_action: RenderCleanupAction::Schedule,
                 remaining_steps: 0,
             };
@@ -106,19 +106,19 @@ impl TailDrainModel {
             self.next_frame_at_ms = None;
             return TailDrainExpectedTransition {
                 action: TailDrainExpectedAction::ClearAll,
-                should_schedule_next_animation: false,
-                next_animation_at_ms: None,
+                animation_schedule: AnimationSchedule::Idle,
                 render_cleanup_action: RenderCleanupAction::Schedule,
                 remaining_steps: 0,
             };
         }
 
-        let next_animation_at_ms = Some(self.next_animation_deadline(now_ms, frame_period_ms));
+        let animation_schedule = AnimationSchedule::Deadline(Millis::new(
+            self.next_animation_deadline(now_ms, frame_period_ms),
+        ));
         if planner_idle_steps == 0 {
             return TailDrainExpectedTransition {
                 action: TailDrainExpectedAction::Noop,
-                should_schedule_next_animation: true,
-                next_animation_at_ms,
+                animation_schedule,
                 render_cleanup_action: RenderCleanupAction::Invalidate,
                 remaining_steps: self.remaining_steps,
             };
@@ -126,8 +126,7 @@ impl TailDrainModel {
 
         TailDrainExpectedTransition {
             action: TailDrainExpectedAction::Draw { planner_idle_steps },
-            should_schedule_next_animation: true,
-            next_animation_at_ms,
+            animation_schedule,
             render_cleanup_action: RenderCleanupAction::Invalidate,
             remaining_steps: self.remaining_steps,
         }
@@ -202,14 +201,7 @@ fn assert_tail_drain_transition_matches_model(
         }
     }
 
-    assert_eq!(
-        transition.should_schedule_next_animation,
-        expected.should_schedule_next_animation
-    );
-    assert_eq!(
-        transition.next_animation_at_ms,
-        expected.next_animation_at_ms
-    );
+    assert_eq!(transition.animation_schedule, expected.animation_schedule);
     assert_eq!(
         render_cleanup_action(transition),
         expected.render_cleanup_action
@@ -230,7 +222,7 @@ fn quiescent_external_noop_after_first_frame_schedules_cleanup() {
     );
 
     assert!(matches!(render_action(&follow_up), RenderAction::Noop));
-    assert!(!follow_up.should_schedule_next_animation);
+    assert!(!follow_up.should_schedule_next_animation());
     assert_eq!(
         render_side_effects(&follow_up).cursor_visibility,
         CursorVisibilityEffect::Show
@@ -262,8 +254,8 @@ fn tail_drain_gap_beyond_catch_up_budget_clears_tail_immediately() {
     );
 
     assert!(matches!(render_action(&transition), RenderAction::ClearAll));
-    assert!(!transition.should_schedule_next_animation);
-    assert_eq!(transition.next_animation_at_ms, None);
+    assert!(!transition.should_schedule_next_animation());
+    assert_eq!(transition.next_animation_at_ms(), None);
     assert_eq!(
         render_cleanup_action(&transition),
         RenderCleanupAction::Schedule
@@ -295,8 +287,8 @@ proptest! {
         );
         let frame = draw_frame(&transition).expect("tail drain entry should draw");
         prop_assert_eq!(frame.planner_idle_steps, 0);
-        prop_assert!(transition.should_schedule_next_animation);
-        prop_assert!(transition.next_animation_at_ms.is_some());
+        prop_assert!(transition.should_schedule_next_animation());
+        prop_assert!(transition.next_animation_at_ms().is_some());
         prop_assert_eq!(
             render_cleanup_action(&transition),
             RenderCleanupAction::Invalidate,
@@ -355,8 +347,8 @@ proptest! {
             EventSource::External,
         );
         prop_assert!(matches!(render_action(&follow_up), RenderAction::Noop));
-        prop_assert!(!follow_up.should_schedule_next_animation);
-        prop_assert_eq!(follow_up.next_animation_at_ms, None);
+        prop_assert!(!follow_up.should_schedule_next_animation());
+        prop_assert_eq!(follow_up.next_animation_at_ms(), None);
         prop_assert_eq!(
             render_side_effects(&follow_up).cursor_visibility,
             CursorVisibilityEffect::Show,

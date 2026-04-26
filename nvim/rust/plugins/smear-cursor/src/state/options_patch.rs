@@ -1,5 +1,6 @@
 use super::RuntimeState;
 use crate::config::BufferPerfMode;
+use crate::config::LogLevel;
 use crate::config::RuntimeConfig;
 use crate::config::normalize_color_levels;
 use crate::lua::invalid_key;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) struct RuntimeOptionsEffects {
-    pub(crate) logging_level: Option<i64>,
+    pub(crate) logging_level: Option<LogLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,7 +46,7 @@ pub(crate) struct RuntimeSwitchesPatch {
     pub(crate) windows_zindex: Option<u32>,
     pub(crate) buffer_perf_mode: Option<BufferPerfMode>,
     pub(crate) filetypes_disabled: Option<Vec<String>>,
-    pub(crate) logging_level: Option<i64>,
+    pub(crate) logging_level: Option<LogLevel>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]

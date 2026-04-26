@@ -9,8 +9,9 @@ use super::scheduled_drain_budget;
 use super::scheduled_drain_budget_for_depth;
 use super::scheduled_drain_budget_for_hot_effect_only_snapshot;
 use super::scheduled_drain_budget_for_thermal;
-use super::with_scheduled_effect_queue;
+use super::with_dispatch_queue;
 use crate::core::effect::Effect;
+use crate::core::effect::OrderedEffect;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ExternalDemandQueuedEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
@@ -51,6 +52,7 @@ use std::sync::Mutex;
 mod deferred_multi_probe_observation;
 mod dispatch_core_event;
 mod refresh_required_probe_retry;
+mod scheduled_effect_coalescing;
 mod scheduled_effect_drain;
 mod scheduled_effect_drain_support;
 mod single_cursor_probe_observation;
@@ -159,7 +161,7 @@ impl CoreDispatchTestContext {
             // CONTEXT: `stage_batch` reports whether this enqueue operation also needs to arm
             // the drain edge; it does not signal whether the batch was accepted.
             let should_schedule =
-                with_scheduled_effect_queue(|queue| queue.stage_batch(effects).should_schedule);
+                with_dispatch_queue(|queue| queue.stage_batch(effects).should_schedule);
             assert!(
                 should_schedule,
                 "ingress dispatch should arm exactly one scheduled work item"
@@ -255,33 +257,44 @@ fn install_background_probe_plan(basis: &ObservationBasis) {
 }
 
 fn queue_stage_batch(effects: Vec<Effect>) -> bool {
-    with_scheduled_effect_queue(|queue| queue.stage_batch(effects).should_schedule)
+    with_dispatch_queue(|queue| queue.stage_batch(effects).should_schedule)
 }
 
 fn queued_work_count() -> usize {
-    with_scheduled_effect_queue(|queue| queue.pending_work_units)
+    with_dispatch_queue(|queue| queue.pending_work_units)
 }
 
 fn queued_item_capacity() -> usize {
-    with_scheduled_effect_queue(|queue| queue.items.capacity())
+    with_dispatch_queue(|queue| queue.items.capacity())
 }
 
 fn queued_front_work_item() -> Option<ScheduledWorkUnit> {
-    with_scheduled_effect_queue(|queue| match queue.items.front()? {
-        ScheduledWorkItem::EffectBatch(effects) => {
-            Some(ScheduledWorkUnit::EffectBatch(effects.clone()))
+    with_dispatch_queue(|queue| match queue.items.front()? {
+        ScheduledWorkItem::OrderedEffectBatch(effects) => {
+            Some(ScheduledWorkUnit::OrderedEffectBatch(effects.clone()))
         }
         ScheduledWorkItem::CoreEvent(event) => Some(ScheduledWorkUnit::CoreEvent(event.clone())),
-        ScheduledWorkItem::EffectOnlyAgenda(agenda) => agenda
+        ScheduledWorkItem::ShellOnlyAgenda(agenda) => agenda
             .steps
             .front()
             .cloned()
-            .map(ScheduledWorkUnit::EffectOnlyStep),
+            .map(ScheduledWorkUnit::ShellOnlyStep),
+    })
+}
+
+fn queue_contains_observation_base_request() -> bool {
+    with_dispatch_queue(|queue| {
+        queue.items.iter().any(|item| match item {
+            ScheduledWorkItem::OrderedEffectBatch(effects) => {
+                contains_observation_base_request(effects)
+            }
+            ScheduledWorkItem::CoreEvent(_) | ScheduledWorkItem::ShellOnlyAgenda(_) => false,
+        })
     })
 }
 
 fn queue_is_marked_scheduled() -> bool {
-    with_scheduled_effect_queue(|queue| queue.drain_scheduled)
+    with_dispatch_queue(|queue| queue.drain_scheduled)
 }
 
 fn drain_next_edge(executor: &mut RecordingExecutor) -> bool {
@@ -289,42 +302,42 @@ fn drain_next_edge(executor: &mut RecordingExecutor) -> bool {
         .expect("scheduled drain should execute one queued edge")
 }
 
-fn contains_observation_base_request(effects: &[Effect]) -> bool {
+fn contains_observation_base_request(effects: &[OrderedEffect]) -> bool {
     effects
         .iter()
-        .any(|effect| matches!(effect, Effect::RequestObservationBase(_)))
+        .any(|effect| matches!(effect, OrderedEffect::RequestObservationBase(_)))
 }
 
-fn contains_probe_request(effects: &[Effect]) -> bool {
+fn contains_probe_request(effects: &[OrderedEffect]) -> bool {
     effects
         .iter()
-        .any(|effect| matches!(effect, Effect::RequestProbe(_)))
+        .any(|effect| matches!(effect, OrderedEffect::RequestProbe(_)))
 }
 
-fn contains_render_plan_request(effects: &[Effect]) -> bool {
+fn contains_render_plan_request(effects: &[OrderedEffect]) -> bool {
     effects
         .iter()
-        .any(|effect| matches!(effect, Effect::RequestRenderPlan(_)))
+        .any(|effect| matches!(effect, OrderedEffect::RequestRenderPlan(_)))
 }
 
-fn is_apply_proposal(effect: &Effect) -> bool {
-    matches!(effect, Effect::ApplyProposal(_))
+fn is_apply_proposal(effect: &OrderedEffect) -> bool {
+    matches!(effect, OrderedEffect::ApplyProposal(_))
 }
 
-fn only_cursor_color_probe_request(effects: &[Effect]) -> bool {
+fn only_cursor_color_probe_request(effects: &[OrderedEffect]) -> bool {
     matches!(
         effects,
-        [Effect::RequestProbe(payload)] if payload.kind == ProbeKind::CursorColor
+        [OrderedEffect::RequestProbe(payload)] if payload.kind == ProbeKind::CursorColor
     )
 }
 
 fn only_background_probe_request_for_chunk(
-    effects: &[Effect],
+    effects: &[OrderedEffect],
     expected_chunk: &BackgroundProbeChunk,
 ) -> bool {
     matches!(
         effects,
-        [Effect::RequestProbe(payload)]
+        [OrderedEffect::RequestProbe(payload)]
             if payload.kind == ProbeKind::Background
                 && payload.background_chunk.as_ref() == Some(expected_chunk)
     )

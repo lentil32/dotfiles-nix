@@ -15,15 +15,15 @@ use crate::config::normalize_color_levels;
 use crate::core::realization::RealizationProjection;
 use crate::core::realization::RealizationSpan;
 use crate::events::editor_viewport_for_bounds;
+use crate::host::DrawResourcePort;
+use crate::host::NamespaceId;
+use crate::host::NeovimHost;
+use crate::host::TabHandle;
+use crate::host::api;
+use crate::host::api::opts::SetExtmarkOpts;
+use crate::host::api::types::ExtmarkVirtTextPosition;
 use crate::position::ViewportBounds;
-use nvim_oxi::Array;
-use nvim_oxi::Dictionary;
-use nvim_oxi::Object;
 use nvim_oxi::Result;
-use nvim_oxi::api;
-use nvim_oxi::api::opts::SetExtmarkOpts;
-use nvim_oxi::api::types::ExtmarkVirtTextPosition;
-use std::cell::Cell;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ApplyMetrics {
@@ -55,89 +55,24 @@ pub(crate) fn editor_bounds() -> Result<ViewportBounds> {
     })
 }
 
-pub(crate) fn current_tab_handle() -> i32 {
-    api::get_current_tabpage().handle()
+pub(crate) fn current_tab_handle() -> TabHandle {
+    NeovimHost.current_tab_handle()
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum FlushRedrawCapability {
-    #[default]
-    Unknown,
-    ApiAvailable,
-    FallbackOnly,
-}
-
-thread_local! {
-    static FLUSH_REDRAW_CAPABILITY: Cell<FlushRedrawCapability> =
-        const { Cell::new(FlushRedrawCapability::Unknown) };
-}
-
-fn set_flush_redraw_capability(capability: FlushRedrawCapability) {
-    FLUSH_REDRAW_CAPABILITY.with(|slot| slot.set(capability));
-}
-
-fn flush_redraw_capability() -> FlushRedrawCapability {
-    FLUSH_REDRAW_CAPABILITY.with(Cell::get)
-}
-
-fn flush_redraw_capability_from_exists_result(exists_result: i64) -> FlushRedrawCapability {
-    if exists_result > 0 {
-        FlushRedrawCapability::ApiAvailable
-    } else {
-        FlushRedrawCapability::FallbackOnly
-    }
-}
-
-fn flush_redraw_via_api() -> Result<()> {
-    let mut opts = Dictionary::new();
-    opts.insert("cursor", true);
-    opts.insert("valid", true);
-    opts.insert("flush", true);
-    let _: Object = api::call_function("nvim__redraw", Array::from_iter([Object::from(opts)]))?;
-    Ok(())
-}
-
-pub(crate) fn refresh_redraw_capability() -> Result<()> {
-    let exists_result: i64 =
-        api::call_function("exists", Array::from_iter([Object::from("*nvim__redraw")]))?;
-    set_flush_redraw_capability(flush_redraw_capability_from_exists_result(exists_result));
-    Ok(())
-}
-
-pub(crate) fn redraw() -> Result<()> {
-    let capability = match flush_redraw_capability() {
-        FlushRedrawCapability::Unknown => {
-            refresh_redraw_capability()?;
-            flush_redraw_capability()
-        }
-        known => known,
-    };
-
-    if matches!(capability, FlushRedrawCapability::ApiAvailable) {
-        match flush_redraw_via_api() {
-            Ok(()) => return Ok(()),
-            Err(_) => set_flush_redraw_capability(FlushRedrawCapability::FallbackOnly),
-        }
-    }
-
-    Ok(api::command("redraw!")?)
-}
-
-pub(crate) fn clear_namespace_in_buffer(buffer: &mut api::Buffer, namespace_id: u32) -> bool {
-    match buffer.clear_namespace(namespace_id, 0..) {
-        Ok(()) => true,
-        Err(err) => {
-            log_draw_error("clear render namespace", &err);
-            false
-        }
-    }
-}
-
-pub(crate) fn clear_namespace_all_buffers(namespace_id: u32) -> usize {
+pub(crate) fn clear_namespace_all_buffers(namespace_id: NamespaceId) -> usize {
+    let host = NeovimHost;
     let mut cleared_buffers = 0_usize;
-    for mut buffer in api::list_bufs() {
-        if buffer.is_valid() && clear_namespace_in_buffer(&mut buffer, namespace_id) {
-            cleared_buffers = cleared_buffers.saturating_add(1);
+    for mut buffer in host.list_buffers() {
+        if !host.buffer_is_valid(&buffer) {
+            continue;
+        }
+        match host.clear_buffer_namespace(&mut buffer, namespace_id) {
+            Ok(()) => {
+                cleared_buffers = cleared_buffers.saturating_add(1);
+            }
+            Err(err) => {
+                log_draw_error("clear render namespace", &err);
+            }
         }
     }
     cleared_buffers
@@ -191,7 +126,7 @@ pub(crate) fn prepare_apply_plan<'a>(
 
 fn acquire_window_for_span(
     tab_windows: &mut window_pool::TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     placement: WindowPlacement,
     allocation_policy: AllocationPolicy,
     metrics: &mut ApplyMetrics,
@@ -212,7 +147,7 @@ fn acquire_window_for_span(
         }
         Err(AcquireError::Exhausted {
             allocation_policy: AllocationPolicy::BootstrapIfPoolEmpty,
-        }) => Err(nvim_oxi::Error::Api(nvim_oxi::api::Error::Other(
+        }) => Err(nvim_oxi::Error::Api(crate::host::api::Error::Other(
             "render window acquire exhausted after frame-start bootstrap prewarm".into(),
         ))),
     }
@@ -233,8 +168,8 @@ enum SpanApplyDecision {
 }
 
 fn draw_span(
-    namespace_id: u32,
-    tab_handle: i32,
+    namespace_id: NamespaceId,
+    tab_handle: TabHandle,
     allocation_policy: AllocationPolicy,
     group_names: &HighlightGroupNames,
     metrics: &mut ApplyMetrics,
@@ -318,7 +253,8 @@ fn draw_span(
 
     // the window pool reservation already lives in draw state. Apply the extmark outside
     // the global draw mutex so one long frame does not block unrelated prepaint/cleanup bookkeeping.
-    if let Err(err) = buffer.set_extmark(namespace_id, 0, 0, &extmark_opts) {
+    let host = NeovimHost;
+    if let Err(err) = host.set_buffer_extmark(&mut buffer, namespace_id, 0, 0, &extmark_opts) {
         let recovered = with_render_tab(tab_handle, |tab_windows| {
             window_pool::recover_invalid_window_in_tab(tab_windows, namespace_id, window_id)
         });
@@ -327,7 +263,7 @@ fn draw_span(
             log_draw_error("recover invalid render window", &err);
             return Ok(());
         }
-        return Err(nvim_oxi::Error::Api(err));
+        return Err(err);
     }
 
     mark_span_satisfied(metrics);
@@ -338,8 +274,8 @@ fn draw_span(
 }
 
 fn prepare_frame_capacity(
-    namespace_id: u32,
-    tab_handle: i32,
+    namespace_id: NamespaceId,
+    tab_handle: TabHandle,
     max_kept_windows: usize,
     prepared: &PreparedApplyPlan<'_>,
     allocation_policy: AllocationPolicy,
@@ -371,7 +307,11 @@ fn prepare_frame_capacity(
     })
 }
 
-fn finalize_apply_metrics(namespace_id: u32, tab_handle: i32, metrics: &mut ApplyMetrics) {
+fn finalize_apply_metrics(
+    namespace_id: NamespaceId,
+    tab_handle: TabHandle,
+    metrics: &mut ApplyMetrics,
+) {
     let (release_summary, pool_snapshot) = with_render_tab(tab_handle, |tab_windows| {
         (
             window_pool::release_unused_in_tab(tab_windows, namespace_id),
@@ -383,8 +323,8 @@ fn finalize_apply_metrics(namespace_id: u32, tab_handle: i32, metrics: &mut Appl
 }
 
 pub(crate) fn apply_plan(
-    namespace_id: u32,
-    tab_handle: i32,
+    namespace_id: NamespaceId,
+    tab_handle: TabHandle,
     max_kept_windows: usize,
     prepared: &PreparedApplyPlan<'_>,
     allocation_policy: AllocationPolicy,
@@ -435,8 +375,6 @@ fn record_release_summary(
 #[cfg(test)]
 mod tests {
     use super::ApplyMetrics;
-    use super::FlushRedrawCapability;
-    use super::flush_redraw_capability_from_exists_result;
     use super::mark_span_satisfied;
     use super::prepare_apply_plan;
     use super::record_release_summary;
@@ -449,6 +387,7 @@ mod tests {
     use crate::draw::render_plan::HighlightLevel;
     use crate::draw::render_plan::HighlightRef;
     use crate::draw::window_pool::ReleaseUnusedSummary;
+    use pretty_assertions::assert_eq;
     use std::sync::Arc;
 
     #[test]
@@ -494,18 +433,6 @@ mod tests {
         mark_span_satisfied(&mut metrics);
 
         assert_eq!(metrics.applied_ops, 2);
-    }
-
-    #[test]
-    fn flush_redraw_capability_maps_exists_results_to_api_or_fallback() {
-        assert_eq!(
-            flush_redraw_capability_from_exists_result(1),
-            FlushRedrawCapability::ApiAvailable
-        );
-        assert_eq!(
-            flush_redraw_capability_from_exists_result(0),
-            FlushRedrawCapability::FallbackOnly
-        );
     }
 
     #[test]

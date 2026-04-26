@@ -20,6 +20,7 @@ use crate::core::effect::RequestProbeEffect;
 use crate::core::event::EffectFailedEvent;
 use crate::core::event::EffectFailureSource;
 use crate::core::event::Event;
+use crate::events::handlers::ProbeDispatchWave;
 use nvim_oxi::Result;
 use std::time::Instant;
 
@@ -43,7 +44,7 @@ pub(crate) trait EffectExecutor {
     fn execute_probe_effect(
         &mut self,
         payload: RequestProbeEffect,
-        _same_reducer_wave: bool,
+        _dispatch_wave: ProbeDispatchWave,
     ) -> Result<Vec<Event>> {
         self.execute_effect(Effect::RequestProbe(payload))
     }
@@ -66,14 +67,17 @@ impl EffectExecutor for NeovimEffectExecutor {
     fn execute_probe_effect(
         &mut self,
         payload: RequestProbeEffect,
-        same_reducer_wave: bool,
+        dispatch_wave: ProbeDispatchWave,
     ) -> Result<Vec<Event>> {
         let kind = payload.kind;
         let started_at = Instant::now();
-        let result = if same_reducer_wave {
-            handlers::execute_core_request_probe_effect_same_reducer_wave(&payload)
-        } else {
-            handlers::execute_core_request_probe_effect(&payload)
+        let result = match dispatch_wave {
+            ProbeDispatchWave::NewReducerWave => {
+                handlers::execute_core_request_probe_effect(&payload)
+            }
+            ProbeDispatchWave::SameReducerWave => {
+                handlers::execute_core_request_probe_effect_same_reducer_wave(&payload)
+            }
         };
         record_probe_duration(kind, duration_to_micros(started_at.elapsed()));
         Ok(result)
@@ -92,7 +96,9 @@ impl EffectExecutor for NeovimEffectExecutor {
                 record_observation_request_executed();
                 handlers::execute_core_request_observation_base_effect(payload)
             }
-            Effect::RequestProbe(payload) => self.execute_probe_effect(payload, false),
+            Effect::RequestProbe(payload) => {
+                self.execute_probe_effect(payload, ProbeDispatchWave::NewReducerWave)
+            }
             Effect::RequestRenderPlan(payload) => {
                 Ok(handlers::execute_core_request_render_plan_effect(*payload))
             }
@@ -103,8 +109,7 @@ impl EffectExecutor for NeovimEffectExecutor {
                 Ok(handlers::execute_core_apply_render_cleanup_effect(payload))
             }
             Effect::ApplyIngressCursorPresentation(payload) => {
-                handlers::apply_ingress_cursor_presentation_effect(payload);
-                Ok(Vec::new())
+                Ok(handlers::apply_ingress_cursor_presentation_effect(payload))
             }
             Effect::RecordEventLoopMetric(metric) => {
                 match metric {

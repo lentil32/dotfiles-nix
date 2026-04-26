@@ -6,16 +6,25 @@ use super::timer_protocol::FiredHostTimer;
 use super::timer_protocol::HostCallbackId;
 use super::timer_protocol::HostTimerId;
 use crate::core::event::EffectFailureSource;
+use crate::host::NeovimHost;
+use crate::host::SchedulerPort;
 use nvim_oxi::Result;
-use nvim_oxi::schedule;
 use std::time::Duration;
 
 // Core timers use Neovim's builtin timer API so Rust owns cancellation state
 // while the host owns timer allocation and teardown.
 
 pub(crate) fn schedule_guarded(context: &'static str, callback: impl FnOnce() + 'static) {
+    schedule_guarded_with(&NeovimHost, context, callback);
+}
+
+fn schedule_guarded_with(
+    host: &impl SchedulerPort,
+    context: &'static str,
+    callback: impl FnOnce() + 'static,
+) {
     let mut callback = Some(callback);
-    schedule(move |()| {
+    host.schedule(Box::new(move || {
         let Some(callback) = callback.take() else {
             // Surprising: scheduled callback was invoked after being consumed.
             warn("scheduled callback invoked after callback was consumed");
@@ -26,7 +35,7 @@ pub(crate) fn schedule_guarded(context: &'static str, callback: impl FnOnce() + 
             warn(&format!("scheduled callback panicked: {context}"));
             record_effect_failure(EffectFailureSource::ScheduledCallback, context);
         }
-    });
+    }));
 }
 
 pub(super) fn start_timer_once(
@@ -36,11 +45,6 @@ pub(super) fn start_timer_once(
 ) -> Result<HostTimerId> {
     let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
     HostTimerId::try_new(host_bridge.start_timer_once(host_callback_id, timeout_ms)?)
-}
-
-#[cfg(not(test))]
-pub(super) fn stop_timer(timer_id: HostTimerId) -> Result<()> {
-    Ok(InstalledHostBridge.stop_timer(timer_id.get())?)
 }
 
 pub(crate) fn on_core_timer_fired_event(host_callback_id: i64, host_timer_id: i64) {
@@ -65,4 +69,28 @@ pub(crate) fn on_core_timer_fired_event(host_callback_id: i64, host_timer_id: i6
         });
         super::runtime::dispatch_core_timer_fired(fired_timer);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::schedule_guarded_with;
+    use crate::host::FakeSchedulerPort;
+    use crate::host::SchedulerCall;
+    use pretty_assertions::assert_eq;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn schedule_guarded_routes_through_scheduler_port() {
+        let host = FakeSchedulerPort::default();
+        let callback_ran = Rc::new(Cell::new(false));
+        let callback_witness = Rc::clone(&callback_ran);
+
+        schedule_guarded_with(&host, "scheduler route test", move || {
+            callback_witness.set(true);
+        });
+
+        assert_eq!(host.calls(), vec![SchedulerCall::Schedule]);
+        assert!(callback_ran.get());
+    }
 }

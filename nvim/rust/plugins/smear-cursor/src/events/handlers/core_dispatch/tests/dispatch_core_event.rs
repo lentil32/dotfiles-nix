@@ -14,7 +14,9 @@ fn stages_observation_request_work_for_external_cursor_ingress() {
 
     assert_eq!(staged_batches.len(), 1);
     assert!(
-        contains_observation_base_request(&staged_batches[0]),
+        staged_batches[0]
+            .iter()
+            .any(|effect| matches!(effect, Effect::RequestObservationBase(_))),
         "expected queued observation request effect"
     );
 }

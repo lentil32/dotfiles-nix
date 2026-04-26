@@ -1,10 +1,14 @@
-use super::context::log_draw_error;
+use super::floating_windows::close_floating_window;
 use super::floating_windows::delete_floating_buffer;
 use super::prepaint::PrepaintOverlay;
 use super::prepaint::PrepaintPlacement;
 use super::prepaint::close_prepaint_overlay;
+use super::prepaint::retained_prepaint_overlay_after_close;
 use super::prepaint::valid_prepaint_handles;
-use nvim_oxi::api;
+use super::resource_close::TrackedWindowBufferCloseOutcome;
+use crate::host::NamespaceId;
+use crate::host::TabHandle;
+use crate::host::api;
 use std::collections::HashMap;
 
 pub(crate) struct StagedFloatingWindow {
@@ -93,10 +97,8 @@ impl Drop for StagedFloatingWindow {
 
 impl Drop for AttachedFloatingWindow {
     fn drop(&mut self) {
-        if let Some(window) = self.window.take()
-            && let Err(err) = window.close(true)
-        {
-            log_draw_error(self.close_window_context, &err);
+        if let Some(window) = self.window.take() {
+            let _ = close_floating_window(window, self.close_window_context);
         }
 
         let Some(buffer) = self.buffer.take() else {
@@ -107,15 +109,15 @@ impl Drop for AttachedFloatingWindow {
 }
 
 pub(super) struct PrepaintOverlaySlot<'a> {
-    prepaint_by_tab: &'a mut HashMap<i32, PrepaintOverlay>,
-    tab_handle: i32,
+    prepaint_by_tab: &'a mut HashMap<TabHandle, PrepaintOverlay>,
+    tab_handle: TabHandle,
     overlay: Option<PrepaintOverlay>,
 }
 
 impl<'a> PrepaintOverlaySlot<'a> {
     pub(super) fn detach(
-        prepaint_by_tab: &'a mut HashMap<i32, PrepaintOverlay>,
-        tab_handle: i32,
+        prepaint_by_tab: &'a mut HashMap<TabHandle, PrepaintOverlay>,
+        tab_handle: TabHandle,
     ) -> Self {
         Self {
             overlay: prepaint_by_tab.remove(&tab_handle),
@@ -146,10 +148,30 @@ impl<'a> PrepaintOverlaySlot<'a> {
         }
     }
 
-    pub(super) fn close_overlay(&mut self, namespace_id: u32) {
-        if let Some(overlay) = self.overlay.take() {
-            close_prepaint_overlay(namespace_id, overlay);
+    pub(super) fn close_overlay(
+        &mut self,
+        namespace_id: NamespaceId,
+    ) -> TrackedWindowBufferCloseOutcome {
+        let mut close_overlay = close_prepaint_overlay;
+        self.close_overlay_with_closer(namespace_id, &mut close_overlay)
+    }
+
+    fn close_overlay_with_closer<C>(
+        &mut self,
+        namespace_id: NamespaceId,
+        close_overlay: &mut C,
+    ) -> TrackedWindowBufferCloseOutcome
+    where
+        C: FnMut(NamespaceId, PrepaintOverlay) -> TrackedWindowBufferCloseOutcome,
+    {
+        let Some(overlay) = self.overlay.take() else {
+            return TrackedWindowBufferCloseOutcome::closed_or_gone();
+        };
+        let outcome = close_overlay(namespace_id, overlay);
+        if outcome.should_retain() {
+            self.overlay = Some(retained_prepaint_overlay_after_close(overlay, outcome));
         }
+        outcome
     }
 }
 
@@ -158,5 +180,67 @@ impl Drop for PrepaintOverlaySlot<'_> {
         if let Some(overlay) = self.overlay.take() {
             self.prepaint_by_tab.insert(self.tab_handle, overlay);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrepaintOverlaySlot;
+    use crate::draw::TrackedResourceCloseOutcome;
+    use crate::draw::TrackedWindowBufferCloseOutcome;
+    use crate::draw::context::with_prepaint_by_tab;
+    use crate::draw::prepaint::PrepaintOverlay;
+    use crate::draw::prepaint::insert_prepaint_overlay_for_test;
+    use crate::draw::prepaint::prepaint_snapshot_for_test;
+    use crate::draw::test_support::with_isolated_draw_context;
+    use crate::host::BufferHandle;
+    use crate::host::NamespaceId;
+    use crate::host::TabHandle;
+    use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+
+    fn tab_handle(value: i32) -> TabHandle {
+        TabHandle::from_raw_for_test(value)
+    }
+
+    #[test]
+    fn prepaint_slot_restores_overlay_when_injected_close_retains() {
+        with_isolated_draw_context(|| {
+            let overlay = PrepaintOverlay {
+                window_id: 19,
+                buffer_id: BufferHandle::from_raw_for_test(/*value*/ 119),
+                placement: None,
+            };
+            let mut close_calls = 0_usize;
+            insert_prepaint_overlay_for_test(tab_handle(17), overlay);
+
+            with_prepaint_by_tab(|prepaint_by_tab| {
+                let mut slot = PrepaintOverlaySlot::detach(prepaint_by_tab, tab_handle(17));
+                let mut close_overlay = |namespace_id, closed_overlay| {
+                    assert_eq!(namespace_id, NamespaceId::new(/*value*/ 99));
+                    assert_eq!(closed_overlay, overlay);
+                    close_calls = close_calls.saturating_add(1);
+                    TrackedWindowBufferCloseOutcome::new(
+                        TrackedResourceCloseOutcome::Retained,
+                        TrackedResourceCloseOutcome::Retained,
+                    )
+                };
+
+                assert_eq!(
+                    slot.close_overlay_with_closer(
+                        NamespaceId::new(/*value*/ 99),
+                        &mut close_overlay
+                    )
+                    .aggregate(),
+                    TrackedResourceCloseOutcome::Retained
+                );
+            });
+
+            assert_eq!(close_calls, 1);
+            assert_eq!(
+                prepaint_snapshot_for_test(),
+                HashMap::from([(tab_handle(17), overlay)])
+            );
+        });
     }
 }

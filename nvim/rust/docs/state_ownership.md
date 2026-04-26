@@ -13,21 +13,102 @@ Each row is classified as one of:
 - `snapshot`: retained copy of ingress, prior, or external state used for reuse or
   comparison
 - `telemetry`: bookkeeping that describes execution rather than UI truth
+- `resource`: effectful host handles or I/O handles that materialize reducer
+  output but do not define it
+- `queue`: deferred shell-edge work or retry coalescing after reducer output has
+  already been chosen
+- `context`: access guards or diagnostic configuration around the engine, not
+  semantic state
 
 ## Top-Level Split
 
-Reducer-owned truth lives under `EngineState.core_state`. Shell-facing state lives
-under `EngineState.shell` and is limited to purgeable caches, reusable scratch
-buffers, telemetry, and retained host capability snapshots. Shell state may
-accelerate reads or avoid redundant host calls, but it does not own reducer
-semantics.
+Runtime-owned state now starts at `RuntimeCell`, the event-layer thread-local
+root. It owns separate lanes for reducer-semantic state, shell-local state,
+host-timer bridging, shell capability caches, draw resources, event-loop
+telemetry, palette resources, scheduled dispatch work, and diagnostic
+configuration:
+
+- `RuntimeCell.reducer` owns strict access to `ReducerState`, which contains
+  only `CoreState`. Event callers enter this lane through core-specific
+  ports (`with_core_read`, lifecycle-specific runtime commands such as
+  `sync_core_runtime_to_current_cursor`, `apply_core_setup_options`, and
+  `toggle_core_runtime`, plus `with_core_transition`) instead of whole-engine
+  read or mutation APIs.
+- `RuntimeCell.shell` owns strict access to `ShellState`: purgeable caches,
+  reusable scratch buffers, host capability snapshots, and shell telemetry.
+  Callers cross this lane through cache-specific ports such as
+  `with_editor_viewport_cache`, `with_probe_cache`,
+  `with_buffer_perf_telemetry_cache`, and `try_record_telemetry`; broad
+  `ShellState` access remains the private transaction primitive behind those
+  ports.
+- `RuntimeCell.timer_bridge` owns strict access to `TimerBridge`: host callback
+  id allocation, host timer cancellation witnesses, and timer-dispatch retry
+  coalescing. Timer runtime code mutates this lane through `with_timer_bridge`
+  and starts or stops Neovim timers through `HostBridgePort`.
+- `RuntimeCell.host_capabilities` owns cheap shell capability caches that can be
+  probed and updated without entering reducer or shell-state borrows, including
+  the cached `nvim__redraw` availability used by draw flushing. Redraw probing,
+  flush execution, and fallback `redraw!` command execution cross the host
+  boundary through `RedrawCommandPort`.
+- `RuntimeCell.dispatch_queue` owns deferred reducer events and effect batches
+  that must move to a later shell edge after reducer output has already been
+  chosen. Only shell-only work may be coalesced inside this lane; callers enter
+  it through `with_dispatch_queue`.
+- `RuntimeCell.draw_resources` owns live and reusable Neovim draw resources:
+  render-tab window pools and prepaint overlays. Draw callers detach these maps
+  before mutation and restore them after shell work completes. Window and buffer
+  creation, option writes, namespace clears, extmark writes, and orphan-resource
+  scans cross the Neovim boundary through `DrawResourcePort`.
+- `RuntimeCell.palette` owns highlight-palette cache state, highlight-group-name
+  reuse, and deferred palette refresh coalescing. Palette callers detach this
+  state before mutation and restore it after the cache-local transition
+  completes. Palette host reads and highlight writes cross the Neovim boundary
+  through `HighlightPalettePort`, with foreground/background color selection
+  modeled by `HighlightColorField` instead of positional booleans.
+- `RuntimeCell.telemetry` owns best-effort access to `EventLoopState`: advisory
+  runtime metrics, callback-duration estimates, and last-observed event
+  timestamps. Contended writes may be dropped and never drive reducer truth.
+- `RuntimeCell.diagnostics` owns typed diagnostic log-level configuration and the
+  best-effort log-file handle. Host notification and error output are emitted
+  through `HostLoggingPort`.
+
+Runtime recovery is centralized through `RuntimeRecoveryPlan`. Transient resets
+and runtime-lane panic recovery both execute named action lists instead of
+assembling ad hoc reset sequences at each failure site. Panic recovery runs in
+this order: restore diagnostic logging, report the panic, recover draw
+resources from the captured namespace witness, stop recovered host timers, reset
+the recovered timer bridge and pending retry queue, reset the scheduled dispatch
+queue, reset recovered shell state, clear advisory telemetry timestamps, reset
+the palette lane to a captured recovery epoch, and finally reset reducer core state.
+The palette epoch is captured when the plan is built, so applying the same plan
+again converges to the same runtime state.
+
+Shell state may accelerate reads, retain host-resource witnesses, or avoid
+redundant host calls, but it does not own reducer semantics.
 
 At the root boundary:
 
-- `CoreState` is the only authoritative top-level reducer subtree.
-- `ShellState` is restricted to cache, snapshot, and telemetry roles listed in
-  this document; purging it may change cost or reuse, but not semantic output
-  for the same external input sequence.
+- `CoreState`, behind `RuntimeCell.reducer`, is the only authoritative top-level
+  reducer subtree.
+- `ShellState`, behind `RuntimeCell.shell`, is restricted to cache, snapshot,
+  resource-witness, and telemetry roles listed in this document; purging it may
+  change cost or reuse, but not semantic output for the same external input
+  sequence.
+- `TimerBridge`, behind `RuntimeCell.timer_bridge`, owns host-side timer
+  callback allocation, cancellation witnesses, and retry single-flight state.
+  It does not own reducer timer liveness or generations.
+- Shell-edge callsites use explicit boundary enums for reducer-wave probe
+  dispatch, viewport capture, and cursor-color extmark fallback instead of
+  positional booleans.
+- Ingress cursor prepaint requests cross the shell/reducer boundary with
+  `IngressCursorModeAdmission` and `IngressCursorCommandLineLocation`, and draw
+  floating-window helpers use `FloatingWindowVisibility` instead of hidden
+  positional booleans.
+- Runtime-level holders are restricted to the resource, cache, queue,
+  telemetry, and context roles listed in
+  [External Shell Holders](#external-shell-holders). They may change shell cost,
+  host-resource reuse, diagnostic counters, or callback coalescing, but they
+  must not make reducer lifecycle decisions.
 
 ## Non-Owners
 
@@ -42,14 +123,21 @@ These types and accessors intentionally do not own semantic facts:
   code cross the boundary through explicit `ProjectionHandle` views instead of
   borrowing `RetainedProjection` directly.
 - `ProtocolPhaseKind` and `Lifecycle` are derived from `ProtocolState.phase`.
+- `AnimationSchedule::{Idle, DefaultDelay, Deadline}` is the single transition
+  and proposal representation for animation-timer intent. Boolean scheduling
+  flags and optional deadlines are derived from it only for tests or diagnostics.
 
 ## Field Role Quick Map
 
 This storage-role index classifies the main reducer and shell roots by field.
 It does not assign new owners; it only labels how the stored fields are used.
 
-- `EngineState`: `core_state` is the authoritative reducer root; `shell` is the
-  shell-owned cache, snapshot, and telemetry root.
+- `RuntimeCell`
+  - context: `reducer`, `shell`, `timer_bridge`, `diagnostics.log_level`
+  - cache: `host_capabilities.flush_redraw_capability`, `palette`
+  - resource: `draw_resources`, `diagnostics.log_file_handle`
+  - telemetry: `telemetry`
+- `ReducerState`: `core_state` is the authoritative reducer root.
 - `ShellState`
   - snapshot: `namespace_id`, `host_bridge_state`, `editor_viewport_cache`,
     `buffer_metadata_cache`, `real_cursor_visibility`
@@ -57,6 +145,9 @@ It does not assign new owners; it only labels how the stored fields are used.
     `conceal_regions_scratch`, `buffer_text_revision_cache`,
     `buffer_perf_policy_cache`
   - telemetry: `buffer_perf_telemetry_cache`
+- `TimerBridge`
+  - resource: `handles`, `next_host_callback_id`
+  - queue: `pending_retries`
 - `RuntimeState`
   - authoritative: `config`, `config_revision`, `projection_policy`,
     `plugin_state`, `animation_phase`, `current_corners`, `target`, `trail`,
@@ -98,6 +189,18 @@ It does not assign new owners; it only labels how the stored fields are used.
   - snapshot: `Diverged.last_consistent`
 - `SceneState`: non-owner composite view over authoritative `semantics` and
   `projection` handles.
+- External thread-local shell holders
+  - context: `RUNTIME_CELL` stores the reducer-state lane, shell-state lane,
+    timer-bridge lane, host-capability lane, draw-resource lane, palette lane,
+    scheduled dispatch-queue lane, event-loop telemetry lane, and log-level
+    diagnostics lane; the reducer-state lane guards reducer state, the
+    shell-state lane guards shell cache/resource witnesses, the timer-bridge
+    lane guards host-timer witnesses and retry coalescing, the host-capability
+    lane guards cheap host capability caches, the draw-resource lane guards live
+    draw resource handles, the palette lane guards highlight cache resources,
+    the dispatch-queue lane guards deferred reducer events and effect batches,
+    telemetry owns advisory metrics, and diagnostics owns log verbosity plus the
+    best-effort diagnostic file handle.
 
 ## Core And Protocol Facts
 
@@ -115,6 +218,7 @@ It does not assign new owners; it only labels how the stored fields are used.
 | Prepared observation preview | cache | `ProtocolPhase::Observing.prepared_plan` caches the preview runtime transition derived from the active observation and current runtime. It is invalidated when the observation changes or the phase leaves `Observing`. |
 | Planning proposal identity | authoritative | `ProtocolPhase::Planning.proposal_id` owns the in-flight proposal id allocation. |
 | Applying proposal payload | authoritative | `ProtocolPhase::Applying.proposal` owns the in-flight realization proposal. |
+| Animation scheduling intent | authoritative | `AnimationSchedule` owns whether the next animation timer is idle, uses the default delay, or targets a concrete deadline. `CursorTransition.animation_schedule`, `RequestRenderPlanEffect.animation_schedule`, and `InFlightProposal.animation_schedule` carry that same enum across reducer boundaries instead of splitting the fact into a boolean plus optional deadline. |
 | Proposal and ingress sequence allocation | authoritative | `CoreStatePayload.entropy` owns proposal id and ingress sequence allocation. |
 | Latest exact cursor fallback anchor | authoritative | `CoreStatePayload.latest_exact_cursor_cell` owns the last exact cursor cell reused when a later observation lacks one. |
 
@@ -144,7 +248,7 @@ It does not assign new owners; it only labels how the stored fields are used.
 | Animation lifecycle | authoritative | `RuntimeState.animation_phase` owns uninitialized, idle, settling, running, and draining state. |
 | Animation tick bookkeeping | authoritative | `RunningPhase.clock` and `DrainingPhase.clock` own `last_tick_ms`, `next_frame_at_ms`, and `simulation_accumulator_ms` while those phases are active. `RuntimeState::take_animation_clock_sample()` classifies oversized or invalid wall-clock gaps as motion-clock discontinuities, and the allowable catch-up budget is derived from `RuntimeState.config` instead of being copied into the clock. |
 | Current simulated cursor geometry | authoritative | `RuntimeState.current_corners` owns the live simulated cursor corners. |
-| Cursor target identity | authoritative | `RuntimeState.target` owns target `position`, discrete `cell`, `shape`, `retarget_surface`, `tracked_cursor`, and `retarget_epoch`. `CursorTarget::retarget_key()` derives the reviewable equality surface, and target corners are derived on demand by `CursorTarget::corners()` instead of being stored separately. |
+| Cursor target identity | authoritative | `RuntimeState.target` owns target `position`, `shape`, `tracked_cursor`, and `retarget_epoch`. `CursorTarget::retarget_key()` derives the reviewable equality surface, including the discrete target cell and retarget surface, so those derived facts are not stored separately. Target corners are derived on demand by `CursorTarget::corners()`. |
 | Trail identity | authoritative | `RuntimeState.trail` owns `stroke_id`, `origin_corners`, and `elapsed_ms`. |
 | Velocity state | authoritative | `RuntimeState.velocity_corners` and `RuntimeState.spring_velocity_corners` own live physics velocity state. |
 | Live particle simulation | authoritative | `RuntimeState.particles` owns live particle state. |
@@ -177,17 +281,44 @@ It does not assign new owners; it only labels how the stored fields are used.
 
 | Fact | Class | Owner / derivation |
 | --- | --- | --- |
-| Render namespace handle | snapshot | `ShellState.namespace_id` retains the draw namespace handle created by `ensure_namespace_id()`. It is a shell capability witness, not a realization or reducer truth owner, and transient cache resets intentionally preserve it. |
+| Render namespace handle | snapshot | `ShellState.namespace_id` retains the typed `NamespaceId` draw namespace handle created by `ensure_namespace_id()`. It is a shell capability witness, not a realization or reducer truth owner, and transient cache resets intentionally preserve it. The raw Neovim integer is unwrapped only at host API calls. |
+| Buffer handle witness | snapshot | `BufferHandle` wraps Neovim buffer ids retained in `SurfaceId`, cursor-color and cursor-text-context witnesses, shell buffer-local caches, telemetry, and draw resource handles. Host reads convert `api::Buffer::handle()` at the boundary; code unwraps the raw integer only when calling Neovim APIs or parsing raw host payloads. |
+| Current editor host snapshot | snapshot | Current mode, current window, current buffer, and current-handle validity checks used by lifecycle and ingress observation code cross through `CurrentEditorPort`. `FakeCurrentEditorPort` covers current-editor capture paths without live Neovim mode, current-window, current-buffer, or validity reads. |
+| Window surface host snapshot | snapshot | `WindowSurfaceSnapshot` is parsed by `src/events/surface.rs` from `getwininfo` and window-buffer host reads that cross through `WindowSurfacePort`. `FakeWindowSurfacePort` covers parsing and scroll-distance behavior without live Neovim `getwininfo`, window-buffer, or text-height reads. Once accepted into `ObservationBasis`, the surface becomes reducer-owned observation truth; raw host dictionaries stay event-layer input. |
+| Cursor read host snapshot | snapshot | Cursor observation reads for window cursor position, `screenpos()`, command-line cursor position, conceal probes, and cursor text-context rows cross through `CursorReadPort`. `FakeCursorReadPort` covers cursor projection, conceal, and text-context paths without live Neovim cursor, `screenpos()`, `synconcealed()`, `strdisplaywidth()`, `getcmd*`, or buffer-line reads. |
+| Tab handle witness | snapshot | `TabHandle` wraps Neovim tabpage ids used to key render-tab window pools, prepaint overlays, and TabClosed cleanup. Host reads convert `api::TabPage::handle()` at the boundary; draw-resource maps and stale-tab pruning compare typed witnesses instead of raw integers. |
 | Verified host bridge capability | snapshot | `ShellState.host_bridge_state` retains whether the current host bridge revision has been verified by `verify_host_bridge()`. It is an external capability witness, not a semantic owner. |
-| Outstanding host timer ids | snapshot | `ShellState.core_timer_handles` retains the currently armed Neovim host timer ids keyed by reducer `TimerId`. The reducer token remains authoritative for timer liveness and generation; host timer ids are cancellation witnesses only. `schedule_core_timer_effect()`, `dispatch_core_timer_fired()`, `clear_all_core_timer_handles()`, and panic recovery are the only ownership transitions. |
+| Outstanding host timer ids | resource | `RuntimeCell.timer_bridge` retains the currently armed Neovim host timer ids keyed by reducer `TimerId` inside `TimerBridge`. The reducer token remains authoritative for timer liveness and generation; host timer ids are cancellation witnesses only. `schedule_core_timer_effect()`, `dispatch_core_timer_fired()`, `reset_core_timer_bridge()`, and panic recovery are the ownership transitions. |
 | Shell probe reuse state | cache | `ShellState.probe_cache` owns purgeable cursor-color, cursor-text-context, conceal-region, conceal-delta, and conceal-screen-cell reuse keyed by external witnesses such as `CursorColorProbeWitness`, buffer-local text revisions, and window state. `note_cursor_color_observation_boundary()`, `note_cursor_color_colorscheme_change()`, `note_conceal_read_boundary()`, `invalidate_buffer_local_probe_caches()`, and `reset_transient_caches()` are its invalidation and purge paths. |
 | Probe request and conceal scratch buffers | cache | `ShellState.background_probe_request_scratch` and `ShellState.conceal_regions_scratch` retain reusable allocations for effect construction only. `reset_transient_caches()` drops the retained allocations, while `reclaim_background_probe_request_scratch()` and `reclaim_conceal_regions_scratch()` only recycle them between operations. |
-| Editor viewport witness | snapshot | `ShellState.editor_viewport_cache` retains the last live `EditorViewportSnapshot` read from Neovim. `EditorViewportSnapshot` is also the canonical shell-side owner of command-row math and `ViewportBounds` projection through `command_row()` and `bounds()`. `refresh_editor_viewport_cache()`, `invalidate_editor_viewport_cache()`, and `reset_transient_caches()` refresh or purge the witness without changing semantic state. |
-| Buffer metadata witness | snapshot | `ShellState.buffer_metadata_cache` retains `BufferMetadata` read from Neovim so policy and probe code can reuse it without rereading host options on every ingress. `invalidate_buffer_metadata()`, `invalidate_buffer_local_caches()`, and `reset_transient_caches()` clear it. |
+| Editor viewport witness | snapshot | `ShellState.editor_viewport_cache` retains the last live `EditorViewportSnapshot` read through `EditorViewportPort`. `EditorViewportSnapshot` is also the canonical shell-side owner of command-row math and `ViewportBounds` projection through `command_row()` and `bounds()`. `refresh_editor_viewport_cache()`, `invalidate_editor_viewport_cache()`, and `reset_transient_caches()` refresh or purge the witness without changing semantic state. Tests use `FakeEditorViewportPort` to exercise the shell cache without live Neovim option reads. |
+| Buffer metadata witness | snapshot | `ShellState.buffer_metadata_cache` retains `BufferMetadata` read from Neovim so policy and probe code can reuse it without rereading host options on every ingress. Cache misses cross the host boundary through `BufferMetadataPort`, with `FakeBufferMetadataPort` covering cache behavior without live Neovim buffer option or line-count reads. `invalidate_buffer_metadata()`, `invalidate_buffer_local_caches()`, and `reset_transient_caches()` clear it. |
 | Buffer text revision cache | cache | `ShellState.buffer_text_revision_cache` retains shell-local generations used to partition buffer-local probe reuse and invalidation. `invalidate_buffer_local_caches()` and `reset_transient_caches()` clear it; it never becomes reducer truth. |
 | Buffer performance policy cache | cache | `ShellState.buffer_perf_policy_cache` caches `BufferEventPolicy` derived from the current ingress snapshot, `BufferMetadata`, and buffer-local telemetry. It is invalidated per buffer or by `reset_transient_caches()` and does not own `BufferPerfClass` independently of those inputs. |
 | Buffer performance telemetry | telemetry | `ShellState.buffer_perf_telemetry_cache` records callback EWMA and probe-pressure signals used to explain or derive future buffer performance policy. It does not own the selected `BufferPerfClass`, and `invalidate_buffer_local_caches()` plus `reset_transient_caches()` purge it. |
 | Real cursor visibility witness | snapshot | `ShellState.real_cursor_visibility` retains the last shell cursor visibility applied so host calls can skip redundant hide/show work. `note_cursor_color_colorscheme_change()`, `invalidate_real_cursor_visibility()`, and `reset_transient_caches()` clear it. |
+
+## External Shell Holders
+
+These thread-local holders live outside the reducer lane by design. They are not
+exceptions to single-source-of-truth ownership because they do not own reducer
+facts, phase transitions, requested probe state, runtime motion state, or
+realization trust. They exist at effectful boundaries where borrowing reducer
+state would either re-enter reducer execution during shell work or make
+best-effort diagnostics capable of perturbing semantic execution.
+
+| Holder | Class | Owner / boundary |
+| --- | --- | --- |
+| Runtime cell | context | `RUNTIME_CELL` is the runtime-layer thread-local root for runtime lanes. Its current lanes are strict reducer-state access, strict shell-state access, strict timer-bridge access, host-capability caches, draw resources, palette resources, strict dispatch-queue access, best-effort event-loop telemetry, and diagnostics; future shell-resource and cache migrations attach here instead of adding new roots. |
+| Reducer state lane | context | `RuntimeCell.reducer` owns access to the single `ReducerState` through `ReducerStateSlot::{Ready, InUse}`. This is an exclusive-borrow guard around reducer state, not a second semantic owner. `take_reducer_state()` and `restore_reducer_state()` are private slot transitions behind `with_core_read`, lifecycle-specific runtime commands, and `with_core_transition`. |
+| Shell state lane | context | `RuntimeCell.shell` owns access to the single `ShellState` through `ShellStateSlot::{Ready, InUse}`. This is an exclusive-borrow guard around shell caches, scratch buffers, host capability snapshots, and shell telemetry. `take_shell_state()` and `restore_shell_state()` are the only state-slot transitions. |
+| Timer bridge lane | resource / queue | `RuntimeCell.timer_bridge` owns access to `TimerBridge` through `TimerBridgeSlot::{Ready, InUse}`. `TimerBridge` owns host callback id allocation, host timer cancellation witnesses, and the single-flight retry set for fired host timer callbacks that must be rescheduled after timer-bridge re-entry. Reducer timer liveness and generations remain in `ProtocolSharedState.timers`; bridge retries only decide whether a duplicate scheduled callback is redundant. |
+| Host-capability lane | cache | `RuntimeCell.host_capabilities` owns shell capability caches that need no reducer or shell-state borrow. `FlushRedrawCapability` caches whether the current host exposes `nvim__redraw`, is refreshed by `refresh_redraw_capability()`, and is downgraded after an API failure. It chooses between equivalent shell flush paths and does not own visual state. |
+| Draw-resource lane | resource | `RuntimeCell.draw_resources` owns live and reusable Neovim draw resources: render-tab window pools and prepaint overlays. The reducer owns desired realization state; draw resources own shell handles used to materialize, reuse, and clean that desire. `take_draw_render_tabs()`, `restore_draw_render_tabs()`, `take_draw_prepaint_by_tab()`, `restore_draw_prepaint_by_tab()`, and their draw-facing wrappers are the detach-mutate-restore ownership boundaries. Draw resource creation, option writes, namespace clears, extmark writes, and orphan-resource scans cross the host boundary through `DrawResourcePort`. |
+| Highlight palette lane | cache | `RuntimeCell.palette` owns applied highlight-palette cache state, highlight-group-name reuse, and the single-flight deferred palette refresh slot. Palette inputs come from `PaletteSpec` and runtime config; palette lane state only avoids redundant host highlight writes and coalesces palette churn. `with_runtime_palette_lane()`, `clear_highlight_cache()`, `ensure_highlight_palette_for_spec()`, and deferred refresh draining are its mutation boundaries. |
+| Scheduled dispatch-queue lane | queue | `RuntimeCell.dispatch_queue` owns shell-edge backlog for deferred reducer events and effect batches after the reducer has emitted them. It may coalesce adjacent shell-only metric and redraw work, but reducer-significant work remains ordered as queued `CoreEvent` or ordered effect batches. `ScheduledEffectQueueState::{stage_batch, stage_core_event, pop_work_unit, reset}`, `with_dispatch_queue()`, scheduled drain, and reset-after-failure are its ownership boundaries. |
+| Event-loop telemetry lane | telemetry | `RuntimeCell.telemetry` owns advisory runtime metrics, EWMA callback duration, and last-observed event timestamps. Recording can be dropped under a nested borrow, so this state is intentionally non-semantic and must not gate reducer transitions. Diagnostics read it through `event_loop_diagnostics()`. |
+| Diagnostics lane | context / resource | `RuntimeCell.diagnostics` owns the `LogLevel` verbosity threshold and the best-effort buffered diagnostics sink selected by `SMEAR_CURSOR_LOG_FILE`. It can change which messages are emitted or persisted, but host notification and error output go through `HostLoggingPort` and cannot change reducer events, effects, or state transitions. Nested logging may drop a file line instead of panicking. |
 
 ## Invariant Hooks
 
@@ -241,7 +372,7 @@ Current invariants pin the ownership model:
 
 - inactive runtime phases must not retain animation tick bookkeeping
 - settling requires tracked-cursor ownership and an ordered settling window
-- runtime target cell and retarget-surface facts must stay derived from the retained target position and tracked cursor
+- runtime target equality keys must stay derived from the retained target position, shape, and tracked cursor; discrete target cell and retarget surface are not stored owners
 - ready background probe batches must match the observation basis viewport
 - retained projection shell materialization must match the retained logical raster
 - protocol phase variants recurse only into the phase-legal observation owner

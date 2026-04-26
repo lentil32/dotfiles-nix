@@ -1,5 +1,7 @@
 use super::geometry::render_side_effects_for_action;
 use crate::core::state::SemanticEvent;
+use crate::core::types::AnimationSchedule;
+use crate::core::types::Millis;
 use crate::position::ScreenCell;
 use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
@@ -102,8 +104,7 @@ pub(crate) struct RenderDecision {
 pub(crate) struct CursorTransition {
     pub(crate) render_decision: RenderDecision,
     pub(crate) motion_class: MotionClass,
-    pub(crate) should_schedule_next_animation: bool,
-    pub(crate) next_animation_at_ms: Option<u64>,
+    pub(crate) animation_schedule: AnimationSchedule,
 }
 
 impl CursorTransition {
@@ -123,8 +124,7 @@ impl CursorTransition {
                 render_side_effects,
             },
             motion_class: MotionClass::Continuous,
-            should_schedule_next_animation: false,
-            next_animation_at_ms: None,
+            animation_schedule: AnimationSchedule::Idle,
         }
     }
 
@@ -133,10 +133,8 @@ impl CursorTransition {
         self
     }
 
-    pub(super) fn with_schedule_next_animation(mut self, enabled: bool) -> Self {
-        if enabled {
-            self.should_schedule_next_animation = true;
-        }
+    pub(super) fn with_animation_schedule(mut self, schedule: AnimationSchedule) -> Self {
+        self.animation_schedule = schedule;
         self
     }
 
@@ -145,9 +143,20 @@ impl CursorTransition {
         self
     }
 
-    pub(super) fn with_next_animation_at_ms(mut self, deadline: Option<u64>) -> Self {
-        self.next_animation_at_ms = deadline;
-        self
+    pub(super) fn with_next_animation_deadline(self, deadline: Option<Millis>) -> Self {
+        let schedule =
+            deadline.map_or(AnimationSchedule::DefaultDelay, AnimationSchedule::Deadline);
+        self.with_animation_schedule(schedule)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn should_schedule_next_animation(&self) -> bool {
+        self.animation_schedule.should_schedule()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn next_animation_at_ms(&self) -> Option<u64> {
+        self.animation_schedule.next_animation_at_ms()
     }
 
     pub(super) fn with_cursor_visibility(mut self, effect: CursorVisibilityEffect) -> Self {
@@ -171,7 +180,7 @@ impl CursorTransitions {
     pub(super) fn draw(
         mode: &str,
         frame: RenderFrame,
-        should_schedule_next_animation: bool,
+        animation_schedule: AnimationSchedule,
         render_allocation_policy: RenderAllocationPolicy,
     ) -> CursorTransition {
         let allow_real_cursor_updates = !frame.hide_target_hack;
@@ -182,7 +191,7 @@ impl CursorTransitions {
             render_allocation_policy,
             allow_real_cursor_updates,
         )
-        .with_schedule_next_animation(should_schedule_next_animation)
+        .with_animation_schedule(animation_schedule)
     }
 
     pub(super) fn noop(mode: &str, allow_real_cursor_updates: bool) -> CursorTransition {

@@ -1,6 +1,6 @@
 fn prune_tab_windows(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     max_kept_windows: usize,
 ) -> usize {
     let keep_budget = effective_keep_budget(tab_windows.cached_budget, max_kept_windows);
@@ -14,9 +14,12 @@ fn prune_tab_windows(
     if !remove_indices.is_empty() {
         let _event_ignore = EventIgnoreGuard::set_all();
         for remove_index in remove_indices.iter().copied().rev() {
-            remove_cached_window_at(tab_windows, namespace_id, remove_index);
+            if remove_cached_window_at(tab_windows, namespace_id, remove_index)
+                == TrackedResourceCloseOutcome::ClosedOrGone
+            {
+                pruned_windows = pruned_windows.saturating_add(1);
+            }
         }
-        pruned_windows = pruned_windows.saturating_add(remove_indices.len());
     }
 
     let invalid_removed = remove_invalid_windows(tab_windows, namespace_id);
@@ -29,13 +32,13 @@ fn prune_tab_windows(
 
 pub(crate) fn prune_tab(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     max_kept_windows: usize,
 ) -> usize {
     prune_tab_windows(tab_windows, namespace_id, max_kept_windows)
 }
 
-fn total_window_count(render_tabs: &std::collections::HashMap<i32, TabWindows>) -> usize {
+fn total_window_count(render_tabs: &std::collections::HashMap<TabHandle, TabWindows>) -> usize {
     render_tabs
         .values()
         .map(|tab_windows| tab_windows.windows.len())
@@ -43,7 +46,7 @@ fn total_window_count(render_tabs: &std::collections::HashMap<i32, TabWindows>) 
 }
 
 fn has_pending_compaction_work(
-    render_tabs: &std::collections::HashMap<i32, TabWindows>,
+    render_tabs: &std::collections::HashMap<TabHandle, TabWindows>,
     target_budget: usize,
 ) -> bool {
     total_window_count(render_tabs) > target_budget
@@ -53,10 +56,10 @@ fn has_pending_compaction_work(
 }
 
 fn global_compaction_prune_plan(
-    render_tabs: &std::collections::HashMap<i32, TabWindows>,
+    render_tabs: &std::collections::HashMap<TabHandle, TabWindows>,
     target_budget: usize,
     max_prune_per_tick: usize,
-) -> std::collections::HashMap<i32, Vec<usize>> {
+) -> std::collections::HashMap<TabHandle, Vec<usize>> {
     let total_windows = total_window_count(render_tabs);
     if total_windows <= target_budget || max_prune_per_tick == 0 {
         return std::collections::HashMap::new();
@@ -73,7 +76,7 @@ fn global_compaction_prune_plan(
         return std::collections::HashMap::new();
     }
     if prune_goal >= available_candidates {
-        let mut plan = std::collections::HashMap::<i32, Vec<usize>>::new();
+        let mut plan = std::collections::HashMap::<TabHandle, Vec<usize>>::new();
         for (tab_handle, tab_windows) in render_tabs {
             if tab_windows.reusable_window_indices.is_empty() {
                 continue;
@@ -114,7 +117,7 @@ fn global_compaction_prune_plan(
         }
     }
 
-    let mut plan = std::collections::HashMap::<i32, Vec<usize>>::new();
+    let mut plan = std::collections::HashMap::<TabHandle, Vec<usize>>::new();
     for (_, tab_handle, index) in selected_candidates.into_iter() {
         plan.entry(tab_handle).or_default().push(index);
     }
@@ -125,9 +128,9 @@ fn global_compaction_prune_plan(
 }
 
 fn apply_global_compaction_prune_plan(
-    render_tabs: &mut std::collections::HashMap<i32, TabWindows>,
-    namespace_id: u32,
-    prune_plan: std::collections::HashMap<i32, Vec<usize>>,
+    render_tabs: &mut std::collections::HashMap<TabHandle, TabWindows>,
+    namespace_id: NamespaceId,
+    prune_plan: std::collections::HashMap<TabHandle, Vec<usize>>,
 ) -> usize {
     let mut pruned_windows = 0_usize;
     let mut tab_handles = prune_plan.keys().copied().collect::<Vec<_>>();
@@ -146,8 +149,11 @@ fn apply_global_compaction_prune_plan(
             if remove_index >= tab_windows.windows.len() {
                 continue;
             }
-            remove_cached_window_at(tab_windows, namespace_id, remove_index);
-            pruned_windows = pruned_windows.saturating_add(1);
+            if remove_cached_window_at(tab_windows, namespace_id, remove_index)
+                == TrackedResourceCloseOutcome::ClosedOrGone
+            {
+                pruned_windows = pruned_windows.saturating_add(1);
+            }
             removed_any = true;
         }
         if removed_any {
@@ -159,8 +165,8 @@ fn apply_global_compaction_prune_plan(
 }
 
 pub(crate) fn compact_tabs_to_budget(
-    render_tabs: &mut std::collections::HashMap<i32, TabWindows>,
-    namespace_id: u32,
+    render_tabs: &mut std::collections::HashMap<TabHandle, TabWindows>,
+    namespace_id: NamespaceId,
     target_budget: usize,
     max_prune_per_tick: usize,
 ) -> CompactRenderWindowsSummary {
@@ -204,7 +210,10 @@ fn shell_visible_close_indices(tab_windows: &TabWindows) -> Vec<usize> {
         .collect()
 }
 
-fn close_shell_visible_tab_windows(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
+fn close_shell_visible_tab_windows(
+    tab_windows: &mut TabWindows,
+    namespace_id: NamespaceId,
+) -> usize {
     let remove_indices = shell_visible_close_indices(tab_windows);
     if remove_indices.is_empty() {
         return 0;
@@ -213,19 +222,59 @@ fn close_shell_visible_tab_windows(tab_windows: &mut TabWindows, namespace_id: u
     let _event_ignore = EventIgnoreGuard::set_all();
     let mut closed_windows = 0_usize;
     for remove_index in remove_indices.into_iter().rev() {
-        remove_cached_window_at(tab_windows, namespace_id, remove_index);
-        closed_windows = closed_windows.saturating_add(1);
+        if remove_cached_window_at(tab_windows, namespace_id, remove_index)
+            == TrackedResourceCloseOutcome::ClosedOrGone
+        {
+            closed_windows = closed_windows.saturating_add(1);
+        }
     }
     closed_windows
 }
 
-pub(crate) fn close_shell_visible_tab(tab_windows: &mut TabWindows, namespace_id: u32) -> usize {
+pub(crate) fn close_shell_visible_tab(
+    tab_windows: &mut TabWindows,
+    namespace_id: NamespaceId,
+) -> usize {
     close_shell_visible_tab_windows(tab_windows, namespace_id)
+}
+
+pub(crate) fn remove_window_in_tab(
+    tab_windows: &mut TabWindows,
+    namespace_id: NamespaceId,
+    window_id: i32,
+) -> TrackedResourceCloseSummary {
+    if !tab_windows
+        .windows
+        .iter()
+        .any(|cached| cached.handles.window_id == window_id)
+    {
+        return TrackedResourceCloseSummary::default();
+    }
+
+    #[cfg(not(test))]
+    let _event_ignore = EventIgnoreGuard::set_all();
+
+    let mut summary = TrackedResourceCloseSummary::default();
+    while let Some(index) = tab_windows
+        .windows
+        .iter()
+        .position(|cached| cached.handles.window_id == window_id)
+    {
+        let outcome = remove_cached_window_at(tab_windows, namespace_id, index);
+        summary.record(outcome);
+        if outcome.should_retain() {
+            break;
+        }
+    }
+    if summary.closed_or_gone > 0 {
+        tab_windows.debug_assert_tracking_consistent();
+    }
+    summary
 }
 
 fn release_unused_tab_windows(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
 ) -> ReleaseUnusedSummary {
     let mut summary = ReleaseUnusedSummary::default();
     let mut hide_indices = tab_windows.take_visible_available_indices_for_hide();
@@ -244,7 +293,7 @@ fn release_unused_tab_windows(
         }
 
         let handles = tab_windows.windows[index].handles;
-        let Some(mut buffer) = buffer_from_handle_i32(handles.buffer_id) else {
+        let Some(mut buffer) = buffer_from_handle(handles.buffer_id) else {
             let _ = mark_cached_window_invalid(tab_windows, index);
             continue;
         };
@@ -293,14 +342,14 @@ fn release_unused_tab_windows(
 
 pub(crate) fn release_unused_in_tab(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
 ) -> ReleaseUnusedSummary {
     release_unused_tab_windows(tab_windows, namespace_id)
 }
 
 pub(crate) fn recover_invalid_window_in_tab(
     tab_windows: &mut TabWindows,
-    namespace_id: u32,
+    namespace_id: NamespaceId,
     window_id: i32,
 ) -> bool {
     let Some(index) = tab_windows
@@ -320,10 +369,11 @@ pub(crate) fn recover_invalid_window_in_tab(
 }
 
 fn window_buffer(window: &api::Window) -> Option<api::Buffer> {
-    if !window.is_valid() {
+    let host = NeovimHost;
+    if !host.window_is_valid(window) {
         return None;
     }
-    match window.get_buf() {
+    match host.window_buffer(window) {
         Ok(buffer) => Some(buffer),
         Err(err) => {
             log_draw_error("window.get_buf", &err);
@@ -333,15 +383,15 @@ fn window_buffer(window: &api::Window) -> Option<api::Buffer> {
 }
 
 fn buffer_matches_marker(buffer: &api::Buffer, filetype_marker: &str, buftype_marker: &str) -> bool {
-    let opts = OptionOpts::builder().buf(buffer.clone()).build();
-    let Ok(filetype) = api::get_option_value::<String>("filetype", &opts) else {
+    let host = NeovimHost;
+    let Ok(filetype) = host.buffer_string_option(buffer, "filetype") else {
         return false;
     };
     if filetype != filetype_marker {
         return false;
     }
 
-    let Ok(buftype) = api::get_option_value::<String>("buftype", &opts) else {
+    let Ok(buftype) = host.buffer_string_option(buffer, "buftype") else {
         return false;
     };
     buftype == buftype_marker
@@ -356,39 +406,101 @@ fn buffer_has_smear_marker(buffer: &api::Buffer) -> bool {
         )
 }
 
-pub(crate) fn close_orphan_smear_windows(namespace_id: u32) -> usize {
-    let _event_ignore = EventIgnoreGuard::set_all();
-    let mut closed_windows = 0_usize;
-    for window in api::list_wins() {
-        let Some(mut buffer) = window_buffer(&window) else {
+fn close_orphan_smear_buffer_with(
+    host: &impl DrawResourcePort,
+    namespace_id: NamespaceId,
+    mut buffer: api::Buffer,
+) -> TrackedResourceCloseOutcome {
+    if let Err(err) = host.clear_buffer_namespace(&mut buffer, namespace_id) {
+        log_draw_error("clear orphan smear namespace", &err);
+    }
+    crate::draw::delete_floating_buffer_with(host, buffer, "delete orphan smear buffer")
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct OrphanSmearResourceCloseSummary {
+    pub(crate) closed_windows: usize,
+    pub(crate) retained_resources: usize,
+}
+
+impl OrphanSmearResourceCloseSummary {
+    fn record_retention(&mut self, outcome: TrackedResourceCloseOutcome) {
+        if outcome.should_retain() {
+            self.retained_resources = self.retained_resources.saturating_add(1);
+        }
+    }
+}
+
+pub(crate) fn close_orphan_smear_resources(
+    namespace_id: NamespaceId,
+) -> OrphanSmearResourceCloseSummary {
+    let host = NeovimHost;
+    let _event_ignore = EventIgnoreGuard::set_all_with(&host);
+    let mut summary = OrphanSmearResourceCloseSummary::default();
+    let mut window_buffer_handles = HashSet::new();
+    for window in host.list_windows() {
+        let Some(buffer) = window_buffer(&window) else {
             continue;
         };
         if !buffer_has_smear_marker(&buffer) {
             continue;
         }
 
-        if let Err(err) = buffer.clear_namespace(namespace_id, 0..) {
-            log_draw_error("clear orphan smear namespace", &err);
+        window_buffer_handles.insert(BufferHandle::from_buffer(&buffer));
+        let window_outcome =
+            crate::draw::close_floating_window_with(&host, window, "close orphan smear window");
+        if matches!(window_outcome, TrackedResourceCloseOutcome::ClosedOrGone) {
+            summary.closed_windows = summary.closed_windows.saturating_add(1);
         }
-        match window.close(true) {
-            Ok(()) => {
-                closed_windows = closed_windows.saturating_add(1);
-            }
-            Err(err) => {
-                log_draw_error("close orphan smear window", &err);
-            }
-        }
-        crate::draw::delete_floating_buffer(buffer, "delete orphan smear buffer");
+        let buffer_outcome = close_orphan_smear_buffer_with(&host, namespace_id, buffer);
+        summary.record_retention(window_outcome.merge(buffer_outcome));
     }
-    closed_windows
+
+    for buffer in host.list_buffers() {
+        if !host.buffer_is_valid(&buffer) {
+            continue;
+        }
+        if window_buffer_handles.contains(&BufferHandle::from_buffer(&buffer)) {
+            continue;
+        }
+        if !buffer_has_smear_marker(&buffer) {
+            continue;
+        }
+
+        summary.record_retention(close_orphan_smear_buffer_with(&host, namespace_id, buffer));
+    }
+    summary
 }
 
-pub(crate) fn purge_tab(tab_windows: &mut TabWindows, namespace_id: u32) {
+pub(crate) fn purge_tab_with_closer(
+    tab_windows: &mut TabWindows,
+    namespace_id: NamespaceId,
+    close_cached_window: &mut impl FnMut(
+        NamespaceId,
+        WindowBufferHandle,
+    ) -> TrackedResourceCloseOutcome,
+) -> TrackedResourceCloseSummary {
+    #[cfg(not(test))]
     let _event_ignore = EventIgnoreGuard::set_all();
 
-    for cached in tab_windows.windows.iter().copied() {
-        close_cached_window(namespace_id, cached.handles);
+    let drained_tab_windows = std::mem::take(tab_windows);
+    let mut summary = TrackedResourceCloseSummary::default();
+    for mut cached in drained_tab_windows.windows {
+        let outcome = close_cached_window(namespace_id, cached.handles);
+        summary.record(outcome);
+        if outcome.should_retain() {
+            cached.mark_invalid();
+            tab_windows.push_cached_window(cached);
+        }
     }
 
-    *tab_windows = TabWindows::default();
+    summary
+}
+
+pub(crate) fn purge_tab(
+    tab_windows: &mut TabWindows,
+    namespace_id: NamespaceId,
+) -> TrackedResourceCloseSummary {
+    let mut close_tracked_window = close_cached_window;
+    purge_tab_with_closer(tab_windows, namespace_id, &mut close_tracked_window)
 }

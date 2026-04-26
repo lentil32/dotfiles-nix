@@ -27,8 +27,8 @@ pub(crate) fn tab_pool_snapshot_from_tab(tab_windows: &TabWindows) -> TabPoolSna
 
 #[cfg(test)]
 pub(crate) fn tab_pool_snapshot(
-    tabs: &HashMap<i32, TabWindows>,
-    tab_handle: i32,
+    tabs: &HashMap<TabHandle, TabWindows>,
+    tab_handle: TabHandle,
 ) -> Option<TabPoolSnapshot> {
     tabs.get(&tab_handle).map(tab_pool_snapshot_from_tab)
 }
@@ -48,6 +48,8 @@ mod snapshot_tests {
         WindowBufferHandle, WindowPlacement, tab_in_use_window_count_from_tab, tab_pool_snapshot,
         tab_pool_snapshot_from_tab, tab_visible_window_count_from_tab,
     };
+    use crate::host::BufferHandle;
+    use crate::host::TabHandle;
     use crate::test_support::proptest::pure_config;
     use proptest::collection::vec;
     use proptest::prelude::*;
@@ -106,7 +108,7 @@ mod snapshot_tests {
         let offset = i32::try_from(index).unwrap_or(i32::MAX);
         let handles = WindowBufferHandle {
             window_id: 11_i32.saturating_add(offset),
-            buffer_id: 21_i32.saturating_add(offset),
+            buffer_id: BufferHandle::from(21_i32.saturating_add(offset)),
         };
 
         match lifecycle {
@@ -242,8 +244,9 @@ mod snapshot_tests {
                 expected_visible_windows,
             );
 
-            let tabs = HashMap::from([(9_i32, tab_windows)]);
-            prop_assert_eq!(tab_pool_snapshot(&tabs, 9), Some(expected));
+            let tab_handle = TabHandle::from_raw_for_test(/*value*/ 9);
+            let tabs = HashMap::from([(tab_handle, tab_windows)]);
+            prop_assert_eq!(tab_pool_snapshot(&tabs, tab_handle), Some(expected));
         }
     }
 }

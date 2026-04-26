@@ -2,7 +2,6 @@ use super::CursorParseError;
 use super::CursorResult;
 use super::cursor_parse_error;
 use super::screenpos::buffer_column_to_col1;
-use super::screenpos::current_window_option;
 use super::screenpos::parse_screenpos_cell;
 use super::screenpos::screenpos_for_buffer_column;
 use crate::events::logging::warn;
@@ -28,14 +27,15 @@ use crate::events::runtime::store_conceal_delta;
 use crate::events::runtime::store_conceal_regions;
 use crate::events::runtime::store_conceal_screen_cell;
 use crate::events::runtime::take_conceal_regions_scratch;
+use crate::host::BufferHandle;
+use crate::host::CursorReadPort;
+use crate::host::api;
 use crate::lua::i64_from_object_typed;
 use crate::lua::string_from_object_typed;
 use crate::position::ObservedCell;
 use crate::position::ScreenCell;
 use crate::position::WindowSurfaceSnapshot;
-use nvim_oxi::Array;
 use nvim_oxi::Object;
-use nvim_oxi::api;
 use nvim_oxi::conversion::FromObject;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
@@ -164,13 +164,12 @@ pub(super) struct ExactCursorProjection {
     pub(super) source: ExactProjectionSource,
 }
 
-fn replacement_display_width(replacement: &str) -> CursorResult<i64> {
+fn replacement_display_width(host: &impl CursorReadPort, replacement: &str) -> CursorResult<i64> {
     if replacement.is_empty() {
         return Ok(0);
     }
 
-    let args = Array::from_iter([Object::from(replacement)]);
-    let width = api::call_function("strdisplaywidth", args)?;
+    let width = host.string_display_width(replacement)?;
     i64_from_object_typed("strdisplaywidth", width)
         .map_err(|source| cursor_parse_error("strdisplaywidth", source))
 }
@@ -218,6 +217,7 @@ pub(super) fn merge_conceal_region(
 }
 
 fn extend_concealed_regions(
+    host: &impl CursorReadPort,
     line: usize,
     start_col1: i64,
     end_col1: i64,
@@ -227,22 +227,23 @@ fn extend_concealed_regions(
         return Ok(());
     }
 
-    let line = i64::try_from(line).unwrap_or(i64::MAX);
     for col1 in start_col1..=end_col1 {
-        let args = Array::from_iter([Object::from(line), Object::from(col1)]);
-        let concealed = parse_synconcealed(api::call_function("synconcealed", args)?)?;
+        let concealed = parse_synconcealed(host.synconcealed(line, col1)?)?;
         let Some((replacement, match_id)) = concealed else {
             continue;
         };
 
-        let replacement_width = replacement_display_width(&replacement)?;
+        let replacement_width = replacement_display_width(host, &replacement)?;
         merge_conceal_region(regions, col1, match_id, replacement_width);
     }
     Ok(())
 }
 
-fn window_buffer_handle(window: &api::Window) -> CursorResult<i64> {
-    Ok(i64::from(window.get_buf()?.handle()))
+fn window_buffer_handle(
+    host: &impl CursorReadPort,
+    window: &api::Window,
+) -> CursorResult<BufferHandle> {
+    Ok(host.window_buffer_handle(window)?)
 }
 
 fn concealcursor_mode_key(mode: &str) -> Option<char> {
@@ -271,18 +272,22 @@ fn conceal_window_state_allows_mode(window_state: &ConcealWindowState, mode: &st
     concealcursor_allows_mode(window_state.concealcursor(), mode)
 }
 
-fn capture_conceal_window_state(window: &api::Window) -> CursorResult<ConcealWindowState> {
-    let conceallevel: i64 = current_window_option(window, "conceallevel")?;
-    let concealcursor: String = current_window_option(window, "concealcursor")?;
+fn capture_conceal_window_state(
+    host: &impl CursorReadPort,
+    window: &api::Window,
+) -> CursorResult<ConcealWindowState> {
+    let conceallevel = host.window_conceallevel(window)?;
+    let concealcursor = host.window_concealcursor(window)?;
     Ok(ConcealWindowState::new(conceallevel, concealcursor))
 }
 
 fn conceal_cache_key(
+    host: &impl CursorReadPort,
     window: &api::Window,
     line: usize,
     window_state: ConcealWindowState,
 ) -> CursorResult<ConcealCacheKey> {
-    let buffer_handle = window_buffer_handle(window)?;
+    let buffer_handle = window_buffer_handle(host, window)?;
     let text_revision = buffer_text_revision(buffer_handle)
         .map_err(nvim_oxi::Error::from)?
         .value();
@@ -295,6 +300,7 @@ fn conceal_cache_key(
 }
 
 fn cached_concealed_regions_for_cursor(
+    host: &impl CursorReadPort,
     key: ConcealCacheKey,
     column: usize,
 ) -> CursorResult<Arc<[ConcealRegion]>> {
@@ -335,7 +341,13 @@ fn cached_concealed_regions_for_cursor(
         .map_or(1, |cached| cached.scanned_to_col1().saturating_add(1));
     let result = (|| -> CursorResult<Arc<[ConcealRegion]>> {
         record_conceal_full_scan(key.buffer_handle());
-        extend_concealed_regions(key.line(), scan_start_col1, required_col1, &mut regions)?;
+        extend_concealed_regions(
+            host,
+            key.line(),
+            scan_start_col1,
+            required_col1,
+            &mut regions,
+        )?;
 
         let regions: Arc<[ConcealRegion]> = Arc::from(regions.as_slice());
         if let Err(err) = store_conceal_regions(key, required_col1, Arc::clone(&regions)) {
@@ -370,14 +382,16 @@ fn cached_concealed_regions_hint_for_cursor(
 }
 
 fn screen_cell_for_buffer_column(
+    host: &impl CursorReadPort,
     window: &api::Window,
     line: usize,
     col1: i64,
 ) -> CursorResult<Option<ScreenCell>> {
-    parse_screenpos_cell(screenpos_for_buffer_column(window, line, col1)?)
+    parse_screenpos_cell(screenpos_for_buffer_column(host, window, line, col1)?)
 }
 
 fn cached_screen_cell_for_buffer_column(
+    host: &impl CursorReadPort,
     window: &api::Window,
     conceal_key: &ConcealCacheKey,
     surface_snapshot: WindowSurfaceSnapshot,
@@ -398,7 +412,7 @@ fn cached_screen_cell_for_buffer_column(
         }
     }
 
-    let cell = screen_cell_for_buffer_column(window, conceal_key.line(), col1)?;
+    let cell = screen_cell_for_buffer_column(host, window, conceal_key.line(), col1)?;
     if let Err(err) = store_conceal_screen_cell(cache_key, cell) {
         warn(&format!("conceal screen cell cache write failed: {err}"));
     }
@@ -514,6 +528,7 @@ fn cached_conceal_delta_hint(
 }
 
 pub(super) fn observed_cell_for_raw_screenpos(
+    host: &impl CursorReadPort,
     window: &api::Window,
     line: usize,
     column: usize,
@@ -521,7 +536,7 @@ pub(super) fn observed_cell_for_raw_screenpos(
     raw_cell: ScreenCell,
     surface_snapshot: Option<WindowSurfaceSnapshot>,
 ) -> CursorResult<RawScreenposProjection> {
-    let window_state = capture_conceal_window_state(window)?;
+    let window_state = capture_conceal_window_state(host, window)?;
     if column == 0 || !conceal_window_state_allows_mode(&window_state, mode) {
         return Ok(RawScreenposProjection::Projected {
             observed_cell: ObservedCell::Exact(raw_cell),
@@ -531,7 +546,7 @@ pub(super) fn observed_cell_for_raw_screenpos(
 
     // This is a hint-only fast path. Exact conceal resolution clears cross-read cache state before
     // re-sampling, but motion reads can reuse prior hints to avoid deferring every sample.
-    let conceal_key = conceal_cache_key(window, line, window_state)?;
+    let conceal_key = conceal_cache_key(host, window, line, window_state)?;
     let Some(regions) = cached_concealed_regions_hint_for_cursor(&conceal_key, column) else {
         return Ok(RawScreenposProjection::NeedsExactProjection);
     };
@@ -633,6 +648,7 @@ fn conceal_delta_for_regions(
 }
 
 pub(super) fn resolve_buffer_cursor_position(
+    host: &impl CursorReadPort,
     window: &api::Window,
     line: usize,
     column: usize,
@@ -647,7 +663,7 @@ pub(super) fn resolve_buffer_cursor_position(
         });
     }
 
-    let window_state = capture_conceal_window_state(window)?;
+    let window_state = capture_conceal_window_state(host, window)?;
     if !conceal_window_state_allows_mode(&window_state, mode) {
         return Ok(ExactCursorProjection {
             observed_cell: ObservedCell::Exact(raw_cell),
@@ -662,8 +678,8 @@ pub(super) fn resolve_buffer_cursor_position(
         warn(&format!("conceal cache boundary update failed: {err}"));
     }
 
-    let conceal_key = conceal_cache_key(window, line, window_state)?;
-    let regions = cached_concealed_regions_for_cursor(conceal_key.clone(), column)?;
+    let conceal_key = conceal_cache_key(host, window, line, window_state)?;
+    let regions = cached_concealed_regions_for_cursor(host, conceal_key.clone(), column)?;
     if regions.is_empty() {
         return Ok(ExactCursorProjection {
             observed_cell: ObservedCell::Exact(raw_cell),
@@ -697,9 +713,15 @@ pub(super) fn resolve_buffer_cursor_position(
         surface_snapshot.and_then(WrappedScreenCellLayout::from_surface),
         |col1| {
             if let Some(surface_snapshot) = surface_snapshot {
-                cached_screen_cell_for_buffer_column(window, &conceal_key, surface_snapshot, col1)
+                cached_screen_cell_for_buffer_column(
+                    host,
+                    window,
+                    &conceal_key,
+                    surface_snapshot,
+                    col1,
+                )
             } else {
-                screen_cell_for_buffer_column(window, line, col1)
+                screen_cell_for_buffer_column(host, window, line, col1)
             }
         },
     )?;

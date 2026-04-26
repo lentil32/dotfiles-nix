@@ -1,8 +1,19 @@
-//! Thread-local draw bookkeeping detached during mutation so shell callbacks stay re-entrant.
+//! Draw-resource bookkeeping detached during mutation so shell callbacks stay re-entrant.
 
 use super::prepaint::PrepaintOverlay;
 use super::window_pool;
-use nvim_oxi::api;
+#[cfg(test)]
+use crate::events::clear_runtime_draw_context_for_test;
+use crate::events::restore_draw_prepaint_by_tab;
+use crate::events::restore_draw_render_tabs;
+#[cfg(test)]
+use crate::events::runtime_render_tab_handles_for_test;
+use crate::events::take_draw_prepaint_by_tab;
+use crate::events::take_draw_render_tabs;
+use crate::events::tracked_runtime_draw_tab_handles;
+use crate::host::HostLoggingPort;
+use crate::host::NeovimHost;
+use crate::host::TabHandle;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -11,8 +22,8 @@ use std::panic::resume_unwind;
 
 #[derive(Debug)]
 struct DrawContext {
-    render_tabs: HashMap<i32, window_pool::TabWindows>,
-    prepaint_by_tab: HashMap<i32, PrepaintOverlay>,
+    render_tabs: HashMap<TabHandle, window_pool::TabWindows>,
+    prepaint_by_tab: HashMap<TabHandle, PrepaintOverlay>,
 }
 
 impl DrawContext {
@@ -24,40 +35,100 @@ impl DrawContext {
     }
 }
 
-thread_local! {
-    static DRAW_CONTEXT: RefCell<DrawContext> = RefCell::new(DrawContext::new());
+#[derive(Debug)]
+pub(crate) struct DrawResourcesLane {
+    context: RefCell<DrawContext>,
+}
+
+impl Default for DrawResourcesLane {
+    fn default() -> Self {
+        Self {
+            context: RefCell::new(DrawContext::new()),
+        }
+    }
+}
+
+impl DrawResourcesLane {
+    pub(crate) fn take_render_tabs(&self) -> HashMap<TabHandle, window_pool::TabWindows> {
+        // Detach the tracked tabs before mutating them so any later shell work runs after the
+        // RefCell borrow is released. Re-entrant draw recovery should operate on detached state.
+        std::mem::take(&mut self.context.borrow_mut().render_tabs)
+    }
+
+    pub(crate) fn restore_render_tabs(
+        &self,
+        render_tabs: HashMap<TabHandle, window_pool::TabWindows>,
+    ) {
+        self.context.borrow_mut().render_tabs = render_tabs;
+    }
+
+    pub(crate) fn take_prepaint_by_tab(&self) -> HashMap<TabHandle, PrepaintOverlay> {
+        // Detach the tracked overlays before mutating them so any later shell work runs after the
+        // RefCell borrow is released. Re-entrant draw recovery should operate on detached state.
+        std::mem::take(&mut self.context.borrow_mut().prepaint_by_tab)
+    }
+
+    pub(crate) fn restore_prepaint_by_tab(
+        &self,
+        prepaint_by_tab: HashMap<TabHandle, PrepaintOverlay>,
+    ) {
+        self.context.borrow_mut().prepaint_by_tab = prepaint_by_tab;
+    }
+
+    pub(crate) fn tracked_tab_handles(&self) -> Vec<TabHandle> {
+        let context = self.context.borrow();
+        let mut handles = context
+            .render_tabs
+            .keys()
+            .chain(context.prepaint_by_tab.keys())
+            .copied()
+            .collect::<Vec<_>>();
+        handles.sort_unstable();
+        handles.dedup();
+        handles
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_tab_handles_for_test(&self) -> Vec<TabHandle> {
+        let context = self.context.borrow();
+        let mut handles = context.render_tabs.keys().copied().collect::<Vec<_>>();
+        handles.sort_unstable();
+        handles
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_for_test(&self) {
+        self.restore_render_tabs(HashMap::with_capacity(4));
+        self.restore_prepaint_by_tab(HashMap::with_capacity(2));
+    }
 }
 
 pub(crate) fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
-    api::err_writeln(&format!("[smear_cursor][draw] {context} failed: {err}"));
+    log_draw_error_with(&NeovimHost, context, err);
 }
 
-pub(super) fn take_render_tabs() -> HashMap<i32, window_pool::TabWindows> {
-    // Detach the tracked tabs before mutating them so any later shell work runs after the
-    // RefCell borrow is released. Re-entrant draw recovery should operate on detached state.
-    DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().render_tabs))
+fn log_draw_error_with(host: &impl HostLoggingPort, context: &str, err: &impl std::fmt::Display) {
+    host.write_error(&format!("[smear_cursor][draw] {context} failed: {err}"));
 }
 
-pub(super) fn restore_render_tabs(render_tabs: HashMap<i32, window_pool::TabWindows>) {
-    DRAW_CONTEXT.with(|context| {
-        context.borrow_mut().render_tabs = render_tabs;
-    });
+pub(super) fn take_render_tabs() -> HashMap<TabHandle, window_pool::TabWindows> {
+    take_draw_render_tabs()
 }
 
-pub(super) fn take_prepaint_by_tab() -> HashMap<i32, PrepaintOverlay> {
-    // Detach the tracked overlays before mutating them so any later shell work runs after the
-    // RefCell borrow is released. Re-entrant draw recovery should operate on detached state.
-    DRAW_CONTEXT.with(|context| std::mem::take(&mut context.borrow_mut().prepaint_by_tab))
+pub(super) fn restore_render_tabs(render_tabs: HashMap<TabHandle, window_pool::TabWindows>) {
+    restore_draw_render_tabs(render_tabs);
 }
 
-fn restore_prepaint_by_tab(prepaint_by_tab: HashMap<i32, PrepaintOverlay>) {
-    DRAW_CONTEXT.with(|context| {
-        context.borrow_mut().prepaint_by_tab = prepaint_by_tab;
-    });
+pub(super) fn take_prepaint_by_tab() -> HashMap<TabHandle, PrepaintOverlay> {
+    take_draw_prepaint_by_tab()
+}
+
+pub(super) fn restore_prepaint_by_tab(prepaint_by_tab: HashMap<TabHandle, PrepaintOverlay>) {
+    restore_draw_prepaint_by_tab(prepaint_by_tab);
 }
 
 pub(super) fn with_render_tabs<R>(
-    mutator: impl FnOnce(&mut HashMap<i32, window_pool::TabWindows>) -> R,
+    mutator: impl FnOnce(&mut HashMap<TabHandle, window_pool::TabWindows>) -> R,
 ) -> R {
     let mut render_tabs = take_render_tabs();
     match catch_unwind(AssertUnwindSafe(|| mutator(&mut render_tabs))) {
@@ -73,10 +144,10 @@ pub(super) fn with_render_tabs<R>(
 }
 
 pub(super) fn with_prepaint_by_tab<R>(
-    mutator: impl FnOnce(&mut HashMap<i32, PrepaintOverlay>) -> R,
+    mutator: impl FnOnce(&mut HashMap<TabHandle, PrepaintOverlay>) -> R,
 ) -> R {
     // Prepaint overlays follow the same detach-mutate-restore pattern as render tabs so shell
-    // callbacks never run while the DRAW_CONTEXT RefCell itself is mutably borrowed.
+    // callbacks never run while the draw-resource lane itself is mutably borrowed.
     let mut prepaint_by_tab = take_prepaint_by_tab();
     match catch_unwind(AssertUnwindSafe(|| mutator(&mut prepaint_by_tab))) {
         Ok(output) => {
@@ -91,7 +162,7 @@ pub(super) fn with_prepaint_by_tab<R>(
 }
 
 pub(crate) fn with_render_tab<T>(
-    tab_handle: i32,
+    tab_handle: TabHandle,
     mutator: impl FnOnce(&mut window_pool::TabWindows) -> T,
 ) -> T {
     with_render_tabs(|render_tabs| {
@@ -150,18 +221,17 @@ pub(crate) fn render_pool_diagnostics() -> RenderPoolDiagnostics {
     })
 }
 
-#[cfg(test)]
-pub(super) fn render_tab_handles_for_test() -> Vec<i32> {
-    DRAW_CONTEXT.with(|context| {
-        let context = context.borrow();
-        let mut handles = context.render_tabs.keys().copied().collect::<Vec<_>>();
-        handles.sort_unstable();
-        handles
-    })
+pub(crate) fn tracked_draw_tab_handles() -> Vec<TabHandle> {
+    tracked_runtime_draw_tab_handles()
 }
 
 #[cfg(test)]
-pub(super) fn take_render_tabs_for_test() -> Vec<(i32, window_pool::TabWindows)> {
+pub(super) fn render_tab_handles_for_test() -> Vec<TabHandle> {
+    runtime_render_tab_handles_for_test()
+}
+
+#[cfg(test)]
+pub(super) fn take_render_tabs_for_test() -> Vec<(TabHandle, window_pool::TabWindows)> {
     let mut render_tabs = take_render_tabs().into_iter().collect::<Vec<_>>();
     render_tabs.sort_unstable_by_key(|(tab_handle, _)| *tab_handle);
     render_tabs
@@ -169,12 +239,12 @@ pub(super) fn take_render_tabs_for_test() -> Vec<(i32, window_pool::TabWindows)>
 
 #[cfg(test)]
 pub(super) fn clear_draw_context_for_test() {
-    restore_render_tabs(HashMap::with_capacity(4));
-    restore_prepaint_by_tab(HashMap::with_capacity(2));
+    clear_runtime_draw_context_for_test();
 }
 
 #[cfg(test)]
 mod tests {
+    use super::log_draw_error_with;
     use super::render_pool_diagnostics;
     use super::render_tab_handles_for_test;
     use super::take_render_tabs_for_test;
@@ -182,7 +252,15 @@ mod tests {
     use crate::draw::test_support::with_isolated_draw_context;
     use crate::draw::window_pool::WindowBufferHandle;
     use crate::draw::window_pool::WindowPlacement;
+    use crate::host::BufferHandle;
+    use crate::host::FakeHostLoggingPort;
+    use crate::host::HostLoggingCall;
+    use crate::host::TabHandle;
     use pretty_assertions::assert_eq;
+
+    fn tab_handle(value: i32) -> TabHandle {
+        TabHandle::from_raw_for_test(value)
+    }
 
     #[test]
     fn render_pool_diagnostics_aggregates_window_counts_across_tabs() {
@@ -200,11 +278,11 @@ mod tests {
                 zindex: 50,
             };
 
-            with_render_tab(11, |tab_windows| {
+            with_render_tab(tab_handle(11), |tab_windows| {
                 tab_windows.push_test_visible_window(
                     WindowBufferHandle {
                         window_id: 101,
-                        buffer_id: 201,
+                        buffer_id: BufferHandle::from_raw_for_test(/*value*/ 201),
                     },
                     placement_a,
                     1,
@@ -212,17 +290,17 @@ mod tests {
                 tab_windows.push_test_visible_window(
                     WindowBufferHandle {
                         window_id: 102,
-                        buffer_id: 202,
+                        buffer_id: BufferHandle::from_raw_for_test(/*value*/ 202),
                     },
                     placement_b,
                     2,
                 );
             });
-            with_render_tab(22, |tab_windows| {
+            with_render_tab(tab_handle(22), |tab_windows| {
                 tab_windows.push_test_visible_window(
                     WindowBufferHandle {
                         window_id: 103,
-                        buffer_id: 203,
+                        buffer_id: BufferHandle::from_raw_for_test(/*value*/ 203),
                     },
                     placement_a,
                     3,
@@ -246,45 +324,78 @@ mod tests {
     #[test]
     fn render_tab_tracking_is_isolated_by_tab_handle() {
         with_isolated_draw_context(|| {
-            with_render_tab(11, |tab_windows| tab_windows.cache_payload(91, 111));
-            with_render_tab(22, |tab_windows| tab_windows.cache_payload(91, 222));
+            with_render_tab(tab_handle(11), |tab_windows| {
+                tab_windows.cache_payload(91, 111)
+            });
+            with_render_tab(tab_handle(22), |tab_windows| {
+                tab_windows.cache_payload(91, 222)
+            });
 
-            assert!(with_render_tab(11, |tab_windows| tab_windows
+            assert!(with_render_tab(tab_handle(11), |tab_windows| tab_windows
                 .cached_payload_matches(91, 111)));
-            assert!(!with_render_tab(11, |tab_windows| tab_windows
+            assert!(!with_render_tab(tab_handle(11), |tab_windows| tab_windows
                 .cached_payload_matches(91, 222)));
-            assert!(with_render_tab(22, |tab_windows| tab_windows
+            assert!(with_render_tab(tab_handle(22), |tab_windows| tab_windows
                 .cached_payload_matches(91, 222)));
-            assert_eq!(render_tab_handles_for_test(), vec![11, 22]);
+            assert_eq!(
+                render_tab_handles_for_test(),
+                vec![tab_handle(11), tab_handle(22)]
+            );
         });
     }
 
     #[test]
     fn draining_render_tab_tracking_preserves_tab_owned_state_before_registry_clear() {
         with_isolated_draw_context(|| {
-            with_render_tab(9, |tab_windows| tab_windows.cache_payload(41, 401));
-            with_render_tab(3, |tab_windows| tab_windows.cache_payload(42, 402));
+            with_render_tab(tab_handle(9), |tab_windows| {
+                tab_windows.cache_payload(41, 401)
+            });
+            with_render_tab(tab_handle(3), |tab_windows| {
+                tab_windows.cache_payload(42, 402)
+            });
 
             let drained = take_render_tabs_for_test();
             let drained_handles = drained
                 .iter()
                 .map(|(tab_handle, _)| *tab_handle)
                 .collect::<Vec<_>>();
-            assert_eq!(drained_handles, vec![3, 9]);
+            assert_eq!(drained_handles, vec![tab_handle(3), tab_handle(9)]);
 
             let drained_payloads = drained
                 .iter()
-                .map(|(tab_handle, tab_windows)| {
-                    let cached_payload = match *tab_handle {
-                        3 => tab_windows.cached_payload_matches(42, 402),
-                        9 => tab_windows.cached_payload_matches(41, 401),
-                        other => panic!("unexpected tab handle in drained render tabs: {other}"),
+                .map(|(drained_tab_handle, tab_windows)| {
+                    let cached_payload = if *drained_tab_handle == tab_handle(3) {
+                        tab_windows.cached_payload_matches(42, 402)
+                    } else if *drained_tab_handle == tab_handle(9) {
+                        tab_windows.cached_payload_matches(41, 401)
+                    } else {
+                        panic!(
+                            "unexpected tab handle in drained render tabs: {drained_tab_handle}"
+                        );
                     };
-                    (*tab_handle, cached_payload)
+                    (*drained_tab_handle, cached_payload)
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(drained_payloads, vec![(3, true), (9, true)]);
+            assert_eq!(
+                drained_payloads,
+                vec![(tab_handle(3), true), (tab_handle(9), true)]
+            );
             assert!(render_tab_handles_for_test().is_empty());
         });
+    }
+
+    #[test]
+    fn draw_errors_route_through_host_logging_port() {
+        let host = FakeHostLoggingPort::default();
+
+        log_draw_error_with(&host, "clear render namespace", &"api failed");
+
+        assert_eq!(
+            host.calls(),
+            vec![HostLoggingCall::WriteError {
+                message: "[smear_cursor][draw] clear render namespace failed: api failed"
+                    .to_string(),
+            }]
+        );
     }
 }

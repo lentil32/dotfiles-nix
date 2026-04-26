@@ -266,8 +266,8 @@ local function extmark_highlight_groups(details)
   return groups
 end
 
-local EXTMARK_OVERLAP_PROBE_SOFT_LIMIT = 32
-local EXTMARK_OVERLAP_PROBE_SATURATION_LIMIT = EXTMARK_OVERLAP_PROBE_SOFT_LIMIT + 1
+local EXTMARK_OVERLAP_TRUSTED_LIMIT = 32
+local EXTMARK_OVERLAP_PROBE_LIMIT = EXTMARK_OVERLAP_TRUSTED_LIMIT + 1
 
 local function overlapping_extmarks_at_cursor(cursor)
   local extmarks = vim.api.nvim_buf_get_extmarks(
@@ -275,24 +275,26 @@ local function overlapping_extmarks_at_cursor(cursor)
     -1,
     cursor,
     cursor,
-    { details = true, overlap = true, limit = EXTMARK_OVERLAP_PROBE_SATURATION_LIMIT }
+    { details = true, overlap = true, limit = EXTMARK_OVERLAP_PROBE_LIMIT }
   )
-  if #extmarks < EXTMARK_OVERLAP_PROBE_SATURATION_LIMIT then
-    return extmarks
+
+  if #extmarks > EXTMARK_OVERLAP_TRUSTED_LIMIT then
+    return extmarks, true
   end
 
-  -- Traversal order is not priority order, so a saturated soft cap could omit the winning overlay.
-  return vim.api.nvim_buf_get_extmarks(
-    0,
-    -1,
-    cursor,
-    cursor,
-    { details = true, overlap = true }
-  )
+  return extmarks, false
 end
 
 local function extmark_color_at_cursor(cursor, hl_context)
-  local extmarks = overlapping_extmarks_at_cursor(cursor)
+  local extmarks, saturated = overlapping_extmarks_at_cursor(cursor)
+  if saturated then
+    return {
+      color = nil,
+      priority = math.huge,
+      source_rank = 2,
+      used_extmark_fallback = true,
+    }
+  end
 
   local extmark_candidates = {}
   for extmark_index, extmark in ipairs(extmarks) do

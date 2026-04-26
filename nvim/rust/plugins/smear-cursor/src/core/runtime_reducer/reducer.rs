@@ -29,6 +29,7 @@ use crate::animation::stop_metrics;
 use crate::animation::within_stop_enter;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::SemanticEvent;
+use crate::core::types::AnimationSchedule;
 use crate::position::RenderPoint;
 use crate::state::AnimationClockSample;
 use crate::state::CursorShape;
@@ -175,15 +176,13 @@ fn draw_discontinuous_jump_frame(
         },
     );
     state.start_tail_drain(planner_tail_drain_steps(state), spec.event_now_ms);
-    let next_animation_at_ms = Some(next_animation_deadline_from_clock(state, spec.event_now_ms));
     CursorTransitions::draw(
         mode,
         frame,
-        true,
+        AnimationSchedule::Deadline(next_animation_deadline_from_clock(state, spec.event_now_ms)),
         RenderAllocationPolicy::BootstrapIfPoolEmpty,
     )
     .with_motion_class(spec.motion_class)
-    .with_next_animation_at_ms(next_animation_at_ms)
     .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
 
@@ -210,8 +209,7 @@ fn waiting_for_settled_target(
 ) -> CursorTransition {
     CursorTransitions::noop(mode, allow_real_cursor_updates)
         .with_motion_class(motion_class)
-        .with_schedule_next_animation(true)
-        .with_next_animation_at_ms(next_animation_deadline_from_settling(state, now_ms))
+        .with_next_animation_deadline(next_animation_deadline_from_settling(state, now_ms))
         .with_cursor_visibility(CursorVisibilityEffect::Show)
         .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
@@ -281,11 +279,13 @@ fn draw_drain_frame(
         planner_idle_steps = planner_idle_steps.saturating_add(1);
         executed_steps = executed_steps.saturating_add(1);
     }
-    let should_schedule_next_animation = state.is_draining();
-    let next_animation_at_ms = should_schedule_next_animation
-        .then(|| next_animation_deadline_from_clock(state, event_now_ms));
+    let animation_schedule = if state.is_draining() {
+        AnimationSchedule::Deadline(next_animation_deadline_from_clock(state, event_now_ms))
+    } else {
+        AnimationSchedule::Idle
+    };
 
-    if !should_schedule_next_animation {
+    if !animation_schedule.should_schedule() {
         // Surprising: keep-warm cleanup intentionally preserves hidden cached windows. Terminal
         // tail drain therefore must collapse into an explicit clear instead of relying on a later
         // soft cleanup pass, or the last smear frame can remain visible until unrelated ingress.
@@ -295,8 +295,7 @@ fn draw_drain_frame(
 
     if planner_idle_steps == 0 {
         return CursorTransitions::noop(mode, allow_real_cursor_updates)
-            .with_schedule_next_animation(should_schedule_next_animation)
-            .with_next_animation_at_ms(next_animation_at_ms)
+            .with_animation_schedule(animation_schedule)
             .with_cursor_visibility(CursorVisibilityEffect::Show)
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
@@ -319,10 +318,9 @@ fn draw_drain_frame(
     CursorTransitions::draw(
         mode,
         frame,
-        should_schedule_next_animation,
+        animation_schedule,
         RenderAllocationPolicy::ReuseOnly,
     )
-    .with_next_animation_at_ms(next_animation_at_ms)
     .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
 
@@ -511,7 +509,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             return CursorTransitions::draw(
                 mode,
                 frame,
-                false,
+                AnimationSchedule::Idle,
                 RenderAllocationPolicy::BootstrapIfPoolEmpty,
             )
             .with_render_cleanup_action(RenderCleanupAction::Schedule);
@@ -784,16 +782,16 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                         buffer_perf_class,
                     },
                 );
-                let next_animation_at_ms =
-                    Some(next_animation_deadline_from_clock(state, event.now_ms));
                 return CursorTransitions::draw(
                     mode,
                     frame,
-                    true,
+                    AnimationSchedule::Deadline(next_animation_deadline_from_clock(
+                        state,
+                        event.now_ms,
+                    )),
                     RenderAllocationPolicy::ReuseOnly,
                 )
                 .with_motion_class(motion_class)
-                .with_next_animation_at_ms(next_animation_at_ms)
                 .with_render_cleanup_action(RenderCleanupAction::Invalidate);
             }
 
@@ -813,25 +811,33 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     buffer_perf_class,
                 },
             );
-            let next_animation_at_ms =
-                Some(next_animation_deadline_from_clock(state, event.now_ms));
-            return CursorTransitions::draw(mode, frame, true, RenderAllocationPolicy::ReuseOnly)
-                .with_motion_class(motion_class)
-                .with_next_animation_at_ms(next_animation_at_ms)
-                .with_render_cleanup_action(RenderCleanupAction::Invalidate);
+            return CursorTransitions::draw(
+                mode,
+                frame,
+                AnimationSchedule::Deadline(next_animation_deadline_from_clock(
+                    state,
+                    event.now_ms,
+                )),
+                RenderAllocationPolicy::ReuseOnly,
+            )
+            .with_motion_class(motion_class)
+            .with_render_cleanup_action(RenderCleanupAction::Invalidate);
         }
 
         match source {
             EventSource::External => {
-                let should_schedule_next_animation = state.is_animating() || state.is_settling();
-                let next_animation_at_ms = if state.is_settling() {
+                let animation_schedule = if state.is_settling() {
                     next_animation_deadline_from_settling(state, event.now_ms)
-                } else if state.is_animating() && should_schedule_next_animation {
-                    Some(next_animation_deadline_from_clock(state, event.now_ms))
+                        .map_or(AnimationSchedule::DefaultDelay, AnimationSchedule::Deadline)
+                } else if state.is_animating() {
+                    AnimationSchedule::Deadline(next_animation_deadline_from_clock(
+                        state,
+                        event.now_ms,
+                    ))
                 } else {
-                    None
+                    AnimationSchedule::Idle
                 };
-                let cleanup_action = if should_schedule_next_animation {
+                let cleanup_action = if animation_schedule.should_schedule() {
                     RenderCleanupAction::Invalidate
                 } else {
                     // Surprising: a quiescent external noop can be the last lifecycle edge after
@@ -841,8 +847,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 };
                 CursorTransitions::noop(mode, allow_real_cursor_updates)
                     .with_motion_class(motion_class)
-                    .with_schedule_next_animation(should_schedule_next_animation)
-                    .with_next_animation_at_ms(next_animation_at_ms)
+                    .with_animation_schedule(animation_schedule)
                     .with_cursor_visibility(if state.is_animating() {
                         CursorVisibilityEffect::Keep
                     } else {
@@ -867,9 +872,14 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                         buffer_perf_class,
                     },
                 );
-                CursorTransitions::draw(mode, frame, false, RenderAllocationPolicy::ReuseOnly)
-                    .with_motion_class(motion_class)
-                    .with_render_cleanup_action(RenderCleanupAction::NoAction)
+                CursorTransitions::draw(
+                    mode,
+                    frame,
+                    AnimationSchedule::Idle,
+                    RenderAllocationPolicy::ReuseOnly,
+                )
+                .with_motion_class(motion_class)
+                .with_render_cleanup_action(RenderCleanupAction::NoAction)
             }
         }
     })();

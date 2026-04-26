@@ -1,36 +1,26 @@
 use super::super::event_loop;
 use super::super::ingress::AutocmdIngress;
 use super::super::policy::BufferPerfTelemetry;
-use super::engine::mutate_engine_state;
-use super::engine::read_engine_state;
+use super::shell::try_record_telemetry;
+use super::shell::with_buffer_perf_telemetry_cache;
 use super::timers::now_ms;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
 use crate::core::types::TimerId;
-
-fn record_buffer_perf_telemetry(
-    buffer_handle: Option<i64>,
-    update: impl FnOnce(&mut super::super::ShellState, i64),
-) {
-    let Some(buffer_handle) = buffer_handle else {
-        return;
-    };
-    let _ = mutate_engine_state(|state| update(&mut state.shell, buffer_handle));
-}
+use crate::host::BufferHandle;
 
 fn record_probe_extmark_fallback_for_buffer(
-    shell: &mut super::super::ShellState,
-    buffer_handle: i64,
+    telemetry: &mut super::super::policy::BufferPerfTelemetryCache,
+    buffer_handle: impl Into<BufferHandle>,
     kind: ProbeKind,
     observed_at_ms: f64,
 ) {
+    let buffer_handle = buffer_handle.into();
     match kind {
         ProbeKind::CursorColor => {
-            shell
-                .buffer_perf_telemetry_cache
-                .record_cursor_color_extmark_fallback(buffer_handle, observed_at_ms);
+            telemetry.record_cursor_color_extmark_fallback(buffer_handle, observed_at_ms);
         }
         ProbeKind::Background => {}
     }
@@ -52,12 +42,13 @@ pub(crate) fn clear_observation_request_timestamp() {
     event_loop::clear_observation_request_timestamp();
 }
 
-pub(crate) fn record_cursor_callback_duration(buffer_handle: Option<i64>, duration_ms: f64) {
+pub(crate) fn record_cursor_callback_duration(
+    buffer_handle: Option<BufferHandle>,
+    duration_ms: f64,
+) {
     event_loop::record_cursor_callback_duration(duration_ms);
-    record_buffer_perf_telemetry(buffer_handle, |shell, buffer_handle| {
-        shell
-            .buffer_perf_telemetry_cache
-            .record_callback_duration(buffer_handle, duration_ms);
+    let _ = try_record_telemetry(buffer_handle, |telemetry, buffer_handle| {
+        telemetry.record_callback_duration(buffer_handle, duration_ms);
     });
 }
 
@@ -65,12 +56,10 @@ pub(crate) fn clear_cursor_callback_duration_estimate() {
     event_loop::clear_cursor_callback_duration_estimate();
 }
 
-pub(crate) fn cursor_callback_duration_estimate_ms(buffer_handle: Option<i64>) -> f64 {
+pub(crate) fn cursor_callback_duration_estimate_ms(buffer_handle: Option<BufferHandle>) -> f64 {
     let local_estimate = buffer_handle.and_then(|buffer_handle| {
-        read_engine_state(|state| {
-            state
-                .shell
-                .buffer_perf_telemetry_cache
+        with_buffer_perf_telemetry_cache(|telemetry| {
+            telemetry
                 .telemetry(buffer_handle)
                 .map(BufferPerfTelemetry::callback_duration_estimate_ms)
         })
@@ -203,11 +192,11 @@ pub(crate) fn record_probe_refresh_budget_exhausted_count(kind: ProbeKind, count
     event_loop::record_probe_refresh_budget_exhausted_count(kind, count);
 }
 
-pub(crate) fn record_probe_extmark_fallback(buffer_handle: i64, kind: ProbeKind) {
+pub(crate) fn record_probe_extmark_fallback(buffer_handle: BufferHandle, kind: ProbeKind) {
     event_loop::record_probe_extmark_fallback(kind);
     let observed_at_ms = now_ms();
-    record_buffer_perf_telemetry(Some(buffer_handle), |shell, buffer_handle| {
-        record_probe_extmark_fallback_for_buffer(shell, buffer_handle, kind, observed_at_ms);
+    let _ = try_record_telemetry(Some(buffer_handle), |telemetry, buffer_handle| {
+        record_probe_extmark_fallback_for_buffer(telemetry, buffer_handle, kind, observed_at_ms);
     });
 }
 
@@ -239,21 +228,17 @@ pub(crate) fn record_conceal_screen_cell_cache_miss() {
     event_loop::record_conceal_screen_cell_cache_miss();
 }
 
-pub(crate) fn record_conceal_full_scan(buffer_handle: i64) {
+pub(crate) fn record_conceal_full_scan(buffer_handle: BufferHandle) {
     event_loop::record_conceal_full_scan();
-    record_buffer_perf_telemetry(Some(buffer_handle), |shell, buffer_handle| {
-        shell
-            .buffer_perf_telemetry_cache
-            .record_conceal_full_scan(buffer_handle, now_ms());
+    let _ = try_record_telemetry(Some(buffer_handle), |telemetry, buffer_handle| {
+        telemetry.record_conceal_full_scan(buffer_handle, now_ms());
     });
 }
 
-pub(crate) fn record_conceal_deferred_projection(buffer_handle: i64) {
+pub(crate) fn record_conceal_deferred_projection(buffer_handle: BufferHandle) {
     event_loop::record_conceal_deferred_projection();
-    record_buffer_perf_telemetry(Some(buffer_handle), |shell, buffer_handle| {
-        shell
-            .buffer_perf_telemetry_cache
-            .record_conceal_deferred_projection(buffer_handle, now_ms());
+    let _ = try_record_telemetry(Some(buffer_handle), |telemetry, buffer_handle| {
+        telemetry.record_conceal_deferred_projection(buffer_handle, now_ms());
     });
 }
 
@@ -402,7 +387,7 @@ pub(crate) fn record_command_row_read() {}
 mod tests {
     use super::record_probe_extmark_fallback_for_buffer;
     use crate::core::state::ProbeKind;
-    use crate::events::ShellState;
+    use crate::events::policy::BufferPerfTelemetryCache;
     use crate::test_support::proptest::pure_config;
     use proptest::prelude::*;
 
@@ -420,10 +405,10 @@ mod tests {
             kind in probe_kind(),
         ) {
             let buffer_handle = i64::from(buffer_handle);
-            let mut shell = ShellState::default();
+            let mut telemetry = BufferPerfTelemetryCache::default();
 
             record_probe_extmark_fallback_for_buffer(
-                &mut shell,
+                &mut telemetry,
                 buffer_handle,
                 kind,
                 observed_at_ms,
@@ -431,11 +416,10 @@ mod tests {
 
             match kind {
                 ProbeKind::Background => {
-                    prop_assert_eq!(shell.buffer_perf_telemetry_cache.telemetry(buffer_handle), None);
+                    prop_assert_eq!(telemetry.telemetry(buffer_handle), None);
                 }
                 ProbeKind::CursorColor => {
-                    let signals = shell
-                        .buffer_perf_telemetry_cache
+                    let signals = telemetry
                         .telemetry(buffer_handle)
                         .expect("cursor-color fallback should create buffer telemetry")
                         .signals_at(observed_at_ms);

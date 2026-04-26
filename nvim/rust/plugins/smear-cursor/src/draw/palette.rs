@@ -9,27 +9,24 @@ use crate::config::normalize_color_levels;
 use crate::core::realization::PaletteSpec;
 use crate::events::schedule_guarded;
 use crate::events::warn;
+use crate::events::with_runtime_palette_lane;
+use crate::host::HighlightColorField;
+use crate::host::HighlightPalettePort;
+use crate::host::HighlightStyle;
+use crate::host::NeovimHost;
 #[cfg(test)]
 use crate::types::RenderFrame;
-use nvim_oxi::Array;
-use nvim_oxi::Dictionary;
-use nvim_oxi::Object;
 use nvim_oxi::Result;
-use nvim_oxi::api;
-use nvim_oxi::api::opts::GetHighlightOpts;
-use nvim_oxi::api::opts::SetHighlightOpts;
-use nvim_oxi::api::types::GetHlInfos;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::panic::AssertUnwindSafe;
-use std::panic::catch_unwind;
-use std::panic::resume_unwind;
 use std::sync::Arc;
 
 mod core;
+mod lane;
+
+pub(crate) use lane::PaletteStateLane;
 
 const DEFAULT_CURSOR_COLOR: u32 = 0x00D0_D0D0;
 const DEFAULT_BACKGROUND_COLOR: u32 = 0x0030_3030;
@@ -79,10 +76,6 @@ impl PaletteState {
     }
 }
 
-thread_local! {
-    static PALETTE_STATE: RefCell<PaletteState> = RefCell::new(PaletteState::new());
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PaletteRefreshOutcome {
     ReusedCommitted,
@@ -90,37 +83,53 @@ enum PaletteRefreshOutcome {
 }
 
 fn with_palette_state<R>(reader: impl FnOnce(&PaletteState) -> R) -> R {
-    PALETTE_STATE.with(|state| {
-        let state = state.borrow();
-        reader(&state)
-    })
+    with_runtime_palette_lane(|lane| lane.read_state(reader))
 }
 
 fn with_palette_state_mut<R>(mutator: impl FnOnce(&mut PaletteState) -> R) -> R {
-    PALETTE_STATE.with(|state| {
-        // Keep palette mutators cache-local. Shell calls and logging must happen after this
-        // borrow is released so palette refresh cannot self-reenter through the RefCell.
-        let mut state = state.borrow_mut();
-        match catch_unwind(AssertUnwindSafe(|| mutator(&mut state))) {
-            Ok(output) => output,
-            Err(panic_payload) => {
-                *state = PaletteState::new_with_epoch(state.core.epoch().wrapping_add(1));
-                resume_unwind(panic_payload);
-            }
-        }
+    with_runtime_palette_lane(|lane| lane.mutate_state(mutator))
+}
+
+pub(crate) fn next_palette_recovery_epoch() -> Option<u64> {
+    with_runtime_palette_lane(PaletteStateLane::next_recovery_epoch)
+}
+
+pub(crate) fn recover_palette_to_epoch(epoch: u64) -> bool {
+    with_runtime_palette_lane(|lane| lane.recover_to_epoch(epoch))
+}
+
+#[cfg(test)]
+pub(crate) fn palette_epoch_for_test() -> u64 {
+    with_runtime_palette_lane(PaletteStateLane::epoch_for_test)
+}
+
+fn clear_highlight_cache_state() -> Vec<String> {
+    with_palette_state_mut(|state| {
+        let stale_groups = stale_highlight_group_names(state.core.clear(), None);
+        state.group_name_cache.clear();
+        stale_groups
     })
 }
 
 pub(crate) fn clear_highlight_cache() {
-    let stale_groups = with_palette_state_mut(|state| {
-        let stale_groups = stale_highlight_group_names(state.core.clear(), None);
-        state.group_name_cache.clear();
-        stale_groups
-    });
+    let stale_groups = clear_highlight_cache_state();
 
-    if let Err(err) = clear_highlight_groups(stale_groups.iter().map(String::as_str)) {
-        warn(&format!("palette cache clear failed: {err}"));
+    #[cfg(test)]
+    let _ = stale_groups;
+
+    #[cfg(not(test))]
+    {
+        let host = NeovimHost;
+        if let Err(err) = clear_highlight_groups(&host, stale_groups.iter().map(String::as_str)) {
+            warn(&format!("palette cache clear failed: {err}"));
+        }
     }
+}
+
+#[cfg(test)]
+fn clear_highlight_cache_with(host: &impl HighlightPalettePort) -> Result<()> {
+    let stale_groups = clear_highlight_cache_state();
+    clear_highlight_groups(host, stale_groups.iter().map(String::as_str))
 }
 
 fn hl_group_name(level: u32) -> String {
@@ -205,24 +214,6 @@ fn interpolate_color(color_a: u32, color_b: u32, t: f64) -> u32 {
     (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
 }
 
-fn highlight_color(group: &str, foreground: bool) -> Option<u32> {
-    let opts = GetHighlightOpts::builder()
-        .name(group)
-        .link(false)
-        .create(false)
-        .build();
-    let infos = api::get_hl(0, &opts).ok()?;
-    let GetHlInfos::Single(infos) = infos else {
-        return None;
-    };
-
-    if foreground {
-        infos.foreground
-    } else {
-        infos.background
-    }
-}
-
 fn parse_hex_color(color: &str) -> Option<u32> {
     let stripped = color.strip_prefix('#')?;
     if stripped.len() != 6 || !stripped.chars().all(|chr| chr.is_ascii_hexdigit()) {
@@ -237,7 +228,10 @@ enum ResolvedCursorColor {
     FromCursorText,
 }
 
-fn resolve_cursor_color_setting(setting: Option<&str>) -> Option<ResolvedCursorColor> {
+fn resolve_cursor_color_setting(
+    host: &impl HighlightPalettePort,
+    setting: Option<&str>,
+) -> Option<ResolvedCursorColor> {
     let setting = setting?;
     if setting == "none" {
         return Some(ResolvedCursorColor::FromCursorText);
@@ -245,10 +239,11 @@ fn resolve_cursor_color_setting(setting: Option<&str>) -> Option<ResolvedCursorC
     if let Some(hex_color) = parse_hex_color(setting) {
         return Some(ResolvedCursorColor::Direct(hex_color));
     }
-    highlight_color(setting, false).map(ResolvedCursorColor::Direct)
+    host.highlight_color(setting, HighlightColorField::Background)
+        .map(ResolvedCursorColor::Direct)
 }
 
-fn resolve_mode_cursor_color_for_spec(spec: &PaletteSpec) -> u32 {
+fn resolve_mode_cursor_color_for_spec(host: &impl HighlightPalettePort, spec: &PaletteSpec) -> u32 {
     let setting = if spec.mode().is_insert_like() {
         spec.cursor_color_insert_mode()
     } else {
@@ -256,22 +251,26 @@ fn resolve_mode_cursor_color_for_spec(spec: &PaletteSpec) -> u32 {
     };
 
     let explicit_color =
-        resolve_cursor_color_setting(setting).and_then(|resolved| match resolved {
+        resolve_cursor_color_setting(host, setting).and_then(|resolved| match resolved {
             ResolvedCursorColor::Direct(color) => Some(color),
             ResolvedCursorColor::FromCursorText => spec.color_at_cursor(),
         });
 
     explicit_color
-        .or_else(|| highlight_color("Cursor", false))
-        .or_else(|| highlight_color("Normal", true))
+        .or_else(|| host.highlight_color("Cursor", HighlightColorField::Background))
+        .or_else(|| host.highlight_color("Normal", HighlightColorField::Foreground))
         .unwrap_or(DEFAULT_CURSOR_COLOR)
 }
 
-fn resolve_normal_background_for_spec(spec: &PaletteSpec) -> Option<u32> {
+fn resolve_normal_background_for_spec(
+    host: &impl HighlightPalettePort,
+    spec: &PaletteSpec,
+) -> Option<u32> {
     match spec.normal_bg() {
         Some("none") => None,
-        Some(value) => parse_hex_color(value).or_else(|| highlight_color(value, false)),
-        None => highlight_color("Normal", false),
+        Some(value) => parse_hex_color(value)
+            .or_else(|| host.highlight_color(value, HighlightColorField::Background)),
+        None => host.highlight_color("Normal", HighlightColorField::Background),
     }
 }
 
@@ -313,10 +312,13 @@ fn raw_palette_input_key(frame: &RenderFrame) -> RawPaletteInputKey {
     raw_palette_input_key_for_spec(&PaletteSpec::from_frame(frame))
 }
 
-fn resolve_palette_key_for_spec(spec: &PaletteSpec) -> HighlightPaletteKey {
+fn resolve_palette_key_for_spec(
+    host: &impl HighlightPalettePort,
+    spec: &PaletteSpec,
+) -> HighlightPaletteKey {
     HighlightPaletteKey {
-        cursor_color: resolve_mode_cursor_color_for_spec(spec),
-        normal_background: resolve_normal_background_for_spec(spec),
+        cursor_color: resolve_mode_cursor_color_for_spec(host, spec),
+        normal_background: resolve_normal_background_for_spec(host, spec),
         transparent_fallback: resolve_transparent_fallback_for_spec(spec),
         non_inverted_blend: 0,
         color_levels: spec.color_levels(),
@@ -336,32 +338,18 @@ fn cterm_color_at_level(cterm_cursor_colors: Option<&[u16]>, level: u32) -> Opti
     colors.get(index).copied()
 }
 
-#[cfg(not(test))]
-fn clear_highlight_group(group: &str) -> Result<()> {
-    let args = Array::from_iter([
-        Object::from(0_i64),
-        Object::from(group),
-        Object::from(Dictionary::new()),
-    ]);
-    let _: Object = api::call_function("nvim_set_hl", args)?;
-    Ok(())
-}
-
-#[cfg(not(test))]
-fn clear_highlight_groups<'a>(groups: impl IntoIterator<Item = &'a str>) -> Result<()> {
+fn clear_highlight_groups<'a>(
+    host: &impl HighlightPalettePort,
+    groups: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
     for group in groups {
-        clear_highlight_group(group)?;
+        host.clear_highlight(group)?;
     }
     Ok(())
 }
 
-#[cfg(test)]
-fn clear_highlight_groups<'a>(groups: impl IntoIterator<Item = &'a str>) -> Result<()> {
-    let _ = groups.into_iter().count();
-    Ok(())
-}
-
 fn set_highlight_group(
+    host: &impl HighlightPalettePort,
     group: &str,
     foreground: &str,
     background: &str,
@@ -369,37 +357,20 @@ fn set_highlight_group(
     cterm_fg: Option<u16>,
     cterm_bg: Option<u16>,
 ) -> Result<()> {
-    if cterm_fg.is_none() && cterm_bg.is_none() {
-        let opts = SetHighlightOpts::builder()
-            .foreground(foreground)
-            .background(background)
-            .blend(blend)
-            .build();
-        api::set_hl(0, group, &opts)?;
-        return Ok(());
-    }
-
-    let mut highlight = Dictionary::new();
-    highlight.insert("fg", foreground);
-    highlight.insert("bg", background);
-    highlight.insert("blend", i64::from(blend));
-    if let Some(value) = cterm_fg {
-        highlight.insert("ctermfg", i64::from(value));
-    }
-    if let Some(value) = cterm_bg {
-        highlight.insert("ctermbg", i64::from(value));
-    }
-
-    let args = Array::from_iter([
-        Object::from(0_i64),
-        Object::from(group),
-        Object::from(highlight),
-    ]);
-    let _: Object = api::call_function("nvim_set_hl", args)?;
-    Ok(())
+    host.set_highlight(
+        group,
+        HighlightStyle {
+            foreground,
+            background,
+            blend,
+            cterm_fg,
+            cterm_bg,
+        },
+    )
 }
 
 fn apply_highlight_palette(
+    host: &impl HighlightPalettePort,
     spec: &PaletteSpec,
     palette_key: &HighlightPaletteKey,
     previous_levels: Option<u32>,
@@ -429,6 +400,7 @@ fn apply_highlight_palette(
         let inverted_hl_group = group_names.inverted_name(level_ref);
 
         set_highlight_group(
+            host,
             hl_group,
             blended_hex.as_str(),
             "none",
@@ -438,6 +410,7 @@ fn apply_highlight_palette(
         )?;
 
         set_highlight_group(
+            host,
             inverted_hl_group,
             inverted_foreground.as_str(),
             blended_hex.as_str(),
@@ -448,14 +421,15 @@ fn apply_highlight_palette(
     }
 
     let stale_groups = stale_highlight_group_names(previous_levels, Some(palette_key.color_levels));
-    clear_highlight_groups(stale_groups.iter().map(String::as_str))
+    clear_highlight_groups(host, stale_groups.iter().map(String::as_str))
 }
 
 fn refresh_highlight_palette_for_spec(
+    host: &impl HighlightPalettePort,
     spec: &PaletteSpec,
     raw_input_key: RawPaletteInputKey,
 ) -> Result<PaletteRefreshOutcome> {
-    let palette_key = resolve_palette_key_for_spec(spec);
+    let palette_key = resolve_palette_key_for_spec(host, spec);
     let previous_levels = match with_palette_state_mut(|state| {
         state.core.prepare_refresh(raw_input_key, &palette_key)
     }) {
@@ -463,7 +437,7 @@ fn refresh_highlight_palette_for_spec(
         PaletteRefreshPlan::Apply { previous_levels } => previous_levels,
     };
 
-    apply_highlight_palette(spec, &palette_key, previous_levels)?;
+    apply_highlight_palette(host, spec, &palette_key, previous_levels)?;
     with_palette_state_mut(|state| state.core.commit_refresh(raw_input_key, palette_key));
     Ok(PaletteRefreshOutcome::AppliedHighlights)
 }
@@ -474,8 +448,10 @@ fn drain_deferred_palette_refresh(expected_epoch: u64) {
             DeferredPaletteRefreshPoll::Run(pending_refresh) => pending_refresh,
             DeferredPaletteRefreshPoll::Idle | DeferredPaletteRefreshPoll::StaleEpoch => return,
         };
+        let host = NeovimHost;
 
         match refresh_highlight_palette_for_spec(
+            &host,
             &pending_refresh.spec,
             pending_refresh.raw_input_key,
         ) {
@@ -499,6 +475,14 @@ fn defer_palette_refresh(expected_epoch: u64) {
 }
 
 pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()> {
+    let host = NeovimHost;
+    ensure_highlight_palette_for_spec_with(&host, spec)
+}
+
+fn ensure_highlight_palette_for_spec_with(
+    host: &impl HighlightPalettePort,
+    spec: &PaletteSpec,
+) -> Result<()> {
     let raw_input_key = raw_palette_input_key_for_spec(spec);
     let disposition = with_palette_state_mut(|state| state.core.stage_refresh(spec, raw_input_key));
 
@@ -509,7 +493,7 @@ pub(crate) fn ensure_highlight_palette_for_spec(spec: &PaletteSpec) -> Result<()
         PaletteRefreshDisposition::BootstrapSynchronously => {
             // first draw has no committed smear highlight groups yet, so keep a one-time
             // synchronous bootstrap until palette refresh can be primed earlier in the lifecycle.
-            refresh_highlight_palette_for_spec(spec, raw_input_key)?;
+            refresh_highlight_palette_for_spec(host, spec, raw_input_key)?;
             Ok(())
         }
         PaletteRefreshDisposition::ScheduleDeferred { epoch } => {
@@ -524,6 +508,8 @@ mod tests {
     use super::*;
     use crate::config::MAX_COLOR_LEVELS;
     use crate::core::types::StrokeId;
+    use crate::host::FakeHighlightPalettePort;
+    use crate::host::HighlightPaletteCall;
     use crate::position::RenderPoint;
     use crate::test_support::proptest::ModeCase;
     use crate::test_support::proptest::cache_key_mutation_axis;
@@ -536,6 +522,11 @@ mod tests {
     use proptest::prelude::*;
 
     const RAW_KEY_COMMON_AXIS_COUNT: usize = 7;
+
+    fn reset_palette_state_for_test() {
+        let epoch = next_palette_recovery_epoch().expect("palette state should be readable");
+        assert_eq!(recover_palette_to_epoch(epoch), true);
+    }
 
     fn test_frame() -> RenderFrame {
         RenderFrame {
@@ -610,6 +601,20 @@ mod tests {
                 config.cursor_color_insert_mode = Some(setting.to_string());
             }
         });
+    }
+
+    fn palette_spec_for_levels(color_levels: u32, gamma: f64) -> PaletteSpec {
+        let mut frame = test_frame();
+        mutate_static_config(&mut frame, |config| {
+            config.cursor_color = Some("#FFFFFF".to_string());
+            config.normal_bg = Some("#000000".to_string());
+            config.transparent_bg_fallback_color = "#000000".to_string();
+            config.cterm_cursor_colors = Some(vec![10_u16, 11_u16]);
+            config.cterm_bg = Some(20_u16);
+            config.color_levels = color_levels;
+            config.gamma = gamma;
+        });
+        PaletteSpec::from_frame(&frame)
     }
 
     fn frame_for_raw_key_properties(mode: &ModeCase, depends_on_cursor_text: bool) -> RenderFrame {
@@ -731,5 +736,180 @@ mod tests {
 
         assert_eq!(oversized.normal, capped.normal);
         assert_eq!(oversized.inverted, capped.inverted);
+    }
+
+    #[test]
+    fn resolve_palette_key_reads_named_colors_through_the_palette_port() {
+        let host = FakeHighlightPalettePort::default();
+        host.set_highlight_color("CursorAccent", HighlightColorField::Background, 0x0011_2233);
+        host.set_highlight_color("Paper", HighlightColorField::Background, 0x0020_2020);
+        let mut frame = test_frame();
+        mutate_static_config(&mut frame, |config| {
+            config.cursor_color = Some("CursorAccent".to_string());
+            config.normal_bg = Some("Paper".to_string());
+        });
+        let spec = PaletteSpec::from_frame(&frame);
+
+        let key = resolve_palette_key_for_spec(&host, &spec);
+
+        assert_eq!(
+            key,
+            HighlightPaletteKey {
+                cursor_color: 0x0011_2233,
+                normal_background: Some(0x0020_2020),
+                transparent_fallback: 0x0030_3030,
+                non_inverted_blend: 0,
+                color_levels: 16,
+                gamma_bits: spec.gamma_bits(),
+                cterm_cursor_colors: Some(vec![17_u16, 42_u16]),
+                cterm_bg: Some(235_u16),
+            }
+        );
+        assert_eq!(
+            host.calls(),
+            vec![
+                HighlightPaletteCall::HighlightColor {
+                    group: "CursorAccent".to_string(),
+                    field: HighlightColorField::Background,
+                },
+                HighlightPaletteCall::HighlightColor {
+                    group: "Paper".to_string(),
+                    field: HighlightColorField::Background,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_highlight_palette_writes_groups_through_the_palette_port() {
+        reset_palette_state_for_test();
+        let host = FakeHighlightPalettePort::default();
+        let spec = palette_spec_for_levels(/*color_levels*/ 2, /*gamma*/ 1.0);
+        let palette_key = HighlightPaletteKey {
+            cursor_color: 0x00FF_FFFF,
+            normal_background: Some(0),
+            transparent_fallback: 0,
+            non_inverted_blend: 0,
+            color_levels: 2,
+            gamma_bits: spec.gamma_bits(),
+            cterm_cursor_colors: Some(vec![10_u16, 11_u16]),
+            cterm_bg: Some(20_u16),
+        };
+
+        apply_highlight_palette(&host, &spec, &palette_key, Some(3))
+            .expect("fake palette port should accept highlight writes");
+
+        assert_eq!(
+            host.calls(),
+            vec![
+                HighlightPaletteCall::SetHighlight {
+                    group: "SmearCursor1".to_string(),
+                    foreground: "#808080".to_string(),
+                    background: "none".to_string(),
+                    blend: 0,
+                    cterm_fg: Some(10_u16),
+                    cterm_bg: None,
+                },
+                HighlightPaletteCall::SetHighlight {
+                    group: "SmearCursorInverted1".to_string(),
+                    foreground: "#000000".to_string(),
+                    background: "#808080".to_string(),
+                    blend: 0,
+                    cterm_fg: Some(20_u16),
+                    cterm_bg: Some(10_u16),
+                },
+                HighlightPaletteCall::SetHighlight {
+                    group: "SmearCursor2".to_string(),
+                    foreground: "#FFFFFF".to_string(),
+                    background: "none".to_string(),
+                    blend: 0,
+                    cterm_fg: Some(11_u16),
+                    cterm_bg: None,
+                },
+                HighlightPaletteCall::SetHighlight {
+                    group: "SmearCursorInverted2".to_string(),
+                    foreground: "#000000".to_string(),
+                    background: "#FFFFFF".to_string(),
+                    blend: 0,
+                    cterm_fg: Some(20_u16),
+                    cterm_bg: Some(11_u16),
+                },
+                HighlightPaletteCall::ClearHighlight {
+                    group: "SmearCursor3".to_string(),
+                },
+                HighlightPaletteCall::ClearHighlight {
+                    group: "SmearCursorInverted3".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_highlight_palette_returns_palette_port_set_failures() {
+        reset_palette_state_for_test();
+        let host = FakeHighlightPalettePort::default();
+        host.push_set_highlight_error("planned set_hl failure");
+        let spec = palette_spec_for_levels(/*color_levels*/ 2, /*gamma*/ 1.0);
+        let palette_key = HighlightPaletteKey {
+            cursor_color: 0x00FF_FFFF,
+            normal_background: Some(0),
+            transparent_fallback: 0,
+            non_inverted_blend: 0,
+            color_levels: 2,
+            gamma_bits: spec.gamma_bits(),
+            cterm_cursor_colors: Some(vec![10_u16, 11_u16]),
+            cterm_bg: Some(20_u16),
+        };
+
+        let err = apply_highlight_palette(&host, &spec, &palette_key, None)
+            .expect_err("palette set failure should propagate");
+
+        assert!(err.to_string().contains("planned set_hl failure"));
+    }
+
+    #[test]
+    fn clear_highlight_cache_clears_committed_groups_through_the_palette_port() {
+        reset_palette_state_for_test();
+        let host = FakeHighlightPalettePort::default();
+        let spec = palette_spec_for_levels(/*color_levels*/ 2, /*gamma*/ 1.0);
+        let palette_key = resolve_palette_key_for_spec(&host, &spec);
+        let raw_input_key = raw_palette_input_key_for_spec(&spec);
+        with_palette_state_mut(|state| state.core.commit_refresh(raw_input_key, palette_key));
+
+        clear_highlight_cache_with(&host).expect("fake palette port should accept clear writes");
+
+        assert_eq!(
+            host.calls(),
+            vec![
+                HighlightPaletteCall::ClearHighlight {
+                    group: "SmearCursor1".to_string(),
+                },
+                HighlightPaletteCall::ClearHighlight {
+                    group: "SmearCursorInverted1".to_string(),
+                },
+                HighlightPaletteCall::ClearHighlight {
+                    group: "SmearCursor2".to_string(),
+                },
+                HighlightPaletteCall::ClearHighlight {
+                    group: "SmearCursorInverted2".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn clear_highlight_cache_returns_palette_port_clear_failures() {
+        reset_palette_state_for_test();
+        let host = FakeHighlightPalettePort::default();
+        host.push_clear_highlight_error("planned clear_hl failure");
+        let spec = palette_spec_for_levels(/*color_levels*/ 2, /*gamma*/ 1.0);
+        let palette_key = resolve_palette_key_for_spec(&host, &spec);
+        let raw_input_key = raw_palette_input_key_for_spec(&spec);
+        with_palette_state_mut(|state| state.core.commit_refresh(raw_input_key, palette_key));
+
+        let err =
+            clear_highlight_cache_with(&host).expect_err("palette clear failure should propagate");
+
+        assert!(err.to_string().contains("planned clear_hl failure"));
     }
 }

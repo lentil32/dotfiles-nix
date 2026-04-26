@@ -8,6 +8,7 @@ mod scene;
 #[cfg(test)]
 mod semantic_view;
 
+pub(crate) use crate::core::types::AnimationSchedule;
 pub(crate) use ingress::*;
 pub(crate) use observation::*;
 pub(crate) use policy::*;

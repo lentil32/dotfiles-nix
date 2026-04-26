@@ -118,6 +118,10 @@ in
           run = "move-node-to-workspace ${workspaces.media}";
         }
         {
+          "if".app-id = "com.apple.Music";
+          run = "move-node-to-workspace ${workspaces.media}";
+        }
+        {
           "if".app-id = "com.github.th-ch.youtube-music";
           run = "move-node-to-workspace ${workspaces.media}";
         }

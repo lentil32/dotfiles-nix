@@ -5,11 +5,14 @@ use crate::core::types::Millis;
 use crate::core::types::TimerId;
 #[cfg(feature = "perf-counters")]
 use crate::events::ingress::AutocmdIngress;
-use std::cell::RefCell;
 
 mod state;
 mod telemetry;
 
+use super::runtime::read_event_loop_state as runtime_read_event_loop_state;
+use super::runtime::with_event_loop_state as runtime_with_event_loop_state;
+#[cfg(test)]
+use super::runtime::with_event_loop_state_for_test as runtime_with_event_loop_state_for_test;
 pub(super) use state::EventLoopDiagnostics;
 pub(super) use state::EventLoopState;
 pub(super) use telemetry::RuntimeBehaviorMetrics;
@@ -17,20 +20,8 @@ pub(super) use telemetry::RuntimeBehaviorMetrics;
 #[cfg(test)]
 mod tests;
 
-thread_local! {
-    static EVENT_LOOP_STATE: RefCell<EventLoopState> = const { RefCell::new(EventLoopState::new()) };
-}
-
 fn with_event_loop_state(mutator: impl FnOnce(&mut EventLoopState)) {
-    let _ = EVENT_LOOP_STATE.with(|state| {
-        // Event-loop telemetry is advisory. If a nested callback is already sampling it, drop the
-        // contended sample instead of panicking the plugin on a RefCell borrow failure.
-        let Ok(mut state) = state.try_borrow_mut() else {
-            return None;
-        };
-        mutator(&mut state);
-        Some(())
-    });
+    runtime_with_event_loop_state(mutator);
 }
 
 fn with_runtime_metrics(mutator: impl FnOnce(&mut RuntimeBehaviorMetrics)) {
@@ -69,22 +60,14 @@ fn with_nonzero_metric_total(
 }
 
 fn read_event_loop_state<R>(reader: impl FnOnce(&EventLoopState) -> R) -> Option<R> {
-    EVENT_LOOP_STATE.with(|state| {
-        let Ok(state) = state.try_borrow() else {
-            return None;
-        };
-        Some(reader(&state))
-    })
+    runtime_read_event_loop_state(reader)
 }
 
 #[cfg(test)]
 pub(in crate::events) fn with_event_loop_state_for_test<R>(
     mutator: impl FnOnce(&mut EventLoopState) -> R,
 ) -> R {
-    EVENT_LOOP_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        mutator(&mut state)
-    })
+    runtime_with_event_loop_state_for_test(mutator)
 }
 
 pub(super) fn note_autocmd_event(now_ms: f64) {

@@ -1,17 +1,18 @@
 use super::super::logging::warn;
 use super::super::policy::BufferEventPolicy;
 use super::super::runtime::resolved_current_buffer_event_policy;
-use super::EngineAccessResult;
-use super::read_engine_state;
+use super::RuntimeAccessResult;
+use super::with_core_read;
 use crate::config::BufferPerfMode;
 use crate::config::RuntimeConfig;
 use crate::core::state::BufferPerfClass;
+use crate::host::BufferHandle;
+use crate::host::api;
 use crate::position::RenderPoint;
 use crate::position::ScreenCell;
 use crate::position::current_visual_cursor_anchor;
 use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
-use nvim_oxi::api;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 use nvimrs_nvim_utils::mode::is_insert_like_mode;
 use nvimrs_nvim_utils::mode::is_replace_like_mode;
@@ -109,25 +110,30 @@ pub(crate) struct IngressReadSnapshotTestInput {
 
 impl IngressReadSnapshot {
     #[cfg(not(test))]
-    pub(crate) fn capture() -> EngineAccessResult<Self> {
-        let current_buffer = api::get_current_buf();
-        let current_buffer = current_buffer.is_valid().then_some(current_buffer);
+    pub(crate) fn capture() -> RuntimeAccessResult<Self> {
+        use crate::host::CurrentEditorPort as _;
+
+        let host = crate::host::NeovimHost;
+        let current_buffer = host.current_buffer();
+        let current_buffer = host
+            .buffer_is_valid(&current_buffer)
+            .then_some(current_buffer);
         Self::capture_with_current_buffer(current_buffer.as_ref())
     }
 
     pub(crate) fn capture_with_current_buffer(
         current_buffer: Option<&api::Buffer>,
-    ) -> EngineAccessResult<Self> {
+    ) -> RuntimeAccessResult<Self> {
         let callback_duration_estimate_ms = super::cursor_callback_duration_estimate_ms(
-            current_buffer.map(api::Buffer::handle).map(i64::from),
+            current_buffer.map(BufferHandle::from_buffer),
         );
-        let mut snapshot = read_engine_state(|state| {
-            let runtime = state.core_state.runtime();
+        let mut snapshot = with_core_read(|state| {
+            let runtime = state.runtime();
             let config = &runtime.config;
 
             Self {
                 enabled: runtime.is_enabled(),
-                needs_initialize: state.core_state.needs_initialize(),
+                needs_initialize: state.needs_initialize(),
                 current_corners: runtime.current_corners(),
                 target_corners: runtime.target_corners(),
                 target_position: runtime.target_position(),

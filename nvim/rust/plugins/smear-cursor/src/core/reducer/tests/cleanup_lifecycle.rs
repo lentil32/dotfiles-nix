@@ -176,7 +176,9 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
         &soft_tick.next,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
-            action: RenderCleanupAppliedAction::SoftCleared,
+            action: RenderCleanupAppliedAction::SoftCleared {
+                retained_resources: 0,
+            },
         }),
     );
     assert_cooling_cleanup_state(
@@ -205,6 +207,7 @@ fn cleanup_timer_soft_clear_immediately_emits_first_cooling_compaction() {
             observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
             action: RenderCleanupAppliedAction::CompactedToBudget {
                 converged_to_idle: true,
+                progress: RenderCleanupCompactionProgress::NoProgress,
             },
         }),
     );
@@ -272,7 +275,9 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
         &soft_tick.next,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
-            action: RenderCleanupAppliedAction::SoftCleared,
+            action: RenderCleanupAppliedAction::SoftCleared {
+                retained_resources: 0,
+            },
         }),
     );
     pretty_assert_eq!(
@@ -285,13 +290,14 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
             observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
             action: RenderCleanupAppliedAction::CompactedToBudget {
                 converged_to_idle: false,
+                progress: RenderCleanupCompactionProgress::NoProgress,
             },
         }),
     );
     assert_cooling_cleanup_state(
         after_compaction.next.render_cleanup(),
         Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
-        Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+        Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
         Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
     );
 
@@ -300,6 +306,18 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
         .timers()
         .active_token(TimerId::Cleanup)
         .expect("hard purge fallback timer should stay armed while cooling remains pending");
+    pretty_assert_eq!(
+        after_compaction.effects,
+        vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+            token: hard_token,
+            delay: DelayBudgetMs::try_new(
+                render_hard_cleanup_delay_ms(&runtime.config)
+                    .saturating_sub(render_cleanup_delay_ms(&runtime.config)),
+            )
+            .expect("hard cleanup fallback delay"),
+            requested_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
+        })]
+    );
 
     let hard_tick = reduce(
         &after_compaction.next,
@@ -320,7 +338,9 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
         &hard_tick.next,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
-            action: RenderCleanupAppliedAction::HardPurged,
+            action: RenderCleanupAppliedAction::HardPurged {
+                retained_resources: 0,
+            },
         }),
     );
 
@@ -337,6 +357,96 @@ fn hard_purge_stays_as_fallback_when_cooling_compaction_does_not_converge() {
                 converged_at: Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config)),
             },
         )]
+    );
+}
+
+#[test]
+fn non_converged_compaction_with_progress_rearms_after_cleanup_cadence() {
+    let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
+    runtime.config.max_kept_windows = 21;
+    let started_at = Millis::new(79 + render_cleanup_delay_ms(&runtime.config));
+    let observed_at = started_at;
+    let hard_due_at = Millis::new(79 + render_hard_cleanup_delay_ms(&runtime.config));
+    let cooling_cleanup = RenderCleanupState::scheduled(
+        Millis::new(79),
+        render_cleanup_delay_ms(&runtime.config),
+        render_hard_cleanup_delay_ms(&runtime.config),
+    )
+    .enter_cooling(started_at);
+    let state = ready_state_with_observation(cursor(4, 9))
+        .with_runtime(runtime.clone())
+        .with_render_cleanup(cooling_cleanup);
+
+    let after_compaction = reduce(
+        &state,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at,
+            action: RenderCleanupAppliedAction::CompactedToBudget {
+                converged_to_idle: false,
+                progress: RenderCleanupCompactionProgress::MadeProgress,
+            },
+        }),
+    );
+
+    let next_due_at = Millis::new(
+        observed_at
+            .value()
+            .saturating_add(render_cleanup_delay_ms(&runtime.config)),
+    );
+    assert_cooling_cleanup_state(
+        after_compaction.next.render_cleanup(),
+        started_at,
+        next_due_at,
+        hard_due_at,
+    );
+    let cleanup_token = after_compaction
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("progressing compaction should schedule another cleanup cadence");
+    pretty_assert_eq!(
+        after_compaction.effects,
+        vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+            token: cleanup_token,
+            delay: DelayBudgetMs::try_new(render_cleanup_delay_ms(&runtime.config))
+                .expect("progress compaction cadence delay"),
+            requested_at: observed_at,
+        })]
+    );
+}
+
+#[test]
+fn stalled_compaction_after_hard_deadline_emits_hard_purge_without_timer() {
+    let runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
+    let cooling_cleanup =
+        RenderCleanupState::scheduled(Millis::new(79), 30, 90).enter_cooling(Millis::new(109));
+    let state = ready_state_with_observation(cursor(4, 9))
+        .with_runtime(runtime)
+        .with_render_cleanup(cooling_cleanup);
+
+    let after_compaction = reduce(
+        &state,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at: Millis::new(170),
+            action: RenderCleanupAppliedAction::CompactedToBudget {
+                converged_to_idle: false,
+                progress: RenderCleanupCompactionProgress::NoProgress,
+            },
+        }),
+    );
+
+    pretty_assert_eq!(
+        after_compaction
+            .next
+            .timers()
+            .active_token(TimerId::Cleanup),
+        None
+    );
+    pretty_assert_eq!(
+        after_compaction.effects,
+        vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+            execution: RenderCleanupExecution::HardPurge,
+        })]
     );
 }
 
@@ -362,6 +472,7 @@ fn cleanup_cold_convergence_releases_runtime_purgeable_storage() {
             observed_at: Millis::new(110),
             action: RenderCleanupAppliedAction::CompactedToBudget {
                 converged_to_idle: true,
+                progress: RenderCleanupCompactionProgress::NoProgress,
             },
         }),
     );
@@ -392,7 +503,9 @@ fn hard_purge_releases_runtime_purgeable_storage_without_prior_cooling() {
         &state,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(169),
-            action: RenderCleanupAppliedAction::HardPurged,
+            action: RenderCleanupAppliedAction::HardPurged {
+                retained_resources: 0,
+            },
         }),
     );
 
@@ -400,6 +513,203 @@ fn hard_purge_releases_runtime_purgeable_storage_without_prior_cooling() {
     pretty_assert_eq!(
         runtime_cleanup_cold_storage_residency(completed.next.runtime()),
         RuntimeCleanupColdStorageResidency::RELEASED
+    );
+}
+
+#[test]
+fn retained_hard_purge_resources_keep_cleanup_retryable_and_storage_retained() {
+    let retained_runtime = runtime_with_retained_cleanup_cold_storage(
+        ready_state_with_observation(cursor(4, 9)).runtime().clone(),
+    );
+    let retry_delay_ms = render_cleanup_delay_ms(&retained_runtime.config);
+    let hot_cleanup = RenderCleanupState::scheduled(Millis::new(79), 30, 90);
+    let state = ready_state_with_observation(cursor(4, 9))
+        .with_runtime(retained_runtime)
+        .with_render_cleanup(hot_cleanup);
+    let observed_at = Millis::new(169);
+
+    let completed = reduce(
+        &state,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at,
+            action: RenderCleanupAppliedAction::HardPurged {
+                retained_resources: 2,
+            },
+        }),
+    );
+
+    let retry_due_at = Millis::new(observed_at.value().saturating_add(retry_delay_ms));
+    assert_cooling_cleanup_state(
+        completed.next.render_cleanup(),
+        observed_at,
+        retry_due_at,
+        retry_due_at,
+    );
+    pretty_assert_eq!(
+        runtime_cleanup_cold_storage_residency(completed.next.runtime()),
+        RuntimeCleanupColdStorageResidency::RETAINED
+    );
+    let cleanup_token = completed
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("retained hard purge resources should schedule a retry");
+    pretty_assert_eq!(
+        completed.effects,
+        vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+            token: cleanup_token,
+            delay: DelayBudgetMs::try_new(retry_delay_ms).expect("hard purge retry delay"),
+            requested_at: observed_at,
+        })]
+    );
+}
+
+#[test]
+fn retained_soft_clear_resources_skip_compaction_and_schedule_hard_purge_retry() {
+    let retained_runtime = runtime_with_retained_cleanup_cold_storage(
+        ready_state_with_observation(cursor(4, 9)).runtime().clone(),
+    );
+    let retry_delay_ms = render_cleanup_delay_ms(&retained_runtime.config);
+    let hot_cleanup = RenderCleanupState::scheduled(Millis::new(79), 30, 90);
+    let state = ready_state_with_observation(cursor(4, 9))
+        .with_runtime(retained_runtime)
+        .with_render_cleanup(hot_cleanup);
+    let observed_at = Millis::new(109);
+
+    let completed = reduce(
+        &state,
+        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
+            observed_at,
+            action: RenderCleanupAppliedAction::SoftCleared {
+                retained_resources: 1,
+            },
+        }),
+    );
+
+    let retry_due_at = Millis::new(observed_at.value().saturating_add(retry_delay_ms));
+    assert_cooling_cleanup_state(
+        completed.next.render_cleanup(),
+        observed_at,
+        retry_due_at,
+        retry_due_at,
+    );
+    pretty_assert_eq!(
+        runtime_cleanup_cold_storage_residency(completed.next.runtime()),
+        RuntimeCleanupColdStorageResidency::RETAINED
+    );
+    let cleanup_token = completed
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("retained soft clear resources should schedule a hard-purge retry");
+    pretty_assert_eq!(
+        completed.effects,
+        vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+            token: cleanup_token,
+            delay: DelayBudgetMs::try_new(retry_delay_ms).expect("soft clear retry delay"),
+            requested_at: observed_at,
+        })]
+    );
+}
+
+#[test]
+fn retained_cleanup_resources_observed_schedules_retry_without_fake_apply_completion() {
+    let retained_runtime = runtime_with_retained_cleanup_cold_storage(
+        ready_state_with_observation(cursor(4, 9)).runtime().clone(),
+    );
+    let retry_delay_ms = render_cleanup_delay_ms(&retained_runtime.config);
+    let state = ready_state_with_observation(cursor(4, 9))
+        .with_runtime(retained_runtime)
+        .with_render_cleanup(RenderCleanupState::cold());
+    let observed_at = Millis::new(219);
+
+    let completed = reduce(
+        &state,
+        Event::RenderCleanupRetainedResourcesObserved(
+            RenderCleanupRetainedResourcesObservedEvent {
+                observed_at,
+                retained_resources: 3,
+            },
+        ),
+    );
+
+    let retry_due_at = Millis::new(observed_at.value().saturating_add(retry_delay_ms));
+    assert_cooling_cleanup_state(
+        completed.next.render_cleanup(),
+        observed_at,
+        retry_due_at,
+        retry_due_at,
+    );
+    pretty_assert_eq!(
+        runtime_cleanup_cold_storage_residency(completed.next.runtime()),
+        RuntimeCleanupColdStorageResidency::RETAINED
+    );
+    let cleanup_token = completed
+        .next
+        .timers()
+        .active_token(TimerId::Cleanup)
+        .expect("retained resource observation should schedule a cleanup retry");
+    pretty_assert_eq!(
+        completed.effects,
+        vec![Effect::ScheduleTimer(ScheduleTimerEffect {
+            token: cleanup_token,
+            delay: DelayBudgetMs::try_new(retry_delay_ms).expect("retained resource retry delay"),
+            requested_at: observed_at,
+        })]
+    );
+}
+
+#[test]
+fn retained_cleanup_resources_observed_while_hot_after_deadline_keeps_active_timer_owner() {
+    let mut retained_runtime = runtime_with_retained_cleanup_cold_storage(
+        ready_state_with_observation(cursor(4, 9)).runtime().clone(),
+    );
+    retained_runtime.config.max_kept_windows = 21;
+    let hot_cleanup = RenderCleanupState::scheduled(Millis::new(100), 30, 90);
+    let state = ready_state_with_observation(cursor(4, 9))
+        .with_runtime(retained_runtime)
+        .with_render_cleanup(hot_cleanup);
+    let (timers, cleanup_token) = state.timers().arm(TimerId::Cleanup);
+    let state = state.with_timers(timers);
+    let observed_at = Millis::new(135);
+
+    let completed = reduce(
+        &state,
+        Event::RenderCleanupRetainedResourcesObserved(
+            RenderCleanupRetainedResourcesObservedEvent {
+                observed_at,
+                retained_resources: 3,
+            },
+        ),
+    );
+
+    assert_hot_cleanup_state(
+        completed.next.render_cleanup(),
+        Millis::new(130),
+        Millis::new(190),
+    );
+    pretty_assert_eq!(
+        runtime_cleanup_cold_storage_residency(completed.next.runtime()),
+        RuntimeCleanupColdStorageResidency::RETAINED
+    );
+    pretty_assert_eq!(
+        completed.next.timers().active_token(TimerId::Cleanup),
+        Some(cleanup_token)
+    );
+    pretty_assert_eq!(completed.effects, Vec::<Effect>::new());
+
+    let timer_fired = reduce(
+        &completed.next,
+        cleanup_tick_event(cleanup_token, observed_at.value()),
+    );
+
+    pretty_assert_eq!(
+        timer_fired.effects,
+        vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+            execution: RenderCleanupExecution::SoftClear {
+                max_kept_windows: 21,
+            },
+        })]
     );
 }
 
@@ -466,7 +776,9 @@ fn cleanup_effects_follow_current_runtime_config_without_scheduler_policy_copies
         &cooling_state,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(79 + render_cleanup_delay_ms(&hot_runtime.config)),
-            action: RenderCleanupAppliedAction::SoftCleared,
+            action: RenderCleanupAppliedAction::SoftCleared {
+                retained_resources: 0,
+            },
         }),
     );
 
@@ -531,7 +843,9 @@ fn fresh_ingress_promotes_cooling_cleanup_state_back_to_hot() {
         &soft_tick.next,
         Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
             observed_at: Millis::new(79 + render_cleanup_delay_ms(&runtime.config)),
-            action: RenderCleanupAppliedAction::SoftCleared,
+            action: RenderCleanupAppliedAction::SoftCleared {
+                retained_resources: 0,
+            },
         }),
     )
     .next;

@@ -1,6 +1,4 @@
 use crate::core::state::CoreState;
-use std::cell::Cell;
-use std::cell::RefCell;
 use thiserror::Error;
 
 mod buffer_text_revision;
@@ -21,6 +19,8 @@ mod timer_protocol;
 mod timers;
 mod trace;
 
+use crate::host::BufferHandle;
+use crate::host::NamespaceId;
 use buffer_text_revision::BufferTextRevisionCache;
 use cursor::BufferMetadataCache;
 use nvim_oxi::Object;
@@ -28,9 +28,7 @@ use policy::BufferEventPolicyCache;
 use policy::BufferPerfTelemetryCache;
 use probe_cache::ConcealRegion;
 use probe_cache::ProbeCacheState;
-use runtime::CoreTimerHandles;
 use runtime::EditorViewportCache;
-use timer_protocol::HostCallbackId;
 
 #[cfg(test)]
 mod tests;
@@ -42,7 +40,11 @@ pub(crate) use lifecycle::setup;
 pub(crate) use lifecycle::toggle;
 pub(crate) use lifecycle::validation_counters;
 pub(crate) use logging::warn;
+pub(crate) use runtime::FlushRedrawCapability;
+#[cfg(test)]
+pub(crate) use runtime::clear_runtime_draw_context_for_test;
 pub(crate) use runtime::editor_viewport_for_bounds;
+pub(crate) use runtime::flush_redraw_capability;
 pub(crate) use runtime::record_compiled_field_cache_hit;
 pub(crate) use runtime::record_compiled_field_cache_miss;
 pub(crate) use runtime::record_effect_failure;
@@ -63,15 +65,19 @@ pub(crate) use runtime::record_planning_preview_copy;
 pub(crate) use runtime::record_planning_preview_invocation;
 pub(crate) use runtime::record_projection_reuse_hit;
 pub(crate) use runtime::record_projection_reuse_miss;
+pub(crate) use runtime::restore_draw_prepaint_by_tab;
+pub(crate) use runtime::restore_draw_render_tabs;
+#[cfg(test)]
+pub(crate) use runtime::runtime_render_tab_handles_for_test;
+pub(crate) use runtime::set_flush_redraw_capability;
+pub(crate) use runtime::take_draw_prepaint_by_tab;
+pub(crate) use runtime::take_draw_render_tabs;
+pub(crate) use runtime::tracked_runtime_draw_tab_handles;
+pub(crate) use runtime::with_runtime_palette_lane;
 pub(crate) use timers::on_core_timer_fired_event;
 pub(crate) use timers::schedule_guarded;
 
 const LOG_SOURCE_NAME: &str = "smear_cursor";
-const LOG_LEVEL_TRACE: i64 = 0;
-const LOG_LEVEL_DEBUG: i64 = 1;
-const LOG_LEVEL_WARN: i64 = 3;
-const LOG_LEVEL_INFO: i64 = 2;
-const LOG_LEVEL_ERROR: i64 = 4;
 const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
 const CALLBACK_DURATION_EWMA_ALPHA: f64 = 0.25;
 
@@ -120,10 +126,8 @@ struct ShellState {
     // scratch buffers, host timer ids, telemetry, and host capability
     // witnesses live here.
     // snapshot: host capability and witness state retained across cache purges.
-    namespace_id: Option<u32>,
+    namespace_id: Option<NamespaceId>,
     host_bridge_state: HostBridgeState,
-    core_timer_handles: CoreTimerHandles,
-    next_host_callback_id: u64,
     editor_viewport_cache: EditorViewportCache,
     buffer_metadata_cache: BufferMetadataCache,
     real_cursor_visibility: Option<RealCursorVisibility>,
@@ -138,11 +142,11 @@ struct ShellState {
 }
 
 impl ShellState {
-    const fn namespace_id(&self) -> Option<u32> {
+    const fn namespace_id(&self) -> Option<NamespaceId> {
         self.namespace_id
     }
 
-    fn set_namespace_id(&mut self, namespace_id: u32) {
+    fn set_namespace_id(&mut self, namespace_id: NamespaceId) {
         self.namespace_id = Some(namespace_id);
     }
 
@@ -154,10 +158,6 @@ impl ShellState {
         self.host_bridge_state = HostBridgeState::Verified { revision };
     }
 
-    fn allocate_host_callback_id(&mut self) -> HostCallbackId {
-        HostCallbackId::next(&mut self.next_host_callback_id)
-    }
-
     fn note_cursor_color_colorscheme_change(&mut self) {
         self.probe_cache.note_cursor_color_colorscheme_change();
         self.clear_real_cursor_visibility();
@@ -167,7 +167,7 @@ impl ShellState {
         self.editor_viewport_cache.invalidate();
     }
 
-    fn invalidate_buffer_metadata(&mut self, buffer_handle: i64) {
+    fn invalidate_buffer_metadata(&mut self, buffer_handle: BufferHandle) {
         self.buffer_metadata_cache.invalidate_buffer(buffer_handle);
         // Buffer event policy is derived from buffer-local metadata, so this
         // metadata boundary remains the single owner of policy invalidation.
@@ -175,15 +175,15 @@ impl ShellState {
             .invalidate_buffer(buffer_handle);
     }
 
-    fn invalidate_conceal_probe_caches(&mut self, buffer_handle: i64) {
+    fn invalidate_conceal_probe_caches(&mut self, buffer_handle: BufferHandle) {
         self.probe_cache.invalidate_conceal_buffer(buffer_handle);
     }
 
-    fn invalidate_buffer_local_probe_caches(&mut self, buffer_handle: i64) {
+    fn invalidate_buffer_local_probe_caches(&mut self, buffer_handle: BufferHandle) {
         self.probe_cache.invalidate_buffer(buffer_handle);
     }
 
-    fn invalidate_buffer_local_caches(&mut self, buffer_handle: i64) {
+    fn invalidate_buffer_local_caches(&mut self, buffer_handle: BufferHandle) {
         self.invalidate_buffer_metadata(buffer_handle);
         self.buffer_perf_telemetry_cache
             .invalidate_buffer(buffer_handle);
@@ -198,7 +198,6 @@ impl ShellState {
         self.buffer_perf_policy_cache.clear();
         self.buffer_perf_telemetry_cache.clear();
         self.buffer_text_revision_cache.clear();
-        self.next_host_callback_id = 0;
         self.release_cleanup_cold_storage();
         self.clear_real_cursor_visibility();
     }
@@ -250,14 +249,13 @@ impl ShellState {
 }
 
 #[derive(Debug, Default)]
-struct EngineState {
-    // Engine state preserves one top-level split: reducer truth in `core_state`
-    // and shell-owned cache/snapshot/telemetry state in `shell`.
-    shell: ShellState,
+struct ReducerState {
+    // Reducer state is semantic-only. Shell caches, resources, and telemetry
+    // live in sibling `RuntimeCell` lanes.
     core_state: CoreState,
 }
 
-impl EngineState {
+impl ReducerState {
     fn core_state(&self) -> &CoreState {
         &self.core_state
     }
@@ -270,71 +268,19 @@ impl EngineState {
         std::mem::take(&mut self.core_state)
     }
 
-    #[cfg(test)]
-    fn clone_core_state(&self) -> CoreState {
-        self.core_state.clone()
-    }
-
     fn set_core_state(&mut self, next_state: CoreState) {
         self.core_state = next_state;
     }
 }
 
-#[derive(Debug)]
-enum EngineStateSlot {
-    Ready(Box<EngineState>),
-    InUse,
-}
-
-impl Default for EngineStateSlot {
-    fn default() -> Self {
-        Self::Ready(Box::default())
-    }
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
-pub(super) enum EngineAccessError {
-    #[error("engine state re-entered while already in use")]
+pub(super) enum RuntimeAccessError {
+    #[error("runtime lane re-entered while already in use")]
     Reentered,
 }
 
-impl From<EngineAccessError> for nvim_oxi::Error {
-    fn from(error: EngineAccessError) -> Self {
+impl From<RuntimeAccessError> for nvim_oxi::Error {
+    fn from(error: RuntimeAccessError) -> Self {
         crate::other_error(error.to_string())
     }
-}
-
-#[derive(Debug)]
-struct EngineContext {
-    state: RefCell<EngineStateSlot>,
-    log_level: Cell<i64>,
-}
-
-impl EngineContext {
-    fn new() -> Self {
-        Self {
-            state: RefCell::new(EngineStateSlot::Ready(Box::default())),
-            log_level: Cell::new(LOG_LEVEL_INFO),
-        }
-    }
-
-    fn take_state(&self) -> Result<EngineState, EngineAccessError> {
-        let mut slot = self.state.borrow_mut();
-        match std::mem::replace(&mut *slot, EngineStateSlot::InUse) {
-            EngineStateSlot::Ready(state) => Ok(*state),
-            EngineStateSlot::InUse => Err(EngineAccessError::Reentered),
-        }
-    }
-
-    fn restore_state(&self, state: EngineState) {
-        let mut slot = self.state.borrow_mut();
-        let previous = std::mem::replace(&mut *slot, EngineStateSlot::Ready(Box::new(state)));
-        debug_assert!(matches!(previous, EngineStateSlot::InUse));
-    }
-}
-
-thread_local! {
-    // CONTEXT: smear_cursor funnels host callbacks back through Neovim's scheduled
-    // main-thread path, so engine state only needs single-thread interior mutability.
-    static ENGINE_CONTEXT: EngineContext = EngineContext::new();
 }

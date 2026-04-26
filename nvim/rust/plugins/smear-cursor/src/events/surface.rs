@@ -1,5 +1,8 @@
 //! Canonical window-surface host reads for observation-time position facts.
 
+use crate::host::NeovimHost;
+use crate::host::WindowSurfacePort;
+use crate::host::api;
 use crate::lua::LuaParseError;
 use crate::lua::i64_from_object_ref_with_typed;
 use crate::position::BufferLine;
@@ -7,11 +10,9 @@ use crate::position::ScreenCell;
 use crate::position::SurfaceId;
 use crate::position::ViewportBounds;
 use crate::position::WindowSurfaceSnapshot;
-use nvim_oxi::Array;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
 use nvim_oxi::String as NvimString;
-use nvim_oxi::api;
 use nvim_oxi::conversion::FromObject;
 
 type WindowSurfaceReadResult<T> = std::result::Result<T, WindowSurfaceReadError>;
@@ -51,8 +52,8 @@ pub(crate) enum WindowSurfaceReadError {
     InvalidWindowSize { width: i64, height: i64 },
 }
 
-impl From<nvim_oxi::api::Error> for WindowSurfaceReadError {
-    fn from(error: nvim_oxi::api::Error) -> Self {
+impl From<crate::host::api::Error> for WindowSurfaceReadError {
+    fn from(error: crate::host::api::Error) -> Self {
         Self::Shell(error.into())
     }
 }
@@ -86,9 +87,11 @@ fn non_negative_u32(value: i64, field: &'static str) -> WindowSurfaceReadResult<
         .map_err(|_| WindowSurfaceReadError::InvalidNonNegativeField { field, value })
 }
 
-fn getwininfo_dict(window: &api::Window) -> WindowSurfaceReadResult<Dictionary> {
-    let args = Array::from_iter([Object::from(window.handle())]);
-    let [entry]: [Object; 1] = Vec::<Object>::from_object(api::call_function("getwininfo", args)?)
+fn getwininfo_dict(
+    host: &impl WindowSurfacePort,
+    window: &api::Window,
+) -> WindowSurfaceReadResult<Dictionary> {
+    let [entry]: [Object; 1] = Vec::<Object>::from_object(host.getwininfo(window)?)
         .map_err(|_| WindowSurfaceReadError::GetwininfoInvalidList)?
         .try_into()
         .map_err(|_| WindowSurfaceReadError::GetwininfoUnexpectedLen)?;
@@ -144,21 +147,33 @@ fn parse_window_surface_snapshot(
 pub(crate) fn current_window_surface_snapshot(
     window: &api::Window,
 ) -> WindowSurfaceReadResult<WindowSurfaceSnapshot> {
-    let dict = getwininfo_dict(window)?;
+    current_window_surface_snapshot_with(&NeovimHost, window)
+}
+
+pub(crate) fn current_window_surface_snapshot_with(
+    host: &impl WindowSurfacePort,
+    window: &api::Window,
+) -> WindowSurfaceReadResult<WindowSurfaceSnapshot> {
+    let dict = getwininfo_dict(host, window)?;
     let window_handle = i64::from(window.handle());
-    let buffer_handle = i64::from(window.get_buf()?.handle());
+    let buffer_handle = host.window_buffer_handle(window)?.get();
     parse_window_surface_snapshot(window_handle, buffer_handle, &dict)
 }
 
 #[cfg(test)]
 mod tests {
     use super::WindowSurfaceReadError;
+    use super::current_window_surface_snapshot_with;
     use super::parse_window_surface_snapshot;
+    use crate::host::FakeWindowSurfacePort;
+    use crate::host::WindowSurfaceCall;
+    use crate::host::api;
     use crate::position::BufferLine;
     use crate::position::ScreenCell;
     use crate::position::SurfaceId;
     use crate::position::ViewportBounds;
     use crate::position::WindowSurfaceSnapshot;
+    use nvim_oxi::Array;
     use nvim_oxi::Dictionary;
     use nvim_oxi::Object;
     use pretty_assertions::assert_eq;
@@ -181,6 +196,38 @@ mod tests {
             ("width", 80),
             ("height", 24),
         ])
+    }
+
+    fn getwininfo_object(dict: Dictionary) -> Object {
+        Object::from(Array::from_iter([Object::from(dict)]))
+    }
+
+    #[test]
+    fn current_window_surface_snapshot_reads_through_window_surface_port() {
+        let host = FakeWindowSurfacePort::default();
+        host.push_getwininfo(getwininfo_object(canonical_getwininfo_dict()));
+        host.push_window_buffer_handle(17);
+
+        let snapshot = current_window_surface_snapshot_with(&host, &api::Window::from(11))
+            .expect("surface snapshot should read through fake host");
+
+        assert_eq!(
+            (snapshot, host.calls(),),
+            (
+                WindowSurfaceSnapshot::new(
+                    SurfaceId::new(11, 17).expect("positive handles"),
+                    BufferLine::new(23).expect("positive buffer line"),
+                    5,
+                    2,
+                    ScreenCell::new(7, 13).expect("one-based window origin"),
+                    ViewportBounds::new(24, 80).expect("positive window size"),
+                ),
+                vec![
+                    WindowSurfaceCall::Getwininfo { window_handle: 11 },
+                    WindowSurfaceCall::WindowBufferHandle { window_handle: 11 },
+                ],
+            )
+        );
     }
 
     #[test]

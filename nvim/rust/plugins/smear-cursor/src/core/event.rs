@@ -14,6 +14,7 @@ use crate::core::state::PlannedRender;
 use crate::core::state::ProbeFailure;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RealizationDivergence;
+use crate::core::state::RenderCleanupCompactionProgress;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
 use crate::core::types::ProposalId;
@@ -103,17 +104,26 @@ pub(crate) struct RenderPlanFailedEvent {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum RenderCleanupAppliedAction {
-    SoftCleared,
-    CompactedToBudget { converged_to_idle: bool },
-    HardPurged,
+    SoftCleared {
+        retained_resources: usize,
+    },
+    CompactedToBudget {
+        converged_to_idle: bool,
+        progress: RenderCleanupCompactionProgress,
+    },
+    HardPurged {
+        retained_resources: usize,
+    },
 }
 
 impl RenderCleanupAppliedAction {
     pub(crate) const fn converges_to_cold(self) -> bool {
         match self {
-            Self::SoftCleared => false,
-            Self::CompactedToBudget { converged_to_idle } => converged_to_idle,
-            Self::HardPurged => true,
+            Self::SoftCleared { .. } => false,
+            Self::CompactedToBudget {
+                converged_to_idle, ..
+            } => converged_to_idle,
+            Self::HardPurged { retained_resources } => retained_resources == 0,
         }
     }
 }
@@ -122,6 +132,12 @@ impl RenderCleanupAppliedAction {
 pub(crate) struct RenderCleanupAppliedEvent {
     pub(crate) observed_at: Millis,
     pub(crate) action: RenderCleanupAppliedAction,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RenderCleanupRetainedResourcesObservedEvent {
+    pub(crate) observed_at: Millis,
+    pub(crate) retained_resources: usize,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -158,6 +174,7 @@ pub(crate) enum Event {
     RenderPlanFailed(RenderPlanFailedEvent),
     ApplyReported(ApplyReport),
     RenderCleanupApplied(RenderCleanupAppliedEvent),
+    RenderCleanupRetainedResourcesObserved(RenderCleanupRetainedResourcesObservedEvent),
     TimerFiredWithToken(TimerFiredWithTokenEvent),
     TimerLostWithToken(TimerLostWithTokenEvent),
     EffectFailed(EffectFailedEvent),

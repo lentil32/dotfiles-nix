@@ -1,11 +1,14 @@
 use super::super::cursor::smear_outside_cmd_row;
 use crate::core::effect::ObservationRuntimeContext;
 use crate::core::runtime_reducer::ScrollShift;
-use crate::events::surface::current_window_surface_snapshot;
+use crate::events::surface::current_window_surface_snapshot_with;
+use crate::host::BufferHandle;
+use crate::host::CurrentEditorPort;
+use crate::host::NeovimHost;
+use crate::host::WindowSurfacePort;
+use crate::host::api;
 use crate::position::WindowSurfaceSnapshot;
 use nvim_oxi::Result;
-use nvim_oxi::api;
-use nvim_oxi::api::opts::WinTextHeightOpts;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct SurfaceTranslationDelta {
@@ -16,18 +19,28 @@ struct SurfaceTranslationDelta {
 }
 
 fn snapshot_matches_buffer(snapshot: WindowSurfaceSnapshot, buffer: &api::Buffer) -> bool {
-    snapshot.id().buffer_handle() == i64::from(buffer.handle())
+    snapshot.id().buffer_handle() == BufferHandle::from_buffer(buffer)
 }
 
-pub(crate) fn surface_for_ingress_fast_path_with_handles(
+pub(crate) fn surface_for_ingress_fast_path_with_current_editor(
+    current_host: &impl CurrentEditorPort,
     window: &api::Window,
     buffer: &api::Buffer,
 ) -> Option<WindowSurfaceSnapshot> {
-    if !window.is_valid() || !buffer.is_valid() {
+    surface_for_ingress_fast_path_with_hosts(current_host, &NeovimHost, window, buffer)
+}
+
+fn surface_for_ingress_fast_path_with_hosts(
+    current_host: &impl CurrentEditorPort,
+    surface_host: &impl WindowSurfacePort,
+    window: &api::Window,
+    buffer: &api::Buffer,
+) -> Option<WindowSurfaceSnapshot> {
+    if !current_host.window_is_valid(window) || !current_host.buffer_is_valid(buffer) {
         return None;
     }
 
-    let surface_snapshot = current_window_surface_snapshot(window).ok()?;
+    let surface_snapshot = current_window_surface_snapshot_with(surface_host, window).ok()?;
     snapshot_matches_buffer(surface_snapshot, buffer).then_some(surface_snapshot)
 }
 
@@ -37,6 +50,7 @@ fn line_index_1_to_0(row: i64) -> usize {
 }
 
 fn screen_distance(
+    host: &impl WindowSurfacePort,
     window: &api::Window,
     viewport_height: i64,
     row_start: i64,
@@ -53,13 +67,7 @@ fn screen_distance(
     let distance = if end.saturating_sub(start) >= viewport_height {
         viewport_height.saturating_sub(1)
     } else {
-        let opts = WinTextHeightOpts::builder()
-            .start_row(line_index_1_to_0(start))
-            .end_row(line_index_1_to_0(end))
-            .build();
-        window
-            .text_height(&opts)
-            .map_or(0, |height| i64::from(height.all).saturating_sub(1))
+        host.window_text_height_rows(window, line_index_1_to_0(start), line_index_1_to_0(end))
     };
 
     if reversed {
@@ -128,6 +136,7 @@ pub(super) fn maybe_scroll_shift_for_core_event(
 
     let viewport_row_shift = match delta.vertical_rows {
         Some((previous_top_row, current_top_row)) => screen_distance(
+            &NeovimHost,
             window,
             current_surface.window_size().max_row(),
             previous_top_row,
@@ -156,7 +165,11 @@ pub(super) fn maybe_scroll_shift_for_core_event(
 #[cfg(test)]
 mod tests {
     use super::SurfaceTranslationDelta;
+    use super::screen_distance;
     use super::surface_translation_delta;
+    use crate::host::FakeWindowSurfacePort;
+    use crate::host::WindowSurfaceCall;
+    use crate::host::api;
     use crate::state::TrackedCursor;
     use pretty_assertions::assert_eq;
 
@@ -176,6 +189,27 @@ mod tests {
             surface_translation_delta(previous_surface, current_surface),
             Some(expected),
             "{label}"
+        );
+    }
+
+    #[test]
+    fn screen_distance_reads_window_text_height_through_window_surface_port() {
+        let host = FakeWindowSurfacePort::default();
+        host.push_window_text_height_rows(7);
+
+        let distance = screen_distance(&host, &api::Window::from(11), 20, 3, 6)
+            .expect("screen distance should read through fake host");
+
+        assert_eq!(
+            (distance, host.calls(),),
+            (
+                7.0,
+                vec![WindowSurfaceCall::WindowTextHeightRows {
+                    window_handle: 11,
+                    start_row: 2,
+                    end_row: 5,
+                }],
+            )
         );
     }
 

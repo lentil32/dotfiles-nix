@@ -12,6 +12,9 @@ pub(super) fn core_event_label(event: &CoreEvent) -> &'static str {
         CoreEvent::RenderPlanFailed(_) => "render_plan_failed",
         CoreEvent::ApplyReported(_) => "apply_reported",
         CoreEvent::RenderCleanupApplied(_) => "render_cleanup_applied",
+        CoreEvent::RenderCleanupRetainedResourcesObserved(_) => {
+            "render_cleanup_retained_resources_observed"
+        }
         CoreEvent::TimerFiredWithToken(_) => "timer_fired_with_token",
         CoreEvent::TimerLostWithToken(_) => "timer_lost_with_token",
         CoreEvent::EffectFailed(_) => "effect_failed",

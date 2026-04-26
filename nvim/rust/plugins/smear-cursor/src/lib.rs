@@ -18,6 +18,7 @@ mod core;
 mod doc_sync;
 mod draw;
 mod events;
+mod host;
 mod lua;
 #[cfg(test)]
 mod mutex;
@@ -40,7 +41,7 @@ static GLOBAL_ALLOCATOR: allocation_counters::CountingAllocator =
     allocation_counters::CountingAllocator;
 
 pub(crate) fn other_error(message: impl Into<String>) -> nvim_oxi::Error {
-    nvim_oxi::api::Error::Other(message.into()).into()
+    crate::host::api::Error::Other(message.into()).into()
 }
 
 fn guard_plugin_call<T>(

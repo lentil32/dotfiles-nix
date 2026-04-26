@@ -22,8 +22,7 @@ fn long_gap_while_animating_clears_stale_motion_and_stops_animation() {
         TransitionSummary::from_transition(&transition),
         TransitionSummary {
             motion_class: MotionClass::DiscontinuousJump,
-            should_schedule_next_animation: false,
-            next_animation_at_ms: None,
+            animation_schedule: crate::core::types::AnimationSchedule::Idle,
             render_cleanup_action: RenderCleanupAction::Schedule,
             render_allocation_policy: RenderAllocationPolicy::ReuseOnly,
             render_side_effects: RenderSideEffects {
@@ -68,8 +67,7 @@ fn long_gap_while_draining_clears_the_tail_and_stops_animation() {
         TransitionSummary::from_transition(&transition),
         TransitionSummary {
             motion_class: MotionClass::DiscontinuousJump,
-            should_schedule_next_animation: false,
-            next_animation_at_ms: None,
+            animation_schedule: crate::core::types::AnimationSchedule::Idle,
             render_cleanup_action: RenderCleanupAction::Schedule,
             render_allocation_policy: RenderAllocationPolicy::ReuseOnly,
             render_side_effects: RenderSideEffects {

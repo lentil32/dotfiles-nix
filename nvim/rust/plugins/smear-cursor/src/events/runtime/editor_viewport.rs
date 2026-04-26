@@ -2,10 +2,10 @@
 
 use super::telemetry::record_command_row_read;
 use super::telemetry::record_editor_bounds_read;
+use crate::host::EditorViewportPort;
+use crate::host::NeovimHost;
 use crate::position::ViewportBounds;
 use nvim_oxi::Result;
-use nvim_oxi::api;
-use nvim_oxi::api::opts::OptionOpts;
 
 /// A live editor viewport snapshot used to derive command-row and bounds facts.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -16,17 +16,16 @@ pub(crate) struct EditorViewportSnapshot {
 }
 
 impl EditorViewportSnapshot {
-    fn read_live(read_kind: EditorViewportReadKind) -> Result<Self> {
+    fn read_live_with(
+        host: &impl EditorViewportPort,
+        read_kind: EditorViewportReadKind,
+    ) -> Result<Self> {
         read_kind.record();
-        let opts = OptionOpts::builder().build();
-        let lines: i64 = api::get_option_value("lines", &opts)?;
-        let cmdheight: i64 = api::get_option_value("cmdheight", &opts)?;
-        let columns: i64 = api::get_option_value("columns", &opts)?;
-
+        let options = host.editor_viewport_options()?;
         Ok(Self {
-            lines,
-            cmdheight,
-            columns,
+            lines: options.lines(),
+            cmdheight: options.cmdheight(),
+            columns: options.columns(),
         })
     }
 
@@ -81,15 +80,30 @@ pub(in crate::events) struct EditorViewportCache {
 
 impl EditorViewportCache {
     pub(in crate::events) fn read_for_bounds(&mut self) -> Result<EditorViewportSnapshot> {
-        self.read(EditorViewportReadKind::EditorBounds)
+        self.read_for_bounds_with(&NeovimHost)
+    }
+
+    fn read_for_bounds_with(
+        &mut self,
+        host: &impl EditorViewportPort,
+    ) -> Result<EditorViewportSnapshot> {
+        self.read(host, EditorViewportReadKind::EditorBounds)
     }
 
     pub(in crate::events) fn read_for_command_row(&mut self) -> Result<EditorViewportSnapshot> {
-        self.read(EditorViewportReadKind::CommandRow)
+        self.read_for_command_row_with(&NeovimHost)
+    }
+
+    fn read_for_command_row_with(
+        &mut self,
+        host: &impl EditorViewportPort,
+    ) -> Result<EditorViewportSnapshot> {
+        self.read(host, EditorViewportReadKind::CommandRow)
     }
 
     pub(in crate::events) fn refresh(&mut self) -> Result<()> {
-        self.cached = Some(EditorViewportSnapshot::read_live(
+        self.cached = Some(EditorViewportSnapshot::read_live_with(
+            &NeovimHost,
             EditorViewportReadKind::EditorBounds,
         )?);
         Ok(())
@@ -99,12 +113,16 @@ impl EditorViewportCache {
         self.cached = None;
     }
 
-    fn read(&mut self, read_kind: EditorViewportReadKind) -> Result<EditorViewportSnapshot> {
+    fn read(
+        &mut self,
+        host: &impl EditorViewportPort,
+        read_kind: EditorViewportReadKind,
+    ) -> Result<EditorViewportSnapshot> {
         if let Some(cached) = self.cached {
             return Ok(cached);
         }
 
-        let viewport = EditorViewportSnapshot::read_live(read_kind)?;
+        let viewport = EditorViewportSnapshot::read_live_with(host, read_kind)?;
         self.cached = Some(viewport);
         Ok(viewport)
     }
@@ -124,6 +142,8 @@ impl EditorViewportCache {
 mod tests {
     use super::EditorViewportCache;
     use super::EditorViewportSnapshot;
+    use crate::host::EditorViewportOptions;
+    use crate::host::FakeEditorViewportPort;
     use crate::position::ViewportBounds;
     use pretty_assertions::assert_eq;
 
@@ -162,5 +182,24 @@ mod tests {
         assert_eq!(cache.cached_for_test(), Some(viewport));
         cache.invalidate();
         assert_eq!(cache.cached_for_test(), None);
+    }
+
+    #[test]
+    fn cache_reads_live_viewport_through_host_port_once() {
+        let host = FakeEditorViewportPort::default();
+        let expected = EditorViewportSnapshot::from_dimensions(24, 1, 80);
+        host.push_editor_viewport_options(EditorViewportOptions::new(
+            /*lines*/ 24, /*cmdheight*/ 1, /*columns*/ 80,
+        ));
+        let mut cache = EditorViewportCache::default();
+
+        let first = cache
+            .read_for_bounds_with(&host)
+            .expect("fake viewport options should produce a snapshot");
+        let second = cache
+            .read_for_command_row_with(&host)
+            .expect("cached viewport should not call the fake host again");
+
+        assert_eq!((first, second, host.calls()), (expected, expected, 1));
     }
 }

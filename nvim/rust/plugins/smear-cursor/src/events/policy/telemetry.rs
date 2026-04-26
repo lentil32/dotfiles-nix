@@ -1,4 +1,5 @@
 use super::super::lru_cache::LruCache;
+use crate::host::BufferHandle;
 
 const BUFFER_PERF_TELEMETRY_CACHE_CAPACITY: usize = 32;
 const PRESSURE_SIGNAL_HALF_LIFE_MS: f64 = 5_000.0;
@@ -106,7 +107,7 @@ impl BufferPerfTelemetry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::events) struct BufferPerfTelemetryCache {
-    entries: LruCache<i64, BufferPerfTelemetry>,
+    entries: LruCache<BufferHandle, BufferPerfTelemetry>,
 }
 
 impl Default for BufferPerfTelemetryCache {
@@ -118,19 +119,25 @@ impl Default for BufferPerfTelemetryCache {
 }
 
 impl BufferPerfTelemetryCache {
-    pub(in crate::events) fn telemetry(&self, buffer_handle: i64) -> Option<BufferPerfTelemetry> {
+    pub(in crate::events) fn telemetry(
+        &self,
+        buffer_handle: impl Into<BufferHandle>,
+    ) -> Option<BufferPerfTelemetry> {
+        let buffer_handle = buffer_handle.into();
         self.entries.peek_copy(&buffer_handle)
     }
 
-    pub(in crate::events) fn invalidate_buffer(&mut self, buffer_handle: i64) {
+    pub(in crate::events) fn invalidate_buffer(&mut self, buffer_handle: impl Into<BufferHandle>) {
+        let buffer_handle = buffer_handle.into();
         let _ = self.entries.remove(&buffer_handle);
     }
 
     fn update_telemetry_entry(
         &mut self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         update: impl FnOnce(&mut BufferPerfTelemetry),
     ) -> BufferPerfTelemetry {
+        let buffer_handle = buffer_handle.into();
         let mut telemetry = self.telemetry(buffer_handle).unwrap_or_default();
         update(&mut telemetry);
         self.store_telemetry(buffer_handle, telemetry);
@@ -139,7 +146,7 @@ impl BufferPerfTelemetryCache {
 
     pub(in crate::events) fn record_callback_duration(
         &mut self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         duration_ms: f64,
     ) -> BufferPerfTelemetry {
         self.update_telemetry_entry(buffer_handle, |telemetry| {
@@ -153,7 +160,7 @@ impl BufferPerfTelemetryCache {
 
     pub(in crate::events) fn record_cursor_color_extmark_fallback(
         &mut self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         observed_at_ms: f64,
     ) -> BufferPerfTelemetry {
         self.update_telemetry_entry(buffer_handle, |telemetry| {
@@ -163,7 +170,7 @@ impl BufferPerfTelemetryCache {
 
     pub(in crate::events) fn record_conceal_full_scan(
         &mut self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         observed_at_ms: f64,
     ) -> BufferPerfTelemetry {
         self.update_telemetry_entry(buffer_handle, |telemetry| {
@@ -173,7 +180,7 @@ impl BufferPerfTelemetryCache {
 
     pub(in crate::events) fn record_conceal_deferred_projection(
         &mut self,
-        buffer_handle: i64,
+        buffer_handle: impl Into<BufferHandle>,
         observed_at_ms: f64,
     ) -> BufferPerfTelemetry {
         self.update_telemetry_entry(buffer_handle, |telemetry| {
@@ -181,7 +188,12 @@ impl BufferPerfTelemetryCache {
         })
     }
 
-    fn store_telemetry(&mut self, buffer_handle: i64, telemetry: BufferPerfTelemetry) {
+    fn store_telemetry(
+        &mut self,
+        buffer_handle: impl Into<BufferHandle>,
+        telemetry: BufferPerfTelemetry,
+    ) {
+        let buffer_handle = buffer_handle.into();
         self.entries.insert(buffer_handle, telemetry);
     }
 }

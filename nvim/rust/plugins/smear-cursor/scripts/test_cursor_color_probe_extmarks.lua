@@ -33,6 +33,35 @@ local function with_mocked_extmarks(extmarks, callback)
   return result
 end
 
+local function with_observed_extmark_limits(extmarks, callback)
+  local calls = {}
+  local result = with_mocked_extmarks(extmarks, function()
+    local original = vim.api.nvim_buf_get_extmarks
+    vim.api.nvim_buf_get_extmarks = function(buffer, namespace, start_pos, end_pos, opts)
+      calls[#calls + 1] = opts and opts.limit or false
+      return original(buffer, namespace, start_pos, end_pos, opts)
+    end
+
+    local ok, probe_result = pcall(callback)
+    vim.api.nvim_buf_get_extmarks = original
+    if not ok then
+      error(probe_result)
+    end
+    return probe_result
+  end)
+
+  return result, calls
+end
+
+local function assert_single_extmark_scan(calls, expected_limit, context)
+  if #calls ~= 1 then
+    error(context .. " should issue exactly one host scan, got " .. #calls)
+  end
+  if calls[1] ~= expected_limit then
+    error(context .. " should request limit=" .. expected_limit .. ", got " .. tostring(calls[1]))
+  end
+end
+
 local function probe_in_window(window, callback)
   local ok, result = pcall(vim.api.nvim_win_call, window, callback)
   if not ok then
@@ -246,6 +275,72 @@ local function test_resolves_window_highlight_namespaces_per_window()
   }, "window highlight namespace should resolve in the right window")
 end
 
+local function test_extmark_probe_stays_bounded_when_overlap_limit_saturates()
+  prepare_cursor_buffer()
+  local probes = reset_probe_module()
+  vim.api.nvim_set_hl(0, "SmearExtmarkInsideLimit", { fg = "#111111" })
+  vim.api.nvim_set_hl(0, "SmearExtmarkPastLimit", { fg = "#abcdef" })
+
+  local extmarks = {}
+  for index = 1, 32 do
+    extmarks[index] = {
+      index,
+      0,
+      0,
+      { end_col = 1, hl_group = "SmearExtmarkInsideLimit", priority = 1 },
+    }
+  end
+  extmarks[33] = {
+    33,
+    0,
+    0,
+    { end_col = 1, hl_group = "SmearExtmarkPastLimit", priority = 10000 },
+  }
+
+  local result, calls = with_observed_extmark_limits(extmarks, function()
+    return probes.cursor_color_at_cursor(true)
+  end)
+  assert_single_extmark_scan(calls, 33, "bounded extmark probe")
+
+  assert_probe_result(result, {
+    color = nil,
+    used_extmark_fallback = true,
+  }, "saturated extmark probe should degrade instead of trusting a partial priority set")
+end
+
+local function test_extmark_probe_trusts_exact_overlap_limit()
+  prepare_cursor_buffer()
+  local probes = reset_probe_module()
+  vim.api.nvim_set_hl(0, "SmearExtmarkInsideLimitLow", { fg = "#111111" })
+  vim.api.nvim_set_hl(0, "SmearExtmarkInsideLimitHigh", { fg = "#abcdef" })
+
+  local extmarks = {}
+  for index = 1, 31 do
+    extmarks[index] = {
+      index,
+      0,
+      0,
+      { end_col = 1, hl_group = "SmearExtmarkInsideLimitLow", priority = 1 },
+    }
+  end
+  extmarks[32] = {
+    32,
+    0,
+    0,
+    { end_col = 1, hl_group = "SmearExtmarkInsideLimitHigh", priority = 10000 },
+  }
+
+  local result, calls = with_observed_extmark_limits(extmarks, function()
+    return probes.cursor_color_at_cursor(true)
+  end)
+  assert_single_extmark_scan(calls, 33, "exact-limit extmark probe")
+
+  assert_probe_result(result, {
+    color = 0xabcdef,
+    used_extmark_fallback = true,
+  }, "exact-limit extmark probe should trust the complete candidate set")
+end
+
 local function main()
   prepend_runtimepath(os.getenv("SMEAR_CURSOR_RTP") or "")
   vim.opt.swapfile = false
@@ -256,6 +351,8 @@ local function main()
   test_reads_group_defined_after_initial_probe()
   test_resolves_winhighlight_per_window()
   test_resolves_window_highlight_namespaces_per_window()
+  test_extmark_probe_stays_bounded_when_overlap_limit_saturates()
+  test_extmark_probe_trusts_exact_overlap_limit()
   print("SMEAR_CURSOR_PROBE_EXTMARKS_OK")
 end
 

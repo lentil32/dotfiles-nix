@@ -39,11 +39,13 @@ use crate::core::state::ProbeKind;
 use crate::core::state::ProbeRequestSet;
 use crate::core::state::ProbeState;
 use crate::core::state::ProposalExecution;
+use crate::core::state::RenderCleanupCompactionProgress;
 use crate::core::state::RenderCleanupState;
 use crate::core::types::DelayBudgetMs;
 use crate::core::types::Millis;
 use crate::core::types::ProposalId;
 use crate::core::types::TimerId;
+use crate::host::BufferHandle;
 
 pub(super) const DEFAULT_ANIMATION_DELAY_MS: DelayBudgetMs = DelayBudgetMs::DEFAULT_ANIMATION;
 pub(super) const RECOVERY_MAX_ATTEMPTS: u8 = 5;
@@ -371,7 +373,7 @@ pub(super) fn next_pending_probe_effect(
 
 pub(super) fn apply_proposal_effect(
     proposal: InFlightProposal,
-    buffer_handle: Option<i64>,
+    buffer_handle: Option<BufferHandle>,
     requested_at: Millis,
 ) -> Effect {
     Effect::ApplyProposal(Box::new(ApplyProposalEffect {
@@ -518,16 +520,31 @@ pub(super) fn cleanup_state_after_applied(
     cleanup: RenderCleanupState,
     action: RenderCleanupAppliedAction,
     observed_at: Millis,
+    progress_compaction_delay_ms: u64,
 ) -> RenderCleanupState {
     match action {
-        RenderCleanupAppliedAction::SoftCleared => cleanup.enter_cooling(observed_at),
+        RenderCleanupAppliedAction::SoftCleared {
+            retained_resources: 0,
+        } => cleanup.enter_cooling(observed_at),
+        RenderCleanupAppliedAction::SoftCleared { .. } => cleanup
+            .retry_hard_purge_after_retained_resources(observed_at, progress_compaction_delay_ms),
         RenderCleanupAppliedAction::CompactedToBudget {
             converged_to_idle: true,
+            ..
         } => cleanup.converge_to_cold(),
         RenderCleanupAppliedAction::CompactedToBudget {
             converged_to_idle: false,
-        } => cleanup.continue_cooling(observed_at),
-        RenderCleanupAppliedAction::HardPurged => cleanup.converge_to_cold(),
+            progress: RenderCleanupCompactionProgress::MadeProgress,
+        } => cleanup.continue_cooling_after_progress(observed_at, progress_compaction_delay_ms),
+        RenderCleanupAppliedAction::CompactedToBudget {
+            converged_to_idle: false,
+            progress: RenderCleanupCompactionProgress::NoProgress,
+        } => cleanup.await_hard_purge_after_stalled_compaction(observed_at),
+        RenderCleanupAppliedAction::HardPurged {
+            retained_resources: 0,
+        } => cleanup.converge_to_cold(),
+        RenderCleanupAppliedAction::HardPurged { .. } => cleanup
+            .retry_hard_purge_after_retained_resources(observed_at, progress_compaction_delay_ms),
     }
 }
 

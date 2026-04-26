@@ -6,7 +6,7 @@ use crate::core::realization::PaletteSpec;
 use crate::core::runtime_reducer::RenderAllocationPolicy;
 use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderSideEffects;
-use crate::core::types::Millis;
+use crate::core::types::AnimationSchedule;
 use crate::core::types::ProposalId;
 use thiserror::Error;
 
@@ -248,33 +248,6 @@ pub(crate) enum RealizationPlan {
     Clear(RealizationClear),
     Noop,
     Failure(RealizationFailure),
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum AnimationSchedule {
-    Idle,
-    DefaultDelay,
-    Deadline(Millis),
-}
-
-impl AnimationSchedule {
-    pub(crate) const fn from_parts(
-        should_schedule_next_animation: bool,
-        next_animation_at_ms: Option<Millis>,
-    ) -> Self {
-        match (should_schedule_next_animation, next_animation_at_ms) {
-            (false, _) => Self::Idle,
-            (true, None) => Self::DefaultDelay,
-            (true, Some(deadline)) => Self::Deadline(deadline),
-        }
-    }
-
-    pub(crate) const fn deadline(self) -> Option<Millis> {
-        match self {
-            Self::Idle | Self::DefaultDelay => None,
-            Self::Deadline(deadline) => Some(deadline),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
@@ -761,14 +734,12 @@ mod tests {
     }
 
     fn animation_schedule_strategy() -> BoxedStrategy<AnimationSchedule> {
-        (any::<bool>(), proptest::option::of(any::<u64>()))
-            .prop_map(|(should_schedule_next_animation, next_animation_at_ms)| {
-                AnimationSchedule::from_parts(
-                    should_schedule_next_animation,
-                    next_animation_at_ms.map(Millis::new),
-                )
-            })
-            .boxed()
+        prop_oneof![
+            Just(AnimationSchedule::Idle),
+            Just(AnimationSchedule::DefaultDelay),
+            any::<u64>().prop_map(|deadline| AnimationSchedule::Deadline(Millis::new(deadline))),
+        ]
+        .boxed()
     }
 
     fn proposal_patch_fixture_strategy() -> BoxedStrategy<PatchFixture> {
@@ -1055,25 +1026,20 @@ mod tests {
         }
 
         #[test]
-        fn prop_animation_schedule_from_parts_preserves_idle_default_and_deadline_states(
-            should_schedule_next_animation in any::<bool>(),
-            next_animation_at_ms in proptest::option::of(any::<u64>()),
+        fn prop_animation_schedule_accessors_preserve_schedule_truth(
+            schedule in animation_schedule_strategy(),
         ) {
-            let next_animation_at_ms = next_animation_at_ms.map(Millis::new);
-            let schedule = AnimationSchedule::from_parts(
-                should_schedule_next_animation,
-                next_animation_at_ms,
-            );
-
             prop_assert_eq!(
-                schedule,
-                match (should_schedule_next_animation, next_animation_at_ms) {
-                    (false, _) => AnimationSchedule::Idle,
-                    (true, None) => AnimationSchedule::DefaultDelay,
-                    (true, Some(deadline)) => AnimationSchedule::Deadline(deadline),
+                schedule.should_schedule(),
+                !matches!(schedule, AnimationSchedule::Idle)
+            );
+            prop_assert_eq!(
+                schedule.deadline(),
+                match schedule {
+                    AnimationSchedule::Deadline(deadline) => Some(deadline),
+                    AnimationSchedule::Idle | AnimationSchedule::DefaultDelay => None,
                 }
             );
-            prop_assert_eq!(schedule.deadline(), next_animation_at_ms.filter(|_| matches!(schedule, AnimationSchedule::Deadline(_))));
         }
     }
 }

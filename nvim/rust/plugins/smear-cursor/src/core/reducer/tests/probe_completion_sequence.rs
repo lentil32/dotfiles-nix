@@ -354,8 +354,7 @@ fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
                 render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
             },
             motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
-            should_schedule_next_animation: false,
-            next_animation_at_ms: None,
+            animation_schedule: crate::core::state::AnimationSchedule::Idle,
         },
     );
     let prepared_particles_capacity = prepared_plan.prepared_particles_capacity();
@@ -459,14 +458,7 @@ fn background_only_probe_completion_matches_with_or_without_prepared_transition_
         crate::core::runtime_reducer::CursorTransition {
             render_decision: cold_payload.render_decision.clone(),
             motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
-            should_schedule_next_animation: !matches!(
-                cold_payload.animation_schedule,
-                crate::core::state::AnimationSchedule::Idle
-            ),
-            next_animation_at_ms: cold_payload
-                .animation_schedule
-                .deadline()
-                .map(crate::core::types::Millis::value),
+            animation_schedule: cold_payload.animation_schedule,
         },
     );
 
@@ -529,8 +521,7 @@ fn background_only_probe_completion_reuses_the_cached_runtime_transition() {
             render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
         },
         motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
-        should_schedule_next_animation: false,
-        next_animation_at_ms: None,
+        animation_schedule: crate::core::state::AnimationSchedule::Idle,
     };
     let prepared_plan = crate::core::state::PreparedObservationPlan::new(
         prepared_runtime.prepared_motion(),

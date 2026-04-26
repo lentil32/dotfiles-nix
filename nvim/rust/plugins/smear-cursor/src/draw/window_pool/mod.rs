@@ -1,4 +1,5 @@
-use nvim_oxi::api;
+use crate::host::BufferHandle;
+use crate::host::api;
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -14,10 +15,10 @@ const ADAPTIVE_POOL_EWMA_NEW_WEIGHT: u64 = 3;
 const RENDER_BUFFER_FILETYPE: &str = "smear-cursor";
 const RENDER_BUFFER_TYPE: &str = "nofile";
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowBufferHandle {
     pub(crate) window_id: i32,
-    pub(crate) buffer_id: i32,
+    pub(crate) buffer_id: BufferHandle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -318,6 +319,12 @@ impl CompactRenderWindowsSummary {
 
     pub(crate) fn had_visual_change(self) -> bool {
         self.closed_visible_windows > 0
+    }
+
+    pub(crate) fn made_progress(self) -> bool {
+        self.closed_visible_windows > 0
+            || self.pruned_windows > 0
+            || self.invalid_removed_windows > 0
     }
 }
 
