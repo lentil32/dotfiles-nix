@@ -150,11 +150,6 @@ impl RuntimeRecoveryPlan {
         }
     }
 
-    #[cfg(test)]
-    pub(super) const fn actions(&self) -> &'static [RuntimeRecoveryAction] {
-        self.actions
-    }
-
     pub(super) fn apply(&self) {
         for action in self.actions {
             self.apply_action(*action);

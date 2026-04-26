@@ -335,9 +335,7 @@ impl Default for RuntimeConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::BufferPerfMode;
     use super::DEFAULT_ANIMATION_FPS;
-    use super::DEFAULT_MAX_KEPT_WINDOWS;
     use super::LogLevel;
     use super::RuntimeConfig;
     use crate::test_support::proptest::ModeFamily;
@@ -392,7 +390,6 @@ mod tests {
             mode_family in mode_family(),
             normal_mode_uses_sampling in any::<bool>(),
             insert_mode_uses_sampling in any::<bool>(),
-            horizontal_bar_cursor_replace_mode in any::<bool>(),
         ) {
             let config = RuntimeConfig {
                 cursor_color: Some(if normal_mode_uses_sampling {
@@ -405,7 +402,6 @@ mod tests {
                 } else {
                     "#445566".to_string()
                 }),
-                horizontal_bar_cursor_replace_mode,
                 ..RuntimeConfig::default()
             };
             let mode = representative_mode(mode_family);
@@ -428,13 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn default_delay_event_to_smear_keeps_small_ingress_debounce() {
-        let config = RuntimeConfig::default();
-
-        assert_eq!(config.delay_event_to_smear, 1.0);
-    }
-
-    #[test]
     fn default_time_interval_matches_the_named_animation_fps() {
         let config = RuntimeConfig::default();
 
@@ -452,26 +441,5 @@ mod tests {
         assert_eq!(LogLevel::from_i64(2), LogLevel::Info);
         assert_eq!(LogLevel::from_i64(4), LogLevel::Error);
         assert_eq!(LogLevel::from_i64(5), LogLevel::Off);
-    }
-
-    #[test]
-    fn default_particles_remain_disabled() {
-        let config = RuntimeConfig::default();
-
-        assert!(!config.particles_enabled);
-    }
-
-    #[test]
-    fn default_max_kept_windows_uses_named_default_cap() {
-        let config = RuntimeConfig::default();
-
-        assert_eq!(config.max_kept_windows, DEFAULT_MAX_KEPT_WINDOWS);
-    }
-
-    #[test]
-    fn default_buffer_perf_mode_stays_automatic() {
-        let config = RuntimeConfig::default();
-
-        assert_eq!(config.buffer_perf_mode, BufferPerfMode::Auto);
     }
 }

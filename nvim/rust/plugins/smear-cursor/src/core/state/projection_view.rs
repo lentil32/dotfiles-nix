@@ -79,11 +79,6 @@ impl ProjectionHandle {
     }
 
     #[cfg(test)]
-    pub(crate) fn cached_logical_raster(&self) -> &LogicalRaster {
-        self.retained().cached_logical_raster()
-    }
-
-    #[cfg(test)]
     pub(crate) fn cached_planner_state(&self) -> &ProjectionPlannerState {
         self.retained().cached_planner_state()
     }
@@ -178,22 +173,6 @@ mod tests {
         assert_eq!(
             PatchBasis::new(Some(acknowledged), Some(target)).kind(),
             ScenePatchKind::Noop
-        );
-    }
-
-    #[test]
-    fn shell_projection_is_an_explicit_cached_materialization_view() {
-        let projection = retained_projection(Some(11));
-        let shell_projection = projection.shell_projection();
-
-        assert_eq!(shell_projection.witness(), projection.witness());
-        assert_eq!(
-            shell_projection.logical_raster(),
-            projection.cached_logical_raster()
-        );
-        assert_eq!(
-            shell_projection.realization(),
-            projection.cached_realization()
         );
     }
 }

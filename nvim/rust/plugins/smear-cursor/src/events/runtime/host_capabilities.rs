@@ -22,29 +22,3 @@ impl HostCapabilitiesLane {
         self.flush_redraw.get()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn host_capabilities_lane_tracks_flush_redraw_capability() {
-        let lane = HostCapabilitiesLane::default();
-
-        let initial = lane.flush_redraw_capability();
-        lane.set_flush_redraw_capability(FlushRedrawCapability::ApiAvailable);
-        let after_api_available = lane.flush_redraw_capability();
-        lane.set_flush_redraw_capability(FlushRedrawCapability::FallbackOnly);
-        let after_fallback_only = lane.flush_redraw_capability();
-
-        assert_eq!(
-            [initial, after_api_available, after_fallback_only],
-            [
-                FlushRedrawCapability::Unknown,
-                FlushRedrawCapability::ApiAvailable,
-                FlushRedrawCapability::FallbackOnly
-            ]
-        );
-    }
-}

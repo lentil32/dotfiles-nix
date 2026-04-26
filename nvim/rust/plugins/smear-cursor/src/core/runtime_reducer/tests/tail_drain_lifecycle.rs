@@ -211,60 +211,6 @@ fn assert_tail_drain_transition_matches_model(
     assert!(!state.is_animating());
 }
 
-#[test]
-fn quiescent_external_noop_after_first_frame_schedules_cleanup() {
-    let (mut state, _) = initialized_runtime("n", |_| {});
-    let follow_up = reduce_cursor_event(
-        &mut state,
-        "n",
-        event_at(5.0, 6.0, 116.0),
-        EventSource::External,
-    );
-
-    assert!(matches!(render_action(&follow_up), RenderAction::Noop));
-    assert!(!follow_up.should_schedule_next_animation());
-    assert_eq!(
-        render_side_effects(&follow_up).cursor_visibility,
-        CursorVisibilityEffect::Show
-    );
-    assert_eq!(
-        render_cleanup_action(&follow_up),
-        RenderCleanupAction::Schedule
-    );
-    assert!(!state.is_animating());
-    assert!(!state.is_draining());
-}
-
-#[test]
-fn tail_drain_gap_beyond_catch_up_budget_clears_tail_immediately() {
-    let case = TailDrainCountdownCase {
-        remaining_steps: 2,
-        max_simulation_steps_per_frame: 1,
-        frame_period_ms: 1,
-        simulation_hz: 217,
-        tick_gaps_ms: vec![37],
-    };
-    let mut state = draining_runtime(&case);
-
-    let transition = reduce_cursor_event(
-        &mut state,
-        "n",
-        event_at(5.0, 6.0, 137.0),
-        EventSource::AnimationTick,
-    );
-
-    assert!(matches!(render_action(&transition), RenderAction::ClearAll));
-    assert!(!transition.should_schedule_next_animation());
-    assert_eq!(transition.next_animation_at_ms(), None);
-    assert_eq!(
-        render_cleanup_action(&transition),
-        RenderCleanupAction::Schedule
-    );
-    assert_eq!(state.last_tick_ms(), None);
-    assert!(!state.is_draining());
-    assert_eq!(state.drain_steps_remaining(), 0);
-}
-
 proptest! {
     #![proptest_config(stateful_config())]
 

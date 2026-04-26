@@ -31,7 +31,6 @@ use crate::types::StepOutput;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use std::fmt;
-use std::sync::Arc;
 
 fn render_action(transition: &CursorTransition) -> &RenderAction {
     &transition.render_decision.render_action
@@ -756,19 +755,6 @@ fn initialized_runtime(
     (state, transition)
 }
 
-fn delayed_retarget_scenario() -> (RuntimeState, CursorTransition) {
-    let (mut state, _) = initialized_runtime("n", |state| {
-        state.config.delay_event_to_smear = 40.0;
-    });
-    let pending = reduce_cursor_event(
-        &mut state,
-        "n",
-        event_at(5.0, 16.0, 116.0),
-        EventSource::External,
-    );
-    (state, pending)
-}
-
 fn animating_runtime_after_kickoff(
     configure: impl FnOnce(&mut RuntimeState),
 ) -> (RuntimeState, CursorTransition) {
@@ -832,7 +818,6 @@ mod fixed_step_stability;
 mod jump_classification;
 mod mode_specific_transitions;
 mod property_invariants;
-mod render_frame_caching;
 mod retargeting_while_animating;
 mod tail_drain_lifecycle;
 mod trajectory_goldens;

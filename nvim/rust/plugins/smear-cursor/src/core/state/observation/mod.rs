@@ -14,8 +14,6 @@ pub(crate) use background_probe::BackgroundProbeChunkMask;
 pub(crate) use background_probe::BackgroundProbePlan;
 #[cfg(test)]
 pub(crate) use background_probe::BackgroundProbeProgress;
-#[cfg(test)]
-pub(crate) use background_probe::BackgroundProbeUpdate;
 pub(crate) use cursor_context::CursorColorProbeGenerations;
 pub(crate) use cursor_context::CursorColorProbeWitness;
 pub(crate) use cursor_context::CursorTextContext;

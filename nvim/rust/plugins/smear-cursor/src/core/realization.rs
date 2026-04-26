@@ -258,11 +258,6 @@ impl RealizationProjection {
     }
 
     #[cfg(test)]
-    pub(crate) fn particle_spans(&self) -> &[RealizationSpan] {
-        self.particle_spans.as_ref()
-    }
-
-    #[cfg(test)]
     pub(crate) fn static_spans(&self) -> &[RealizationSpan] {
         self.static_spans.as_ref()
     }

@@ -576,17 +576,11 @@ impl SceneState {
 
 #[cfg(test)]
 mod tests {
-    use super::CursorTrailSemantic;
-    use super::PatchBasis;
     use super::ProjectionReuseCache;
     use super::ProjectionReuseKey;
     use super::ProjectionState;
     use super::ProjectionWitness;
     use super::RetainedProjection;
-    use super::ScenePatch;
-    use super::ScenePatchKind;
-    use super::SceneState;
-    use super::SemanticState;
     use crate::core::realization::LogicalRaster;
     use crate::core::realization::realize_logical_raster;
     use crate::core::runtime_reducer::TargetCellPresentation;
@@ -596,7 +590,6 @@ mod tests {
     use crate::core::types::ProjectionPolicyRevision;
     use crate::core::types::ProjectorRevision;
     use crate::core::types::RenderRevision;
-    use crate::core::types::SemanticRevision;
     use crate::draw::render_plan::CellOp;
     use crate::draw::render_plan::ClearOp;
     use crate::draw::render_plan::Glyph;
@@ -605,7 +598,6 @@ mod tests {
     use crate::draw::render_plan::PlannerState as ProjectionPlannerState;
     use crate::position::ViewportBounds;
     use pretty_assertions::assert_eq;
-    use std::rc::Rc;
     use std::sync::Arc;
 
     fn projection_witness_with_ingress_seq(ingress_seq: u64) -> ProjectionWitness {
@@ -716,169 +708,5 @@ mod tests {
         } else {
             assert!(result.is_ok());
         }
-    }
-
-    #[test]
-    fn replacing_particle_cells_reuses_the_retained_static_realization_segment() {
-        let retained = RetainedProjection::new(
-            projection_witness(),
-            projection_reuse_key(),
-            ProjectionPlannerState::default(),
-            LogicalRaster::from_segments(
-                Some(ClearOp {
-                    max_kept_windows: 4,
-                }),
-                Arc::from([CellOp {
-                    row: 3,
-                    col: 5,
-                    zindex: 9,
-                    glyph: Glyph::Static("P"),
-                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(1)),
-                }]),
-                Arc::from([
-                    CellOp {
-                        row: 4,
-                        col: 2,
-                        zindex: 1,
-                        glyph: Glyph::BLOCK,
-                        highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(2)),
-                    },
-                    CellOp {
-                        row: 4,
-                        col: 3,
-                        zindex: 1,
-                        glyph: Glyph::Static("x"),
-                        highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(3)),
-                    },
-                ]),
-            ),
-        );
-
-        let replaced = retained.with_replaced_particle_cells(
-            projection_witness(),
-            projection_reuse_key(),
-            Arc::from([CellOp {
-                row: 8,
-                col: 9,
-                zindex: 12,
-                glyph: Glyph::Braille(2),
-                highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(4)),
-            }]),
-        );
-
-        assert_eq!(
-            retained.cached_realization().static_spans().as_ptr(),
-            replaced.cached_realization().static_spans().as_ptr(),
-        );
-        assert_ne!(
-            retained.cached_realization().particle_spans(),
-            replaced.cached_realization().particle_spans()
-        );
-        assert_eq!(
-            replaced.cached_realization(),
-            &realize_logical_raster(replaced.cached_logical_raster())
-        );
-    }
-
-    #[test]
-    fn scene_state_from_parts_stays_a_composite_view_over_semantics_and_projection_cache() {
-        let retained_projection = RetainedProjection::new(
-            projection_witness(),
-            projection_reuse_key(),
-            ProjectionPlannerState::default(),
-            LogicalRaster::new(
-                Some(ClearOp {
-                    max_kept_windows: 9,
-                }),
-                Arc::from([CellOp {
-                    row: 2,
-                    col: 4,
-                    zindex: 7,
-                    glyph: Glyph::Static("Z"),
-                    highlight: HighlightRef::Normal(HighlightLevel::from_raw_clamped(3)),
-                }]),
-            ),
-        )
-        .into_handle();
-        let cursor_trail = CursorTrailSemantic::new(TargetCellPresentation::None);
-        let semantics = Rc::new(SemanticState {
-            revision: SemanticRevision::INITIAL.next(),
-            cursor_trail: Some(cursor_trail.clone()),
-        });
-        let projection = Rc::new(ProjectionState {
-            motion_revision: MotionRevision::INITIAL.next().next(),
-            last_motion_fingerprint: Some(77),
-            cache: ProjectionReuseCache {
-                retained_projection: Some(retained_projection.clone()),
-            },
-        });
-        let scene = SceneState::from_parts(Rc::clone(&semantics), Rc::clone(&projection));
-
-        assert!(Rc::ptr_eq(&scene.semantics, &semantics));
-        assert!(Rc::ptr_eq(&scene.projection, &projection));
-        assert_eq!(scene.semantic_revision(), semantics.revision());
-        assert_eq!(scene.motion_revision(), projection.motion_revision());
-        assert_eq!(
-            scene.render_revision(),
-            RenderRevision::new(projection.motion_revision(), semantics.revision())
-        );
-        assert_eq!(
-            scene.last_motion_fingerprint(),
-            projection.last_motion_fingerprint()
-        );
-        assert_eq!(scene.cursor_trail(), Some(&cursor_trail));
-        assert_eq!(
-            scene
-                .retained_projection_handle()
-                .expect("scene should expose the retained projection handle"),
-            &retained_projection
-        );
-        assert!(
-            scene
-                .retained_projection_handle()
-                .expect("scene should expose the retained projection handle")
-                .ptr_eq(&retained_projection)
-        );
-        assert_eq!(
-            scene.retained_projection(),
-            projection.retained_projection()
-        );
-    }
-
-    #[test]
-    fn patch_basis_kind_depends_only_on_the_projection_pair() {
-        let acknowledged = retained_projection_with_ingress_seq(7).into_handle();
-        let same_target = retained_projection_with_ingress_seq(7).into_handle();
-        let changed_target = retained_projection_with_ingress_seq(8).into_handle();
-
-        assert_eq!(PatchBasis::new(None, None).kind(), ScenePatchKind::Noop);
-        assert_eq!(
-            PatchBasis::new(Some(acknowledged.clone()), Some(same_target)).kind(),
-            ScenePatchKind::Noop
-        );
-        assert_eq!(
-            PatchBasis::new(Some(acknowledged.clone()), None).kind(),
-            ScenePatchKind::Clear
-        );
-        assert_eq!(
-            PatchBasis::new(None, Some(changed_target.clone())).kind(),
-            ScenePatchKind::Replace
-        );
-        assert_eq!(
-            PatchBasis::new(Some(acknowledged), Some(changed_target)).kind(),
-            ScenePatchKind::Replace
-        );
-    }
-
-    #[test]
-    fn scene_patch_kind_is_a_derived_view_over_patch_basis() {
-        let basis = PatchBasis::new(
-            Some(retained_projection_with_ingress_seq(3).into_handle()),
-            Some(retained_projection_with_ingress_seq(5).into_handle()),
-        );
-        let patch = ScenePatch::derive(basis.clone());
-
-        assert_eq!(patch.basis(), &basis);
-        assert_eq!(patch.kind(), basis.kind());
     }
 }

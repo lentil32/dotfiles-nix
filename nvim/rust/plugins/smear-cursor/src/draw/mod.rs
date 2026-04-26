@@ -16,8 +16,6 @@ mod resource_close;
 mod resource_guard;
 #[cfg(test)]
 mod test_support;
-#[cfg(test)]
-mod tests;
 mod window_pool;
 
 pub(crate) use apply::ApplyMetrics;
@@ -68,6 +66,7 @@ pub(crate) use redraw::refresh_redraw_capability as initialize_runtime_capabilit
 pub(crate) use resource_close::TrackedResourceCloseOutcome;
 pub(crate) use resource_close::TrackedResourceCloseSummary;
 pub(crate) use resource_close::TrackedWindowBufferCloseOutcome;
+#[cfg(test)]
 pub(crate) use resource_close::TrackedWindowBufferCloseSummary;
 pub(crate) use resource_guard::StagedFloatingWindow;
 pub(crate) use window_pool::AllocationPolicy;

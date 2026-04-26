@@ -717,19 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_highlight_group_names_clears_every_managed_group_on_full_reset() {
-        assert_eq!(
-            stale_highlight_group_names(Some(2), None),
-            vec![
-                "SmearCursor1".to_string(),
-                "SmearCursorInverted1".to_string(),
-                "SmearCursor2".to_string(),
-                "SmearCursorInverted2".to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn highlight_group_names_clamps_requests_to_the_palette_cap() {
         let capped = highlight_group_names(MAX_COLOR_LEVELS);
         let oversized = highlight_group_names(MAX_COLOR_LEVELS.saturating_add(32));

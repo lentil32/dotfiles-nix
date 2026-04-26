@@ -174,17 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_invalidation_clears_only_the_cached_viewport() {
-        let mut cache = EditorViewportCache::default();
-        let viewport = EditorViewportSnapshot::from_dimensions(24, 1, 80);
-        cache.store_for_test(viewport);
-
-        assert_eq!(cache.cached_for_test(), Some(viewport));
-        cache.invalidate();
-        assert_eq!(cache.cached_for_test(), None);
-    }
-
-    #[test]
     fn cache_reads_live_viewport_through_host_port_once() {
         let host = FakeEditorViewportPort::default();
         let expected = EditorViewportSnapshot::from_dimensions(24, 1, 80);

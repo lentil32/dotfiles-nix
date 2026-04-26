@@ -143,27 +143,6 @@ impl FakeCursorReadPort {
             .insert(window_handle, (line, column));
     }
 
-    pub(crate) fn push_window_buffer_handle(&self, handle: impl Into<BufferHandle>) {
-        self.window_buffer_handle_results
-            .borrow_mut()
-            .push_back(Ok(handle.into()));
-    }
-
-    pub(crate) fn set_window_conceal_state(
-        &self,
-        window_handle: i32,
-        conceallevel: i64,
-        concealcursor: &str,
-    ) {
-        self.window_conceal_states
-            .borrow_mut()
-            .insert(window_handle, (conceallevel, concealcursor.to_owned()));
-    }
-
-    pub(crate) fn push_screenpos(&self, screenpos: Object) {
-        self.screenpos_results.borrow_mut().push_back(Ok(screenpos));
-    }
-
     pub(crate) fn push_synconcealed(&self, synconcealed: Object) {
         self.synconcealed_results
             .borrow_mut()

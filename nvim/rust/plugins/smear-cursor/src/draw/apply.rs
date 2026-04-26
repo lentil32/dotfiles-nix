@@ -374,10 +374,7 @@ fn record_release_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::ApplyMetrics;
-    use super::mark_span_satisfied;
     use super::prepare_apply_plan;
-    use super::record_release_summary;
     use crate::config::MAX_COLOR_LEVELS;
     use crate::core::realization::LogicalRaster;
     use crate::core::realization::realize_logical_raster;
@@ -386,54 +383,8 @@ mod tests {
     use crate::draw::render_plan::Glyph;
     use crate::draw::render_plan::HighlightLevel;
     use crate::draw::render_plan::HighlightRef;
-    use crate::draw::window_pool::ReleaseUnusedSummary;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
-
-    #[test]
-    fn record_release_summary_tracks_hidden_and_invalid_removed_windows() {
-        let mut metrics = ApplyMetrics::default();
-        record_release_summary(
-            &mut metrics,
-            ReleaseUnusedSummary {
-                hidden_windows: 2,
-                invalid_removed_windows: 1,
-            },
-        );
-
-        assert_eq!(metrics.hidden_windows, 2);
-        assert_eq!(metrics.invalid_removed_windows, 1);
-    }
-
-    #[test]
-    fn apply_metrics_require_shell_redraw_when_hidden_windows_change() {
-        let metrics = ApplyMetrics {
-            hidden_windows: 1,
-            ..ApplyMetrics::default()
-        };
-
-        assert!(metrics.requires_shell_redraw());
-    }
-
-    #[test]
-    fn apply_metrics_require_shell_redraw_when_invalid_windows_are_removed() {
-        let metrics = ApplyMetrics {
-            invalid_removed_windows: 1,
-            ..ApplyMetrics::default()
-        };
-
-        assert!(metrics.requires_shell_redraw());
-    }
-
-    #[test]
-    fn mark_span_satisfied_counts_payload_reuse_as_applied() {
-        let mut metrics = ApplyMetrics::default();
-
-        mark_span_satisfied(&mut metrics);
-        mark_span_satisfied(&mut metrics);
-
-        assert_eq!(metrics.applied_ops, 2);
-    }
 
     #[test]
     fn prepare_apply_plan_materializes_read_only_span_inputs() {

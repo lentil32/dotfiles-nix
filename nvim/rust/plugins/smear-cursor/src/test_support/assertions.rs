@@ -51,11 +51,3 @@ pub(crate) fn assert_probe_policy_shape(
         )
     );
 }
-
-pub(crate) fn assert_queue_disarmed(queued_work_count: usize, queue_is_scheduled: bool) {
-    assert_eq!(queued_work_count, 0, "scheduled queue should be empty");
-    assert!(
-        !queue_is_scheduled,
-        "scheduled queue should clear its armed state"
-    );
-}

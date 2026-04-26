@@ -104,6 +104,7 @@ pub(super) use shell::reclaim_background_probe_request_scratch;
 pub(super) use shell::reclaim_conceal_regions_scratch;
 pub(super) use shell::refresh_editor_viewport_cache;
 pub(super) use shell::release_cleanup_cold_shell_storage;
+#[cfg(test)]
 pub(super) use shell::reset_transient_shell_caches;
 #[cfg(test)]
 use shell::resolve_buffer_event_policy_for_metadata;

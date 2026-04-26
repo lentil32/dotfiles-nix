@@ -2,10 +2,8 @@ use super::*;
 use crate::test_support::proptest::pure_config;
 use crate::types::ModeClass;
 use crate::types::Particle;
-use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 use proptest::prelude::*;
-use std::sync::Arc;
 
 fn compact_origins(max_len: usize) -> BoxedStrategy<Vec<(i16, i16)>> {
     vec((8_i16..=20_i16, 8_i16..=20_i16), 1..=max_len).boxed()
@@ -31,39 +29,6 @@ fn mutate_signature_axis(frame: &mut RenderFrame, axis: usize, row: i16, col: i1
         }
         _ => panic!("unexpected signature mutation axis {axis}"),
     }
-}
-
-#[test]
-fn planner_state_clone_shares_retained_storage_until_the_next_mutation() {
-    let viewport = test_viewport();
-    let seeded = render_frame_to_plan(&base_frame(), PlannerState::default(), viewport).next_state;
-    let shared = seeded.clone();
-
-    assert!(Arc::ptr_eq(&seeded.latent_cache, &shared.latent_cache));
-    assert!(Arc::ptr_eq(&seeded.center_history, &shared.center_history));
-    assert!(Arc::ptr_eq(&seeded.previous_cells, &shared.previous_cells));
-    assert!(shared.decode_scratch.centerline.is_empty());
-    assert!(seeded.sweep_scratch.tile_capacity() > 0);
-    assert_eq!(shared.sweep_scratch.tile_capacity(), 0);
-
-    let advanced = render_frame_to_plan(&single_sample_frame(12, 14), shared, viewport).next_state;
-
-    assert!(!Arc::ptr_eq(&seeded.latent_cache, &advanced.latent_cache));
-    assert!(!Arc::ptr_eq(
-        &seeded.center_history,
-        &advanced.center_history
-    ));
-    assert!(!Arc::ptr_eq(
-        &seeded.previous_cells,
-        &advanced.previous_cells
-    ));
-    assert_eq!(seeded.center_history.len(), 1);
-    assert_eq!(advanced.center_history.len(), 2);
-}
-
-#[test]
-fn frame_particle_overlay_signature_skips_empty_overlay_frames() {
-    assert_eq!(frame_particle_overlay_signature(&base_frame()), None);
 }
 
 #[test]

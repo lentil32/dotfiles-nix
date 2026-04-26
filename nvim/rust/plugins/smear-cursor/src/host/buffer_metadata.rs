@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::BufferHandle;
 use super::NeovimHost;
 use super::api;

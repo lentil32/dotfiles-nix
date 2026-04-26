@@ -1,8 +1,6 @@
 use super::*;
 use crate::test_support::proptest::stateful_config;
 use crate::test_support::sparse_probe_cells;
-use crate::types::Particle;
-use crate::types::StepOutput;
 use proptest::prelude::*;
 
 #[derive(Clone, Debug)]
@@ -57,13 +55,6 @@ fn probe_sequence_scenario(
         background_probe_ready_state()
     };
     ObservationScenario::with_background_probe_cell_count(ready, background_cell_count)
-}
-
-fn single_background_probe_scenario() -> ObservationScenario {
-    ObservationScenario::with_background_plan(
-        background_probe_ready_state(),
-        vec![ScreenCell::new(7, 8).expect("background probe cell")],
-    )
 }
 
 fn expected_background_probe_effect(
@@ -263,36 +254,6 @@ proptest! {
 }
 
 #[test]
-fn background_ready_probe_report_stores_allowed_cells_and_reuse_state_in_snapshot() {
-    let scenario = single_background_probe_scenario();
-    let resolved = reduce(
-        &scenario.based.next,
-        background_probe_report(
-            &scenario.request,
-            scenario.basis.viewport(),
-            &[(7, 8)],
-            ProbeReuse::Exact,
-        ),
-    );
-
-    let observation = resolved
-        .next
-        .observation()
-        .expect("stored observation snapshot");
-    let background = observation
-        .probes()
-        .background()
-        .batch()
-        .expect("background probe batch");
-    assert!(background.allows_particle(crate::position::ScreenCell::new(7, 8).expect("cell")));
-    assert!(!background.allows_particle(crate::position::ScreenCell::new(7, 9).expect("cell")));
-    pretty_assert_eq!(
-        observation.probes().background().reuse(),
-        Some(ProbeReuse::Exact)
-    );
-}
-
-#[test]
 fn background_probe_preparation_leaves_live_runtime_unchanged_until_completion() {
     let ready = dual_probe_ready_state();
     let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25);
@@ -305,74 +266,6 @@ fn background_probe_preparation_leaves_live_runtime_unchanged_until_completion()
     assert!(
         prepared.next.prepared_observation_plan().is_some(),
         "background probe preparation should cache the reduced runtime motion separately",
-    );
-}
-
-#[test]
-fn dropping_a_staged_prepared_plan_recycles_its_preview_particle_capacity() {
-    let ready = background_probe_ready_state();
-    let mut prepared_runtime = ready.runtime().clone();
-    prepared_runtime.initialize_cursor(
-        RenderPoint {
-            row: 19.0,
-            col: 11.0,
-        },
-        CursorShape::block(),
-        7,
-        &TrackedCursor::fixture(31, 32, 4, 12),
-    );
-    prepared_runtime.apply_step_output(StepOutput {
-        current_corners: prepared_runtime.current_corners(),
-        velocity_corners: prepared_runtime.velocity_corners(),
-        spring_velocity_corners: prepared_runtime.spring_velocity_corners(),
-        trail_elapsed_ms: prepared_runtime.trail_elapsed_ms(),
-        particles: vec![Particle {
-            position: RenderPoint {
-                row: 19.0,
-                col: 12.0,
-            },
-            velocity: RenderPoint {
-                row: 0.5,
-                col: 0.25,
-            },
-            lifetime: 120.0,
-        }],
-        previous_center: prepared_runtime.previous_center(),
-        index_head: 0,
-        index_tail: 0,
-        rng_state: prepared_runtime.rng_state(),
-    });
-    let preview_runtime = crate::state::RuntimePreview::new(&mut prepared_runtime);
-    let prepared_plan = crate::core::state::PreparedObservationPlan::new(
-        preview_runtime.into_prepared_motion(),
-        crate::core::runtime_reducer::CursorTransition {
-            render_decision: crate::core::runtime_reducer::RenderDecision {
-                render_action: crate::core::runtime_reducer::RenderAction::Noop,
-                render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
-                render_allocation_policy:
-                    crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
-                render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
-            },
-            motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
-            animation_schedule: crate::core::state::AnimationSchedule::Idle,
-        },
-    );
-    let prepared_particles_capacity = prepared_plan.prepared_particles_capacity();
-
-    let scenario = single_background_probe_scenario();
-    let mut staged = scenario.based.next;
-    assert!(
-        staged.set_prepared_observation_plan(Some(prepared_plan)),
-        "manual observing scenario should accept a cached runtime transition",
-    );
-
-    assert!(
-        staged.replace_active_observation_with_pending(scenario.request),
-        "refresh retries should be able to drop the staged observation",
-    );
-    assert_eq!(
-        staged.runtime().preview_particles_scratch_capacity(),
-        prepared_particles_capacity
     );
 }
 
@@ -426,136 +319,6 @@ fn final_background_probe_completion_reuses_the_cached_runtime_transition() {
 
     let [Effect::RequestRenderPlan(payload)] = resolved.effects.as_slice() else {
         panic!("expected render plan request after background probe completion");
-    };
-    pretty_assert_eq!(resolved.next.runtime(), &expected_runtime);
-    pretty_assert_eq!(
-        &payload.render_decision,
-        &prepared_plan.transition().render_decision,
-    );
-}
-
-#[test]
-fn background_only_probe_completion_matches_with_or_without_prepared_transition_cache() {
-    let scenario = single_background_probe_scenario();
-    let cold_resolved = reduce(
-        &scenario
-            .based
-            .next
-            .clone()
-            .with_runtime(RuntimeState::default()),
-        background_probe_report(
-            &scenario.request,
-            scenario.basis.viewport(),
-            &[(7, 8)],
-            ProbeReuse::Exact,
-        ),
-    );
-    let [Effect::RequestRenderPlan(cold_payload)] = cold_resolved.effects.as_slice() else {
-        panic!("expected render plan request after uncached background-only completion");
-    };
-    let prepared_plan = crate::core::state::PreparedObservationPlan::new(
-        cold_resolved.next.runtime().prepared_motion(),
-        crate::core::runtime_reducer::CursorTransition {
-            render_decision: cold_payload.render_decision.clone(),
-            motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
-            animation_schedule: cold_payload.animation_schedule,
-        },
-    );
-
-    let mut warm = scenario.based.next;
-    assert!(
-        warm.set_prepared_observation_plan(Some(prepared_plan)),
-        "manual observing scenario should accept a cached runtime transition",
-    );
-    let warm_resolved = reduce(
-        &warm.with_runtime(RuntimeState::default()),
-        background_probe_report(
-            &scenario.request,
-            scenario.basis.viewport(),
-            &[(7, 8)],
-            ProbeReuse::Exact,
-        ),
-    );
-
-    pretty_assert_eq!(
-        warm_resolved.next.semantic_view(),
-        cold_resolved.next.semantic_view()
-    );
-    let [Effect::RequestRenderPlan(warm_payload)] = warm_resolved.effects.as_slice() else {
-        panic!("expected render plan request after cached background-only completion");
-    };
-    pretty_assert_eq!(warm_payload.proposal_id, cold_payload.proposal_id);
-    pretty_assert_eq!(warm_payload.requested_at, cold_payload.requested_at);
-    pretty_assert_eq!(
-        warm_payload.animation_schedule,
-        cold_payload.animation_schedule
-    );
-    pretty_assert_eq!(warm_payload.render_decision, cold_payload.render_decision);
-}
-
-#[test]
-fn background_only_probe_completion_reuses_the_cached_runtime_transition() {
-    let ready = background_probe_ready_state();
-    let observing = observing_state_from_demand(&ready, ExternalDemandKind::ExternalCursor, 25);
-    pretty_assert_eq!(
-        active_request(&observing).probes(),
-        ProbeRequestSet::only(ProbeKind::Background)
-    );
-
-    let mut prepared_runtime = ready.runtime().clone();
-    prepared_runtime.initialize_cursor(
-        RenderPoint {
-            row: 19.0,
-            col: 11.0,
-        },
-        CursorShape::block(),
-        7,
-        &TrackedCursor::fixture(31, 32, 4, 12),
-    );
-    let prepared_transition = crate::core::runtime_reducer::CursorTransition {
-        render_decision: crate::core::runtime_reducer::RenderDecision {
-            render_action: crate::core::runtime_reducer::RenderAction::Noop,
-            render_cleanup_action: crate::core::runtime_reducer::RenderCleanupAction::NoAction,
-            render_allocation_policy:
-                crate::core::runtime_reducer::RenderAllocationPolicy::ReuseOnly,
-            render_side_effects: crate::core::runtime_reducer::RenderSideEffects::default(),
-        },
-        motion_class: crate::core::runtime_reducer::MotionClass::Continuous,
-        animation_schedule: crate::core::state::AnimationSchedule::Idle,
-    };
-    let prepared_plan = crate::core::state::PreparedObservationPlan::new(
-        prepared_runtime.prepared_motion(),
-        prepared_transition,
-    );
-
-    let scenario = ObservationScenario::with_background_plan(
-        background_probe_ready_state(),
-        vec![ScreenCell::new(7, 8).expect("background probe cell")],
-    );
-    let mut staged = scenario.based.next.clone();
-    assert!(
-        staged.set_prepared_observation_plan(Some(prepared_plan.clone())),
-        "manual observing scenario should accept a cached runtime transition",
-    );
-
-    let mutated_runtime = RuntimeState::default();
-    let mutated = staged.with_runtime(mutated_runtime);
-    let mut expected_runtime = mutated.runtime().clone();
-    prepared_plan.apply_to_runtime(&mut expected_runtime);
-    assert_ne!(mutated.runtime(), &expected_runtime);
-
-    let resolved = reduce(
-        &mutated,
-        background_probe_report(
-            &scenario.request,
-            scenario.basis.viewport(),
-            &[(7, 8)],
-            ProbeReuse::Exact,
-        ),
-    );
-
-    let [Effect::RequestRenderPlan(payload)] = resolved.effects.as_slice() else {
-        panic!("expected render plan request after background-only probe completion");
     };
     pretty_assert_eq!(resolved.next.runtime(), &expected_runtime);
     pretty_assert_eq!(

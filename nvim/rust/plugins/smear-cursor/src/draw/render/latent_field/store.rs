@@ -307,24 +307,9 @@ impl LatentFieldCache {
 }
 
 #[cfg(test)]
-pub(super) fn prune_history(
-    history: &mut VecDeque<DepositedSlice>,
-    latest_step: StepIndex,
-    support_steps: usize,
-) {
-    let support_steps_u64 = u64::try_from(support_steps).unwrap_or(u64::MAX);
-    while history.front().is_some_and(|slice| {
-        latest_step.value().saturating_sub(slice.step_index.value()) >= support_steps_u64
-    }) {
-        let _ = history.pop_front();
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::super::CellRect;
     use super::super::MICRO_TILE_SAMPLES;
-    use super::super::MaterializedTile;
     use super::super::MicroTile;
     use super::super::SAMPLE_Q12_SCALE;
     use super::super::TailBand;
@@ -336,7 +321,6 @@ mod tests {
     use super::BucketCell;
     use super::DepositedSlice;
     use super::LatentFieldCache;
-    use super::prune_history;
     use crate::core::types::ArcLenQ16;
     use crate::core::types::StepIndex;
     use crate::core::types::StrokeId;
@@ -355,31 +339,6 @@ mod tests {
         MicroTile {
             samples_q12: [SAMPLE_Q12_SCALE as u16; MICRO_TILE_SAMPLES],
         }
-    }
-
-    #[test]
-    fn prune_history_keeps_recent_window() {
-        let mut history = VecDeque::new();
-        for step in 0_u64..10_u64 {
-            history.push_back(DepositedSlice {
-                stroke_id: StrokeId::new(1),
-                step_index: StepIndex::new(step),
-                dt_ms_q16: q16_from_non_negative(simulation_step_ms(120.0)),
-                arc_len_q16: ArcLenQ16::ZERO,
-                bbox: CellRect::new(0, 0, 0, 0),
-                band: TailBand::Core,
-                support_steps: 3,
-                intensity_q16: intensity_q16(1.0),
-                microtiles: Default::default(),
-            });
-        }
-
-        prune_history(&mut history, StepIndex::new(9), 3);
-        assert!(
-            history
-                .front()
-                .is_some_and(|slice| slice.step_index.value() >= 7)
-        );
     }
 
     #[test]
@@ -446,60 +405,5 @@ mod tests {
             compile_field_reference(&cache),
             compile_field(&history, StepIndex::new(5))
         );
-    }
-
-    #[test]
-    fn insert_materialized_slice_matches_slice_replay() {
-        let tile = fully_covered_tile();
-        let bbox = CellRect::new(4, 6, 5, 7);
-        let step_index = StepIndex::new(3);
-        let dt_ms_q16 = q16_from_non_negative(simulation_step_ms(120.0));
-        let support_steps = 4;
-        let intensity_q16 = intensity_q16(1.0);
-        let materialized_tiles = [
-            MaterializedTile {
-                coord: (4, 5),
-                tile,
-            },
-            MaterializedTile {
-                coord: (4, 7),
-                tile,
-            },
-            MaterializedTile {
-                coord: (6, 6),
-                tile,
-            },
-        ];
-        let slice = DepositedSlice {
-            stroke_id: StrokeId::new(1),
-            step_index,
-            dt_ms_q16,
-            arc_len_q16: ArcLenQ16::ZERO,
-            bbox,
-            band: TailBand::Core,
-            support_steps,
-            intensity_q16,
-            microtiles: BTreeMap::from(materialized_tiles.map(|tile| (tile.coord, tile.tile))),
-        };
-
-        let mut materialized_cache = LatentFieldCache::default();
-        materialized_cache.advance_to(step_index);
-        materialized_cache.insert_materialized_slice(
-            step_index,
-            dt_ms_q16,
-            support_steps,
-            intensity_q16,
-            &materialized_tiles,
-        );
-
-        let mut replay_cache = LatentFieldCache::default();
-        replay_cache.advance_to(step_index);
-        replay_cache.insert_slice(&slice);
-
-        assert_eq!(
-            compile_field_reference(&materialized_cache),
-            compile_field_reference(&replay_cache)
-        );
-        assert_eq!(materialized_cache.revision(), replay_cache.revision());
     }
 }

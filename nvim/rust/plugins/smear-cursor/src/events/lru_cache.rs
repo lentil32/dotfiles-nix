@@ -304,20 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn copy_accessors_return_the_cached_value_and_preserve_lru_behavior() {
-        let mut cache = LruCache::new(3);
-        cache.insert(1, 10);
-        cache.insert(2, 20);
-        cache.insert(3, 30);
-
-        assert_eq!(cache.peek_copy(&2), Some(20));
-        assert_eq!(snapshot(&cache), vec![(3, 30), (2, 20), (1, 10)]);
-
-        assert_eq!(cache.get_copy(&2), Some(20));
-        assert_eq!(snapshot(&cache), vec![(2, 20), (3, 30), (1, 10)]);
-    }
-
-    #[test]
     fn remove_where_removes_only_matching_entries() {
         let mut cache = LruCache::new(5);
         cache.insert(1, 10);

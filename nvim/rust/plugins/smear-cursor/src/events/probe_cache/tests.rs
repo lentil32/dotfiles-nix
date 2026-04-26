@@ -23,20 +23,13 @@ pub(super) use crate::test_support::conceal_key;
 pub(super) use crate::test_support::conceal_region;
 pub(super) use crate::test_support::cursor;
 pub(super) use crate::test_support::cursor_color_probe_witness_with_cache_generation as witness_with_cache_generation;
-pub(super) use crate::test_support::proptest::cache_key_mutation_axis;
 pub(super) use crate::test_support::proptest::pure_config;
 pub(super) use proptest::collection::vec;
 use proptest::prelude::*;
 pub(super) use std::sync::Arc;
 
 mod boundaries;
-mod conceal_deltas;
-mod conceal_regions;
-mod conceal_screen_cells;
-mod cursor_text_context;
 mod invalidation;
-
-pub(super) const CURSOR_TEXT_CONTEXT_AXIS_COUNT: usize = 4;
 
 pub(super) fn cursor_text_context_key(
     buffer_handle: i64,

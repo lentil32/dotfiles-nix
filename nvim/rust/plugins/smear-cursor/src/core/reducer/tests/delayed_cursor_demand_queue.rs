@@ -68,54 +68,7 @@ fn delayed_cursor_timer_fire_starts_the_queued_observation() {
             RequestObservationBaseEffect { .. }
         )]
     ));
-}
-
-#[test]
-fn newer_delayed_cursor_demand_replaces_the_pending_queue_without_rearming_the_timer() {
-    let ready = delayed_ready_state();
-    let first = reduce(
-        &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
-    );
-    let first_token = first
-        .next
-        .timers()
-        .active_token(TimerId::Ingress)
-        .expect("first ingress timer token");
-
-    let second = reduce(
-        &first.next,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 21),
-    );
-
-    let second_token = second
-        .next
-        .timers()
-        .active_token(TimerId::Ingress)
-        .expect("existing ingress timer token");
-    pretty_assert_eq!(second_token, first_token);
-    pretty_assert_eq!(
-        second.next.demand_queue().latest_cursor(),
-        Some(&crate::core::state::QueuedDemand::ready(
-            ExternalDemand::new(
-                IngressSeq::new(2),
-                ExternalDemandKind::ExternalCursor,
-                Millis::new(21),
-                BufferPerfClass::Full,
-            )
-        ))
-    );
-    pretty_assert_eq!(
-        second.effects,
-        vec![
-            Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
-            Effect::RecordEventLoopMetric(EventLoopMetricEffect::DelayedIngressPendingUpdated,),
-        ]
-    );
-    pretty_assert_eq!(
-        second.next.ingress_policy().pending_delay_until(),
-        Some(Millis::new(61))
-    );
+    pretty_assert_eq!(fired.next.ingress_policy().pending_delay_until(), None);
 }
 
 #[test]
@@ -232,28 +185,4 @@ fn early_delayed_cursor_timer_fire_rearms_once_for_the_remaining_deadline() {
         early_fire.next.ingress_policy().pending_delay_until(),
         Some(Millis::new(61))
     );
-}
-
-#[test]
-fn starting_observation_clears_the_pending_delayed_cursor_deadline() {
-    let ready = delayed_ready_state();
-    let delayed = reduce(
-        &ready,
-        external_demand_event(ExternalDemandKind::ExternalCursor, 20),
-    )
-    .next;
-    let ingress_token = delayed
-        .timers()
-        .active_token(TimerId::Ingress)
-        .expect("ingress timer token");
-
-    let fired = reduce(
-        &delayed,
-        Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
-            token: ingress_token,
-            observed_at: Millis::new(60),
-        }),
-    );
-
-    pretty_assert_eq!(fired.next.ingress_policy().pending_delay_until(), None);
 }

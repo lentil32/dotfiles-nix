@@ -2,7 +2,6 @@ use super::RuntimeState;
 use crate::config::BufferPerfMode;
 use crate::config::LogLevel;
 use crate::config::RuntimeConfig;
-use crate::config::normalize_color_levels;
 use crate::lua::invalid_key;
 use nvim_oxi::Result;
 use std::collections::HashSet;
@@ -17,12 +16,6 @@ pub(crate) struct RuntimeOptionsEffects {
 pub(crate) enum OptionalChange<T> {
     Set(T),
     Clear,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CtermCursorColorsPatch {
-    pub(crate) colors: Vec<u16>,
-    pub(crate) color_levels: u32,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -56,7 +49,7 @@ pub(crate) struct ColorOptionsPatch {
     pub(crate) normal_bg: Option<OptionalChange<String>>,
     pub(crate) transparent_bg_fallback_color: Option<String>,
     pub(crate) cterm_bg: Option<OptionalChange<u16>>,
-    pub(crate) cterm_cursor_colors: Option<OptionalChange<CtermCursorColorsPatch>>,
+    pub(crate) cterm_cursor_colors: Option<OptionalChange<Vec<u16>>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -301,10 +294,7 @@ impl ColorOptionsPatch {
         apply_optional_value(&mut config.cterm_bg, &mut self.cterm_bg);
         if let Some(change) = self.cterm_cursor_colors.take() {
             match change {
-                OptionalChange::Set(patch) => {
-                    config.color_levels = normalize_color_levels(patch.color_levels);
-                    config.cterm_cursor_colors = Some(patch.colors);
-                }
+                OptionalChange::Set(colors) => config.cterm_cursor_colors = Some(colors),
                 OptionalChange::Clear => config.cterm_cursor_colors = None,
             }
         }
@@ -385,7 +375,7 @@ impl ParticleOptionsPatch {
 impl RenderingOptionsPatch {
     fn apply(&mut self, config: &mut RuntimeConfig) {
         if let Some(color_levels) = self.color_levels.take() {
-            config.color_levels = normalize_color_levels(color_levels);
+            config.color_levels = color_levels;
         }
         apply_config_fields!(
             config,

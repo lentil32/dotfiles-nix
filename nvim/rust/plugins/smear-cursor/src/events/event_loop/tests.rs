@@ -735,17 +735,6 @@ proptest! {
 }
 
 #[test]
-fn projection_reuse_hit_regression_respects_perf_counter_gating() {
-    reset_event_loop_state();
-    let mut model = TelemetryModel::default();
-
-    apply_telemetry_op(TelemetryOp::ProjectionReuseHit);
-    model.apply(TelemetryOp::ProjectionReuseHit);
-
-    assert_diagnostics_match_model(diagnostics_snapshot(), &model);
-}
-
-#[test]
 fn nested_telemetry_update_drops_contended_sample_without_panicking() {
     use super::record_ingress_received;
 

@@ -4,7 +4,6 @@ use super::super::cursor_autocmd_preflight;
 use super::super::demand_kind_for_autocmd;
 use super::super::should_coalesce_window_follow_up_autocmd;
 use super::super::should_drop_unchanged_cursor_autocmd;
-use super::super::tracked_cursor_matches_live_surface_handles;
 use super::autocmd_ingress_strategy;
 use super::fast_path_snapshot;
 use super::perf_class_strategy;
@@ -243,28 +242,6 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
                 &snapshot,
                 current_location.as_ref(),
                 current_target,
-            ),
-            expected,
-            "{label}"
-        );
-    }
-}
-
-#[test]
-fn handle_only_fast_path_precheck_requires_matching_window_and_buffer_handles() {
-    let tracked_cursor = TrackedCursor::fixture(10, 20, 4, 12);
-
-    for (label, current_window_handle, current_buffer_handle, expected) in [
-        ("matching handles", 10, 20, true),
-        ("window drift", 11, 20, false),
-        ("buffer drift", 10, 21, false),
-        ("both drift", 11, 21, false),
-    ] {
-        assert_eq!(
-            tracked_cursor_matches_live_surface_handles(
-                &tracked_cursor,
-                current_window_handle,
-                current_buffer_handle,
             ),
             expected,
             "{label}"

@@ -123,17 +123,11 @@ pub(in super::super) fn slice_state_cmp(lhs: SliceState, rhs: SliceState) -> std
 // never materializes the full combinatorial frontier before sorting it back down.
 struct SliceStateCollector {
     states: Vec<SliceState>,
-    #[cfg(test)]
-    peak_len: usize,
 }
 
 impl SliceStateCollector {
     fn new(seed: SliceState) -> Self {
-        Self {
-            states: vec![seed],
-            #[cfg(test)]
-            peak_len: 1,
-        }
+        Self { states: vec![seed] }
     }
 
     fn insert(&mut self, state: SliceState) {
@@ -148,10 +142,6 @@ impl SliceStateCollector {
         if self.states.len() > RIBBON_MAX_STATES_PER_SLICE {
             let _ = self.states.pop();
         }
-        #[cfg(test)]
-        {
-            self.peak_len = self.peak_len.max(self.states.len());
-        }
     }
 
     fn should_prune_branch(&self, optimistic_cost: u64) -> bool {
@@ -164,11 +154,6 @@ impl SliceStateCollector {
 
     fn finish(self) -> Vec<SliceState> {
         self.states
-    }
-
-    #[cfg(test)]
-    fn peak_len(&self) -> usize {
-        self.peak_len
     }
 }
 
@@ -262,16 +247,6 @@ pub(in super::super) fn build_slice_states(
     spatial_weight_q10: u32,
 ) -> Vec<SliceState> {
     build_slice_state_collector(slice, spatial_weight_q10).finish()
-}
-
-#[cfg(test)]
-pub(in super::super) fn build_slice_states_with_peak_working_set(
-    slice: &RibbonSlice,
-    spatial_weight_q10: u32,
-) -> (Vec<SliceState>, usize) {
-    let collector = build_slice_state_collector(slice, spatial_weight_q10);
-    let peak_len = collector.peak_len();
-    (collector.finish(), peak_len)
 }
 
 #[derive(Clone, Copy)]

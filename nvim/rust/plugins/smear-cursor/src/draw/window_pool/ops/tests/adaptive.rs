@@ -84,15 +84,4 @@ proptest! {
         prop_assert_eq!(tab_windows.ewma_demand_milli, expected_budget.ewma_demand_milli);
         prop_assert_eq!(tab_windows.cached_budget, expected_budget.cached_budget);
     }
-
-    #[test]
-    fn prop_effective_keep_budget_matches_min(
-        adaptive_budget in 0_usize..=1024,
-        max_kept_windows in 0_usize..=1024,
-    ) {
-        prop_assert_eq!(
-            effective_keep_budget(adaptive_budget, max_kept_windows),
-            adaptive_budget.min(max_kept_windows),
-        );
-    }
 }

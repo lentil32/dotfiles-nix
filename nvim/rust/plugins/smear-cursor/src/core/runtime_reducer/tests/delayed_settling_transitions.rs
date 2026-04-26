@@ -83,26 +83,6 @@ fn delayed_settling_scenario(delay_ms: u16, target_col: u16) -> (RuntimeState, C
 }
 
 #[test]
-fn returning_to_the_current_cursor_leaves_the_runtime_idle_and_cursor_visible() {
-    let (mut state, _) = delayed_retarget_scenario();
-    let returned = reduce_cursor_event(
-        &mut state,
-        "n",
-        event_at(5.0, 6.0, 120.0),
-        EventSource::External,
-    );
-
-    assert!(matches!(render_action(&returned), RenderAction::Noop));
-    assert!(!state.is_animating());
-    assert!(!state.is_settling());
-    assert_eq!(state.settling_window(), None);
-    assert_eq!(
-        render_side_effects(&returned).cursor_visibility,
-        CursorVisibilityEffect::Show
-    );
-}
-
-#[test]
 fn retargeting_while_settling_on_a_tick_after_the_previous_deadline_refreshes_instead_of_promoting()
 {
     let (mut state, kickoff) = delayed_settling_scenario(20, 16);

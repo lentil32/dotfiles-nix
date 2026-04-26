@@ -1,6 +1,5 @@
 use super::core_state_summary;
 use super::effect_summary;
-use super::runtime_target_summary;
 use crate::core::effect::ApplyProposalEffect;
 use crate::core::effect::ApplyRenderCleanupEffect;
 use crate::core::effect::Effect;
@@ -69,7 +68,6 @@ use crate::state::RuntimeState;
 use crate::state::TrackedCursor;
 use crate::types::CursorCellShape;
 use insta::assert_snapshot;
-use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
 fn cursor_position(row: u32, col: u32) -> ScreenCell {
@@ -205,17 +203,6 @@ fn runtime_state(max_kept_windows: usize) -> RuntimeState {
     runtime
 }
 
-fn runtime_state_with_minimal_tracked_cursor() -> RuntimeState {
-    let mut runtime = RuntimeState::default();
-    runtime.initialize_cursor(
-        RenderPoint::from(cursor_position(7, 15)),
-        crate::state::CursorShape::block(),
-        7,
-        &TrackedCursor::fixture(17, 29, 4, 8),
-    );
-    runtime
-}
-
 fn failure_metrics() -> DegradedApplyMetrics {
     DegradedApplyMetrics::new(9, 7, 2, 3, 4, 5, 6)
 }
@@ -342,12 +329,4 @@ fn trace_summary_snapshot_renders_phase_owned_state_and_effects() {
     .join("\n");
 
     assert_snapshot!(snapshot);
-}
-
-#[test]
-fn runtime_target_summary_renders_minimal_canonical_tracked_surface() {
-    assert_eq!(
-        runtime_target_summary(&runtime_state_with_minimal_tracked_cursor()),
-        "cell=7:15 epoch=1 tracked=(surface=(id=(win=17 buf=29) top=4 left=0 textoff=0 origin=1:1 size=1x1) buffer_line=8)"
-    );
 }

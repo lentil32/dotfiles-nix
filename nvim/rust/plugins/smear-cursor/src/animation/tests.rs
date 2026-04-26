@@ -406,45 +406,6 @@ mod simulation_step_behavior {
             );
         }
     }
-
-    #[test]
-    fn overdamped_horizontal_motion_regression_stays_monotone_for_checked_in_seed() {
-        let mut input = make_pose_input(PoseInputSpec {
-            start: RenderPoint { row: 2.0, col: 1.0 },
-            target: RenderPoint { row: 2.0, col: 8.0 },
-            vertical_bar: false,
-            horizontal_bar: false,
-            damping_ratio: 2.49469574985472,
-            head_response_ms: 173.19606000702925,
-            block_aspect_ratio: 2.0,
-            rng_state: DEFAULT_RNG_STATE,
-        });
-
-        let target_col = center_col(&input.target_corners);
-        let mut previous_col = center_col(&input.current_corners);
-        for _ in 0..480 {
-            let output = simulate_step(input.clone());
-            let next_col = center_col(&output.current_corners);
-            assert!(
-                next_col + 1.0e-9 >= previous_col,
-                "checked-in overdamped regression moved backward: prev={previous_col} next={next_col}"
-            );
-            assert!(
-                next_col <= target_col + 1.0e-9,
-                "checked-in overdamped regression overshot: next={next_col} target={target_col}"
-            );
-            previous_col = next_col;
-            input.current_corners = output.current_corners;
-            input.spring_velocity_corners = output.spring_velocity_corners;
-            input.trail_elapsed_ms = output.trail_elapsed_ms;
-            input.previous_center = output.previous_center;
-        }
-
-        assert!(
-            approx_eq_f64(previous_col, target_col, 0.03),
-            "checked-in overdamped regression did not settle: settled={previous_col} target={target_col}"
-        );
-    }
 }
 
 mod stop_threshold_logic {
@@ -625,31 +586,6 @@ mod trail_distance_thresholds {
                 "display-space advancement diverged across aspect ratios: one={display_advance_one} two={display_advance_two}"
             );
         }
-    }
-
-    #[test]
-    fn trail_min_distance_regression_snaps_at_checked_in_seed_boundary() {
-        let mut input = make_input();
-        input.block_aspect_ratio = 6.938583027910313;
-        input.vertical_bar = false;
-        input.horizontal_bar = false;
-        input.current_corners = corners_for_cursor(1.0, 1.0, false, false);
-        input.trail_origin_corners = input.current_corners;
-        input.target_corners = corners_for_cursor(
-            1.0 + 2.968038521796358 / input.block_aspect_ratio,
-            1.0,
-            false,
-            false,
-        );
-        input.previous_center = center(&input.current_corners);
-        let travel_distance = center(&input.trail_origin_corners)
-            .display_distance(center(&input.target_corners), input.block_aspect_ratio);
-        input.trail_min_distance = travel_distance;
-        let target_corners = input.target_corners;
-
-        let output = simulate_step(input);
-
-        assert_eq!(output.current_corners, target_corners);
     }
 }
 

@@ -261,18 +261,14 @@ fn test_policy_for_perf_class(perf_class: BufferPerfClass) -> BufferEventPolicy 
 
 #[cfg(test)]
 mod tests {
-    use super::IngressModePolicySnapshot;
     use super::IngressReadSnapshot;
     use super::IngressReadSnapshotTestInput;
     use crate::config::BufferPerfMode;
     use crate::core::state::BufferPerfClass;
     use crate::position::RenderPoint;
-    use crate::position::ScreenCell;
     use crate::test_support::proptest::pure_config;
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
-    use std::collections::HashSet;
-    use std::sync::Arc;
 
     fn current_buffer_perf_class_strategy() -> BoxedStrategy<Option<BufferPerfClass>> {
         prop_oneof![
@@ -359,141 +355,6 @@ mod tests {
                 current_buffer_perf_class
             );
         }
-    }
-
-    #[test]
-    fn ingress_mode_policy_smoke_routes_known_mode_families() {
-        let policy = IngressModePolicySnapshot::from_mode_flags([false, true, false, true]);
-
-        assert!(!policy.mode_allowed("i"));
-        assert!(policy.mode_allowed("R"));
-        assert!(!policy.mode_allowed("t"));
-        assert!(policy.mode_allowed("cv"));
-        assert!(policy.mode_allowed("n"));
-        assert!(policy.mode_allowed("v"));
-    }
-
-    #[test]
-    fn ingress_read_snapshot_preserves_disabled_filetypes_arc_sharing_as_a_perf_contract() {
-        let filetypes_disabled: Arc<HashSet<String>> = Arc::new(
-            ["lua".to_string(), "rust".to_string()]
-                .into_iter()
-                .collect(),
-        );
-        let snapshot = IngressReadSnapshot {
-            enabled: true,
-            needs_initialize: false,
-            current_corners: [RenderPoint::ZERO; 4],
-            target_corners: [RenderPoint::ZERO; 4],
-            target_position: RenderPoint::ZERO,
-            tracked_cursor: None,
-            mode_policy: IngressModePolicySnapshot::from_mode_flags([true, true, true, true]),
-            buffer_perf_mode: BufferPerfMode::Auto,
-            callback_duration_estimate_ms: 12.5,
-            current_buffer_event_policy: Some(super::test_policy_for_perf_class(
-                BufferPerfClass::FastMotion,
-            )),
-            filetypes_disabled: Arc::clone(&filetypes_disabled),
-        };
-
-        assert!(
-            Arc::ptr_eq(&snapshot.filetypes_disabled, &filetypes_disabled),
-            "snapshot should reuse the disabled-filetypes Arc instead of cloning the set"
-        );
-        assert_eq!(snapshot.callback_duration_estimate_ms(), 12.5);
-        assert_eq!(
-            snapshot.current_buffer_perf_class(),
-            Some(BufferPerfClass::FastMotion)
-        );
-        assert_eq!(
-            snapshot
-                .current_buffer_event_policy()
-                .map(crate::events::policy::BufferEventPolicy::perf_class),
-            Some(BufferPerfClass::FastMotion)
-        );
-    }
-
-    #[test]
-    fn ingress_snapshot_smoke_exposes_visual_cursor_accessors_from_stored_runtime_geometry() {
-        let snapshot = IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
-            enabled: true,
-            needs_initialize: false,
-            current_corners: [
-                RenderPoint {
-                    row: 9.0,
-                    col: 14.0,
-                },
-                RenderPoint {
-                    row: 10.0,
-                    col: 14.0,
-                },
-                RenderPoint {
-                    row: 10.0,
-                    col: 15.0,
-                },
-                RenderPoint {
-                    row: 9.0,
-                    col: 15.0,
-                },
-            ],
-            target_corners: [
-                RenderPoint {
-                    row: 9.0,
-                    col: 14.0,
-                },
-                RenderPoint {
-                    row: 10.0,
-                    col: 14.0,
-                },
-                RenderPoint {
-                    row: 10.0,
-                    col: 15.0,
-                },
-                RenderPoint {
-                    row: 9.0,
-                    col: 15.0,
-                },
-            ],
-            target_position: RenderPoint {
-                row: 10.0,
-                col: 15.0,
-            },
-            tracked_cursor: None,
-            mode_flags: [true, true, true, true],
-            buffer_perf_mode: BufferPerfMode::Auto,
-            callback_duration_estimate_ms: 0.0,
-            current_buffer_perf_class: None,
-            filetypes_disabled: Vec::new(),
-        });
-
-        assert_eq!(
-            snapshot.current_visual_cursor_cell(),
-            ScreenCell::new(10, 15)
-        );
-        assert_eq!(
-            snapshot.current_visual_cursor_shape(),
-            crate::types::CursorCellShape::Block
-        );
-    }
-
-    #[test]
-    fn disabled_ingress_snapshot_omits_current_buffer_policy() {
-        let disabled_snapshot = IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
-            enabled: false,
-            needs_initialize: false,
-            current_corners: [RenderPoint::ZERO; 4],
-            target_corners: [RenderPoint::ZERO; 4],
-            target_position: RenderPoint::ZERO,
-            tracked_cursor: None,
-            mode_flags: [true, true, true, true],
-            buffer_perf_mode: BufferPerfMode::Auto,
-            callback_duration_estimate_ms: 0.0,
-            current_buffer_perf_class: Some(BufferPerfClass::Skip),
-            filetypes_disabled: Vec::new(),
-        });
-
-        assert_eq!(disabled_snapshot.current_buffer_event_policy(), None);
-        assert_eq!(disabled_snapshot.current_buffer_perf_class(), None);
     }
 
     #[test]

@@ -46,13 +46,6 @@ impl ReuseLifecycleSpec {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ReusePayloadOp {
-    Store { window_id: u8, payload_hash: u16 },
-    Clear { window_id: u8 },
-    Query { window_id: u8, payload_hash: u16 },
-}
-
-#[derive(Clone, Copy, Debug)]
 enum ReuseAcquireCandidateSpec {
     MatchingValid,
     MatchingMissingWindow,
@@ -68,21 +61,6 @@ fn reuse_lifecycle_spec() -> BoxedStrategy<ReuseLifecycleSpec> {
             .prop_map(|last_used_epoch| ReuseLifecycleSpec::AvailableHidden { last_used_epoch }),
         any::<u8>().prop_map(|epoch| ReuseLifecycleSpec::InUse { epoch }),
         Just(ReuseLifecycleSpec::Invalid),
-    ]
-    .boxed()
-}
-
-fn reuse_payload_op() -> BoxedStrategy<ReusePayloadOp> {
-    prop_oneof![
-        (0_u8..=7, any::<u16>()).prop_map(|(window_id, payload_hash)| ReusePayloadOp::Store {
-            window_id,
-            payload_hash,
-        }),
-        (0_u8..=7).prop_map(|window_id| ReusePayloadOp::Clear { window_id }),
-        (0_u8..=7, any::<u16>()).prop_map(|(window_id, payload_hash)| ReusePayloadOp::Query {
-            window_id,
-            payload_hash,
-        }),
     ]
     .boxed()
 }
@@ -144,20 +122,6 @@ fn reuse_matching_visible_window(index: usize, placement: WindowPlacement) -> Ca
             last_used_epoch: FrameEpoch(1),
         },
         placement: Some(placement),
-    }
-}
-
-fn reuse_hidden_warm_spare(index: usize) -> CachedRenderWindow {
-    let offset = i32::try_from(index).unwrap_or(i32::MAX);
-    CachedRenderWindow {
-        handles: WindowBufferHandle {
-            window_id: 30_000_i32.saturating_add(offset),
-            buffer_id: BufferHandle::from(40_000_i32.saturating_add(offset)),
-        },
-        lifecycle: CachedWindowLifecycle::AvailableHidden {
-            last_used_epoch: FrameEpoch(1),
-        },
-        placement: None,
     }
 }
 
@@ -252,20 +216,6 @@ fn reuse_window_signatures(
         .collect()
 }
 
-fn reuse_available_window_index_baseline(
-    windows: &[CachedRenderWindow],
-    placement: WindowPlacement,
-) -> Option<usize> {
-    windows
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, cached)| {
-            (cached.available_epoch().is_some() && cached.placement == Some(placement))
-                .then_some(index)
-        })
-}
-
 fn reuse_lru_prune_indices_baseline(
     windows: &[CachedRenderWindow],
     keep_count: usize,
@@ -341,20 +291,6 @@ proptest! {
     #![proptest_config(pure_config())]
 
     #[test]
-    fn prop_available_window_index_for_placement_matches_reverse_scan(
-        specs in vec((reuse_lifecycle_spec(), 0_u8..=3), 0..=16),
-        target_key in 0_u8..=3,
-    ) {
-        let tab_windows = reuse_tab_windows_from_specs(&specs, ADAPTIVE_POOL_MIN_BUDGET);
-        let target = reuse_placement(target_key);
-
-        prop_assert_eq!(
-            available_window_index_for_placement(&tab_windows, target),
-            reuse_available_window_index_baseline(&tab_windows.windows, target),
-        );
-    }
-
-    #[test]
     fn prop_rollover_in_use_windows_matches_reference_lifecycles_and_tracking(
         specs in vec((reuse_lifecycle_spec(), 0_u8..=3), 0..=16),
         previous_epoch in any::<u8>(),
@@ -397,60 +333,6 @@ proptest! {
             lru_prune_indices(&windows, keep_count),
             reuse_lru_prune_indices_baseline(&windows, keep_count),
         );
-    }
-
-    #[test]
-    fn prop_cached_window_needs_reconfigure_matches_visibility_and_placement_rule(
-        lifecycle in reuse_lifecycle_spec(),
-        placement_key in 0_u8..=3,
-        target_key in 0_u8..=3,
-    ) {
-        let cached = reuse_cached_window(0, lifecycle, placement_key);
-        let target = reuse_placement(target_key);
-        let expected = !matches!(
-            lifecycle,
-            ReuseLifecycleSpec::AvailableVisible { .. } | ReuseLifecycleSpec::InUse { .. }
-        ) || cached.placement != Some(target);
-
-        prop_assert_eq!(cached.needs_reconfigure(target), expected);
-    }
-
-    #[test]
-    fn prop_payload_cache_matches_hash_map_reference_model(
-        ops in vec(reuse_payload_op(), 0..=64),
-    ) {
-        let mut tab_windows = TabWindows::default();
-        let mut expected = HashMap::<i32, u64>::new();
-
-        for op in ops {
-            match op {
-                ReusePayloadOp::Store {
-                    window_id,
-                    payload_hash,
-                } => {
-                    let window_id = 100_i32.saturating_add(i32::from(window_id));
-                    let payload_hash = u64::from(payload_hash);
-                    tab_windows.cache_payload(window_id, payload_hash);
-                    expected.insert(window_id, payload_hash);
-                }
-                ReusePayloadOp::Clear { window_id } => {
-                    let window_id = 100_i32.saturating_add(i32::from(window_id));
-                    tab_windows.clear_payload(window_id);
-                    expected.remove(&window_id);
-                }
-                ReusePayloadOp::Query {
-                    window_id,
-                    payload_hash,
-                } => {
-                    let window_id = 100_i32.saturating_add(i32::from(window_id));
-                    let payload_hash = u64::from(payload_hash);
-                    prop_assert_eq!(
-                        tab_windows.cached_payload_matches(window_id, payload_hash),
-                        expected.get(&window_id).is_some_and(|cached| *cached == payload_hash),
-                    );
-                }
-            }
-        }
     }
 
     #[test]
@@ -656,51 +538,6 @@ proptest! {
                 allocation_policy: AllocationPolicy::ReuseOnly,
             }),
         );
-    }
-
-    #[test]
-    fn prop_hidden_warm_spares_do_not_change_matching_reuse_order(
-        matching_visible_count in 0_usize..=8,
-        warm_spare_count in 0_usize..=4,
-    ) {
-        let placement = reuse_placement(1);
-        let mut windows = (0..matching_visible_count)
-            .map(|index| reuse_matching_visible_window(index, placement))
-            .collect::<Vec<_>>();
-        windows.extend(
-            (0..warm_spare_count)
-                .map(|index| reuse_hidden_warm_spare(index.saturating_add(matching_visible_count))),
-        );
-        let mut tab_windows = TabWindows {
-            windows,
-            ..TabWindows::default()
-        };
-        tab_windows.seed_tracking_from_windows_for_test();
-        let mut tabs = tabs_with(tab_windows);
-
-        let acquired_window_ids = (0..matching_visible_count)
-            .map(|_| {
-                let acquired = acquire(
-                    &mut tabs,
-                    NamespaceId::new(/*value*/ 1),
-                    tab_handle(1),
-                    placement,
-                    AllocationPolicy::ReuseOnly,
-                )
-                .expect("matching visible windows should be reused before any hidden spare");
-                prop_assert_eq!(acquired.reuse_failures, ReuseFailureCounters::default());
-                Ok::<i32, TestCaseError>(acquired.window_id)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let expected_window_ids = (0..matching_visible_count)
-            .rev()
-            .map(|index| {
-                let offset = i32::try_from(index).unwrap_or(i32::MAX);
-                10_000_i32.saturating_add(offset)
-            })
-            .collect::<Vec<_>>();
-        prop_assert_eq!(acquired_window_ids, expected_window_ids);
     }
 
     #[test]

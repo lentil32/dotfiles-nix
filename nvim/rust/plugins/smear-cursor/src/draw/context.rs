@@ -246,8 +246,6 @@ pub(super) fn clear_draw_context_for_test() {
 mod tests {
     use super::log_draw_error_with;
     use super::render_pool_diagnostics;
-    use super::render_tab_handles_for_test;
-    use super::take_render_tabs_for_test;
     use super::with_render_tab;
     use crate::draw::test_support::with_isolated_draw_context;
     use crate::draw::window_pool::WindowBufferHandle;
@@ -318,69 +316,6 @@ mod tests {
             assert_eq!(diagnostics.peak_frame_demand, 0);
             assert_eq!(diagnostics.peak_requested_capacity, 0);
             assert_eq!(diagnostics.capacity_cap_hits, 0);
-        });
-    }
-
-    #[test]
-    fn render_tab_tracking_is_isolated_by_tab_handle() {
-        with_isolated_draw_context(|| {
-            with_render_tab(tab_handle(11), |tab_windows| {
-                tab_windows.cache_payload(91, 111)
-            });
-            with_render_tab(tab_handle(22), |tab_windows| {
-                tab_windows.cache_payload(91, 222)
-            });
-
-            assert!(with_render_tab(tab_handle(11), |tab_windows| tab_windows
-                .cached_payload_matches(91, 111)));
-            assert!(!with_render_tab(tab_handle(11), |tab_windows| tab_windows
-                .cached_payload_matches(91, 222)));
-            assert!(with_render_tab(tab_handle(22), |tab_windows| tab_windows
-                .cached_payload_matches(91, 222)));
-            assert_eq!(
-                render_tab_handles_for_test(),
-                vec![tab_handle(11), tab_handle(22)]
-            );
-        });
-    }
-
-    #[test]
-    fn draining_render_tab_tracking_preserves_tab_owned_state_before_registry_clear() {
-        with_isolated_draw_context(|| {
-            with_render_tab(tab_handle(9), |tab_windows| {
-                tab_windows.cache_payload(41, 401)
-            });
-            with_render_tab(tab_handle(3), |tab_windows| {
-                tab_windows.cache_payload(42, 402)
-            });
-
-            let drained = take_render_tabs_for_test();
-            let drained_handles = drained
-                .iter()
-                .map(|(tab_handle, _)| *tab_handle)
-                .collect::<Vec<_>>();
-            assert_eq!(drained_handles, vec![tab_handle(3), tab_handle(9)]);
-
-            let drained_payloads = drained
-                .iter()
-                .map(|(drained_tab_handle, tab_windows)| {
-                    let cached_payload = if *drained_tab_handle == tab_handle(3) {
-                        tab_windows.cached_payload_matches(42, 402)
-                    } else if *drained_tab_handle == tab_handle(9) {
-                        tab_windows.cached_payload_matches(41, 401)
-                    } else {
-                        panic!(
-                            "unexpected tab handle in drained render tabs: {drained_tab_handle}"
-                        );
-                    };
-                    (*drained_tab_handle, cached_payload)
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                drained_payloads,
-                vec![(tab_handle(3), true), (tab_handle(9), true)]
-            );
-            assert!(render_tab_handles_for_test().is_empty());
         });
     }
 

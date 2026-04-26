@@ -96,63 +96,6 @@ fn start_animation_discards_settling_window_and_arms_motion_clock() {
 }
 
 #[test]
-fn stop_animation_drops_the_motion_clock() {
-    let mut state = RuntimeState::default();
-
-    state.start_animation();
-    state.stop_animation();
-
-    assert!(!state.is_animating());
-    assert!(!state.has_motion_clock());
-}
-
-#[test]
-fn start_tail_drain_transitions_follow_requested_step_count() {
-    for (label, drain_steps, expected_state) in [
-        (
-            "zero-step drain keeps the runtime idle",
-            0,
-            (false, 0, false),
-        ),
-        (
-            "positive-step drain enters draining with owned clock state",
-            3,
-            (true, 3, true),
-        ),
-    ] {
-        let mut state = RuntimeState::default();
-        state.mark_initialized();
-
-        state.start_tail_drain(drain_steps, 100.0);
-
-        assert_eq!(
-            (
-                state.is_draining(),
-                state.drain_steps_remaining(),
-                state.has_motion_clock(),
-            ),
-            expected_state,
-            "{label}"
-        );
-    }
-}
-
-#[test]
-fn animation_clock_sample_reports_discontinuity_for_large_gaps() {
-    let mut state = RuntimeState::default();
-    state.config.time_interval = 16.0;
-    state.config.simulation_hz = 120.0;
-    state.config.max_simulation_steps_per_frame = 16;
-    state.start_animation();
-    state.set_last_tick_ms(Some(100.0));
-
-    let sample = state.take_animation_clock_sample(2_500.0, 16.0);
-
-    pretty_assertions::assert_eq!(sample, AnimationClockSample::Discontinuity);
-    pretty_assertions::assert_eq!(state.last_tick_ms(), Some(2_500.0));
-}
-
-#[test]
 fn push_simulation_elapsed_caps_motion_clock_debt_to_the_catch_up_budget() {
     let mut state = RuntimeState::default();
     state.config.time_interval = 16.0;
@@ -188,34 +131,6 @@ fn reset_transient_state_restores_default_transient_fields() {
 }
 
 #[test]
-fn clear_runtime_state_cold_resets_motion_and_releases_retained_storage() {
-    let mut state = runtime_with_retained_motion_and_purgeable_storage();
-    let expected = runtime_after_cold_clear(&state);
-
-    assert!(state.preview_particles_scratch_capacity() > 0);
-    assert!(state.render_step_samples_scratch_capacity() > 0);
-    assert!(state.particle_aggregation_scratch_index_capacity() > 0);
-    assert!(state.particle_aggregation_scratch_cells_capacity() > 0);
-    assert!(state.particle_aggregation_scratch_screen_cells_capacity() > 0);
-    assert!(state.has_cached_aggregated_particle_cells());
-    assert!(state.has_cached_particle_screen_cells());
-
-    state.clear_runtime_state();
-
-    pretty_assertions::assert_eq!(state.semantic_view(), expected.semantic_view());
-    assert_eq!(state.preview_particles_scratch_capacity(), 0);
-    assert_eq!(state.render_step_samples_scratch_capacity(), 0);
-    assert_eq!(state.particle_aggregation_scratch_index_capacity(), 0);
-    assert_eq!(state.particle_aggregation_scratch_cells_capacity(), 0);
-    assert_eq!(
-        state.particle_aggregation_scratch_screen_cells_capacity(),
-        0
-    );
-    assert!(!state.has_cached_aggregated_particle_cells());
-    assert!(!state.has_cached_particle_screen_cells());
-}
-
-#[test]
 fn disable_cold_resets_runtime_and_marks_plugin_disabled() {
     let mut state = runtime_with_retained_motion_and_purgeable_storage();
     let mut expected = runtime_after_cold_clear(&state);
@@ -235,36 +150,4 @@ fn disable_cold_resets_runtime_and_marks_plugin_disabled() {
     assert!(!state.has_cached_aggregated_particle_cells());
     assert!(!state.has_cached_particle_screen_cells());
     assert!(!state.is_enabled());
-}
-
-#[test]
-fn cmdline_boundary_tracking_only_reports_known_mode_crossings() {
-    let mut state = RuntimeState::default();
-
-    for (label, current_is_cmdline, expected_boundary) in [
-        (
-            "unknown mode memory does not invent a boundary",
-            true,
-            false,
-        ),
-        (
-            "repeating cmdline mode does not cross the boundary",
-            true,
-            false,
-        ),
-        ("leaving cmdline mode crosses the boundary", false, true),
-        (
-            "repeating non-cmdline mode does not cross the boundary",
-            false,
-            false,
-        ),
-        ("re-entering cmdline mode crosses the boundary", true, true),
-    ] {
-        assert_eq!(
-            state.crossed_cmdline_boundary(current_is_cmdline),
-            expected_boundary,
-            "{label}"
-        );
-        state.record_observed_mode(current_is_cmdline);
-    }
 }

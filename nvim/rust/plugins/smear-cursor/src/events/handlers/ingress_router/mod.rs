@@ -28,23 +28,13 @@ use self::cursor_autocmd::should_coalesce_window_follow_up_autocmd;
 #[cfg(test)]
 use self::cursor_autocmd::should_drop_unchanged_cursor_autocmd;
 #[cfg(test)]
-use self::cursor_autocmd::tracked_cursor_matches_live_surface_handles;
-#[cfg(test)]
 use self::non_cursor_autocmd::LiveTabSnapshot;
 #[cfg(test)]
 use self::non_cursor_autocmd::advance_buffer_text_revision;
 #[cfg(test)]
 use self::non_cursor_autocmd::invalidate_buffer_local_caches;
 #[cfg(test)]
-use self::non_cursor_autocmd::invalidate_buffer_local_probe_caches;
-#[cfg(test)]
 use self::non_cursor_autocmd::invalidate_buffer_metadata;
-#[cfg(test)]
-use self::non_cursor_autocmd::invalidate_conceal_probe_caches;
-#[cfg(test)]
-use self::non_cursor_autocmd::live_tab_snapshot_with;
-#[cfg(test)]
-use self::non_cursor_autocmd::parse_closed_tab_number;
 #[cfg(test)]
 use self::non_cursor_autocmd::parse_closed_window_id;
 #[cfg(test)]
@@ -55,9 +45,6 @@ use self::non_cursor_autocmd::should_invalidate_conceal_probe_cache_for_option;
 use self::non_cursor_autocmd::should_refresh_editor_viewport_for_option;
 #[cfg(test)]
 use self::non_cursor_autocmd::stale_tracked_tab_handles;
-#[cfg(test)]
-use super::retained_resource_cleanup_retry_event;
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum IngressDispatchOutcome {
     Applied,
@@ -83,8 +70,7 @@ fn on_autocmd_ingress(
         | AutocmdIngress::TextChanged
         | AutocmdIngress::TextChangedInsert
         | AutocmdIngress::VimResized
-        | AutocmdIngress::WinClosed
-        | AutocmdIngress::Unknown => {
+        | AutocmdIngress::WinClosed => {
             non_cursor_autocmd::on_non_cursor_autocmd_ingress(ingress, context)
         }
         AutocmdIngress::CmdlineChanged
@@ -122,10 +108,10 @@ fn dispatch_ingress(ingress: Ingress, context: AutocmdDispatchContext<'_>) -> Re
 }
 
 pub(crate) fn on_autocmd_event(event: &str) -> Result<()> {
-    dispatch_ingress(
-        Ingress::Autocmd(parse_autocmd_ingress(event)),
-        AutocmdDispatchContext::default(),
-    )
+    let Some(ingress) = parse_autocmd_ingress(event) else {
+        return Err(crate::lua::invalid_key("event", "registered autocmd event"));
+    };
+    dispatch_ingress(Ingress::Autocmd(ingress), AutocmdDispatchContext::default())
 }
 
 pub(in crate::events) fn on_autocmd_payload_event(
@@ -133,8 +119,11 @@ pub(in crate::events) fn on_autocmd_payload_event(
     buffer_handle: Option<BufferHandle>,
     match_name: Option<&str>,
 ) -> Result<()> {
+    let Some(ingress) = parse_autocmd_ingress(event) else {
+        return Err(crate::lua::invalid_key("event", "registered autocmd event"));
+    };
     dispatch_ingress(
-        Ingress::Autocmd(parse_autocmd_ingress(event)),
+        Ingress::Autocmd(ingress),
         AutocmdDispatchContext {
             buffer_handle,
             match_name,

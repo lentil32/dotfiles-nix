@@ -57,11 +57,6 @@ pub(crate) fn tab_has_visible_windows(tab_windows: &TabWindows) -> bool {
     tab_windows.visible_window_count() > 0
 }
 
-#[cfg(test)]
-pub(crate) fn has_visible_windows(tabs: &HashMap<TabHandle, TabWindows>) -> bool {
-    tabs.values().any(tab_has_visible_windows)
-}
-
 pub(crate) fn tab_has_pending_clear_work(
     tab_windows: &TabWindows,
     max_kept_windows: usize,

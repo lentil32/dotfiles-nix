@@ -416,13 +416,6 @@ fn insert_mode_forced_jump_bridge_starts_from_the_live_head() {
 }
 
 #[test]
-fn insert_mode_immediate_snap_jump_bridge_starts_from_the_translated_live_head_after_scroll() {
-    assert_insert_mode_jump_bridge_starts_from_translated_live_head(
-        InsertModeJumpBridgeCase::ImmediateSnap,
-    );
-}
-
-#[test]
 fn insert_mode_forced_jump_bridge_starts_from_the_translated_live_head_after_scroll() {
     assert_insert_mode_jump_bridge_starts_from_translated_live_head(
         InsertModeJumpBridgeCase::ForcedJump,

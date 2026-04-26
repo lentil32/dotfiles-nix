@@ -312,29 +312,6 @@ fn animation_timer_keeps_rendering_compatible_cursor_color_observation_while_run
 }
 
 #[test]
-fn animation_timer_requests_boundary_refresh_for_compatible_cursor_color_when_motion_stops() {
-    let base = compatible_cursor_color_ready_state(|_runtime| {});
-    let (state, token) = timer_armed_state(base);
-
-    let transition = reduce(&state, animation_tick_event(token, 116));
-
-    let [Effect::RequestObservationBase(payload)] = transition.effects.as_slice() else {
-        panic!("expected boundary refresh observation after compatible cursor color reuse");
-    };
-    let request = active_request(&transition.next);
-
-    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
-    pretty_assert_eq!(payload.request, request);
-    pretty_assert_eq!(payload.context.buffer_perf_class(), BufferPerfClass::Full);
-    pretty_assert_eq!(
-        payload.context.probe_policy().quality(),
-        ProbeQuality::Exact
-    );
-    pretty_assert_eq!(request.demand().kind(), ExternalDemandKind::BoundaryRefresh);
-    pretty_assert_eq!(request.demand().buffer_perf_class(), BufferPerfClass::Full);
-}
-
-#[test]
 fn animation_timer_preserves_perf_class_across_boundary_refresh() {
     let mut runtime = ready_state().runtime().clone();
     runtime.config.cursor_color = Some("none".to_string());

@@ -367,12 +367,6 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    pub(crate) fn shared_aggregated_particle_cells(&mut self) -> SharedAggregatedParticleCells {
-        self.shared_particle_artifacts(ParticleScreenCellsMode::Skip)
-            .0
-    }
-
-    #[cfg(test)]
     pub(crate) fn shared_particle_screen_cells(&mut self) -> SharedParticleScreenCells {
         self.shared_particle_artifacts(ParticleScreenCellsMode::Collect)
             .1
@@ -394,18 +388,8 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    pub(crate) fn preview_particles_scratch_ptr(&self) -> *const Particle {
-        self.caches.scratch_buffers.preview_particles.as_ptr()
-    }
-
-    #[cfg(test)]
     pub(crate) fn render_step_samples_scratch_capacity(&self) -> usize {
         self.caches.scratch_buffers.render_step_samples.capacity()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn render_step_samples_scratch_ptr(&self) -> *const RenderStepSample {
-        self.caches.scratch_buffers.render_step_samples.as_ptr()
     }
 
     #[cfg(test)]

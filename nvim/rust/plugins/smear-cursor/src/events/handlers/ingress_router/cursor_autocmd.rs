@@ -273,8 +273,7 @@ pub(super) fn demand_kind_for_autocmd(ingress: AutocmdIngress) -> ExternalDemand
         | AutocmdIngress::TextChangedInsert
         | AutocmdIngress::VimResized
         | AutocmdIngress::WinClosed
-        | AutocmdIngress::ColorScheme
-        | AutocmdIngress::Unknown => ExternalDemandKind::ExternalCursor,
+        | AutocmdIngress::ColorScheme => ExternalDemandKind::ExternalCursor,
     }
 }
 

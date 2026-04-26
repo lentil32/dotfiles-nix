@@ -46,20 +46,6 @@ impl CoreTimerHandles {
             .collect()
     }
 
-    #[cfg(test)]
-    fn take_by_host_timer_id(&mut self, host_timer_id: HostTimerId) -> Option<CoreTimerHandle> {
-        for slot in self.slots.iter_mut() {
-            if slot
-                .as_ref()
-                .is_some_and(|handle| handle.host_timer_id == host_timer_id)
-            {
-                return slot.take();
-            }
-        }
-
-        None
-    }
-
     fn resolve_fired(&mut self, fired_timer: FiredHostTimer) -> FiredCoreTimerLookup {
         for timer_id in TimerId::ALL {
             let Some(handle) = self.slot(timer_id) else {
@@ -84,15 +70,6 @@ impl CoreTimerHandles {
         }
 
         FiredCoreTimerLookup::MissingHandle
-    }
-
-    #[cfg(test)]
-    fn take_fired(&mut self, fired_timer: FiredHostTimer) -> Option<CoreTimerHandle> {
-        match self.resolve_fired(fired_timer) {
-            FiredCoreTimerLookup::Matched(handle) => Some(handle),
-            FiredCoreTimerLookup::MismatchedHostTimerId { .. }
-            | FiredCoreTimerLookup::MissingHandle => None,
-        }
     }
 }
 
@@ -206,19 +183,6 @@ impl TimerBridge {
     #[cfg(test)]
     pub(crate) fn has_timer_id(&self, timer_id: TimerId) -> bool {
         self.handles.has_timer_id(timer_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_by_host_timer_id(
-        &mut self,
-        host_timer_id: HostTimerId,
-    ) -> Option<CoreTimerHandle> {
-        self.handles.take_by_host_timer_id(host_timer_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_fired(&mut self, fired_timer: FiredHostTimer) -> Option<CoreTimerHandle> {
-        self.handles.take_fired(fired_timer)
     }
 
     #[cfg(test)]

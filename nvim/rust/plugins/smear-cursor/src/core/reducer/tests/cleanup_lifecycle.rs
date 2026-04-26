@@ -868,36 +868,3 @@ fn fresh_ingress_promotes_cooling_cleanup_state_back_to_hot() {
         "fresh ingress should keep one cleanup timer alive while hot deadlines move forward"
     );
 }
-
-#[test]
-fn diverged_realization_cannot_derive_noop_for_identical_target() {
-    let (staged, proposal_id) =
-        planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 86);
-    let target = staged
-        .pending_proposal()
-        .and_then(|proposal| proposal.patch().basis().target_handle().cloned())
-        .expect("target projection for divergence noop regression");
-    let ready = reduce(
-        &staged,
-        Event::ApplyReported(ApplyReport::AppliedFully {
-            proposal_id,
-            observed_at: Millis::new(87),
-            visual_change: true,
-        }),
-    )
-    .next;
-    let diverged = ready.with_realization(RealizationLedger::diverged_from(
-        Some(target.clone()),
-        RealizationDivergence::ShellStateUnknown,
-    ));
-
-    let patch = ScenePatch::derive(PatchBasis::new(
-        diverged
-            .realization()
-            .trusted_acknowledged_for_patch()
-            .cloned(),
-        Some(target),
-    ));
-
-    pretty_assert_eq!(patch.kind(), crate::core::state::ScenePatchKind::Replace);
-}

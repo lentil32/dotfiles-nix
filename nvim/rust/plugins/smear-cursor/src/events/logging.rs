@@ -274,10 +274,8 @@ mod tests {
     use super::ensure_hideable_guicursor_with;
     use super::notify_host_with;
     use super::should_notify;
-    use super::should_skip_real_cursor_visibility_update;
     use crate::config::LogLevel;
     use crate::events::runtime::clear_real_cursor_visibility;
-    use crate::events::runtime::note_real_cursor_visibility;
     use crate::host::CursorVisibilityCall;
     use crate::host::FakeCursorVisibilityPort;
     use crate::host::FakeHostLoggingPort;
@@ -398,25 +396,5 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn real_cursor_visibility_skip_only_matches_the_cached_state() {
-        clear_real_cursor_visibility().expect("shell state access should succeed");
-        assert!(!should_skip_real_cursor_visibility_update(
-            RealCursorVisibility::Hidden
-        ));
-        assert!(!should_skip_real_cursor_visibility_update(
-            RealCursorVisibility::Visible
-        ));
-
-        note_real_cursor_visibility(RealCursorVisibility::Hidden)
-            .expect("shell state access should succeed");
-        assert!(should_skip_real_cursor_visibility_update(
-            RealCursorVisibility::Hidden
-        ));
-        assert!(!should_skip_real_cursor_visibility_update(
-            RealCursorVisibility::Visible
-        ));
     }
 }

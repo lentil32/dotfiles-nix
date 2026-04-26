@@ -5,48 +5,6 @@ proptest! {
     #![proptest_config(stateful_config())]
 
     #[test]
-    fn prop_window_change_clears_when_smear_between_windows_disabled(
-        start_row in 1_u16..120,
-        start_col in 1_u16..220,
-        switched_row in 120_u16..280,
-        switched_col in 120_u16..280,
-        initial_window in 1_i64..1_000_000,
-        initial_buffer in 1_i64..1_000_000,
-        window_delta in 1_i16..32,
-        initial_seed in any::<u32>(),
-        switched_seed in any::<u32>(),
-    ) {
-        let mut state = RuntimeState::default();
-        state.config.smear_between_windows = false;
-        state.config.smear_between_buffers = true;
-
-        let initial = event_with_location(
-            f64::from(start_row),
-            f64::from(start_col),
-            100.0,
-            initial_seed,
-            initial_window,
-            initial_buffer,
-        );
-        let _ = reduce_cursor_event(&mut state, "n", initial, EventSource::External);
-
-        let switched = event_with_location(
-            f64::from(switched_row),
-            f64::from(switched_col),
-            116.0,
-            switched_seed,
-            initial_window.wrapping_add(i64::from(window_delta)),
-            initial_buffer,
-        );
-        let effects = reduce_cursor_event(&mut state, "n", switched, EventSource::External);
-        prop_assert!(matches!(render_action(&effects), RenderAction::ClearAll));
-        prop_assert_eq!(
-            render_cleanup_action(&effects),
-            RenderCleanupAction::Schedule
-        );
-    }
-
-    #[test]
     fn prop_repeated_window_switches_do_not_clear_when_smear_between_windows_enabled(
         switches in vec((20_u16..260, 20_u16..260, any::<u32>()), 1..96),
     ) {

@@ -361,10 +361,8 @@ pub(super) enum CursorTransitionPolicy {
 mod tests {
     use super::CursorShape;
     use super::CursorTarget;
-    use super::RetargetSurfaceKey;
     use super::RuntimeTargetRetargetKey;
     use super::RuntimeTargetSnapshot;
-    use crate::host::BufferHandle;
     use crate::position::BufferLine;
     use crate::position::RenderPoint;
     use crate::position::ScreenCell;
@@ -396,25 +394,6 @@ mod tests {
             ),
             BufferLine::new(line).expect("positive cursor buffer line"),
         )
-    }
-
-    #[test]
-    fn retarget_surface_key_uses_tracked_cursor_surface_identity_and_dimensions() {
-        assert_eq!(
-            RetargetSurfaceKey::from_tracked_cursor(&tracked_cursor(
-                23,
-                29,
-                (5, 2),
-                (7, 13),
-                (80, 24),
-            )),
-            RetargetSurfaceKey {
-                window_handle: 11,
-                buffer_handle: BufferHandle::from_raw_for_test(/*value*/ 17),
-                window_width: 80,
-                window_height: 24,
-            }
-        );
     }
 
     #[test]

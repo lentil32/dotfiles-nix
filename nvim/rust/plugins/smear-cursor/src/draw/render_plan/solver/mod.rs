@@ -11,19 +11,13 @@ pub(super) use self::fallback::active_support_is_disconnected;
 pub(super) use self::fallback::decode_compiled_field;
 #[cfg(test)]
 pub(super) use self::fallback::decode_compiled_field_trace;
-#[cfg(test)]
-pub(super) use self::fallback::decode_compiled_field_trace_with_compiled_and_scratch;
 pub(super) use self::fallback::decode_compiled_field_with_compiled_and_scratch;
-#[cfg(test)]
-pub(super) use self::fallback::decode_compiled_field_with_solver;
 #[cfg(test)]
 pub(super) use self::fallback::ribbon_support_is_oversized;
 #[cfg(test)]
 pub(super) use self::fallback::select_decode_path;
 #[cfg(test)]
 pub(super) use self::fallback::solve_pairwise_fallback;
-#[cfg(test)]
-pub(super) use self::fallback::solve_pairwise_fallback_with_scratch;
 #[cfg(test)]
 pub(super) use self::ribbon_dp::merge_ribbon_assignments;
 #[cfg(test)]
@@ -36,10 +30,6 @@ pub(super) use self::ribbon_state_space::RunEnumerationCursor;
 pub(super) use self::ribbon_state_space::RunEnumerationInput;
 #[cfg(test)]
 pub(super) use self::ribbon_state_space::adjusted_candidate_cost;
-#[cfg(test)]
-pub(super) use self::ribbon_state_space::build_slice_states;
-#[cfg(test)]
-pub(super) use self::ribbon_state_space::build_slice_states_with_peak_working_set;
 #[cfg(test)]
 pub(super) use self::ribbon_state_space::run_width_cells;
 #[cfg(test)]

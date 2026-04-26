@@ -55,7 +55,7 @@ pub(super) fn on_non_cursor_autocmd_ingress(
             Ok(IngressDispatchOutcome::Dropped)
         }
         AutocmdIngress::TabClosed => {
-            handle_tab_closed_autocmd(context)?;
+            handle_tab_closed_autocmd()?;
             Ok(IngressDispatchOutcome::Dropped)
         }
         AutocmdIngress::TextChanged | AutocmdIngress::TextChangedInsert => {
@@ -70,7 +70,6 @@ pub(super) fn on_non_cursor_autocmd_ingress(
             handle_win_closed_autocmd(context)?;
             Ok(IngressDispatchOutcome::Dropped)
         }
-        AutocmdIngress::Unknown => Ok(IngressDispatchOutcome::Dropped),
         AutocmdIngress::CmdlineChanged
         | AutocmdIngress::CursorMoved
         | AutocmdIngress::CursorMovedInsert
@@ -124,11 +123,6 @@ pub(super) fn parse_closed_window_id(match_name: Option<&str>) -> Option<i32> {
     i32::try_from(window_id).ok()
 }
 
-pub(super) fn parse_closed_tab_number(match_name: Option<&str>) -> Option<u32> {
-    let tab_number = parse_positive_i64(match_name)?;
-    u32::try_from(tab_number).ok()
-}
-
 fn live_tab_snapshot() -> Vec<LiveTabSnapshot> {
     live_tab_snapshot_with(&NeovimHost)
 }
@@ -157,13 +151,8 @@ pub(super) fn stale_tracked_tab_handles(
     stale_tab_handles
 }
 
-fn handle_tab_closed_autocmd(context: AutocmdDispatchContext<'_>) -> Result<()> {
-    let closed_tab_number = parse_closed_tab_number(context.match_name);
+fn handle_tab_closed_autocmd() -> Result<()> {
     let live_tabs = live_tab_snapshot();
-    // TabClosed reports the closed tab number, not its handle. A complete number snapshot confirms
-    // the event payload shape; the handle set difference below remains the authoritative mapping.
-    let _exact_number_context =
-        closed_tab_number.is_some() && live_tabs.iter().all(|tab| tab.tab_number.is_some());
     let stale_tab_handles = stale_tracked_tab_handles(tracked_draw_tab_handles(), &live_tabs);
     if stale_tab_handles.is_empty() {
         return Ok(());

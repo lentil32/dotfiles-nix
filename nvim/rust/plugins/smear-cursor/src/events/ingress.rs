@@ -20,7 +20,6 @@ pub(super) enum AutocmdIngress {
     WinScrolled,
     BufEnter,
     ColorScheme,
-    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -93,17 +92,14 @@ const AUTOCMD_INGRESS_MAPPINGS: [AutocmdIngressMapping; 15] = [
     },
 ];
 
-pub(super) fn parse_autocmd_ingress(event_name: &str) -> AutocmdIngress {
-    AUTOCMD_INGRESS_MAPPINGS
-        .iter()
-        .find_map(|mapping| {
-            if mapping.event_name == event_name {
-                Some(mapping.ingress)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(AutocmdIngress::Unknown)
+pub(super) fn parse_autocmd_ingress(event_name: &str) -> Option<AutocmdIngress> {
+    AUTOCMD_INGRESS_MAPPINGS.iter().find_map(|mapping| {
+        if mapping.event_name == event_name {
+            Some(mapping.ingress)
+        } else {
+            None
+        }
+    })
 }
 
 pub(super) fn registered_autocmd_event_names() -> impl Iterator<Item = &'static str> {
@@ -137,33 +133,23 @@ mod tests {
     use super::parse_autocmd_ingress;
     use super::registered_autocmd_event_names;
     use pretty_assertions::assert_eq;
-    use pretty_assertions::assert_ne;
 
     #[test]
     fn known_autocmd_names_round_trip_to_typed_ingress() {
         for event_name in registered_autocmd_event_names() {
-            let ingress = parse_autocmd_ingress(event_name);
-            assert_ne!(ingress, AutocmdIngress::Unknown);
+            assert!(parse_autocmd_ingress(event_name).is_some());
         }
-    }
-
-    #[test]
-    fn unknown_autocmd_name_maps_to_explicit_noop_variant() {
-        assert_eq!(
-            parse_autocmd_ingress("DefinitelyNotReal"),
-            AutocmdIngress::Unknown
-        );
     }
 
     #[test]
     fn close_autocmd_names_map_to_resource_lifecycle_ingress() {
         assert_eq!(
             parse_autocmd_ingress("TabClosed"),
-            AutocmdIngress::TabClosed
+            Some(AutocmdIngress::TabClosed)
         );
         assert_eq!(
             parse_autocmd_ingress("WinClosed"),
-            AutocmdIngress::WinClosed
+            Some(AutocmdIngress::WinClosed)
         );
     }
 

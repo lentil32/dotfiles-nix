@@ -355,18 +355,13 @@ Important weak forms are normalized or rejected at one boundary each:
 
 ## Semantic Comparison Surface
 
-The cache-free equality surfaces used by runtime and reducer tests live next to
-the owning types:
+The cache-free equality surfaces used by runtime and projection tests live next
+to the owning types:
 
 - `RuntimeState::semantic_view()` compares authoritative runtime state while
   ignoring purgeable scratch buffers and rebuildable particle/config caches.
 - `ProjectionHandle::semantic_view()` compares retained projection witness plus
   logical raster while ignoring reuse-key and cached realization drift.
-- `InFlightProposal::semantic_view()` compares authoritative proposal payload
-  through semantic patch-basis views rather than cached projection internals.
-- `CoreState::semantic_view()` compares authoritative reducer state across
-  protocol, runtime, scene, and realization owners while ignoring runtime
-  scratch buffers, projection reuse caches, and cached shell materialization.
 
 Current invariants pin the ownership model:
 

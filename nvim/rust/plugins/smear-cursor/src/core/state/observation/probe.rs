@@ -317,14 +317,6 @@ impl BackgroundProbeState {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) const fn reuse(&self) -> Option<ProbeReuse> {
-        match self {
-            Self::Ready { reuse, .. } => Some(*reuse),
-            Self::Unrequested | Self::Collecting { .. } | Self::Failed { .. } => None,
-        }
-    }
-
     fn set_ready(&mut self, reuse: ProbeReuse, batch: BackgroundProbeBatch) -> bool {
         match self {
             Self::Collecting { .. } => {

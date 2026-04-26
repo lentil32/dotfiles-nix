@@ -61,11 +61,7 @@ pub(crate) use scheduler::FakeSchedulerPort;
 #[cfg(test)]
 pub(crate) use scheduler::SchedulerCall;
 pub(crate) use scheduler::SchedulerPort;
-#[cfg(test)]
-pub(crate) use tabpage::FakeTabPagePort;
 pub(crate) use tabpage::HostTabSnapshot;
-#[cfg(test)]
-pub(crate) use tabpage::TabPageCall;
 pub(crate) use tabpage::TabPagePort;
 #[cfg(test)]
 pub(crate) use window_surface::FakeWindowSurfacePort;
@@ -77,9 +73,6 @@ pub(crate) const HOST_BRIDGE_REVISION_FUNCTION_NAME: &str =
     "nvimrs_smear_cursor#host_bridge#revision";
 pub(crate) const DISPATCH_AUTOCMD_FUNCTION_NAME: &str =
     "nvimrs_smear_cursor#host_bridge#dispatch_autocmd";
-#[cfg(test)]
-pub(crate) const DISPATCH_TIMER_FUNCTION_NAME: &str =
-    "nvimrs_smear_cursor#host_bridge#dispatch_timer";
 pub(crate) const START_TIMER_ONCE_FUNCTION_NAME: &str =
     "nvimrs_smear_cursor#host_bridge#start_timer_once";
 pub(crate) const STOP_TIMER_FUNCTION_NAME: &str = "nvimrs_smear_cursor#host_bridge#stop_timer";

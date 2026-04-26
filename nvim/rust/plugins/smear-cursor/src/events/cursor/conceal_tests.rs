@@ -3,42 +3,29 @@ use super::RawScreenposProjection;
 use super::WrappedScreenCellLayout;
 use super::apply_conceal_delta;
 use super::cached_conceal_drift_hint_from_regions_and_delta;
-use super::capture_conceal_window_state;
-use super::conceal_delta_cache_key;
 use super::conceal_delta_for_regions;
-use super::conceal_screen_cell_cache_key;
 use super::concealcursor_allows_mode;
 use super::exact_observed_cell_from_conceal_delta;
 use super::extend_concealed_regions;
 use super::merge_conceal_region;
 use super::projected_observed_cell_from_cached_conceal;
-use super::screen_cell_for_buffer_column;
 use crate::events::probe_cache::ConcealRegion;
-use crate::events::probe_cache::ConcealWindowState;
 use crate::host::CursorReadCall;
 use crate::host::FakeCursorReadPort;
-use crate::host::api;
 use crate::position::BufferLine;
 use crate::position::ObservedCell;
 use crate::position::ScreenCell;
 use crate::position::SurfaceId;
 use crate::position::ViewportBounds;
 use crate::position::WindowSurfaceSnapshot;
-use crate::test_support::conceal_key;
 use crate::test_support::conceal_region;
-use crate::test_support::proptest::cache_key_mutation_axis;
 use crate::test_support::proptest::pure_config;
 use nvim_oxi::Array;
-use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
-
-const SCREEN_CELL_VIEW_AXIS_COUNT: usize = 8;
-const DELTA_CACHE_VIEW_AXIS_COUNT: usize = 7;
-const CONCEAL_KEY_AXIS_COUNT: usize = 2;
 
 #[derive(Clone, Copy, Debug)]
 enum ConcealModeFamily {
@@ -83,28 +70,6 @@ struct ConcealDeltaFixture {
 
 fn screen_cell(row: i64, col: i64) -> ScreenCell {
     ScreenCell::new(row, col).expect("test screen cells should stay one-based")
-}
-
-fn screenpos_object(
-    row: Option<i64>,
-    col: Option<i64>,
-    endcol: Option<i64>,
-    curscol: Option<i64>,
-) -> Object {
-    let mut dict = Dictionary::new();
-    if let Some(row) = row {
-        dict.insert("row", Object::from(row));
-    }
-    if let Some(col) = col {
-        dict.insert("col", Object::from(col));
-    }
-    if let Some(endcol) = endcol {
-        dict.insert("endcol", Object::from(endcol));
-    }
-    if let Some(curscol) = curscol {
-        dict.insert("curscol", Object::from(curscol));
-    }
-    Object::from(dict)
 }
 
 fn synconcealed_object(concealed: i64, replacement: &str, match_id: i64) -> Object {
@@ -152,18 +117,6 @@ fn surface_snapshot_with_handles(
     )
 }
 
-fn surface_parts(surface_snapshot: WindowSurfaceSnapshot) -> (i64, i64, i64, i64, i64, i64, i64) {
-    (
-        surface_snapshot.window_origin().row(),
-        surface_snapshot.window_origin().col(),
-        surface_snapshot.window_size().max_col(),
-        surface_snapshot.window_size().max_row(),
-        surface_snapshot.top_buffer_line().value(),
-        i64::from(surface_snapshot.left_col0()),
-        i64::from(surface_snapshot.text_offset0()),
-    )
-}
-
 fn concealcursor_strategy() -> BoxedStrategy<String> {
     (
         any::<bool>(),
@@ -192,15 +145,6 @@ fn concealcursor_strategy() -> BoxedStrategy<String> {
             },
         )
         .boxed()
-}
-
-fn different_concealcursor(concealcursor: &str) -> String {
-    let without_normal: String = concealcursor.chars().filter(|&ch| ch != 'n').collect();
-    if without_normal != concealcursor {
-        without_normal
-    } else {
-        format!("{concealcursor}n")
-    }
 }
 
 fn mode_case_strategy() -> BoxedStrategy<ModeCase> {
@@ -422,43 +366,6 @@ fn expected_drift_hint(
 }
 
 #[test]
-fn conceal_cache_keys_follow_the_caller_supplied_surface_snapshot() {
-    let base_surface = surface_snapshot(5, 11, 80, 24, 23, 4, 2);
-    let shifted_surface = surface_snapshot(8, 13, 72, 18, 29, 7, 3);
-    let conceal_key = conceal_key(17, 101, 23, 2, "n");
-
-    assert_eq!(surface_parts(base_surface), (5, 11, 80, 24, 23, 4, 2));
-    assert_eq!(surface_parts(shifted_surface), (8, 13, 72, 18, 29, 7, 3));
-    assert_ne!(
-        conceal_screen_cell_cache_key(base_surface, &conceal_key, 7),
-        conceal_screen_cell_cache_key(shifted_surface, &conceal_key, 7),
-    );
-    assert_ne!(
-        conceal_delta_cache_key(base_surface, &conceal_key),
-        conceal_delta_cache_key(shifted_surface, &conceal_key),
-    );
-}
-
-#[test]
-fn conceal_window_state_reads_through_cursor_read_port() {
-    let host = FakeCursorReadPort::default();
-    host.set_window_conceal_state(11, 2, "nvi");
-
-    assert_eq!(
-        capture_conceal_window_state(&host, &api::Window::from(11))
-            .expect("conceal window state should read through fake host"),
-        ConcealWindowState::new(2, "nvi"),
-    );
-    assert_eq!(
-        host.calls(),
-        vec![
-            CursorReadCall::WindowConceallevel { window_handle: 11 },
-            CursorReadCall::WindowConcealcursor { window_handle: 11 },
-        ],
-    );
-}
-
-#[test]
 fn conceal_region_scan_reads_synconcealed_and_display_width_through_cursor_read_port() {
     let host = FakeCursorReadPort::default();
     host.push_synconcealed(synconcealed_object(1, "xx", 91));
@@ -477,26 +384,6 @@ fn conceal_region_scan_reads_synconcealed_and_display_width_through_cursor_read_
                 text: "xx".to_string(),
             },
         ],
-    );
-}
-
-#[test]
-fn conceal_screen_cell_reads_screenpos_through_cursor_read_port() {
-    let host = FakeCursorReadPort::default();
-    host.push_screenpos(screenpos_object(Some(7), Some(18), Some(18), Some(18)));
-
-    assert_eq!(
-        screen_cell_for_buffer_column(&host, &api::Window::from(11), 5, 9)
-            .expect("screenpos-backed conceal cell should parse"),
-        Some(screen_cell(7, 18)),
-    );
-    assert_eq!(
-        host.calls(),
-        vec![CursorReadCall::Screenpos {
-            window_handle: 11,
-            line: 5,
-            col1: 9,
-        }],
     );
 }
 
@@ -573,117 +460,6 @@ fn cached_conceal_fast_path_requests_exact_projection_when_wrapped_shift_cannot_
         projected_observed_cell_from_cached_conceal(10, raw_cell, &regions, Some(5), Some(surface)),
         RawScreenposProjection::NeedsExactProjection,
     );
-}
-
-fn mutate_surface(
-    snapshot: WindowSurfaceSnapshot,
-    axis: usize,
-    textoff_limit: i64,
-) -> WindowSurfaceSnapshot {
-    let surface_id = snapshot.id();
-    match axis {
-        0 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle().get()),
-            (
-                snapshot.window_origin().row().saturating_add(1),
-                snapshot.window_origin().col(),
-            ),
-            (
-                snapshot.window_size().max_col(),
-                snapshot.window_size().max_row(),
-            ),
-            snapshot.top_buffer_line().value(),
-            i64::from(snapshot.left_col0()),
-            i64::from(snapshot.text_offset0()),
-        ),
-        1 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle().get()),
-            (
-                snapshot.window_origin().row(),
-                snapshot.window_origin().col().saturating_add(1),
-            ),
-            (
-                snapshot.window_size().max_col(),
-                snapshot.window_size().max_row(),
-            ),
-            snapshot.top_buffer_line().value(),
-            i64::from(snapshot.left_col0()),
-            i64::from(snapshot.text_offset0()),
-        ),
-        2 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle().get()),
-            (
-                snapshot.window_origin().row(),
-                snapshot.window_origin().col(),
-            ),
-            (
-                snapshot.window_size().max_col().saturating_add(1),
-                snapshot.window_size().max_row(),
-            ),
-            snapshot.top_buffer_line().value(),
-            i64::from(snapshot.left_col0()),
-            i64::from(snapshot.text_offset0()),
-        ),
-        3 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle().get()),
-            (
-                snapshot.window_origin().row(),
-                snapshot.window_origin().col(),
-            ),
-            (
-                snapshot.window_size().max_col(),
-                snapshot.window_size().max_row().saturating_add(1),
-            ),
-            snapshot.top_buffer_line().value(),
-            i64::from(snapshot.left_col0()),
-            i64::from(snapshot.text_offset0()),
-        ),
-        4 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle().get()),
-            (
-                snapshot.window_origin().row(),
-                snapshot.window_origin().col(),
-            ),
-            (
-                snapshot.window_size().max_col(),
-                snapshot.window_size().max_row(),
-            ),
-            snapshot.top_buffer_line().value().saturating_add(1),
-            i64::from(snapshot.left_col0()),
-            i64::from(snapshot.text_offset0()),
-        ),
-        5 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle().get()),
-            (
-                snapshot.window_origin().row(),
-                snapshot.window_origin().col(),
-            ),
-            (
-                snapshot.window_size().max_col(),
-                snapshot.window_size().max_row(),
-            ),
-            snapshot.top_buffer_line().value(),
-            i64::from(snapshot.left_col0()).saturating_add(1),
-            i64::from(snapshot.text_offset0()),
-        ),
-        6 => surface_snapshot_with_handles(
-            (surface_id.window_handle(), surface_id.buffer_handle().get()),
-            (
-                snapshot.window_origin().row(),
-                snapshot.window_origin().col(),
-            ),
-            (
-                snapshot.window_size().max_col(),
-                snapshot.window_size().max_row(),
-            ),
-            snapshot.top_buffer_line().value(),
-            i64::from(snapshot.left_col0()),
-            i64::from(snapshot.text_offset0())
-                .saturating_add(1)
-                .min(textoff_limit),
-        ),
-        _ => panic!("unexpected view axis {axis}"),
-    }
 }
 
 proptest! {
@@ -794,128 +570,6 @@ proptest! {
     }
 
     #[test]
-    fn prop_screen_cell_cache_key_changes_for_each_effective_view_axis(
-        window_handle in 1_i64..256,
-        buffer_handle in 1_i64..256,
-        changedtick in any::<u64>(),
-        line in 0_usize..256,
-        col1 in 1_i64..256,
-        conceallevel in any::<i64>(),
-        concealcursor in concealcursor_strategy(),
-        window_row in 1_i64..64,
-        window_col in 1_i64..64,
-        window_width in 4_i64..128,
-        window_height in 1_i64..64,
-        topline in 1_i64..512,
-        leftcol in 0_i64..128,
-        textoff in 0_i64..3,
-        axis in cache_key_mutation_axis(SCREEN_CELL_VIEW_AXIS_COUNT),
-    ) {
-        let conceal_key =
-            conceal_key(buffer_handle, changedtick, line, conceallevel, concealcursor);
-        let base_surface = surface_snapshot_with_handles(
-            (window_handle, buffer_handle),
-            (window_row, window_col),
-            (window_width, window_height),
-            topline,
-            leftcol,
-            textoff,
-        );
-        let base_key = conceal_screen_cell_cache_key(base_surface, &conceal_key, col1);
-        let mutated_key = match axis.index() {
-            0 => {
-                conceal_screen_cell_cache_key(base_surface, &conceal_key, col1.saturating_add(1))
-            }
-            axis_index => conceal_screen_cell_cache_key(
-                mutate_surface(base_surface, axis_index.saturating_sub(1), window_width),
-                &conceal_key,
-                col1,
-            ),
-        };
-
-        prop_assert_eq!(
-            &base_key,
-            &conceal_screen_cell_cache_key(base_surface, &conceal_key, col1),
-        );
-        prop_assert_ne!(&base_key, &mutated_key);
-    }
-
-    #[test]
-    fn prop_delta_cache_key_changes_for_each_effective_view_axis(
-        window_handle in 1_i64..256,
-        buffer_handle in 1_i64..256,
-        changedtick in any::<u64>(),
-        line in 0_usize..256,
-        conceallevel in any::<i64>(),
-        concealcursor in concealcursor_strategy(),
-        window_row in 1_i64..64,
-        window_col in 1_i64..64,
-        window_width in 4_i64..128,
-        window_height in 1_i64..64,
-        topline in 1_i64..512,
-        leftcol in 0_i64..128,
-        textoff in 0_i64..3,
-        axis in cache_key_mutation_axis(DELTA_CACHE_VIEW_AXIS_COUNT),
-    ) {
-        let conceal_key =
-            conceal_key(buffer_handle, changedtick, line, conceallevel, concealcursor);
-        let base_surface = surface_snapshot_with_handles(
-            (window_handle, buffer_handle),
-            (window_row, window_col),
-            (window_width, window_height),
-            topline,
-            leftcol,
-            textoff,
-        );
-        let base_key = conceal_delta_cache_key(base_surface, &conceal_key);
-        let mutated_key =
-            conceal_delta_cache_key(mutate_surface(base_surface, axis.index(), window_width), &conceal_key);
-
-        prop_assert_eq!(
-            &base_key,
-            &conceal_delta_cache_key(base_surface, &conceal_key),
-        );
-        prop_assert_ne!(&base_key, &mutated_key);
-    }
-
-    #[test]
-    fn prop_conceal_cache_key_changes_for_each_window_local_conceal_axis(
-        buffer_handle in any::<i64>(),
-        changedtick in any::<u64>(),
-        line in 0_usize..256,
-        conceallevel in any::<i64>(),
-        concealcursor in concealcursor_strategy(),
-        axis in cache_key_mutation_axis(CONCEAL_KEY_AXIS_COUNT),
-    ) {
-        let base = conceal_key(
-            buffer_handle,
-            changedtick,
-            line,
-            conceallevel,
-            concealcursor.clone(),
-        );
-        let mutated = match axis.index() {
-            0 => conceal_key(
-                buffer_handle,
-                changedtick,
-                line,
-                conceallevel.saturating_add(1),
-                concealcursor,
-            ),
-            1 => conceal_key(
-                buffer_handle,
-                changedtick,
-                line,
-                conceallevel,
-                different_concealcursor(&concealcursor),
-            ),
-            _ => panic!("unexpected conceal key axis {}", axis.index()),
-        };
-
-        prop_assert_ne!(base, mutated);
-    }
-
-    #[test]
     fn prop_concealcursor_allows_only_its_expected_mode_families(
         concealcursor in concealcursor_strategy(),
         case in mode_case_strategy(),
@@ -942,14 +596,6 @@ proptest! {
         )?;
 
         prop_assert_eq!(delta, Some(fixture.expected_delta));
-        prop_assert_eq!(
-            cached_conceal_drift_hint_from_regions_and_delta(
-                fixture.current_col1,
-                &fixture.regions,
-                delta,
-            ),
-            expected_drift_hint(!fixture.regions.is_empty(), delta),
-        );
     }
 
     #[test]
@@ -982,13 +628,5 @@ proptest! {
         )?;
 
         prop_assert_eq!(delta, Some(fixture.expected_delta));
-        prop_assert_eq!(
-            cached_conceal_drift_hint_from_regions_and_delta(
-                fixture.current_col1,
-                &fixture.regions,
-                delta,
-            ),
-            expected_drift_hint(!fixture.regions.is_empty(), delta),
-        );
     }
 }

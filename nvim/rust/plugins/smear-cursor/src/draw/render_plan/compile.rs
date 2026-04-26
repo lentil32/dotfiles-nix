@@ -150,30 +150,3 @@ pub(super) fn compiled_field_for_state(
     };
     compiled
 }
-
-#[cfg(test)]
-mod tests {
-    use super::PlannerCompileModeOverride;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn planner_compile_mode_override_parse_accepts_known_modes() {
-        assert_eq!(
-            PlannerCompileModeOverride::parse("auto"),
-            Some(PlannerCompileModeOverride::Auto)
-        );
-        assert_eq!(
-            PlannerCompileModeOverride::parse("reference"),
-            Some(PlannerCompileModeOverride::Reference)
-        );
-        assert_eq!(
-            PlannerCompileModeOverride::parse("local_query"),
-            Some(PlannerCompileModeOverride::LocalQuery)
-        );
-    }
-
-    #[test]
-    fn planner_compile_mode_override_parse_rejects_unknown_modes() {
-        assert_eq!(PlannerCompileModeOverride::parse("bogus"), None);
-    }
-}

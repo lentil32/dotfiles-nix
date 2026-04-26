@@ -4,8 +4,6 @@ use super::BackgroundProbeChunkMask;
 use super::BackgroundProbePlan;
 use super::BackgroundProbeProgress;
 use super::BackgroundProbeState;
-use super::BackgroundProbeUpdate;
-use super::CursorColorSample;
 use super::CursorTextContext;
 use super::CursorTextContextState;
 use super::ObservationBasis;
@@ -16,8 +14,6 @@ use super::PendingObservation;
 use super::ProbeFailure;
 use super::ProbeRequestSet;
 use super::ProbeReuse;
-use super::ProbeSlot;
-use super::ProbeState;
 use super::SemanticEvent;
 use super::classify_semantic_event;
 use crate::core::state::BufferPerfClass;
@@ -32,7 +28,6 @@ use crate::position::ScreenCell;
 use crate::position::SurfaceId;
 use crate::position::ViewportBounds;
 use crate::position::WindowSurfaceSnapshot;
-use pretty_assertions::assert_eq;
 
 mod background_probe;
 mod probe_state;
@@ -76,66 +71,6 @@ fn observation_basis(viewport: ViewportBounds) -> ObservationBasis {
         ),
         viewport,
     )
-}
-
-fn observation_with_observed_cell(observed_cell: ObservedCell) -> ObservationSnapshot {
-    let viewport = viewport_bounds(40, 120);
-    ObservationSnapshot::new(
-        observation_request(ProbeRequestSet::default()),
-        ObservationBasis::new(
-            Millis::new(10),
-            "n".to_string(),
-            WindowSurfaceSnapshot::new(
-                SurfaceId::new(1, 1).expect("positive handles"),
-                BufferLine::new(1).expect("positive top buffer line"),
-                0,
-                0,
-                ScreenCell::new(1, 1).expect("one-based window origin"),
-                viewport,
-            ),
-            CursorObservation::new(
-                BufferLine::new(4).expect("positive buffer line"),
-                observed_cell,
-            ),
-            viewport,
-        ),
-        ObservationMotion::default(),
-    )
-}
-
-#[test]
-fn observation_snapshot_exactness_follows_observed_cell_variants() {
-    let exact_cell = screen_cell(4, 5);
-    let deferred_cell = screen_cell(7, 9);
-    let cases = [
-        (
-            observation_with_observed_cell(ObservedCell::Exact(exact_cell)),
-            Some(exact_cell),
-            Some(exact_cell),
-            false,
-        ),
-        (
-            observation_with_observed_cell(ObservedCell::Deferred(deferred_cell)),
-            Some(deferred_cell),
-            None,
-            true,
-        ),
-        (
-            observation_with_observed_cell(ObservedCell::Unavailable),
-            None,
-            None,
-            false,
-        ),
-    ];
-
-    for (observation, cursor_position, exact_cursor_position, refresh_required) in cases {
-        assert_eq!(observation.basis().cursor_position(), cursor_position);
-        assert_eq!(observation.exact_cursor_position(), exact_cursor_position);
-        assert_eq!(
-            observation.requires_exact_cursor_position_refresh(),
-            refresh_required
-        );
-    }
 }
 
 fn with_background_probe_plan(

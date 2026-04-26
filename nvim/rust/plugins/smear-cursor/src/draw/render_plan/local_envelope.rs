@@ -1,10 +1,6 @@
 use super::*;
 
 pub(super) type SliceSearchBounds = latent_field::CellRect;
-#[cfg(test)]
-pub(super) type CellRowIndexScratch<T> = latent_field::BorrowedCellRowsScratch<T>;
-#[cfg(test)]
-pub(super) type CellRowIndex<'a, T> = latent_field::BorrowedCellRows<'a, T>;
 
 fn normalize_direction_display(
     row_delta: f64,

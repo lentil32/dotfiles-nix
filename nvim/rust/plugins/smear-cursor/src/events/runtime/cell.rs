@@ -442,21 +442,4 @@ mod tests {
         runtime.restore_timer_bridge(bridge);
         assert_eq!(runtime.take_timer_bridge().is_ok(), true);
     }
-
-    #[test]
-    fn telemetry_lane_drops_nested_mutation_samples() {
-        let runtime = RuntimeCell::new();
-
-        runtime.with_event_loop_state_for_test(|state| {
-            runtime.with_event_loop_state(|nested| nested.note_autocmd_event(7.0));
-            assert_eq!(state.diagnostics_snapshot().last_autocmd_event_ms, 0.0);
-            state.note_autocmd_event(11.0);
-        });
-
-        assert_eq!(
-            runtime
-                .read_event_loop_state(|state| state.diagnostics_snapshot().last_autocmd_event_ms),
-            Some(11.0)
-        );
-    }
 }

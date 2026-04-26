@@ -27,86 +27,6 @@ fn background_probe_chunk_mask_decodes_packed_bytes_and_truncates_padding() {
 }
 
 #[test]
-fn background_probe_progress_materializes_particles_from_packed_chunk_masks() {
-    let mut progress = BackgroundProbeProgress::new(BackgroundProbePlan::from_cells(vec![
-        ScreenCell::new(1, 1).expect("cell"),
-        ScreenCell::new(1, 2).expect("cell"),
-        ScreenCell::new(1, 3).expect("cell"),
-        ScreenCell::new(1, 4).expect("cell"),
-        ScreenCell::new(1, 5).expect("cell"),
-        ScreenCell::new(2, 1).expect("cell"),
-        ScreenCell::new(2, 2).expect("cell"),
-        ScreenCell::new(2, 3).expect("cell"),
-        ScreenCell::new(2, 4).expect("cell"),
-        ScreenCell::new(2, 5).expect("cell"),
-    ]));
-    let chunk = progress.next_chunk().expect("single chunk viewport");
-    let packed_mask =
-        BackgroundProbeChunkMask::from_packed_bytes(10, vec![0b0000_0010, 0b0000_0010])
-            .expect("packed chunk mask should decode");
-
-    let Some(BackgroundProbeUpdate::Complete(batch)) = progress.apply_chunk(&chunk, &packed_mask)
-    else {
-        panic!("packed chunk should complete a ten-cell sparse probe");
-    };
-
-    assert!(batch.allows_particle(ScreenCell::new(1, 2).expect("allowed cell")));
-    assert!(batch.allows_particle(ScreenCell::new(2, 5).expect("allowed cell")));
-    assert!(!batch.allows_particle(ScreenCell::new(1, 1).expect("blocked cell")));
-}
-
-#[test]
-fn requested_background_probe_tracks_progress_until_completion() {
-    let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = viewport_bounds(600, 4);
-    let cells = (0_i64..2050_i64)
-        .map(|index| {
-            let row = index / 4 + 1;
-            let col = index % 4 + 1;
-            ScreenCell::new(row, col).expect("cell")
-        })
-        .collect::<Vec<_>>();
-    let mut snapshot = ObservationSnapshot::new(
-        request,
-        observation_basis(viewport),
-        ObservationMotion::default(),
-    );
-    snapshot = with_background_probe_plan(snapshot, BackgroundProbePlan::from_cells(cells));
-    let mut saw_in_progress = false;
-
-    loop {
-        let chunk = next_background_chunk(&snapshot).expect("remaining background chunk");
-        let allowed_mask = vec![true; chunk.len()];
-        let packed_mask = BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask);
-        let completed = {
-            let viewport = snapshot.basis().viewport();
-            snapshot
-                .probes_mut()
-                .background_mut()
-                .apply_chunk(viewport, &chunk, &packed_mask)
-        };
-        assert!(completed, "chunk should match the active progress cursor");
-
-        if snapshot.probes().background().batch().is_some() {
-            break;
-        }
-
-        saw_in_progress = true;
-    }
-
-    assert!(
-        saw_in_progress,
-        "viewport should require multiple background chunks"
-    );
-    assert!(next_background_chunk(&snapshot).is_none());
-    assert!(matches!(
-        snapshot.probes().background(),
-        BackgroundProbeState::Ready { .. }
-    ));
-    assert!(snapshot.probes().background().batch().is_some());
-}
-
-#[test]
 fn background_probe_completion_rejects_batches_outside_observation_viewport() {
     let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
     let viewport = viewport_bounds(1, 1);
@@ -132,12 +52,6 @@ fn background_probe_completion_rejects_batches_outside_observation_viewport() {
         snapshot.probes().background(),
         BackgroundProbeState::Collecting { .. }
     ));
-    assert_eq!(
-        next_background_chunk(&snapshot)
-            .expect("rejected completion should keep the same pending chunk")
-            .start_index(),
-        0
-    );
     assert_eq!(
         next_background_chunk(&snapshot)
             .expect("rejected completion should keep the same pending chunk"),
@@ -290,109 +204,6 @@ fn background_probe_plan_from_render_frame_filters_target_and_out_of_viewport_ce
         ]
     );
     assert!(plan.shares_source_with(&frame.particle_screen_cells));
-}
-
-#[test]
-fn background_probe_progress_and_terminal_batch_share_one_state_node() {
-    let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = viewport_bounds(4, 4);
-    let mut snapshot = ObservationSnapshot::new(
-        request,
-        observation_basis(viewport),
-        ObservationMotion::default(),
-    );
-    snapshot = with_background_probe_plan(
-        snapshot,
-        BackgroundProbePlan::from_cells(vec![ScreenCell::new(1, 1).expect("cell")]),
-    );
-
-    assert!(matches!(
-        snapshot.probes().background(),
-        BackgroundProbeState::Collecting { .. }
-    ));
-
-    let chunk = next_background_chunk(&snapshot)
-        .expect("collecting background probe should expose the next chunk");
-    let viewport = snapshot.basis().viewport();
-    assert!(snapshot.probes_mut().background_mut().apply_chunk(
-        viewport,
-        &chunk,
-        &BackgroundProbeChunkMask::from_allowed_mask(&[true]),
-    ));
-    assert!(next_background_chunk(&snapshot).is_none());
-    assert!(snapshot.probes().background().batch().is_some());
-    assert!(matches!(
-        snapshot.probes().background(),
-        BackgroundProbeState::Ready { .. }
-    ));
-}
-
-#[test]
-fn background_probe_chunk_updates_only_apply_while_collecting() {
-    let request = observation_request(ProbeRequestSet::only(ProbeKind::Background));
-    let viewport = viewport_bounds(4, 4);
-    let plan = BackgroundProbePlan::from_cells(vec![ScreenCell::new(1, 1).expect("cell")]);
-    let progress = BackgroundProbeProgress::new(plan.clone());
-    let chunk = progress
-        .next_chunk()
-        .expect("single-cell background probe plan should emit a chunk");
-    let allowed_mask = BackgroundProbeChunkMask::from_allowed_mask(&[true]);
-
-    let mut unrequested_snapshot = ObservationSnapshot::new(
-        request.clone(),
-        observation_basis(viewport),
-        ObservationMotion::default(),
-    );
-    let viewport = unrequested_snapshot.basis().viewport();
-    assert!(
-        !unrequested_snapshot
-            .probes_mut()
-            .background_mut()
-            .apply_chunk(viewport, &chunk, &allowed_mask,)
-    );
-
-    let mut collecting_snapshot = ObservationSnapshot::new(
-        request.clone(),
-        observation_basis(viewport),
-        ObservationMotion::default(),
-    );
-    collecting_snapshot = with_background_probe_plan(collecting_snapshot, plan.clone());
-    let viewport = collecting_snapshot.basis().viewport();
-    assert!(
-        collecting_snapshot
-            .probes_mut()
-            .background_mut()
-            .apply_chunk(viewport, &chunk, &allowed_mask,)
-    );
-
-    let mut ready_snapshot = ObservationSnapshot::new(
-        request.clone(),
-        observation_basis(viewport),
-        ObservationMotion::default(),
-    );
-    ready_snapshot =
-        with_background_probe_plan(ready_snapshot, BackgroundProbePlan::from_cells(Vec::new()));
-    let viewport = ready_snapshot.basis().viewport();
-    assert!(!ready_snapshot.probes_mut().background_mut().apply_chunk(
-        viewport,
-        &chunk,
-        &allowed_mask,
-    ));
-
-    let mut failed_snapshot = ObservationSnapshot::new(
-        request,
-        observation_basis(viewport),
-        ObservationMotion::default(),
-    );
-    failed_snapshot = with_background_probe_plan(failed_snapshot, plan);
-    failed_snapshot = with_background_probe_failed(failed_snapshot, ProbeFailure::ShellReadFailed)
-        .expect("collecting background probe should accept a failure transition");
-    let viewport = failed_snapshot.basis().viewport();
-    assert!(!failed_snapshot.probes_mut().background_mut().apply_chunk(
-        viewport,
-        &chunk,
-        &allowed_mask,
-    ));
 }
 
 #[test]

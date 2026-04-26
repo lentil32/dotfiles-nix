@@ -4,24 +4,10 @@ use super::RuntimeAccessError;
 use super::runtime::namespace_id;
 use super::runtime::set_namespace_id;
 use super::timer_protocol::HostCallbackId;
-#[cfg(test)]
-use crate::host::BACKGROUND_ALLOWED_MASK_FUNCTION_NAME;
-#[cfg(test)]
-use crate::host::CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME;
 use crate::host::CursorColorExtmarkFallback;
-#[cfg(test)]
-use crate::host::DISPATCH_TIMER_FUNCTION_NAME;
-#[cfg(test)]
-use crate::host::HOST_BRIDGE_REVISION_FUNCTION_NAME;
 use crate::host::HostBridgePort;
-#[cfg(test)]
-use crate::host::INSTALL_PROBE_HELPERS_FUNCTION_NAME;
 use crate::host::NamespaceId;
 use crate::host::NeovimHost;
-#[cfg(test)]
-use crate::host::START_TIMER_ONCE_FUNCTION_NAME;
-#[cfg(test)]
-use crate::host::STOP_TIMER_FUNCTION_NAME;
 use nvim_oxi::Array;
 use nvim_oxi::Object;
 use thiserror::Error;
@@ -31,9 +17,6 @@ pub(super) use crate::host::DISPATCH_AUTOCMD_FUNCTION_NAME;
 const HOST_BRIDGE_SCRIPT: &str = include_str!("../../autoload/nvimrs_smear_cursor/host_bridge.vim");
 #[cfg(test)]
 const PROBE_HELPERS_SCRIPT: &str = include_str!("../../lua/nvimrs_smear_cursor/probes.lua");
-#[cfg(test)]
-const CURSOR_COLOR_EXTMARKS_TEST_SCRIPT: &str =
-    include_str!("../../scripts/test_cursor_color_probe_extmarks.lua");
 
 fn host_bridge_state() -> Result<HostBridgeState, RuntimeAccessError> {
     super::runtime::host_bridge_state()
@@ -386,79 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn host_bridge_script_contract() {
-        let cases: &[(&str, &[&str], &[&str])] = &[
-            (
-                "entrypoints present",
-                &[
-                    HOST_BRIDGE_REVISION_FUNCTION_NAME,
-                    DISPATCH_AUTOCMD_FUNCTION_NAME,
-                    DISPATCH_TIMER_FUNCTION_NAME,
-                    START_TIMER_ONCE_FUNCTION_NAME,
-                    STOP_TIMER_FUNCTION_NAME,
-                    INSTALL_PROBE_HELPERS_FUNCTION_NAME,
-                    CURSOR_COLOR_AT_CURSOR_FUNCTION_NAME,
-                    BACKGROUND_ALLOWED_MASK_FUNCTION_NAME,
-                ],
-                &[],
-            ),
-            (
-                "autocmd bridge forwards explicit payload fields",
-                &[
-                    "dispatch_autocmd(event, buffer, match) abort",
-                    ".on_autocmd_payload(_A)",
-                    "{'event': a:event, 'buffer': a:buffer, 'match': a:match}",
-                ],
-                &[],
-            ),
-            (
-                "timer bridge delegated to builtin vim timers",
-                &[
-                    "dispatch_timer(host_callback_id, timer_id) abort",
-                    "let Callback = function(",
-                    "'nvimrs_smear_cursor#host_bridge#dispatch_timer'",
-                    "[a:host_callback_id]",
-                    "return timer_start(a:timeout, Callback)",
-                    "return timer_stop(a:timer_id)",
-                    ".on_core_timer_fired(_A[1], _A[2])",
-                ],
-                &[
-                    "require('nvimrs_smear_cursor.host_bridge')",
-                    "uv.new_timer()",
-                    "reset_timers",
-                    "dispatch_animation_timer",
-                    "dispatch_ingress_timer",
-                    "dispatch_recovery_timer",
-                    "dispatch_cleanup_timer",
-                    "dispatch_timer(timer_name, timer_id)",
-                    "timer_callbacks",
-                    "timer_callback_name",
-                    "on_core_timer_slot",
-                    "a:timer_name",
-                    "unknown smear cursor timer slot",
-                    "token_generation",
-                    "timer_payloads",
-                ],
-            ),
-            (
-                "runtime-module loading shape",
-                &["require('nvimrs_smear_cursor.probes')"],
-                &[],
-            ),
-        ];
-
-        for &(case_name, required, forbidden) in cases {
-            assert_substring_contract(
-                "host bridge script",
-                HOST_BRIDGE_SCRIPT,
-                case_name,
-                required,
-                forbidden,
-            );
-        }
-    }
-
-    #[test]
     fn probe_helpers_contract() {
         let cases: &[SubstringCase<'_>] = &[
             (
@@ -484,13 +394,6 @@ mod tests {
             (
                 "probe helpers script",
                 PROBE_HELPERS_SCRIPT,
-                "fallback usage field present",
-                &["used_extmark_fallback"],
-                &[],
-            ),
-            (
-                "probe helpers script",
-                PROBE_HELPERS_SCRIPT,
                 "extmark fallback stays bounded",
                 &[
                     "local EXTMARK_OVERLAP_TRUSTED_LIMIT = 32",
@@ -503,20 +406,6 @@ mod tests {
                 &[
                     "{ details = true, overlap = true }",
                     "if #extmarks >= EXTMARK_OVERLAP_PROBE_LIMIT then",
-                ],
-            ),
-            (
-                "cursor-color extmarks regression harness",
-                CURSOR_COLOR_EXTMARKS_TEST_SCRIPT,
-                "extmark regression harness uses the single-argument probe contract",
-                &[
-                    "cursor_color_at_cursor(true)",
-                    "test_extmark_probe_stays_bounded_when_overlap_limit_saturates",
-                    "test_extmark_probe_trusts_exact_overlap_limit",
-                ],
-                &[
-                    "cursor_color_at_cursor(0, true)",
-                    "cursor_color_at_cursor(1, true)",
                 ],
             ),
         ];

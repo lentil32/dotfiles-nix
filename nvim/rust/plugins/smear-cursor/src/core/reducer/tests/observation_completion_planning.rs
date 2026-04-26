@@ -23,6 +23,7 @@ fn observation_completion_enters_planning_and_requests_render_plan() {
     let completed = completed_mode_change_observation_with_cursor_queued();
 
     pretty_assert_eq!(completed.next.lifecycle(), Lifecycle::Planning);
+    assert!(completed.next.demand_queue().latest_cursor().is_some());
     pretty_assert_eq!(completed.effects.len(), 1);
     match &completed.effects[0] {
         Effect::RequestRenderPlan(payload) => {
@@ -34,11 +35,4 @@ fn observation_completion_enters_planning_and_requests_render_plan() {
         }
         other => panic!("expected first render plan request, got {other:?}"),
     }
-}
-
-#[test]
-fn observation_completion_keeps_the_newer_cursor_demand_queued_until_planning_finishes() {
-    let completed = completed_mode_change_observation_with_cursor_queued();
-
-    assert!(completed.next.demand_queue().latest_cursor().is_some());
 }

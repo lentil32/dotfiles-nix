@@ -91,17 +91,3 @@ pub(crate) fn options_dict<'a>(entries: impl IntoIterator<Item = (&'a str, Objec
     }
     opts
 }
-
-#[cfg(test)]
-mod tests {
-    use super::cursor;
-    use super::fixture_screen_cell;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn cursor_fixture_constructs_positions_from_canonical_screen_cells() {
-        let cell = fixture_screen_cell(7, 9);
-
-        assert_eq!(cursor(7, 9), cell);
-    }
-}

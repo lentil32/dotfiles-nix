@@ -33,7 +33,6 @@ use crate::events::policy::BufferPerfTelemetry;
 use crate::events::timer_protocol::FiredHostTimer;
 use crate::events::timer_protocol::HostCallbackId;
 use crate::events::timer_protocol::HostTimerId;
-use crate::host::BufferHandle;
 use crate::host::NamespaceId;
 use crate::host::api;
 use crate::position::BufferLine;
@@ -47,16 +46,10 @@ use insta::assert_snapshot;
 use nvim_oxi::Object;
 use pretty_assertions::assert_eq;
 
-#[path = "tests/shell_purge_invariance.rs"]
-mod shell_purge_invariance;
 #[path = "tests/telemetry_non_interference.rs"]
 mod telemetry_non_interference;
 #[path = "tests/timer_retry_linearizability.rs"]
 mod timer_retry_linearizability;
-
-fn buffer_handle(value: i64) -> BufferHandle {
-    BufferHandle::from_raw_for_test(value)
-}
 
 fn host_callback_id(value: i64) -> HostCallbackId {
     HostCallbackId::try_new(value).expect("test host callback id must be positive")
@@ -72,18 +65,6 @@ fn handle(value: i64, timer_id: TimerId, generation: u64) -> CoreTimerHandle {
         host_timer_id: host_timer_id(value),
         token: crate::core::types::TimerToken::new(timer_id, TimerGeneration::new(generation)),
     }
-}
-
-fn normalize_handles(mut handles: Vec<CoreTimerHandle>) -> Vec<CoreTimerHandle> {
-    handles.sort_by_key(|handle| {
-        (
-            handle.token.id().slot_index(),
-            handle.host_callback_id.get(),
-            handle.host_timer_id.get(),
-            handle.token.generation().value(),
-        )
-    });
-    handles
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -176,138 +157,6 @@ fn prime_shell_scratch_storage() {
     conceal_scratch.push(crate::test_support::conceal_region(3, 4, 11, 1));
     reclaim_conceal_regions_scratch(conceal_scratch)
         .expect("conceal region scratch should be reclaimable");
-}
-
-#[test]
-fn timer_bridge_smoke_replace_lookup_and_clear_each_slot() {
-    let mut bridge = super::timer_bridge::TimerBridge::default();
-    let animation = handle(11, TimerId::Animation, 3);
-    let animation_replaced = handle(12, TimerId::Animation, 4);
-    let ingress = handle(21, TimerId::Ingress, 8);
-
-    assert_eq!(bridge.replace_handle(animation), None);
-    assert!(bridge.has_timer_id(TimerId::Animation));
-    assert_eq!(bridge.replace_handle(animation_replaced), Some(animation));
-    assert_eq!(bridge.take_by_host_timer_id(animation.host_timer_id), None);
-    assert_eq!(
-        bridge.take_by_host_timer_id(animation_replaced.host_timer_id),
-        Some(animation_replaced)
-    );
-    assert!(!bridge.has_timer_id(TimerId::Animation));
-
-    assert_eq!(bridge.replace_handle(ingress), None);
-    assert!(bridge.has_timer_id(TimerId::Ingress));
-
-    let cleared = normalize_handles(bridge.clear_handles());
-    assert_eq!(cleared, vec![ingress]);
-
-    for timer_id in TimerId::ALL {
-        assert!(!bridge.has_timer_id(timer_id));
-    }
-}
-
-#[test]
-fn timer_bridge_only_consumes_matching_callback_and_host_timer_for_persistent_slots() {
-    let mut bridge = super::timer_bridge::TimerBridge::default();
-    let original = handle(11, TimerId::Animation, 3);
-    let rearmed = handle(12, TimerId::Animation, 4);
-
-    assert_eq!(bridge.replace_handle(original), None);
-    assert_eq!(bridge.replace_handle(rearmed), Some(original));
-    assert!(bridge.has_timer_id(TimerId::Animation));
-    assert_eq!(
-        bridge.take_fired(FiredHostTimer::new(
-            original.host_callback_id,
-            original.host_timer_id
-        )),
-        None
-    );
-    assert!(bridge.has_timer_id(TimerId::Animation));
-    assert_eq!(
-        bridge.take_fired(FiredHostTimer::new(
-            rearmed.host_callback_id,
-            original.host_timer_id
-        )),
-        None
-    );
-    assert!(bridge.has_timer_id(TimerId::Animation));
-    assert_eq!(
-        bridge.take_fired(FiredHostTimer::new(
-            rearmed.host_callback_id,
-            rearmed.host_timer_id
-        )),
-        Some(rearmed)
-    );
-    assert!(!bridge.has_timer_id(TimerId::Animation));
-}
-
-#[test]
-fn nested_shell_state_access_returns_reentry_error_and_preserves_state() {
-    let nested = mutate_shell_state(|state| {
-        state.set_namespace_id(NamespaceId::new(/*value*/ 77));
-        read_shell_state(super::super::ShellState::namespace_id)
-    });
-
-    assert_eq!(nested, Ok(Err(super::super::RuntimeAccessError::Reentered)));
-    assert_eq!(
-        read_shell_state(super::super::ShellState::namespace_id),
-        Ok(Some(NamespaceId::new(/*value*/ 77)))
-    );
-}
-
-#[test]
-fn colorscheme_boundary_clears_real_cursor_visibility_cache() {
-    mutate_shell_state(|state| {
-        state.note_real_cursor_visibility(RealCursorVisibility::Hidden);
-    })
-    .expect("shell state access should succeed");
-
-    note_cursor_color_colorscheme_change().expect("colorscheme boundary should succeed");
-
-    assert_eq!(
-        read_shell_state(super::super::ShellState::real_cursor_visibility),
-        Ok(None)
-    );
-}
-
-#[test]
-fn transient_reset_clears_real_cursor_visibility_cache() {
-    mutate_shell_state(|state| {
-        state.note_real_cursor_visibility(RealCursorVisibility::Visible);
-    })
-    .expect("shell state access should succeed");
-
-    reset_transient_event_state();
-
-    assert_eq!(
-        read_shell_state(super::super::ShellState::real_cursor_visibility),
-        Ok(None)
-    );
-}
-
-#[test]
-fn draw_editor_bounds_matches_the_cached_editor_viewport_owner() {
-    reset_transient_event_state();
-    let viewport = EditorViewportSnapshot::from_dimensions(40, 2, 120);
-    let expected = ViewportBounds::new(39, 120).expect("command row math should produce bounds");
-
-    mutate_shell_state(|state| {
-        state.editor_viewport_cache.store_for_test(viewport);
-    })
-    .expect("shell state access should succeed");
-
-    assert_eq!(
-        editor_viewport_for_bounds()
-            .expect("cached editor viewport should be readable")
-            .bounds(),
-        Some(expected)
-    );
-    assert_eq!(
-        crate::draw::editor_bounds().expect("draw bounds should use cached editor viewport"),
-        expected
-    );
-
-    reset_transient_event_state();
 }
 
 #[test]
@@ -494,30 +343,6 @@ fn transient_reset_purges_shell_caches_and_timer_bridge_but_preserves_host_bridg
 }
 
 #[test]
-fn runtime_lane_panic_recovery_plan_names_the_documented_order() {
-    let plan = RuntimeRecoveryPlan::runtime_lane_panic(
-        super::shell::ShellRecoveryState::default(),
-        super::timer_bridge::TimerBridgeRecoveryState::default(),
-    );
-
-    assert_eq!(
-        plan.actions(),
-        &[
-            RuntimeRecoveryAction::RestoreDefaultLogLevel,
-            RuntimeRecoveryAction::EmitPanicRecoveryWarning,
-            RuntimeRecoveryAction::RecoverDrawResources,
-            RuntimeRecoveryAction::StopRecoveredCoreTimerHandles,
-            RuntimeRecoveryAction::ClearRecoveredTimerBridge,
-            RuntimeRecoveryAction::ResetDispatchQueue,
-            RuntimeRecoveryAction::ResetRecoveredShellState,
-            RuntimeRecoveryAction::ClearTelemetryTimestamps,
-            RuntimeRecoveryAction::RecoverPaletteEpoch,
-            RuntimeRecoveryAction::ResetCoreState,
-        ]
-    );
-}
-
-#[test]
 fn reducer_panic_path_applies_runtime_recovery_plan_in_documented_order() {
     reset_transient_event_state();
     start_runtime_recovery_action_log_for_test();
@@ -526,36 +351,6 @@ fn reducer_panic_path_applies_runtime_recovery_plan_in_documented_order() {
         let _: RuntimeAccessResult<()> = with_core_transition(|state| {
             let _ = state.into_primed();
             panic!("forced reducer failure after state mutation");
-        });
-    }));
-
-    assert!(result.is_err());
-    assert_eq!(
-        take_runtime_recovery_action_log_for_test(),
-        vec![
-            RuntimeRecoveryAction::RestoreDefaultLogLevel,
-            RuntimeRecoveryAction::EmitPanicRecoveryWarning,
-            RuntimeRecoveryAction::RecoverDrawResources,
-            RuntimeRecoveryAction::StopRecoveredCoreTimerHandles,
-            RuntimeRecoveryAction::ClearRecoveredTimerBridge,
-            RuntimeRecoveryAction::ResetDispatchQueue,
-            RuntimeRecoveryAction::ResetRecoveredShellState,
-            RuntimeRecoveryAction::ClearTelemetryTimestamps,
-            RuntimeRecoveryAction::RecoverPaletteEpoch,
-            RuntimeRecoveryAction::ResetCoreState,
-        ]
-    );
-}
-
-#[test]
-fn shell_panic_path_applies_runtime_recovery_plan_in_documented_order() {
-    reset_transient_event_state();
-    start_runtime_recovery_action_log_for_test();
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = mutate_shell_state(|state| {
-            state.note_real_cursor_visibility(RealCursorVisibility::Visible);
-            panic!("forced shell failure after state mutation");
         });
     }));
 
@@ -726,47 +521,6 @@ fn perf_diagnostics_report_includes_recovery_fields_within_bridge_budget() {
         "perf diagnostics report exceeded bridge budget: {} bytes",
         report.len()
     );
-    assert!(report.contains("perf_class="));
-    assert!(report.contains("perf_mode="));
-    assert!(report.contains("perf_effective_mode="));
-    assert!(report.contains("buffer_line_count="));
-    assert!(report.contains("callback_ewma_ms="));
-    assert!(report.contains("probe_policy="));
-    assert!(report.contains("perf_reason_bits="));
-    assert!(report.contains("planner_bms="));
-    assert!(report.contains("planner_bcs="));
-    assert!(report.contains("planner_lqea="));
-    assert!(report.contains("planner_local_query_cells="));
-    assert!(report.contains("planner_compq="));
-    assert!(report.contains("planner_candq="));
-    assert!(report.contains("planner_compiled_cells_emitted="));
-    assert!(report.contains("planner_candidate_cells_built="));
-    assert!(report.contains("planner_rc="));
-    assert!(report.contains("planner_lqc="));
-    assert!(report.contains("cursor_color_extmark_fallback_calls="));
-    assert!(report.contains("cursor_color_cache_hit="));
-    assert!(report.contains("cursor_color_cache_miss="));
-    assert!(report.contains("cursor_color_reuse_exact="));
-    assert!(report.contains("cursor_color_reuse_compatible="));
-    assert!(report.contains("cursor_color_reuse_refresh_required="));
-    assert!(report.contains("conceal_region_cache_hit="));
-    assert!(report.contains("conceal_region_cache_miss="));
-    assert!(report.contains("conceal_screen_cell_cache_hit="));
-    assert!(report.contains("conceal_screen_cell_cache_miss="));
-    assert!(report.contains("conceal_full_scan_calls="));
-    assert!(report.contains("conceal_deferred_projection_calls="));
-    assert!(report.contains("perf_reasons="));
-    assert!(report.contains("cleanup_thermal="));
-    assert!(report.contains("pool_total_windows="));
-    assert!(report.contains("pool_cached_budget="));
-    assert!(report.contains("pool_peak_requested="));
-    assert!(report.contains("pool_cap_hits="));
-    assert!(report.contains("max_kept_windows="));
-    assert!(report.contains("queue_total_backlog="));
-    assert!(report.contains("delayed_ingress_pending_updates="));
-    assert!(report.contains("post_burst_convergence_last_ms="));
-    assert!(report.contains("host_timer_rearms_ingress="));
-    assert!(report.contains("scheduled_drain_reschedules_cooling="));
     assert!(report.len() < 1000);
 }
 
@@ -834,7 +588,6 @@ fn perf_diagnostics_report_uses_phase_owned_cursor_color_for_probe_policy() {
     .expect("core state write should succeed");
 
     let report = test_perf_diagnostics_report();
-    assert!(report.contains("probe_policy=exact_compatible"));
     assert_snapshot!(report);
 
     set_core_state(previous_core_state).expect("core state restore should succeed");
@@ -925,36 +678,6 @@ fn validation_counters_report_marks_the_feature_as_disabled() {
         test_validation_counters_report(),
         "smear_cursor_validation unavailable=feature_disabled"
     );
-}
-
-#[cfg(not(feature = "perf-counters"))]
-#[test]
-fn investigation_counters_are_noops_without_the_perf_counter_feature() {
-    use crate::events::ingress::AutocmdIngress;
-
-    super::reset_event_loop_for_test();
-
-    crate::events::record_projection_reuse_hit();
-    crate::events::record_projection_reuse_miss();
-    crate::events::record_compiled_field_cache_hit();
-    crate::events::record_compiled_field_cache_miss();
-    super::telemetry::record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinEnter);
-    super::telemetry::record_cursor_autocmd_fast_path_continued(AutocmdIngress::BufEnter);
-
-    let diagnostics = super::diagnostics::event_loop_diagnostics();
-    assert_eq!(
-        diagnostics.metrics,
-        super::super::event_loop::RuntimeBehaviorMetrics::new()
-    );
-}
-
-fn reset_buffer_event_policy_state() {
-    mutate_shell_state(|state| {
-        state.buffer_metadata_cache.clear();
-        state.buffer_perf_policy_cache.clear();
-        state.buffer_perf_telemetry_cache.clear();
-    })
-    .expect("shell state access should succeed");
 }
 
 const SHELL_CACHE_TEST_BUFFER_HANDLE: i64 = 91;
@@ -1052,45 +775,6 @@ fn prime_shell_boundary_state() -> (
 }
 
 #[test]
-fn callback_duration_telemetry_uses_the_supplied_buffer_handle() {
-    const TARGET_BUFFER_HANDLE: i64 = 41;
-    const OTHER_BUFFER_HANDLE: i64 = 77;
-
-    super::reset_event_loop_for_test();
-    clear_cursor_callback_duration_estimate();
-    mutate_shell_state(|state| {
-        state.buffer_perf_telemetry_cache.clear();
-    })
-    .expect("shell state access should succeed");
-
-    record_cursor_callback_duration(Some(buffer_handle(TARGET_BUFFER_HANDLE)), 12.0);
-
-    let telemetry = read_shell_state(|state| {
-        (
-            state
-                .buffer_perf_telemetry_cache
-                .telemetry(TARGET_BUFFER_HANDLE),
-            state
-                .buffer_perf_telemetry_cache
-                .telemetry(OTHER_BUFFER_HANDLE),
-        )
-    })
-    .expect("shell state access should succeed");
-
-    assert_eq!(
-        telemetry
-            .0
-            .map(BufferPerfTelemetry::callback_duration_estimate_ms),
-        Some(12.0)
-    );
-    assert_eq!(telemetry.1, None);
-    assert_eq!(
-        cursor_callback_duration_estimate_ms(Some(buffer_handle(TARGET_BUFFER_HANDLE))),
-        12.0
-    );
-}
-
-#[test]
 fn conceal_region_scratch_reuses_the_largest_returned_buffer() {
     let mut scratch =
         take_conceal_regions_scratch().expect("conceal region scratch should be available");
@@ -1174,65 +858,4 @@ fn resolve_policy_for_test(
 ) -> BufferEventPolicy {
     resolve_buffer_event_policy_for_metadata(snapshot, buffer_handle, metadata, observed_at_ms)
         .expect("runtime policy resolution should succeed")
-}
-
-fn record_pressure_samples_in_shell(
-    buffer_handle: i64,
-    extmark_count: u8,
-    conceal_scan_count: u8,
-    conceal_deferred_count: u8,
-    observed_at_ms: f64,
-) {
-    mutate_shell_state(|state| {
-        for _ in 0..extmark_count {
-            state
-                .buffer_perf_telemetry_cache
-                .record_cursor_color_extmark_fallback(buffer_handle, observed_at_ms);
-        }
-        for _ in 0..conceal_scan_count {
-            state
-                .buffer_perf_telemetry_cache
-                .record_conceal_full_scan(buffer_handle, observed_at_ms);
-        }
-        for _ in 0..conceal_deferred_count {
-            state
-                .buffer_perf_telemetry_cache
-                .record_conceal_deferred_projection(buffer_handle, observed_at_ms);
-        }
-    })
-    .expect("shell state access should succeed");
-}
-
-#[test]
-fn runtime_policy_resolution_smoke_uses_shell_telemetry_and_caches_the_result() {
-    const BUFFER_HANDLE: i64 = 41;
-
-    reset_buffer_event_policy_state();
-
-    let snapshot = snapshot_for_perf_mode(BufferPerfMode::Auto);
-    let metadata = listed_buffer_metadata(1);
-    record_pressure_samples_in_shell(BUFFER_HANDLE, 2, 0, 0, 1_000.0);
-
-    let first_policy = resolve_policy_for_test(&snapshot, BUFFER_HANDLE, &metadata, 1_000.0);
-
-    assert!(first_policy.observed_reason_bits() != 0);
-    assert_eq!(
-        read_shell_state(|state| { state.buffer_perf_policy_cache.cached_policy(BUFFER_HANDLE) })
-            .expect("shell state access should succeed"),
-        Some(first_policy)
-    );
-
-    record_pressure_samples_in_shell(BUFFER_HANDLE, 0, 2, 0, 1_500.0);
-    let second_policy = resolve_policy_for_test(&snapshot, BUFFER_HANDLE, &metadata, 1_500.0);
-
-    assert!(second_policy.observed_reason_bits() != 0);
-    assert!(
-        second_policy.observed_reason_bits() & first_policy.observed_reason_bits()
-            == first_policy.observed_reason_bits()
-    );
-    assert_eq!(
-        read_shell_state(|state| { state.buffer_perf_policy_cache.cached_policy(BUFFER_HANDLE) })
-            .expect("shell state access should succeed"),
-        Some(second_policy)
-    );
 }

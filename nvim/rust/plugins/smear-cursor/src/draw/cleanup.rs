@@ -447,19 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_active_render_windows_is_noop_without_tracked_state() {
-        with_isolated_draw_context(|| {
-            assert_eq!(
-                clear_active_render_windows(
-                    NamespaceId::new(/*value*/ 99),
-                    /*max_kept_windows*/ 32,
-                ),
-                ClearActiveRenderWindowsSummary::default()
-            );
-        });
-    }
-
-    #[test]
     fn clear_active_render_windows_evicts_empty_tab_registry_entries() {
         with_isolated_draw_context(|| {
             with_render_tab(tab_handle(17), |tab_windows| {

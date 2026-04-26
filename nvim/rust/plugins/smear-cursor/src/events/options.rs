@@ -11,7 +11,6 @@ use crate::lua::parse_optional_change_with as parse_optional_change_value_with;
 use crate::lua::parse_optional_with as parse_optional_value_with;
 use crate::lua::string_from_object;
 use crate::state::ColorOptionsPatch;
-use crate::state::CtermCursorColorsPatch;
 use crate::state::MotionOptionsPatch;
 use crate::state::OptionalChange;
 use crate::state::ParticleOptionsPatch;
@@ -337,10 +336,6 @@ where
     let Some(value) = value.into() else {
         return Ok(None);
     };
-    if value.is_nil() {
-        return Ok(Some(Vec::new()));
-    }
-
     let values =
         parse_indexed_objects(key, value, None).map_err(|_| invalid_key(key, "array[string]"))?;
     let mut filetypes = Vec::with_capacity(values.len());
@@ -354,7 +349,7 @@ where
 fn parse_optional_cterm_cursor_colors<V>(
     value: V,
     key: &'static str,
-) -> Result<Option<OptionalChange<CtermCursorColorsPatch>>>
+) -> Result<Option<OptionalChange<Vec<u16>>>>
 where
     V: Into<Option<Object>>,
 {
@@ -377,10 +372,7 @@ where
     if color_levels > MAX_COLOR_LEVELS {
         return Err(invalid_key(key, CTERM_CURSOR_COLORS_LENGTH_ERROR));
     }
-    Ok(Some(OptionalChange::Set(CtermCursorColorsPatch {
-        colors,
-        color_levels,
-    })))
+    Ok(Some(OptionalChange::Set(colors)))
 }
 
 fn raw_option(opts: &Dictionary, key: &str) -> Option<Object> {
@@ -455,7 +447,14 @@ fn parse_optional_change_u16(
 }
 
 fn parse_optional_time_interval(raw: Option<Object>, key: &'static str) -> Result<Option<f64>> {
-    Ok(parse_optional_with(raw, key, validated_positive_f64)?.map(|parsed| parsed.max(1.0)))
+    parse_optional_with(raw, key, validated_positive_f64)?
+        .map(|parsed| {
+            if parsed < 1.0 {
+                return Err(invalid_key(key, "number greater than or equal to 1"));
+            }
+            Ok(parsed)
+        })
+        .transpose()
 }
 
 macro_rules! define_option_spec {

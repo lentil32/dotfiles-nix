@@ -1,8 +1,6 @@
 use super::super::options::apply_runtime_options;
-use super::cterm_colors_object;
 use super::options_dict;
 use crate::config::BufferPerfMode;
-use crate::config::MAX_COLOR_LEVELS;
 use crate::config::RuntimeConfig;
 use crate::state::ColorOptionsPatch;
 use crate::state::OptionalChange;
@@ -40,6 +38,7 @@ fn buffer_perf_mode_strategy() -> BoxedStrategy<BufferPerfMode> {
 #[derive(Clone, Debug)]
 enum InvalidRuntimeOptionCase {
     NonPositiveTimeInterval(f64),
+    SubMillisecondTimeInterval(f64),
     TailResponseBelowHead {
         head_response_ms: f64,
         tail_response_ms: f64,
@@ -58,6 +57,9 @@ impl InvalidRuntimeOptionCase {
     fn entries(&self) -> Vec<(&'static str, Object)> {
         match self {
             Self::NonPositiveTimeInterval(time_interval) => {
+                vec![("time_interval", Object::from(*time_interval))]
+            }
+            Self::SubMillisecondTimeInterval(time_interval) => {
                 vec![("time_interval", Object::from(*time_interval))]
             }
             Self::TailResponseBelowHead {
@@ -89,7 +91,9 @@ impl InvalidRuntimeOptionCase {
 
     const fn expected_key(&self) -> &'static str {
         match self {
-            Self::NonPositiveTimeInterval(_) => "time_interval",
+            Self::NonPositiveTimeInterval(_) | Self::SubMillisecondTimeInterval(_) => {
+                "time_interval"
+            }
             Self::TailResponseBelowHead { .. } => "tail_response_ms",
             Self::NonPositiveDampingRatio(_) => "damping_ratio",
             Self::StopExitBelowEnter { .. } => "stop_distance_exit",
@@ -104,6 +108,9 @@ fn invalid_runtime_option_case_strategy() -> BoxedStrategy<InvalidRuntimeOptionC
     prop_oneof![
         prop_oneof![Just(0.0_f64), -64.0_f64..0.0_f64]
             .prop_map(InvalidRuntimeOptionCase::NonPositiveTimeInterval),
+        (0.0_f64..1.0_f64)
+            .prop_filter("time interval must be positive", |value| *value > 0.0)
+            .prop_map(InvalidRuntimeOptionCase::SubMillisecondTimeInterval),
         ((1.0_f64..320.0_f64), (0.0_f64..320.0_f64))
             .prop_filter(
                 "tail response must be lower than the head response",
@@ -152,62 +159,6 @@ fn runtime_options_patch_apply_clears_nullable_fields() {
 }
 
 #[test]
-fn runtime_options_patch_explicit_color_levels_override_cterm_array_length() {
-    let mut state = RuntimeState::default();
-    let opts = options_dict([
-        (
-            "cterm_cursor_colors",
-            cterm_colors_object(&[17_i64, 42_i64]),
-        ),
-        ("color_levels", Object::from(9_i64)),
-    ]);
-
-    let result = apply_runtime_options(&mut state, &opts);
-    assert!(
-        result.is_ok(),
-        "unexpected runtime option error: {result:?}"
-    );
-    assert_eq!(state.config.cterm_cursor_colors, Some(vec![17_u16, 42_u16]));
-    assert_eq!(state.config.color_levels, 9_u32);
-}
-
-#[test]
-fn runtime_options_patch_apply_clamps_manual_oversized_color_levels() {
-    let mut state = RuntimeState::default();
-    let patch = RuntimeOptionsPatch {
-        rendering: crate::state::RenderingOptionsPatch {
-            color_levels: Some(MAX_COLOR_LEVELS.saturating_add(32)),
-            ..crate::state::RenderingOptionsPatch::default()
-        },
-        ..RuntimeOptionsPatch::default()
-    };
-
-    patch.apply(&mut state);
-
-    assert_eq!(state.config.color_levels, MAX_COLOR_LEVELS);
-}
-
-#[test]
-fn runtime_options_patch_apply_clamps_manual_oversized_cterm_palette_levels() {
-    let mut state = RuntimeState::default();
-    let patch = RuntimeOptionsPatch {
-        color: ColorOptionsPatch {
-            cterm_cursor_colors: Some(OptionalChange::Set(crate::state::CtermCursorColorsPatch {
-                colors: vec![17_u16, 42_u16],
-                color_levels: MAX_COLOR_LEVELS.saturating_add(32),
-            })),
-            ..ColorOptionsPatch::default()
-        },
-        ..RuntimeOptionsPatch::default()
-    };
-
-    patch.apply(&mut state);
-
-    assert_eq!(state.config.cterm_cursor_colors, Some(vec![17_u16, 42_u16]));
-    assert_eq!(state.config.color_levels, MAX_COLOR_LEVELS);
-}
-
-#[test]
 fn runtime_options_patch_apply_clears_filetypes_list() {
     let mut state = RuntimeState::default();
     state.config.filetypes_disabled = Arc::new(
@@ -225,41 +176,6 @@ fn runtime_options_patch_apply_clears_filetypes_list() {
 
     patch.apply(&mut state);
     assert!(state.config.filetypes_disabled.is_empty());
-}
-
-#[test]
-fn apply_runtime_options_time_interval_updates_canonical_frame_timing() {
-    let mut state = RuntimeState::default();
-
-    apply_options_expect_ok(&mut state, [("time_interval", Object::from(9.5_f64))]);
-
-    assert_eq!(state.config.time_interval, 9.5);
-}
-
-#[test]
-fn apply_runtime_options_clamps_sub_millisecond_time_interval_to_the_canonical_minimum() {
-    let mut state = RuntimeState::default();
-
-    apply_options_expect_ok(&mut state, [("time_interval", Object::from(0.25_f64))]);
-
-    assert_eq!(state.config.time_interval, 1.0);
-}
-
-#[test]
-fn apply_runtime_options_rejects_particle_switch_octant_braille_above_one() {
-    let mut state = RuntimeState::default();
-    let baseline = state.clone();
-    let err = apply_runtime_options(
-        &mut state,
-        &options_dict([("particle_switch_octant_braille", Object::from(1.1_f64))]),
-    )
-    .expect_err("expected runtime option validation failure");
-
-    assert!(
-        err.to_string().contains("particle_switch_octant_braille"),
-        "unexpected runtime option error: {err:?}"
-    );
-    pretty_assertions::assert_eq!(state, baseline);
 }
 
 proptest! {

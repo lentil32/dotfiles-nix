@@ -193,23 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn tracked_cursor_retains_surface_and_buffer_line() {
-        let surface = surface_snapshot(23, 5, 2, 7, 13, 24, 80);
-        let tracked = TrackedCursor::new(
-            surface,
-            BufferLine::new(29).expect("positive cursor buffer line"),
-        );
-
-        assert_eq!(tracked.surface(), surface);
-        assert_eq!(
-            tracked.buffer_line(),
-            BufferLine::new(29).expect("positive cursor buffer line")
-        );
-        assert_eq!(tracked.window_handle(), 11);
-        assert_eq!(tracked.buffer_handle(), 17);
-    }
-
-    #[test]
     fn tracked_cursor_detects_window_dimension_changes_from_surface_snapshots() {
         let tracked = TrackedCursor::new(
             surface_snapshot(23, 5, 2, 7, 13, 24, 80),

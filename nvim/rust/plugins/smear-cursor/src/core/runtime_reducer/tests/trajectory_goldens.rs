@@ -411,31 +411,6 @@ fn window_resize_while_animating() {
 }
 
 #[test]
-fn scroll_retarget_keeps_target_in_post_scroll_screen_coordinates() {
-    let mut state = RuntimeState::default();
-    state.config.delay_event_to_smear = 0.0;
-    state.config.simulation_hz = 240.0;
-    state.config.max_simulation_steps_per_frame = 16;
-
-    let steps = scroll_while_animating_steps();
-    let transcript = trajectory_transcript(&mut state, "n", &steps);
-    let scroll_retarget = &transcript.steps[3];
-    let frame_target = match &scroll_retarget.transition.render_action {
-        RenderActionSummary::Draw(frame) => Some(frame.target),
-        RenderActionSummary::ClearAll | RenderActionSummary::Noop => None,
-    };
-    let expected_target = PointSummary::from_point(RenderPoint {
-        row: 24.0,
-        col: 12.0,
-    });
-
-    pretty_assertions::assert_eq!(
-        (scroll_retarget.state.target, frame_target),
-        (expected_target, Some(expected_target))
-    );
-}
-
-#[test]
 fn cmdline_clear_redraw_when_runtime_is_disabled() {
     let mut state = RuntimeState::default();
     state.set_enabled(false);

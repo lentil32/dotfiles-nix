@@ -54,11 +54,8 @@ use self::latent_field::MICRO_H;
 use self::latent_field::MICRO_W;
 use self::latent_field::MicroTile;
 use self::latent_field::TailBand;
-#[cfg(test)]
-use self::local_envelope::CellRowIndex;
-#[cfg(test)]
-use self::local_envelope::CellRowIndexScratch;
 use self::local_envelope::SliceSearchBounds;
+#[cfg(test)]
 #[cfg(test)]
 use self::local_envelope::build_ribbon_slices;
 #[cfg(test)]
@@ -85,18 +82,10 @@ use self::solver::active_support_is_disconnected;
 use self::solver::adjusted_candidate_cost;
 use self::solver::aspect_metric_distance;
 #[cfg(test)]
-use self::solver::build_slice_states;
-#[cfg(test)]
-use self::solver::build_slice_states_with_peak_working_set;
-#[cfg(test)]
 use self::solver::decode_compiled_field;
 #[cfg(test)]
 use self::solver::decode_compiled_field_trace;
-#[cfg(test)]
-use self::solver::decode_compiled_field_trace_with_compiled_and_scratch;
 use self::solver::decode_compiled_field_with_compiled_and_scratch;
-#[cfg(test)]
-use self::solver::decode_compiled_field_with_solver;
 #[cfg(test)]
 use self::solver::linear_cells_penalty;
 #[cfg(test)]
@@ -122,8 +111,6 @@ use self::solver::slice_peak_highlight_level;
 use self::solver::slice_state_cmp;
 #[cfg(test)]
 use self::solver::solve_pairwise_fallback;
-#[cfg(test)]
-use self::solver::solve_pairwise_fallback_with_scratch;
 #[cfg(test)]
 use self::solver::solve_ribbon_dp;
 #[cfg(test)]

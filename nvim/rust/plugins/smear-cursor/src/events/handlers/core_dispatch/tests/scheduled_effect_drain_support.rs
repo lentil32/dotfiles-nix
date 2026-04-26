@@ -12,9 +12,7 @@ use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::core::types::TimerToken;
 use crate::events::runtime::MAX_CHAINED_SCHEDULED_WORK_ITEMS_PER_EDGE;
-use crate::test_support::assertions::assert_queue_disarmed;
 use crate::test_support::proptest::timer_id;
-use nvim_oxi::Result;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use std::collections::VecDeque;
@@ -47,53 +45,10 @@ impl ScheduledDrainHarness {
         );
     }
 
-    pub(super) fn stage_cleanup_backlog<I>(&self, max_kept_windows: I)
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        self.stage_effect_batches(
-            max_kept_windows
-                .into_iter()
-                .map(|max_kept_windows| vec![cleanup_effect(max_kept_windows)]),
-            "cleanup backlog",
-        );
-    }
-
-    pub(super) fn stage_metric_batches<I>(&self, metrics: I)
-    where
-        I: IntoIterator<Item = EventLoopMetricEffect>,
-    {
-        self.stage_effect_batches(
-            metrics
-                .into_iter()
-                .map(|metric| vec![Effect::RecordEventLoopMetric(metric)]),
-            "metric batches",
-        );
-    }
-
-    pub(super) fn stage_non_coalescible_backlog(&self, count: usize) {
-        self.stage_effect_batches(
-            (0..count).map(|_| vec![non_coalescible_effect()]),
-            "non-coalescible backlog",
-        );
-    }
-
     pub(super) fn stage_redraw_waves(&self, count: usize) {
         self.stage_effect_batches(
             (0..count).map(|_| vec![Effect::RedrawCmdline]),
             "redraw waves",
-        );
-    }
-
-    pub(super) fn stage_timer_rearms<I>(&self, timer_id: TimerId, generations: I)
-    where
-        I: IntoIterator<Item = u64>,
-    {
-        self.stage_effect_batches(
-            generations
-                .into_iter()
-                .map(|generation| vec![schedule_timer_effect(timer_id, generation)]),
-            "timer rearm",
         );
     }
 
@@ -111,10 +66,6 @@ impl ScheduledDrainHarness {
 
     pub(super) fn drain_next_edge(&self, executor: &mut RecordingExecutor) -> bool {
         drain_next_edge(executor)
-    }
-
-    pub(super) fn assert_disarmed(&self) {
-        assert_queue_disarmed(self.queued_work_count(), self.queue_is_marked_scheduled());
     }
 
     fn stage_effect_batches<I>(&self, batches: I, label: &str)
@@ -578,14 +529,6 @@ impl ExecutorPlan {
             executed_effects: Vec::new(),
             planned_follow_ups: self.planned_follow_ups,
         }
-    }
-}
-
-pub(super) struct FailingExecutor;
-
-impl EffectExecutor for FailingExecutor {
-    fn execute_effect(&mut self, _effect: Effect) -> Result<Vec<CoreEvent>> {
-        Err(crate::host::api::Error::Other("planned scheduled drain failure".to_string()).into())
     }
 }
 

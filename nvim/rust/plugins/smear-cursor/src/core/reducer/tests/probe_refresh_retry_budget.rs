@@ -36,7 +36,7 @@ fn exhausted_refresh_transition() -> (PendingObservation, Transition) {
 }
 
 #[test]
-fn refresh_budget_exhaustion_promotes_the_newer_ingress_request() {
+fn refresh_budget_exhaustion_promotes_replacement_and_clears_stale_observation() {
     let (request, exhausted) = exhausted_refresh_transition();
 
     let replacement_request = exhausted
@@ -47,17 +47,7 @@ fn refresh_budget_exhaustion_promotes_the_newer_ingress_request() {
     assert_ne!(replacement_request, request);
     pretty_assert_eq!(replacement_request.demand().observed_at(), Millis::new(27));
     pretty_assert_eq!(exhausted.next.lifecycle(), Lifecycle::Observing);
-}
-
-#[test]
-fn refresh_budget_exhaustion_requests_a_new_base_for_the_replacement_ingress() {
-    let (_request, exhausted) = exhausted_refresh_transition();
-    let replacement_request = exhausted
-        .next
-        .pending_observation()
-        .cloned()
-        .expect("replacement request after retry exhaustion");
-
+    assert!(exhausted.next.observation().is_none());
     pretty_assert_eq!(
         exhausted.effects,
         vec![
@@ -73,11 +63,4 @@ fn refresh_budget_exhaustion_requests_a_new_base_for_the_replacement_ingress() {
             }),
         ]
     );
-}
-
-#[test]
-fn refresh_budget_exhaustion_clears_the_stale_observation_snapshot() {
-    let (_request, exhausted) = exhausted_refresh_transition();
-
-    assert!(exhausted.next.observation().is_none());
 }

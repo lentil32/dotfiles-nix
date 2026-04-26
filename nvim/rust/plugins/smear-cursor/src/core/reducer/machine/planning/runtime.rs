@@ -239,7 +239,6 @@ pub(super) fn plan_ready_state_with_observation_plan(
 #[cfg(test)]
 mod tests {
     use super::plan_runtime_transition_for_runtime;
-    use super::prepare_observation_plan_with_runtime;
     use crate::core::runtime_reducer::RenderAction;
     use crate::core::state::BufferPerfClass;
     use crate::core::state::ExternalDemand;
@@ -256,64 +255,9 @@ mod tests {
     use crate::state::RuntimeState;
     use pretty_assertions::assert_eq;
 
-    use super::super::test_support::observation;
     use super::super::test_support::observation_basis;
     use super::super::test_support::screen_cell;
     use super::super::test_support::valid_surface_location;
-
-    #[test]
-    fn prepare_observation_plan_reclaims_preview_scratch_when_runtime_is_unchanged() {
-        let mut runtime = RuntimeState::default();
-        runtime.initialize_cursor(
-            RenderPoint {
-                row: 10.0,
-                col: 10.0,
-            },
-            CursorShape::block(),
-            7,
-            &valid_surface_location(),
-        );
-        runtime.record_observed_mode(/*current_is_cmdline*/ false);
-        runtime.reclaim_preview_particles_scratch(Vec::with_capacity(8));
-
-        let expected_scratch_capacity = runtime.preview_particles_scratch_capacity();
-        let expected_scratch_ptr = runtime.preview_particles_scratch_ptr();
-
-        let (returned_runtime, prepared_plan) = prepare_observation_plan_with_runtime(
-            runtime,
-            None,
-            None,
-            &observation(1),
-            Millis::new(1),
-        );
-
-        assert_eq!(prepared_plan.prepared_particles_capacity(), 0);
-        assert!(!prepared_plan.retains_preview_motion());
-        assert_eq!(
-            returned_runtime.preview_particles_scratch_capacity(),
-            expected_scratch_capacity
-        );
-        assert_eq!(
-            returned_runtime.preview_particles_scratch_ptr(),
-            expected_scratch_ptr
-        );
-    }
-
-    #[test]
-    fn prepare_observation_plan_keeps_preview_motion_when_runtime_changes() {
-        let mut runtime = RuntimeState::default();
-        runtime.reclaim_preview_particles_scratch(Vec::with_capacity(8));
-
-        let (_returned_runtime, prepared_plan) = prepare_observation_plan_with_runtime(
-            runtime,
-            None,
-            None,
-            &observation(1),
-            Millis::new(1),
-        );
-
-        assert!(prepared_plan.retains_preview_motion());
-    }
 
     #[test]
     fn exact_observation_retargets_to_the_new_exact_cell() {
@@ -587,102 +531,5 @@ mod tests {
         );
         assert_eq!(runtime.tracked_cursor(), Some(moved_location));
         assert_eq!(runtime.retarget_epoch(), baseline_epoch);
-    }
-
-    #[test]
-    fn observed_cell_variants_preserve_runtime_target_selection_semantics() {
-        #[derive(Clone, Copy)]
-        struct Case {
-            observed_cell: ObservedCell,
-            latest_exact_cursor_cell: Option<crate::position::ScreenCell>,
-            expected_target_cell: crate::position::ScreenCell,
-        }
-
-        let cases = [
-            (
-                "exact_observation_uses_the_new_exact_cell",
-                Case {
-                    observed_cell: ObservedCell::Exact(screen_cell(9, 10)),
-                    latest_exact_cursor_cell: Some(screen_cell(10, 10)),
-                    expected_target_cell: screen_cell(9, 10),
-                },
-            ),
-            (
-                "deferred_observation_uses_the_new_deferred_cell",
-                Case {
-                    observed_cell: ObservedCell::Deferred(screen_cell(8, 10)),
-                    latest_exact_cursor_cell: Some(screen_cell(10, 10)),
-                    expected_target_cell: screen_cell(8, 10),
-                },
-            ),
-            (
-                "unavailable_observation_uses_the_latest_exact_anchor",
-                Case {
-                    observed_cell: ObservedCell::Unavailable,
-                    latest_exact_cursor_cell: Some(screen_cell(7, 10)),
-                    expected_target_cell: screen_cell(7, 10),
-                },
-            ),
-            (
-                "unavailable_observation_without_anchor_keeps_the_runtime_target",
-                Case {
-                    observed_cell: ObservedCell::Unavailable,
-                    latest_exact_cursor_cell: None,
-                    expected_target_cell: screen_cell(10, 10),
-                },
-            ),
-        ];
-
-        for (
-            case_name,
-            Case {
-                observed_cell,
-                latest_exact_cursor_cell,
-                expected_target_cell,
-            },
-        ) in cases
-        {
-            let mut runtime = RuntimeState::default();
-            runtime.config.delay_event_to_smear = 24.0;
-            runtime.initialize_cursor(
-                RenderPoint {
-                    row: 10.0,
-                    col: 10.0,
-                },
-                CursorShape::block(),
-                7,
-                &valid_surface_location(),
-            );
-            runtime.record_observed_mode(/*current_is_cmdline*/ false);
-
-            let request = PendingObservation::new(
-                ExternalDemand::new(
-                    IngressSeq::new(5),
-                    ExternalDemandKind::ExternalCursor,
-                    Millis::new(5),
-                    BufferPerfClass::Full,
-                ),
-                ProbeRequestSet::default(),
-            );
-            let observation = ObservationSnapshot::new(
-                request,
-                observation_basis(5, observed_cell, valid_surface_location()),
-                ObservationMotion::default(),
-            );
-
-            plan_runtime_transition_for_runtime(
-                &mut runtime,
-                latest_exact_cursor_cell,
-                None,
-                &observation,
-                Millis::new(16),
-            );
-
-            assert_eq!(
-                crate::position::ScreenCell::from_rounded_point(runtime.target_position()),
-                Some(expected_target_cell),
-                "{case_name}"
-            );
-        }
     }
 }

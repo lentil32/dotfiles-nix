@@ -4,9 +4,6 @@ use super::ScheduledWorkUnit;
 use super::dispatch_core_event;
 use super::drain_scheduled_work_with_executor;
 use super::reset_scheduled_effect_queue;
-use super::reset_scheduled_queue_after_failure;
-use super::scheduled_drain_budget;
-use super::scheduled_drain_budget_for_depth;
 use super::scheduled_drain_budget_for_hot_effect_only_snapshot;
 use super::scheduled_drain_budget_for_thermal;
 use super::with_dispatch_queue;
@@ -17,9 +14,6 @@ use crate::core::event::ExternalDemandQueuedEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
 use crate::core::event::ProbeReportedEvent;
 use crate::core::reducer::reduce as reduce_core_event;
-use crate::core::state::BackgroundProbeBatch;
-use crate::core::state::BackgroundProbeChunk;
-use crate::core::state::BackgroundProbeChunkMask;
 use crate::core::state::BackgroundProbePlan;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::CoreState;
@@ -50,7 +44,6 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 
 mod deferred_multi_probe_observation;
-mod dispatch_core_event;
 mod refresh_required_probe_retry;
 mod scheduled_effect_coalescing;
 mod scheduled_effect_drain;
@@ -108,35 +101,6 @@ fn refresh_required_probe_report(request: &PendingObservation) -> CoreEvent {
         observation_id: request.observation_id(),
         reuse: ProbeReuse::RefreshRequired,
         sample: Some(CursorColorSample::new(0x00AB_CDEF)),
-    })
-}
-
-fn compatible_probe_report(request: &PendingObservation) -> CoreEvent {
-    CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorReady {
-        observation_id: request.observation_id(),
-        reuse: ProbeReuse::Compatible,
-        sample: Some(CursorColorSample::new(0x00AB_CDEF)),
-    })
-}
-
-fn background_probe_report(request: &PendingObservation, _viewport: ViewportBounds) -> CoreEvent {
-    CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundReady {
-        observation_id: request.observation_id(),
-        reuse: ProbeReuse::Exact,
-        batch: BackgroundProbeBatch::empty(),
-    })
-}
-
-fn background_chunk_probe_report(
-    request: &PendingObservation,
-    chunk: &BackgroundProbeChunk,
-    _viewport: ViewportBounds,
-) -> CoreEvent {
-    let allowed_mask = vec![false; chunk.len()];
-    CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundChunkReady {
-        observation_id: request.observation_id(),
-        chunk: chunk.clone(),
-        allowed_mask: BackgroundProbeChunkMask::from_allowed_mask(&allowed_mask),
     })
 }
 
@@ -264,10 +228,6 @@ fn queued_work_count() -> usize {
     with_dispatch_queue(|queue| queue.pending_work_units)
 }
 
-fn queued_item_capacity() -> usize {
-    with_dispatch_queue(|queue| queue.items.capacity())
-}
-
 fn queued_front_work_item() -> Option<ScheduledWorkUnit> {
     with_dispatch_queue(|queue| match queue.items.front()? {
         ScheduledWorkItem::OrderedEffectBatch(effects) => {
@@ -279,17 +239,6 @@ fn queued_front_work_item() -> Option<ScheduledWorkUnit> {
             .front()
             .cloned()
             .map(ScheduledWorkUnit::ShellOnlyStep),
-    })
-}
-
-fn queue_contains_observation_base_request() -> bool {
-    with_dispatch_queue(|queue| {
-        queue.items.iter().any(|item| match item {
-            ScheduledWorkItem::OrderedEffectBatch(effects) => {
-                contains_observation_base_request(effects)
-            }
-            ScheduledWorkItem::CoreEvent(_) | ScheduledWorkItem::ShellOnlyAgenda(_) => false,
-        })
     })
 }
 
@@ -308,37 +257,9 @@ fn contains_observation_base_request(effects: &[OrderedEffect]) -> bool {
         .any(|effect| matches!(effect, OrderedEffect::RequestObservationBase(_)))
 }
 
-fn contains_probe_request(effects: &[OrderedEffect]) -> bool {
-    effects
-        .iter()
-        .any(|effect| matches!(effect, OrderedEffect::RequestProbe(_)))
-}
-
-fn contains_render_plan_request(effects: &[OrderedEffect]) -> bool {
-    effects
-        .iter()
-        .any(|effect| matches!(effect, OrderedEffect::RequestRenderPlan(_)))
-}
-
-fn is_apply_proposal(effect: &OrderedEffect) -> bool {
-    matches!(effect, OrderedEffect::ApplyProposal(_))
-}
-
 fn only_cursor_color_probe_request(effects: &[OrderedEffect]) -> bool {
     matches!(
         effects,
         [OrderedEffect::RequestProbe(payload)] if payload.kind == ProbeKind::CursorColor
-    )
-}
-
-fn only_background_probe_request_for_chunk(
-    effects: &[OrderedEffect],
-    expected_chunk: &BackgroundProbeChunk,
-) -> bool {
-    matches!(
-        effects,
-        [OrderedEffect::RequestProbe(payload)]
-            if payload.kind == ProbeKind::Background
-                && payload.background_chunk.as_ref() == Some(expected_chunk)
     )
 }

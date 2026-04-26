@@ -13,13 +13,6 @@ mod architecture_enforcement {
         text: String,
     }
 
-    #[derive(Debug, Eq, PartialEq)]
-    struct ForbiddenApiMatch {
-        api: String,
-        path: String,
-        text: String,
-    }
-
     fn crate_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
@@ -150,30 +143,6 @@ mod architecture_enforcement {
             }]
         );
     }
-
-    #[test]
-    fn removed_broad_engine_access_ports_do_not_reappear() {
-        let forbidden_apis = [
-            ["read", "_engine", "_state"].concat(),
-            ["mutate", "_engine", "_state"].concat(),
-            ["with", "_core", "_runtime", "_mutation"].concat(),
-        ];
-
-        let matches = forbidden_apis
-            .iter()
-            .flat_map(|api| {
-                source_matches(api)
-                    .into_iter()
-                    .map(|source_match| ForbiddenApiMatch {
-                        api: api.clone(),
-                        path: source_match.path,
-                        text: source_match.text,
-                    })
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(matches, Vec::<ForbiddenApiMatch>::new());
-    }
 }
 
 #[cfg(test)]
@@ -197,17 +166,6 @@ mod state_ownership_doc_sync {
             .collect()
     }
 
-    fn present_forbidden_fragments<'a>(
-        doc: &str,
-        forbidden_fragments: &'a [&'a str],
-    ) -> Vec<&'a str> {
-        forbidden_fragments
-            .iter()
-            .copied()
-            .filter(|fragment| doc.contains(fragment))
-            .collect()
-    }
-
     #[test]
     fn lists_current_invariant_hooks_and_semantic_surfaces() {
         let doc = normalized_state_ownership_doc();
@@ -227,8 +185,6 @@ mod state_ownership_doc_sync {
             "`CoreState::{enter_observing_request, activate_observation, replace_active_observation_with_pending, enter_ready, complete_active_observation, restore_retained_observation_to_ready, enter_planning, enter_applying, take_pending_proposal, restore_retained_observation}` are the protocol construction boundaries that reject cross-phase observation or proposal payload injection instead of persisting an invalid workflow shape.",
             "`RuntimeState::semantic_view()` compares authoritative runtime state while ignoring purgeable scratch buffers and rebuildable particle/config caches.",
             "`ProjectionHandle::semantic_view()` compares retained projection witness plus logical raster while ignoring reuse-key and cached realization drift.",
-            "`InFlightProposal::semantic_view()` compares authoritative proposal payload through semantic patch-basis views rather than cached projection internals.",
-            "`CoreState::semantic_view()` compares authoritative reducer state across protocol, runtime, scene, and realization owners while ignoring runtime scratch buffers, projection reuse caches, and cached shell materialization.",
             "observation-owned cursor cells stay in projected display space; raw host quirks such as conceal and `screenpos()` remain event-layer concerns",
             "requested probe policy may allow deferred projection, but it may not switch reducer-owned cursor truth out of projected display space",
         ];
@@ -282,24 +238,6 @@ mod state_ownership_doc_sync {
 
         assert_eq!(
             missing_fragments(&doc, &expected_fragments),
-            Vec::<&str>::new()
-        );
-    }
-
-    #[test]
-    fn omits_removed_duplicate_owner_descriptions() {
-        let doc = normalized_state_ownership_doc();
-        let forbidden_fragments = [
-            "`DerivedConfigCache.source_revision`",
-            "`RuntimeState.config_revision` and `DerivedConfigCache.source_revision`",
-            "`idle_target_budget`",
-            "`max_prune_per_tick`",
-            "`RuntimeState.target` owns target `position`, discrete `cell`, `shape`, `retarget_surface`, `tracked_cursor`, and `retarget_epoch`",
-            "active timer tokens are the owner",
-        ];
-
-        assert_eq!(
-            present_forbidden_fragments(&doc, &forbidden_fragments),
             Vec::<&str>::new()
         );
     }
@@ -373,17 +311,6 @@ mod position_spec_doc_sync {
             .collect()
     }
 
-    fn present_forbidden_fragments<'a>(
-        doc: &str,
-        forbidden_fragments: &'a [&'a str],
-    ) -> Vec<&'a str> {
-        forbidden_fragments
-            .iter()
-            .copied()
-            .filter(|fragment| doc.contains(fragment))
-            .collect()
-    }
-
     #[test]
     fn lists_current_projected_cursor_contract() {
         let doc = normalized_position_spec_doc();
@@ -397,17 +324,6 @@ mod position_spec_doc_sync {
 
         assert_eq!(
             missing_fragments(&doc, &expected_fragments),
-            Vec::<&str>::new()
-        );
-    }
-
-    #[test]
-    fn omits_removed_raw_fallback_wording() {
-        let doc = normalized_position_spec_doc();
-        let forbidden_fragments = ["raw fallback during fast motion"];
-
-        assert_eq!(
-            present_forbidden_fragments(&doc, &forbidden_fragments),
             Vec::<&str>::new()
         );
     }

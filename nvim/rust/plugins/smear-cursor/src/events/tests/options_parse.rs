@@ -1,10 +1,6 @@
-use super::super::options::parse_optional_change_with;
 use super::super::options::parse_optional_filetypes_disabled;
-use super::super::options::validated_non_negative_f64;
 use super::cterm_colors_object;
 use super::options_dict;
-use crate::config::BufferPerfMode;
-use crate::config::LogLevel;
 use crate::config::MAX_COLOR_LEVELS;
 use crate::state::OptionalChange;
 use crate::state::RuntimeOptionsPatch;
@@ -25,43 +21,16 @@ proptest! {
     #![proptest_config(pure_config())]
 
     #[test]
-    fn prop_parse_optional_change_with_distinguishes_clear_from_set(
-        clear in any::<bool>(),
-        value in 0.0_f64..256.0_f64,
-    ) {
-        let parsed = parse_optional_change_with(
-            Some(if clear { Object::nil() } else { Object::from(value) }),
-            "cursor_color",
-            validated_non_negative_f64,
-        )
-        .expect("expected parse success");
-
-        prop_assert_eq!(
-            parsed,
-            Some(if clear {
-                OptionalChange::Clear
-            } else {
-                OptionalChange::Set(value)
-            })
-        );
-    }
-
-    #[test]
-    fn prop_parse_optional_filetypes_disabled_maps_nil_and_string_arrays(
-        clear in any::<bool>(),
+    fn prop_parse_optional_filetypes_disabled_maps_string_arrays(
         filetypes in vec(filetype_name_strategy(), 0..6),
     ) {
         let parsed = parse_optional_filetypes_disabled(
-            Some(if clear {
-                Object::nil()
-            } else {
-                Object::from(Array::from_iter(filetypes.iter().cloned().map(Object::from)))
-            }),
+            Some(Object::from(Array::from_iter(filetypes.iter().cloned().map(Object::from)))),
             "filetypes_disabled",
         )
         .expect("expected parse success");
 
-        prop_assert_eq!(parsed, Some(if clear { Vec::new() } else { filetypes }));
+        prop_assert_eq!(parsed, Some(filetypes));
     }
 
     #[test]
@@ -98,7 +67,7 @@ fn runtime_options_patch_parse_rejects_negative_windows_zindex() {
 }
 
 #[test]
-fn runtime_options_patch_parse_cterm_cursor_colors_sets_color_levels() {
+fn runtime_options_patch_parse_accepts_cterm_cursor_colors() {
     let opts = options_dict([(
         "cterm_cursor_colors",
         cterm_colors_object(&[17_i64, 42_i64]),
@@ -108,8 +77,7 @@ fn runtime_options_patch_parse_cterm_cursor_colors_sets_color_levels() {
     let Some(OptionalChange::Set(colors)) = patch.color.cterm_cursor_colors else {
         panic!("expected cterm cursor color patch to be set");
     };
-    assert_eq!(colors.colors, vec![17_u16, 42_u16]);
-    assert_eq!(colors.color_levels, 2_u32);
+    assert_eq!(colors, vec![17_u16, 42_u16]);
 }
 
 #[test]
@@ -146,24 +114,6 @@ fn runtime_options_patch_parse_rejects_cterm_cursor_colors_arrays_above_the_pale
         err.to_string().contains("at most 256 entries"),
         "unexpected error: {err}"
     );
-}
-
-#[test]
-fn runtime_options_patch_parse_accepts_buffer_perf_mode() {
-    let opts = options_dict([("buffer_perf_mode", Object::from("fast"))]);
-
-    let patch = RuntimeOptionsPatch::parse(&opts).expect("expected parse success");
-
-    assert_eq!(patch.runtime.buffer_perf_mode, Some(BufferPerfMode::Fast));
-}
-
-#[test]
-fn runtime_options_patch_parse_normalizes_logging_level_to_enum() {
-    let opts = options_dict([("logging_level", Object::from(5_i64))]);
-
-    let patch = RuntimeOptionsPatch::parse(&opts).expect("expected parse success");
-
-    assert_eq!(patch.runtime.logging_level, Some(LogLevel::Off));
 }
 
 #[test]

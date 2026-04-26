@@ -7,13 +7,10 @@ pub(crate) use cursor::TrackedCursor;
 pub(crate) use machine::AnimationClockSample;
 pub(crate) use machine::PreparedRuntimeMotion;
 pub(crate) use machine::RuntimePreview;
-#[cfg(test)]
-pub(crate) use machine::RuntimeSemanticView;
 pub(crate) use machine::RuntimeState;
 #[cfg(test)]
 pub(crate) use machine::RuntimeTargetSnapshot;
 pub(crate) use options_patch::ColorOptionsPatch;
-pub(crate) use options_patch::CtermCursorColorsPatch;
 pub(crate) use options_patch::MotionOptionsPatch;
 pub(crate) use options_patch::OptionalChange;
 pub(crate) use options_patch::ParticleOptionsPatch;

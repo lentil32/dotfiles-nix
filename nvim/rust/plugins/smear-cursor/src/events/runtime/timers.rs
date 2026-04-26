@@ -448,16 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn timer_bridge_retry_coalesces_matching_callback_payloads() {
-        let retry = fired_timer(3, 7);
-        let mut bridge = TimerBridge::default();
-
-        assert_eq!(bridge.stage_retry(retry), TimerRetryTransition::Staged);
-        assert_eq!(bridge.stage_retry(retry), TimerRetryTransition::Coalesced);
-        assert_eq!(bridge.pending_retry_contains(retry), true);
-    }
-
-    #[test]
     fn timer_bridge_retry_release_reopens_the_retry_slot() {
         let retry = fired_timer(5, 11);
         let mut bridge = TimerBridge::default();
@@ -477,25 +467,6 @@ mod tests {
         assert_eq!(bridge.stage_retry(first), TimerRetryTransition::Staged);
         assert_eq!(bridge.stage_retry(second), TimerRetryTransition::Staged);
         assert_eq!(bridge.pending_retry_len(), 2);
-    }
-
-    #[test]
-    fn timer_bridge_clear_pending_retries_drops_all_host_timer_witnesses() {
-        let animation = fired_timer(11, 3);
-        let cleanup = fired_timer(19, 29);
-        let mut bridge = TimerBridge::default();
-
-        assert_eq!(bridge.stage_retry(animation), TimerRetryTransition::Staged);
-        assert_eq!(bridge.stage_retry(cleanup), TimerRetryTransition::Staged);
-        bridge.clear_pending_retries();
-
-        assert_eq!(
-            (
-                bridge.pending_retry_contains(animation),
-                bridge.pending_retry_contains(cleanup)
-            ),
-            (false, false)
-        );
     }
 
     #[test]

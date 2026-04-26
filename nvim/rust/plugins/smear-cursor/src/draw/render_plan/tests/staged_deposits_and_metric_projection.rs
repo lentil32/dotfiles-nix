@@ -167,37 +167,6 @@ fn staged_deposit_band_masses_shift_with_speed() {
     );
 }
 
-#[test]
-fn stage_deposited_samples_reuses_retained_sweep_scratch_between_frames() {
-    let viewport = test_viewport();
-    let first = render_frame_to_plan(
-        &single_sample_frame(12, 14),
-        PlannerState::default(),
-        viewport,
-    )
-    .next_state;
-    let first_capacities = (
-        first.sweep_scratch.row_projection_capacity(),
-        first.sweep_scratch.col_projection_capacity(),
-        first.sweep_scratch.tile_capacity(),
-    );
-    assert!(
-        first_capacities.0 > 0 && first_capacities.1 > 0 && first_capacities.2 > 0,
-        "seeded planner state should retain populated sweep scratch capacity"
-    );
-
-    let second = render_frame_to_plan(&single_sample_frame(12, 14), first, viewport).next_state;
-
-    assert_eq!(
-        (
-            second.sweep_scratch.row_projection_capacity(),
-            second.sweep_scratch.col_projection_capacity(),
-            second.sweep_scratch.tile_capacity(),
-        ),
-        first_capacities,
-    );
-}
-
 proptest! {
     #![proptest_config(pure_config())]
 

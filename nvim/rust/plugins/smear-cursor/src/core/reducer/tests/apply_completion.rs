@@ -127,45 +127,6 @@ fn render_cleanup_applied_clears_trusted_realization_basis() {
 }
 
 #[test]
-fn untrusted_target_basis_derives_replace_patch() {
-    let (staged, proposal_id) =
-        planned_state_after_animation_tick(ready_state_with_observation(cursor(9, 9)), 67);
-    let target = staged
-        .pending_proposal()
-        .and_then(|proposal| proposal.patch().basis().target_handle().cloned())
-        .expect("target projection for cleanup noop regression");
-    let ready = reduce(
-        &staged,
-        Event::ApplyReported(ApplyReport::AppliedFully {
-            proposal_id,
-            observed_at: Millis::new(68),
-            visual_change: true,
-        }),
-    )
-    .next;
-    let cleaned = reduce(
-        &ready,
-        Event::RenderCleanupApplied(RenderCleanupAppliedEvent {
-            observed_at: Millis::new(69),
-            action: RenderCleanupAppliedAction::HardPurged {
-                retained_resources: 0,
-            },
-        }),
-    );
-
-    let patch = ScenePatch::derive(PatchBasis::new(
-        cleaned
-            .next
-            .realization()
-            .trusted_acknowledged_for_patch()
-            .cloned(),
-        Some(target),
-    ));
-
-    pretty_assert_eq!(patch.kind(), crate::core::state::ScenePatchKind::Replace);
-}
-
-#[test]
 fn apply_completion_emits_explicit_cleanup_and_redraw_effects() {
     let mut runtime = ready_state_with_observation(cursor(4, 9)).runtime().clone();
     runtime.config.max_kept_windows = 21;

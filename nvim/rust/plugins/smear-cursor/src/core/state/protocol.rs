@@ -60,21 +60,6 @@ impl PreparedObservationPlan {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn prepared_particles_capacity(&self) -> usize {
-        match &self.runtime {
-            PreparedObservationRuntime::Preview(prepared_motion) => {
-                prepared_motion.particles_capacity()
-            }
-            PreparedObservationRuntime::Unchanged => 0,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retains_preview_motion(&self) -> bool {
-        matches!(&self.runtime, PreparedObservationRuntime::Preview(_))
-    }
-
     pub(crate) fn transition(&self) -> &CursorTransition {
         &self.transition
     }
@@ -673,11 +658,6 @@ impl CoreState {
         self.generation.next()
     }
 
-    #[cfg(test)]
-    pub(crate) const fn generation(&self) -> Generation {
-        self.generation
-    }
-
     #[cfg(debug_assertions)]
     pub(crate) fn debug_assert_invariants(&self) {
         self.runtime().debug_assert_invariants();
@@ -708,11 +688,6 @@ impl CoreState {
 
     pub(crate) const fn phase_kind(&self) -> ProtocolPhaseKind {
         self.protocol.phase_kind()
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn protocol(&self) -> &ProtocolState {
-        &self.protocol
     }
 
     pub(crate) const fn needs_initialize(&self) -> bool {
@@ -751,11 +726,6 @@ impl CoreState {
 
     pub(crate) const fn entropy(&self) -> EntropyState {
         self.payload.entropy
-    }
-
-    #[cfg(test)]
-    pub(in crate::core::state) fn semantic_state(&self) -> &SemanticState {
-        self.payload.semantics.as_ref()
     }
 
     pub(in crate::core::state) fn projection_state(&self) -> &ProjectionState {
@@ -1187,16 +1157,6 @@ impl CoreState {
     pub(crate) fn allocate_proposal_id(self) -> (Self, ProposalId) {
         let (entropy, proposal_id) = self.entropy().allocate_proposal_id();
         (self.with_entropy(entropy), proposal_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn clear_pending_for(
-        self,
-        proposal_id: ProposalId,
-    ) -> Option<(Self, InFlightProposal)> {
-        let mut state = self;
-        let pending = state.take_pending_proposal(proposal_id)?;
-        Some((state, pending))
     }
 
     pub(crate) fn take_pending_proposal(

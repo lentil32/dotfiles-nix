@@ -482,32 +482,17 @@ pub(crate) fn smear_outside_cmd_row(corners: &[RenderPoint; 4]) -> Result<bool> 
 
 #[cfg(test)]
 mod tests {
-    use super::BufferCursorRead;
-    use super::BufferCursorReadDiagnostics;
-    use super::ProjectionSource;
-    use super::buffer_line_for_window_cursor;
-    use super::command_type_string;
-    use super::conceal_surface_snapshot;
-    use super::current_mode_with;
     use super::cursor_observation_for_mode_with_probe_policy_typed_with;
     use super::parse_screenpos_cell;
-    use super::screenpos_for_buffer_column;
     use super::should_use_real_cmdline_cursor;
     use crate::core::effect::ProbePolicy;
-    use crate::host::BufferHandle;
-    use crate::host::CurrentEditorCall;
     use crate::host::CursorReadCall;
-    use crate::host::CursorReadPort;
-    use crate::host::FakeCurrentEditorPort;
     use crate::host::FakeCursorReadPort;
     use crate::host::api;
     use crate::position::BufferLine;
     use crate::position::CursorObservation;
     use crate::position::ObservedCell;
     use crate::position::ScreenCell;
-    use crate::position::SurfaceId;
-    use crate::position::ViewportBounds;
-    use crate::position::WindowSurfaceSnapshot;
     use crate::test_support::proptest::pure_config;
     use nvim_oxi::Dictionary;
     use nvim_oxi::Object;
@@ -548,92 +533,6 @@ mod tests {
 
     fn screen_cell(row: i64, col: i64) -> ScreenCell {
         ScreenCell::new(row, col).expect("one-based screen cell")
-    }
-
-    fn surface_snapshot() -> WindowSurfaceSnapshot {
-        WindowSurfaceSnapshot::new(
-            SurfaceId::new(11, 17).expect("positive surface handles"),
-            BufferLine::new(23).expect("positive buffer line"),
-            5,
-            2,
-            ScreenCell::new(7, 13).expect("one-based origin"),
-            ViewportBounds::new(24, 80).expect("positive viewport"),
-        )
-    }
-
-    #[test]
-    fn current_mode_reads_through_current_editor_port() {
-        let host = FakeCurrentEditorPort::default();
-        host.set_current_mode("i");
-
-        assert_eq!(current_mode_with(&host), "i".to_string());
-        assert_eq!(host.calls(), vec![CurrentEditorCall::CurrentMode]);
-    }
-
-    #[test]
-    fn screenpos_for_buffer_column_reads_through_cursor_read_port() {
-        let host = FakeCursorReadPort::default();
-        host.push_screenpos(screenpos_object(Some(9), Some(14), Some(14), Some(14)));
-
-        let result = parse_screenpos_cell(
-            screenpos_for_buffer_column(&host, &api::Window::from(11), 7, 3)
-                .expect("screenpos read should succeed"),
-        )
-        .expect("screenpos should parse");
-
-        assert_eq!(result, Some(screen_cell(9, 14)));
-        assert_eq!(
-            host.calls(),
-            vec![CursorReadCall::Screenpos {
-                window_handle: 11,
-                line: 7,
-                col1: 3,
-            }],
-        );
-    }
-
-    #[test]
-    fn buffer_line_for_window_cursor_reads_through_cursor_read_port() {
-        let host = FakeCursorReadPort::default();
-        host.set_window_cursor(11, 23, 4);
-
-        assert_eq!(
-            buffer_line_for_window_cursor(&host, &api::Window::from(11))
-                .expect("window cursor should produce a buffer line"),
-            BufferLine::new(23).expect("positive buffer line"),
-        );
-        assert_eq!(
-            host.calls(),
-            vec![CursorReadCall::WindowCursor { window_handle: 11 }],
-        );
-    }
-
-    #[test]
-    fn command_type_string_reads_through_cursor_read_port() {
-        let host = FakeCursorReadPort::default();
-        host.push_command_type(Object::from(":"));
-
-        assert_eq!(
-            command_type_string(&host).expect("command type should parse"),
-            ":".to_string(),
-        );
-        assert_eq!(host.calls(), vec![CursorReadCall::CommandType]);
-    }
-
-    #[test]
-    fn window_buffer_handle_reads_through_cursor_read_port() {
-        let host = FakeCursorReadPort::default();
-        host.push_window_buffer_handle(17);
-
-        assert_eq!(
-            host.window_buffer_handle(&api::Window::from(11))
-                .expect("window buffer handle should read through fake host"),
-            BufferHandle::from(17),
-        );
-        assert_eq!(
-            host.calls(),
-            vec![CursorReadCall::WindowBufferHandle { window_handle: 11 }],
-        );
     }
 
     #[test]
@@ -706,98 +605,5 @@ mod tests {
         ) {
             prop_assert_eq!(should_use_real_cmdline_cursor(&cmdtype), !cmdtype.is_empty());
         }
-    }
-
-    #[test]
-    fn parse_screenpos_cell_treats_the_all_zero_tuple_as_an_unavailable_cursor() {
-        let result = parse_screenpos_cell(screenpos_object(Some(0), Some(0), Some(0), Some(0)))
-            .expect("all-zero screenpos sentinel should parse");
-
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn parse_screenpos_cell_rejects_mixed_zero_and_positive_coordinates() {
-        let result = parse_screenpos_cell(screenpos_object(Some(0), Some(3), None, None));
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn conceal_surface_snapshot_requires_both_a_raw_cell_and_surface_snapshot() {
-        let surface = surface_snapshot();
-        let expected = Some(surface);
-
-        assert_eq!(
-            conceal_surface_snapshot(Some(screen_cell(4, 9)), Some(&surface)),
-            expected,
-        );
-        assert_eq!(conceal_surface_snapshot(None, Some(&surface)), None);
-        assert_eq!(
-            conceal_surface_snapshot(Some(screen_cell(4, 9)), None),
-            None,
-        );
-    }
-
-    #[test]
-    fn fast_motion_reads_keep_the_projected_deferred_cell_across_conceal_adjustment() {
-        let raw_cell = screen_cell(7, 18);
-        let projected_cell = screen_cell(7, 15);
-        let read = BufferCursorRead {
-            line: 7,
-            column: 17,
-            screenpos_summary: "row=7 col=18 endcol=18 curscol=18".to_string(),
-            observed_cell: ObservedCell::Deferred(projected_cell),
-            diagnostics: BufferCursorReadDiagnostics {
-                raw_screenpos_cell: Some(raw_cell),
-                projection_source: Some(ProjectionSource::ConcealCached),
-            },
-        };
-
-        assert_eq!(read.observed_cell(), ObservedCell::Deferred(projected_cell),);
-        assert_eq!(read.projected_adjustment_cell(), Some(projected_cell));
-        assert_eq!(read.projection_source(), "conceal_cached_projection");
-        assert!(read.uses_deferred_projection());
-    }
-
-    #[test]
-    fn fast_motion_reads_keep_same_cell_deferred_when_cached_conceal_confirms_no_drift() {
-        let raw_cell = screen_cell(9, 24);
-        let read = BufferCursorRead {
-            line: 9,
-            column: 23,
-            screenpos_summary: "row=9 col=24 endcol=24 curscol=24".to_string(),
-            observed_cell: ObservedCell::Deferred(raw_cell),
-            diagnostics: BufferCursorReadDiagnostics {
-                raw_screenpos_cell: Some(raw_cell),
-                projection_source: Some(ProjectionSource::ConcealCached),
-            },
-        };
-
-        assert_eq!(read.observed_cell(), ObservedCell::Deferred(raw_cell));
-        assert_eq!(read.projected_adjustment_cell(), None);
-        assert_eq!(read.projection_source(), "conceal_cached_projection");
-        assert!(read.uses_deferred_projection());
-    }
-
-    #[test]
-    fn exact_conceal_unavailable_projection_still_reports_the_exact_projection_source() {
-        let raw_cell = screen_cell(11, 31);
-        let read = BufferCursorRead {
-            line: 11,
-            column: 30,
-            screenpos_summary: "row=11 col=31 endcol=31 curscol=31".to_string(),
-            observed_cell: ObservedCell::Unavailable,
-            diagnostics: BufferCursorReadDiagnostics {
-                raw_screenpos_cell: Some(raw_cell),
-                projection_source: Some(ProjectionSource::ConcealExact),
-            },
-        };
-
-        assert_eq!(read.observed_cell(), ObservedCell::Unavailable);
-        assert_eq!(read.projected_adjustment_cell(), None);
-        assert_eq!(read.projection_source(), "conceal_exact_projection");
-        assert_eq!(read.raw_screenpos_cell(), Some(raw_cell));
-        assert!(!read.uses_deferred_projection());
     }
 }

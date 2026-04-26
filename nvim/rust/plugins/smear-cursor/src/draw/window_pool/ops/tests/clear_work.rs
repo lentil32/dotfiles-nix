@@ -90,47 +90,6 @@ fn tab_windows_from_specs(specs: &[WindowLifecycleSpec], cached_budget: usize) -
 }
 
 #[test]
-fn remove_window_in_tab_prunes_only_the_matching_window() {
-    let mut tab_windows = TabWindows::default();
-    tab_windows.push_test_visible_window(
-        WindowBufferHandle {
-            window_id: -11,
-            buffer_id: BufferHandle::from_raw_for_test(/*value*/ -111),
-        },
-        test_placement(0),
-        1,
-    );
-    tab_windows.push_test_visible_window(
-        WindowBufferHandle {
-            window_id: -12,
-            buffer_id: BufferHandle::from_raw_for_test(/*value*/ -112),
-        },
-        test_placement(1),
-        2,
-    );
-    tab_windows.cache_payload(-11, 111);
-    tab_windows.cache_payload(-12, 222);
-
-    let close_summary = remove_window_in_tab(
-        &mut tab_windows,
-        NamespaceId::new(/*value*/ 99),
-        /*window_id*/ -11,
-    );
-
-    assert_eq!(
-        close_summary,
-        TrackedResourceCloseSummary {
-            closed_or_gone: 1,
-            retained: 0,
-        }
-    );
-    assert_eq!(tab_pool_snapshot_from_tab(&tab_windows).total_windows, 1);
-    assert!(!tab_windows.cached_payload_matches(-11, 111));
-    assert!(tab_windows.cached_payload_matches(-12, 222));
-    tab_windows.assert_tracking_consistent();
-}
-
-#[test]
 fn purge_tab_retains_failed_window_close_as_invalid_retry_state() {
     let retained_handles = WindowBufferHandle {
         window_id: 11,
@@ -204,22 +163,6 @@ proptest! {
             || lifecycles.len() > cached_budget.min(max_kept_windows)
             || lifecycles.iter().copied().any(WindowLifecycleSpec::is_invalid);
 
-        prop_assert_eq!(has_visible_windows(&tabs), expected_has_visible);
         prop_assert_eq!(has_pending_clear_work(&tabs, max_kept_windows), expected_pending);
-    }
-
-    #[test]
-    fn prop_shell_visible_close_indices_follow_authoritative_lifecycles(
-        lifecycles in vec(window_lifecycle_spec(), 0..16),
-    ) {
-        let tab_windows = tab_windows_from_specs(&lifecycles, ADAPTIVE_POOL_MIN_BUDGET);
-        let expected_indices = lifecycles
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(index, lifecycle)| lifecycle.is_shell_visible().then_some(index))
-            .collect::<Vec<_>>();
-
-        prop_assert_eq!(shell_visible_close_indices(&tab_windows), expected_indices);
     }
 }

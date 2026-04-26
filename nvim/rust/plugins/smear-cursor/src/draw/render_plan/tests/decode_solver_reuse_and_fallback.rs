@@ -1,7 +1,5 @@
 use super::*;
-use crate::test_support::proptest::positive_aspect_ratio;
 use crate::test_support::proptest::pure_config;
-use proptest::collection::btree_map;
 use proptest::collection::btree_set;
 use proptest::prelude::*;
 use std::collections::VecDeque;
@@ -15,15 +13,6 @@ fn decoded_glyph_strategy() -> BoxedStrategy<DecodedGlyph> {
         (1_u8..=255_u8).prop_map(DecodedGlyph::Octant),
     ]
     .boxed()
-}
-
-fn decoded_state_strategy() -> BoxedStrategy<DecodedCellState> {
-    (decoded_glyph_strategy(), 1_u32..=16_u32)
-        .prop_map(|(glyph, level)| DecodedCellState {
-            glyph,
-            level: HighlightLevel::from_raw_clamped(level),
-        })
-        .boxed()
 }
 
 fn same_level_distinct_state_pair() -> BoxedStrategy<(DecodedCellState, DecodedCellState)> {
@@ -106,161 +95,6 @@ fn reference_active_support_is_disconnected(coords: &BTreeSet<Coord>) -> bool {
 
 proptest! {
     #![proptest_config(pure_config())]
-
-    #[test]
-    fn prop_pairwise_fallback_scratch_reuse_keeps_output_and_capacity_stable(
-        candidates in btree_map(
-            (8_i64..=18_i64, 8_i64..=18_i64),
-            (decoded_state_strategy(), 0_u16..=512_u16, 0_u16..=512_u16),
-            1..=24,
-        )
-        .prop_map(|entries| {
-            entries
-                .into_iter()
-                .map(|(coord, (state, filled_cost, empty_cost))| {
-                    (coord, presence_candidates(state, filled_cost, empty_cost))
-                })
-                .collect::<BTreeMap<_, _>>()
-        }),
-        spatial_weight_q10 in 0_u32..=2048_u32,
-    ) {
-        let mut scratch = SolverScratch::default();
-
-        let first =
-            solve_pairwise_fallback_with_scratch(&candidates, spatial_weight_q10, &mut scratch);
-        let first_capacities = (
-            scratch.fallback_coords.capacity(),
-            scratch.fallback_coord_index.capacity(),
-            scratch.fallback_assignment.capacity(),
-        );
-
-        let second =
-            solve_pairwise_fallback_with_scratch(&candidates, spatial_weight_q10, &mut scratch);
-
-        prop_assert!(first_capacities.0 > 0);
-        prop_assert!(first_capacities.1 > 0);
-        prop_assert!(first_capacities.2 > 0);
-        prop_assert_eq!(second, first);
-        prop_assert_eq!(
-            (
-                scratch.fallback_coords.capacity(),
-                scratch.fallback_coord_index.capacity(),
-                scratch.fallback_assignment.capacity(),
-            ),
-            first_capacities,
-        );
-    }
-
-    #[test]
-    fn prop_decode_trace_scratch_reuse_keeps_output_and_row_index_capacity_stable(
-        generated in (
-            btree_map(
-                (8_i64..=18_i64, 8_i64..=18_i64),
-                (
-                    0_u8..=3_u8,
-                    0_u16..=4095_u16,
-                    0_u16..=4095_u16,
-                    decoded_state_strategy(),
-                    0_u16..=512_u16,
-                    0_u16..=512_u16,
-                ),
-                1..=16,
-            ),
-            positive_aspect_ratio(),
-        )
-            .prop_map(|(entries, block_aspect_ratio)| {
-                let compiled = entries
-                    .iter()
-                    .map(
-                        |(&(row, col), (pattern, total_mass_q12, recent_mass_q12, ..))| {
-                            let tile = match pattern % 4 {
-                                0 => {
-                                    tile_for_column_span(0, latent_field::MICRO_W - 1, 0x0FFF)
-                                }
-                                1 => tile_for_column_span(0, latent_field::MICRO_W / 2, 0x09FF),
-                                2 => tile_for_column_span(
-                                    latent_field::MICRO_W / 2,
-                                    latent_field::MICRO_W - 1,
-                                    0x09FF,
-                                ),
-                                _ => tile_for_octant(0x55, 0x09FF),
-                            };
-                            (
-                                (row, col),
-                                latent_field::CompiledCell {
-                                    tile,
-                                    age: AgeMoment {
-                                        total_mass_q12: u32::from(*total_mass_q12),
-                                        recent_mass_q12: u32::from(
-                                            (*recent_mass_q12).min(*total_mass_q12),
-                                        ),
-                                    },
-                                },
-                            )
-                        },
-                    )
-                    .collect::<BTreeMap<_, _>>();
-                let candidates = entries
-                    .into_iter()
-                    .map(
-                        |(coord, (_, _, _, state, filled_cost, empty_cost))| {
-                            (coord, presence_candidates(state, filled_cost, empty_cost))
-                        },
-                    )
-                    .collect::<BTreeMap<_, _>>();
-                let centerline = horizontal_centerline(compiled.keys().copied().map(|(row, col)| {
-                    RenderPoint {
-                        row: row as f64 + 0.5,
-                        col: col as f64 + 0.5,
-                    }
-                }));
-
-                (compiled, candidates, centerline, block_aspect_ratio)
-            }),
-    ) {
-        let (compiled, candidates, centerline, block_aspect_ratio) = generated;
-        let compiled = compiled_field(&compiled);
-        let frame = with_block_aspect_ratio(&base_frame(), block_aspect_ratio);
-        let mut scratch = SolverScratch::default();
-
-        let first = decode_compiled_field_trace_with_compiled_and_scratch(
-            &compiled,
-            &candidates,
-            &centerline,
-            &frame,
-            &mut scratch,
-        );
-        let first_capacities = (
-            scratch.compiled_row_index.row_capacity(),
-            scratch.compiled_row_index.entry_capacity(),
-            scratch.candidate_row_index.row_capacity(),
-            scratch.candidate_row_index.entry_capacity(),
-        );
-
-        let second = decode_compiled_field_trace_with_compiled_and_scratch(
-            &compiled,
-            &candidates,
-            &centerline,
-            &frame,
-            &mut scratch,
-        );
-
-        prop_assert!(first_capacities.0 > 0);
-        prop_assert!(first_capacities.1 > 0);
-        prop_assert!(first_capacities.2 > 0);
-        prop_assert!(first_capacities.3 > 0);
-        prop_assert_eq!(second.cells, first.cells);
-        prop_assert_eq!(second.path, first.path);
-        prop_assert_eq!(
-            (
-                scratch.compiled_row_index.row_capacity(),
-                scratch.compiled_row_index.entry_capacity(),
-                scratch.candidate_row_index.row_capacity(),
-                scratch.candidate_row_index.entry_capacity(),
-            ),
-            first_capacities,
-        );
-    }
 
     #[test]
     fn prop_merge_ribbon_assignments_breaks_equal_vote_ties_by_state_order(

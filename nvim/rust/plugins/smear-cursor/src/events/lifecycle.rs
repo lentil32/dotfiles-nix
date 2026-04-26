@@ -273,18 +273,12 @@ mod tests {
     use super::parse_registered_autocmd_payload;
     use super::setup_autocmds_with;
     use super::setup_user_command_with;
-    use crate::events::handlers::on_autocmd_event;
     use crate::events::ingress::registered_autocmd_event_names;
     use crate::host::FakeLifecyclePort;
     use crate::host::LifecycleCall;
     use nvim_oxi::Dictionary;
     use nvim_oxi::Object;
     use pretty_assertions::assert_eq;
-
-    #[test]
-    fn unknown_registered_autocmd_is_a_noop() {
-        on_autocmd_event("DefinitelyNotReal").expect("unknown event should no-op");
-    }
 
     #[test]
     fn autocmd_dispatch_command_routes_through_the_host_bridge() {

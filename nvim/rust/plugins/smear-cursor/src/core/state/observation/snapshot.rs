@@ -13,6 +13,7 @@ use crate::core::state::ExternalDemand;
 use crate::core::types::Millis;
 use crate::core::types::ObservationId;
 use crate::position::CursorObservation;
+#[cfg(debug_assertions)]
 use crate::position::ObservedCell;
 use crate::position::ScreenCell;
 use crate::position::ViewportBounds;

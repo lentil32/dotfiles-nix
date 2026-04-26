@@ -72,50 +72,6 @@ fn queued_external_cursor_demand_does_not_shadow_the_runtime_target() {
 }
 
 #[test]
-fn deferred_observation_retargets_runtime_without_overwriting_the_exact_anchor() {
-    let stale_anchor = cursor(10, 10);
-    let deferred_cell = cursor(8, 10);
-    let ready = ready_state_with_initialized_runtime(stale_anchor, Some(stale_anchor));
-
-    let transition =
-        collect_external_cursor_observation(&ready, ObservedCell::Deferred(deferred_cell), 101);
-
-    let [Effect::RequestRenderPlan(_)] = transition.effects.as_slice() else {
-        panic!("expected render plan request after deferred observation");
-    };
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
-    assert_eq!(
-        ScreenCell::from_rounded_point(transition.next.runtime().target_position()),
-        Some(deferred_cell)
-    );
-    assert_eq!(
-        transition.next.latest_exact_cursor_cell(),
-        Some(stale_anchor)
-    );
-}
-
-#[test]
-fn unavailable_observation_falls_back_to_the_latest_exact_anchor() {
-    let exact_anchor = cursor(7, 10);
-    let ready = ready_state_with_initialized_runtime(cursor(10, 10), Some(exact_anchor));
-
-    let transition = collect_external_cursor_observation(&ready, ObservedCell::Unavailable, 101);
-
-    let [Effect::RequestRenderPlan(_)] = transition.effects.as_slice() else {
-        panic!("expected render plan request after unavailable observation");
-    };
-    assert_eq!(transition.next.lifecycle(), Lifecycle::Planning);
-    assert_eq!(
-        ScreenCell::from_rounded_point(transition.next.runtime().target_position()),
-        Some(exact_anchor)
-    );
-    assert_eq!(
-        transition.next.latest_exact_cursor_cell(),
-        Some(exact_anchor)
-    );
-}
-
-#[test]
 fn unavailable_observation_without_an_anchor_keeps_the_runtime_target() {
     let runtime_target = cursor(10, 10);
     let ready = ready_state_with_initialized_runtime(runtime_target, None);

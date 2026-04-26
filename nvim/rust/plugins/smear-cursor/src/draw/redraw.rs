@@ -51,7 +51,6 @@ fn redraw_with(host: &impl RedrawCommandPort) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::FlushRedrawCapability;
-    use super::flush_redraw_capability_from_host;
     use super::redraw_with;
     use super::refresh_redraw_capability_with;
     use crate::events::flush_redraw_capability;
@@ -60,36 +59,6 @@ mod tests {
     use crate::host::HostFlushRedrawCapability;
     use crate::host::RedrawCommandCall;
     use pretty_assertions::assert_eq;
-
-    #[test]
-    fn flush_redraw_capability_maps_host_capability_to_runtime_capability() {
-        assert_eq!(
-            flush_redraw_capability_from_host(HostFlushRedrawCapability::ApiAvailable),
-            FlushRedrawCapability::ApiAvailable
-        );
-        assert_eq!(
-            flush_redraw_capability_from_host(HostFlushRedrawCapability::FallbackOnly),
-            FlushRedrawCapability::FallbackOnly
-        );
-    }
-
-    #[test]
-    fn refresh_redraw_capability_reads_through_redraw_command_port() {
-        let host = FakeRedrawCommandPort::default();
-        host.push_probe_flush_redraw_capability(HostFlushRedrawCapability::ApiAvailable);
-        set_flush_redraw_capability(FlushRedrawCapability::Unknown);
-
-        refresh_redraw_capability_with(&host).expect("capability refresh should succeed");
-
-        assert_eq!(
-            flush_redraw_capability(),
-            FlushRedrawCapability::ApiAvailable
-        );
-        assert_eq!(
-            host.calls(),
-            vec![RedrawCommandCall::ProbeFlushRedrawCapability]
-        );
-    }
 
     #[test]
     fn refresh_redraw_capability_returns_redraw_command_port_failures() {

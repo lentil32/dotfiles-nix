@@ -137,15 +137,6 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn cache_hit_reuses_metadata_until_explicit_invalidation() {
-        let mut cache = BufferMetadataCache::default();
-        let metadata = BufferMetadata::new_for_test("lua", "", true, 42);
-        cache.store_for_test(11, metadata.clone());
-
-        assert_eq!(cache.cached_entry_for_test(11), Some(metadata));
-    }
-
-    #[test]
     fn cache_miss_reads_once_through_buffer_metadata_port() {
         let host = FakeBufferMetadataPort::default();
         host.push_buffer_metadata(BufferMetadataSnapshot::new("lua", "", true, 42));

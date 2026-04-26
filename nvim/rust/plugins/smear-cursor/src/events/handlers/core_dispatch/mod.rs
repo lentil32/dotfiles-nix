@@ -27,13 +27,7 @@ mod tests;
 
 #[cfg(test)]
 use drain::drain_scheduled_work_with_executor;
-#[cfg(test)]
-use drain::reset_scheduled_queue_after_failure;
 use drain::run_scheduled_effect_drain;
-#[cfg(test)]
-use drain::scheduled_drain_budget;
-#[cfg(test)]
-use drain::scheduled_drain_budget_for_depth;
 #[cfg(test)]
 use drain::scheduled_drain_budget_for_hot_effect_only_snapshot;
 #[cfg(test)]

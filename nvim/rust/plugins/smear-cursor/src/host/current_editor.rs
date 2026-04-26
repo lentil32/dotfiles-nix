@@ -85,10 +85,6 @@ impl Default for FakeCurrentEditorPort {
 
 #[cfg(test)]
 impl FakeCurrentEditorPort {
-    pub(crate) fn set_current_mode(&self, mode: &str) {
-        *self.mode.borrow_mut() = mode.to_string();
-    }
-
     pub(crate) fn set_current_window_handle(&self, handle: i32) {
         self.current_window_handle.set(handle);
     }

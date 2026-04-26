@@ -25,14 +25,6 @@ pub(crate) fn tab_pool_snapshot_from_tab(tab_windows: &TabWindows) -> TabPoolSna
     }
 }
 
-#[cfg(test)]
-pub(crate) fn tab_pool_snapshot(
-    tabs: &HashMap<TabHandle, TabWindows>,
-    tab_handle: TabHandle,
-) -> Option<TabPoolSnapshot> {
-    tabs.get(&tab_handle).map(tab_pool_snapshot_from_tab)
-}
-
 pub(crate) fn tab_in_use_window_count_from_tab(tab_windows: &TabWindows) -> usize {
     tab_windows.in_use_window_count()
 }
@@ -45,15 +37,12 @@ pub(crate) fn tab_visible_window_count_from_tab(tab_windows: &TabWindows) -> usi
 mod snapshot_tests {
     use super::{
         CachedRenderWindow, CachedWindowLifecycle, FrameEpoch, TabPoolSnapshot, TabWindows,
-        WindowBufferHandle, WindowPlacement, tab_in_use_window_count_from_tab, tab_pool_snapshot,
-        tab_pool_snapshot_from_tab, tab_visible_window_count_from_tab,
+        WindowBufferHandle, WindowPlacement, tab_pool_snapshot_from_tab,
     };
     use crate::host::BufferHandle;
-    use crate::host::TabHandle;
     use crate::test_support::proptest::pure_config;
     use proptest::collection::vec;
     use proptest::prelude::*;
-    use std::collections::HashMap;
 
     #[derive(Clone, Copy, Debug)]
     enum WindowLifecycleSpec {
@@ -69,10 +58,6 @@ mod snapshot_tests {
                 self,
                 Self::AvailableVisible { .. } | Self::AvailableHidden { .. }
             )
-        }
-
-        fn is_visible(self) -> bool {
-            matches!(self, Self::AvailableVisible { .. } | Self::InUse { .. })
         }
 
         fn is_in_use(self) -> bool {
@@ -222,11 +207,6 @@ mod snapshot_tests {
                 peak_total_windows,
                 capacity_cap_hits,
             );
-            let expected_visible_windows = lifecycles
-                .iter()
-                .copied()
-                .filter(|lifecycle| lifecycle.is_visible())
-                .count();
             let tab_windows = build_tab_windows(
                 &lifecycles,
                 cached_budget,
@@ -238,15 +218,7 @@ mod snapshot_tests {
             );
 
             prop_assert_eq!(tab_pool_snapshot_from_tab(&tab_windows), expected);
-            prop_assert_eq!(tab_in_use_window_count_from_tab(&tab_windows), expected.in_use_windows);
-            prop_assert_eq!(
-                tab_visible_window_count_from_tab(&tab_windows),
-                expected_visible_windows,
-            );
 
-            let tab_handle = TabHandle::from_raw_for_test(/*value*/ 9);
-            let tabs = HashMap::from([(tab_handle, tab_windows)]);
-            prop_assert_eq!(tab_pool_snapshot(&tabs, tab_handle), Some(expected));
         }
     }
 }

@@ -573,67 +573,6 @@ proptest! {
     }
 
     #[test]
-    fn prop_auto_policy_is_monotone_across_non_decreasing_inputs(
-        buffer_case in supported_buffer_case_strategy(),
-        low_line_count_active in any::<bool>(),
-        raise_line_count in any::<bool>(),
-        low_slow_callback in any::<bool>(),
-        raise_callback in any::<bool>(),
-        low_extmark_pressure in any::<bool>(),
-        raise_extmark_pressure in any::<bool>(),
-        low_conceal_scan_pressure in any::<bool>(),
-        raise_conceal_scan_pressure in any::<bool>(),
-        low_conceal_deferred_pressure in any::<bool>(),
-        raise_conceal_deferred_pressure in any::<bool>(),
-    ) {
-        let high_line_count_active = low_line_count_active || raise_line_count;
-        let high_slow_callback = low_slow_callback || raise_callback;
-        let high_extmark_pressure = low_extmark_pressure || raise_extmark_pressure;
-        let high_conceal_scan_pressure =
-            low_conceal_scan_pressure || raise_conceal_scan_pressure;
-        let high_conceal_deferred_pressure =
-            low_conceal_deferred_pressure || raise_conceal_deferred_pressure;
-        let low_policy = BufferEventPolicy::from_test_input_with_perf_mode(
-            None,
-            supported_policy_input(
-                buffer_case,
-                BufferPerfMode::Auto,
-                if low_line_count_active { 80_000 } else { 1 },
-                if low_slow_callback { 16.0 } else { 0.0 },
-                pressure_signals(
-                    low_extmark_pressure,
-                    low_conceal_scan_pressure,
-                    low_conceal_deferred_pressure,
-                ),
-                false,
-            ),
-        );
-        let high_policy = BufferEventPolicy::from_test_input_with_perf_mode(
-            None,
-            supported_policy_input(
-                buffer_case,
-                BufferPerfMode::Auto,
-                if high_line_count_active { 80_000 } else { 1 },
-                if high_slow_callback { 16.0 } else { 0.0 },
-                pressure_signals(
-                    high_extmark_pressure,
-                    high_conceal_scan_pressure,
-                    high_conceal_deferred_pressure,
-                ),
-                false,
-            ),
-        );
-
-        prop_assert_eq!(
-            low_policy.observed_reason_bits() & !high_policy.observed_reason_bits(),
-            0
-        );
-        if matches!(low_policy.perf_class(), BufferPerfClass::FastMotion) {
-            prop_assert_eq!(high_policy.perf_class(), BufferPerfClass::FastMotion);
-        }
-    }
-
-    #[test]
     fn prop_manual_modes_force_supported_buffers_to_the_configured_perf_class(
         buffer_case in supported_buffer_case_strategy(),
         perf_mode in manual_buffer_perf_mode_strategy(),

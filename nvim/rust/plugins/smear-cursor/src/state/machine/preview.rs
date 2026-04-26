@@ -133,19 +133,4 @@ impl<'a> RuntimePreview<'a> {
     pub(crate) fn into_prepared_motion(self) -> PreparedRuntimeMotion {
         PreparedRuntimeMotion::from_runtime(self.runtime)
     }
-
-    #[cfg(test)]
-    pub(crate) fn particles(&self) -> &[Particle] {
-        self.runtime.particles()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn particles_storage_capacity(&self) -> usize {
-        self.runtime.particles.capacity()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn particles_storage_ptr(&self) -> *const Particle {
-        self.runtime.particles.as_ptr()
-    }
 }

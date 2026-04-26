@@ -270,26 +270,6 @@ fn decode_compiled_field_with_solver_and_path(
 }
 
 #[cfg(test)]
-pub(in super::super) fn decode_compiled_field_with_solver(
-    compiled: &CompiledField,
-    cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
-    centerline: &[CenterSample],
-    frame: &RenderFrame,
-    scratch: &mut SolverScratch,
-    solve_ribbon: impl FnOnce(&[RibbonSlice], u32) -> Option<Vec<SliceState>>,
-) -> DecodedFieldTrace {
-    let (cells, path) = decode_compiled_field_with_solver_and_path(
-        compiled,
-        cell_candidates,
-        centerline,
-        frame,
-        scratch,
-        solve_ribbon,
-    );
-    DecodedFieldTrace { cells, path }
-}
-
-#[cfg(test)]
 pub(in super::super) fn decode_compiled_field_trace(
     cell_candidates: &BTreeMap<(i64, i64), Vec<CellCandidate>>,
     centerline: &[CenterSample],
@@ -314,14 +294,15 @@ pub(in super::super) fn decode_compiled_field_trace_with_compiled_and_scratch(
     frame: &RenderFrame,
     scratch: &mut SolverScratch,
 ) -> DecodedFieldTrace {
-    decode_compiled_field_with_solver(
+    let (cells, path) = decode_compiled_field_with_solver_and_path(
         compiled,
         cell_candidates,
         centerline,
         frame,
         scratch,
         solve_ribbon_dp,
-    )
+    );
+    DecodedFieldTrace { cells, path }
 }
 
 pub(in super::super) fn decode_compiled_field_with_compiled_and_scratch(

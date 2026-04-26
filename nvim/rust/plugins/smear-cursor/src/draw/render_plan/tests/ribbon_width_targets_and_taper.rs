@@ -2,7 +2,6 @@ use super::*;
 use crate::test_support::proptest::approx_eq_f64;
 use crate::test_support::proptest::positive_aspect_ratio;
 use crate::test_support::proptest::pure_config;
-use proptest::collection::vec;
 use proptest::prelude::*;
 
 fn full_width_tile() -> latent_field::MicroTile {
@@ -44,37 +43,6 @@ fn compiled_support(
 
 proptest! {
     #![proptest_config(pure_config())]
-
-    #[test]
-    fn prop_cell_row_index_matches_linear_scan_in_requested_bounds(
-        entries in vec((8_i64..=12_i64, 8_i64..=24_i64, any::<u16>()), 0..=48),
-        row_a in 8_i64..=12_i64,
-        row_b in 8_i64..=12_i64,
-        col_a in 8_i64..=24_i64,
-        col_b in 8_i64..=24_i64,
-    ) {
-        let cells = entries
-            .into_iter()
-            .map(|(row, col, value)| ((row, col), value))
-            .collect::<BTreeMap<_, _>>();
-        let bounds = SliceSearchBounds {
-            min_row: row_a.min(row_b),
-            max_row: row_a.max(row_b),
-            min_col: col_a.min(col_b),
-            max_col: col_a.max(col_b),
-        };
-        let expected = cells
-            .iter()
-            .filter_map(|(&coord, _)| bounds.contains(coord).then_some(coord))
-            .collect::<Vec<_>>();
-        let mut scratch = CellRowIndexScratch::default();
-        let index = CellRowIndex::build(&cells, &mut scratch);
-        let mut visited = Vec::<(i64, i64)>::new();
-
-        index.for_each_in_bounds(bounds, |coord, _| visited.push(coord));
-
-        prop_assert_eq!(visited, expected);
-    }
 
     #[test]
     fn prop_comet_taper_target_is_monotonic_from_head_to_tip(

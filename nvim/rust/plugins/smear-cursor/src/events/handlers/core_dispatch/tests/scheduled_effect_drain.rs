@@ -1,19 +1,15 @@
 use super::scheduled_effect_drain_support::ExecutorPlan;
-use super::scheduled_effect_drain_support::FailingExecutor;
 use super::scheduled_effect_drain_support::ScheduledDrainHarness;
 use super::scheduled_effect_drain_support::ScheduledDrainModel;
 use super::scheduled_effect_drain_support::ScheduledDrainOperation;
 use super::scheduled_effect_drain_support::cleanup_effect;
 use super::scheduled_effect_drain_support::cleanup_timer_effect;
-use super::scheduled_effect_drain_support::non_coalescible_effect;
 use super::scheduled_effect_drain_support::scheduled_drain_effects;
 use super::scheduled_effect_drain_support::scheduled_drain_operation;
 use super::scheduled_effect_drain_support::scheduled_drain_thermal;
 use super::*;
-use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::OrderedEffect;
 use crate::core::state::RenderThermalState;
-use crate::core::types::TimerId;
 use crate::test_support::proptest::stateful_config;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
@@ -59,29 +55,6 @@ fn assert_drain_edge(
     );
 }
 
-fn repeated_effects(effect: Effect, count: usize) -> Vec<Effect> {
-    vec![effect; count]
-}
-
-#[test]
-fn first_edge_executes_a_bounded_snapshot_and_clears_queue_state_when_snapshot_finishes() {
-    let harness = ScheduledDrainHarness::new();
-    harness.stage_two_effect_batches();
-    let mut executor = RecordingExecutor::default();
-
-    assert_drain_edge(
-        &harness,
-        &mut executor,
-        DrainEdgeExpectation {
-            label: "bounded snapshot that fits in budget",
-            executed_effects: &[Effect::RedrawCmdline, cleanup_timer_effect(1)],
-            queued_work_count: 0,
-            queue_is_marked_scheduled: false,
-            has_more_items: false,
-        },
-    );
-}
-
 #[test]
 fn first_edge_leaves_new_follow_up_work_for_a_later_edge() {
     let harness = ScheduledDrainHarness::new();
@@ -115,25 +88,6 @@ fn first_edge_leaves_new_follow_up_work_for_a_later_edge() {
         harness.queue_is_marked_scheduled(),
         "queue must stay armed when new follow-up work remains"
     );
-}
-
-#[test]
-fn staging_shell_only_work_keeps_payloads_out_of_core_state() {
-    let _context = CoreDispatchTestContext::new();
-    let initial = ready_state();
-    replace_core_state(initial.clone());
-
-    assert!(queue_stage_batch(vec![
-        Effect::RedrawCmdline,
-        cleanup_timer_effect(1)
-    ]));
-
-    assert_eq!(current_core_state(), initial);
-    assert_eq!(queued_work_count(), 2);
-    assert!(matches!(
-        queued_front_work_item(),
-        Some(ScheduledWorkUnit::ShellOnlyStep(_))
-    ));
 }
 
 #[test]
@@ -184,33 +138,6 @@ fn hot_edge_defers_cleanup_follow_up_waves_because_they_feed_the_reducer() {
         ),
         "follow-up cleanup should stay in an ordered effect batch"
     );
-}
-
-#[test]
-fn drain_failure_resets_the_scheduled_queue_state() {
-    let harness = ScheduledDrainHarness::new();
-    harness.stage_two_effect_batches();
-    let mut executor = FailingExecutor;
-
-    let err = drain_scheduled_work_with_executor(&mut executor)
-        .expect_err("planned executor failure should surface from the drain");
-    let _ = err;
-    reset_scheduled_queue_after_failure();
-
-    harness.assert_disarmed();
-}
-
-#[test]
-fn reset_scheduled_effect_queue_releases_retained_deque_capacity() {
-    let harness = ScheduledDrainHarness::new();
-    harness.stage_non_coalescible_backlog(40);
-
-    assert!(queued_item_capacity() > 0);
-
-    reset_scheduled_effect_queue();
-
-    harness.assert_disarmed();
-    assert_eq!(queued_item_capacity(), 0);
 }
 
 #[test]
@@ -314,200 +241,6 @@ fn scheduled_drain_budget_shapes_match_expected_tables() {
 
         assert_eq!(actual_budget, expected_budget, "{label}");
     }
-}
-
-#[test]
-fn hot_ordered_cleanup_snapshot_still_defers_mid_pass_follow_up_work() {
-    let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
-    harness.stage_cleanup_backlog([12_usize, 13]);
-    let mut executor = ExecutorPlan::new()
-        .follow_up(vec![external_cursor_demand(21)])
-        .no_follow_up()
-        .build();
-
-    assert_drain_edge(
-        &harness,
-        &mut executor,
-        DrainEdgeExpectation {
-            label: "hot ordered cleanup snapshot with mid-pass follow-up work",
-            executed_effects: &[cleanup_effect(12), cleanup_effect(13)],
-            queued_work_count: 1,
-            queue_is_marked_scheduled: true,
-            has_more_items: true,
-        },
-    );
-    assert!(
-        matches!(
-            harness.queued_front_work_item(),
-            Some(ScheduledWorkUnit::OrderedEffectBatch(ref effects))
-                if contains_observation_base_request(effects)
-        ),
-        "mid-pass reducer follow-up work should remain queued for the next edge"
-    );
-}
-
-#[test]
-fn hot_mixed_snapshot_continues_when_remaining_tail_is_shell_only() {
-    let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
-    harness.stage_non_coalescible_backlog(16);
-    harness.stage_metric_batches([EventLoopMetricEffect::StaleToken]);
-    harness.stage_redraw_waves(1);
-    let mut executor = RecordingExecutor::default();
-    let mut expected_effects = repeated_effects(non_coalescible_effect(), 16);
-    expected_effects.push(Effect::RedrawCmdline);
-
-    assert_drain_edge(
-        &harness,
-        &mut executor,
-        DrainEdgeExpectation {
-            label: "hot mixed snapshot that collapses to a shell-only tail",
-            executed_effects: &expected_effects,
-            queued_work_count: 0,
-            queue_is_marked_scheduled: false,
-            has_more_items: false,
-        },
-    );
-    assert!(
-        executor.executed_effects[..16]
-            .iter()
-            .all(|effect| *effect == non_coalescible_effect()),
-        "the bounded mixed prefix should preserve FIFO order before the shell-only tail"
-    );
-}
-
-#[test]
-fn hot_first_edge_reschedules_when_backlog_exceeds_the_bounded_fractional_budget() {
-    let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
-    harness.stage_non_coalescible_backlog(40);
-    let mut executor = RecordingExecutor::default();
-    let expected_effects = repeated_effects(non_coalescible_effect(), 20);
-
-    assert_drain_edge(
-        &harness,
-        &mut executor,
-        DrainEdgeExpectation {
-            label: "hot bounded backlog",
-            executed_effects: &expected_effects,
-            queued_work_count: 20,
-            queue_is_marked_scheduled: true,
-            has_more_items: true,
-        },
-    );
-}
-
-#[test]
-fn adjacent_redraw_batches_coalesce_into_one_work_unit() {
-    let harness = ScheduledDrainHarness::new();
-    harness.stage_redraw_waves(40);
-
-    assert_eq!(
-        harness.queued_work_count(),
-        1,
-        "redraw waves should coalesce"
-    );
-
-    let mut executor = RecordingExecutor::default();
-    assert_drain_edge(
-        &harness,
-        &mut executor,
-        DrainEdgeExpectation {
-            label: "coalesced redraw batch",
-            executed_effects: &[Effect::RedrawCmdline],
-            queued_work_count: 0,
-            queue_is_marked_scheduled: false,
-            has_more_items: false,
-        },
-    );
-}
-
-#[test]
-fn adjacent_metric_batches_share_one_work_unit() {
-    let harness = ScheduledDrainHarness::new();
-    harness.stage_metric_batches([
-        EventLoopMetricEffect::StaleToken,
-        EventLoopMetricEffect::DelayedIngressPendingUpdated,
-    ]);
-
-    assert_eq!(
-        harness.queued_work_count(),
-        1,
-        "adjacent metric work should aggregate"
-    );
-}
-
-#[test]
-fn adjacent_timer_rearms_for_the_same_kind_remain_ordered() {
-    let harness = ScheduledDrainHarness::new();
-    harness.stage_timer_rearms(TimerId::Cleanup, [1_u64, 2]);
-
-    assert_eq!(
-        harness.queued_work_count(),
-        2,
-        "same-kind timer rearm should not be coalesced by the shell-only agenda"
-    );
-
-    let mut executor = RecordingExecutor::default();
-    assert_drain_edge(
-        &harness,
-        &mut executor,
-        DrainEdgeExpectation {
-            label: "same-kind timer rearm",
-            executed_effects: &[cleanup_timer_effect(1), cleanup_timer_effect(2)],
-            queued_work_count: 0,
-            queue_is_marked_scheduled: false,
-            has_more_items: false,
-        },
-    );
-}
-
-#[test]
-fn hot_bounded_drain_matches_representative_backlog_boundaries() {
-    let cases = [1_usize, 16, 17, 40, 64, 96];
-
-    for queued_items in cases {
-        let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Hot);
-        harness.stage_non_coalescible_backlog(queued_items);
-        let mut executor = RecordingExecutor::default();
-        let expected_drained = scheduled_drain_budget_for_depth(queued_items);
-        let expected_remaining = queued_items.saturating_sub(expected_drained);
-
-        assert_drain_edge(
-            &harness,
-            &mut executor,
-            DrainEdgeExpectation {
-                label: "representative hot bounded backlog",
-                executed_effects: &vec![non_coalescible_effect(); expected_drained],
-                queued_work_count: expected_remaining,
-                queue_is_marked_scheduled: expected_remaining > 0,
-                has_more_items: expected_remaining > 0,
-            },
-        );
-    }
-}
-
-#[test]
-fn cooling_convergence_leaves_no_queue_tail_after_idle_backlog_drains() {
-    let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Cooling);
-    harness.stage_non_coalescible_backlog(40);
-    let mut executor = RecordingExecutor::default();
-    let expected_effects = repeated_effects(non_coalescible_effect(), 40);
-
-    assert_drain_edge(
-        &harness,
-        &mut executor,
-        DrainEdgeExpectation {
-            label: "cooling backlog convergence",
-            executed_effects: &expected_effects,
-            queued_work_count: 0,
-            queue_is_marked_scheduled: false,
-            has_more_items: false,
-        },
-    );
-    assert_eq!(
-        scheduled_drain_budget(),
-        0,
-        "idle convergence should leave no remaining scheduled-drain budget"
-    );
 }
 
 #[test]

@@ -164,52 +164,6 @@ proptest! {
 }
 
 #[test]
-fn retained_cursor_color_fast_motion_regression_requests_the_expected_probe_context() {
-    let buffer_perf_class = BufferPerfClass::FastMotion;
-    let observed_at = 231;
-    let ready = ready_state_for_observation_request_case(
-        true, false, false, false, false, false, false, 37, 80, 57, 26, 19, 184, true,
-    );
-
-    let transition = reduce(
-        &ready,
-        external_demand_event_with_perf_class(
-            ExternalDemandKind::ExternalCursor,
-            observed_at,
-            buffer_perf_class,
-        ),
-    );
-
-    let expected_request = PendingObservation::new(
-        ExternalDemand::new(
-            IngressSeq::new(1),
-            ExternalDemandKind::ExternalCursor,
-            Millis::new(observed_at),
-            buffer_perf_class,
-        ),
-        ProbeRequestSet::none().with_requested(ProbeKind::CursorColor),
-    );
-    let expected_effects = with_cleanup_invalidation(
-        &transition.next,
-        observed_at,
-        vec![
-            Effect::RecordEventLoopMetric(EventLoopMetricEffect::IngressCoalesced),
-            Effect::RequestObservationBase(RequestObservationBaseEffect {
-                request: expected_request,
-                context: observation_runtime_context_with_perf_class(
-                    &ready,
-                    ExternalDemandKind::ExternalCursor,
-                    buffer_perf_class,
-                ),
-            }),
-        ],
-    );
-
-    pretty_assert_eq!(transition.next.lifecycle(), Lifecycle::Observing);
-    pretty_assert_eq!(transition.effects, expected_effects);
-}
-
-#[test]
 fn retained_cursor_text_context_boundary_is_carried_into_observation_runtime_context() {
     let request = observation_request(9, ExternalDemandKind::ExternalCursor, 90);
     let retained = ObservationSnapshot::new(

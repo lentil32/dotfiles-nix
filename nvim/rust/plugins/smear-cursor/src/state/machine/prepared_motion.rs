@@ -62,11 +62,6 @@ impl PreparedRuntimeMotion {
             transient,
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn particles_capacity(&self) -> usize {
-        self.particles.capacity()
-    }
 }
 
 impl RuntimeState {

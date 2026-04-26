@@ -163,13 +163,6 @@ fn highlight_state(level: u32) -> DecodedCellState {
     }
 }
 
-fn decoded_state(glyph: DecodedGlyph, level: u32) -> DecodedCellState {
-    DecodedCellState {
-        glyph,
-        level: HighlightLevel::from_raw_clamped(level),
-    }
-}
-
 fn ordered_candidates(mut candidates: Vec<CellCandidate>) -> Vec<CellCandidate> {
     candidates.sort_by(|lhs, rhs| candidate_cmp(*lhs, *rhs, None));
     candidates
@@ -343,57 +336,8 @@ fn compiled_single_cell(
     BTreeMap::from([((10_i64, 10_i64), latent_field::CompiledCell { tile, age })])
 }
 
-fn compiled_field(compiled: &BTreeMap<(i64, i64), latent_field::CompiledCell>) -> CompiledField {
-    CompiledField::Reference(compiled.clone())
-}
-
-fn compiled_rows(
-    compiled: &BTreeMap<(i64, i64), latent_field::CompiledCell>,
-) -> latent_field::CellRows<latent_field::CompiledCell> {
-    let mut rows = latent_field::CellRows::default();
-    for (&coord, &cell) in compiled {
-        let _ = rows.insert(coord, cell);
-    }
-    rows
-}
-
 fn count_state_toggles(states: &[DecodedCellState]) -> usize {
     states.windows(2).filter(|pair| pair[0] != pair[1]).count()
-}
-
-fn dense_slice_with_candidate_fanout(cell_count: usize, candidate_count: usize) -> RibbonSlice {
-    let cells = (0..cell_count)
-        .map(|cell_index| {
-            let candidates = ordered_candidates(
-                (0..candidate_count)
-                    .map(|candidate_index| CellCandidate {
-                        state: Some(decoded_state(
-                            DecodedGlyph::Block,
-                            2 + ((cell_index * candidate_count + candidate_index) % 13) as u32,
-                        )),
-                        unary_cost: 40
-                            + ((cell_index * 29 + candidate_index * 17 + candidate_index) % 113)
-                                as u64,
-                    })
-                    .collect::<Vec<_>>(),
-            );
-            slice_cell_with_candidates(
-                (10, 10 + cell_index as i64),
-                cell_index as f64 * 0.7,
-                0.45,
-                180 + (cell_index as u64 * 9),
-                candidates,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    RibbonSlice {
-        cells,
-        tail_u: 0.58,
-        target_width_cells: 2.4,
-        tip_width_cap_cells: COMET_MIN_RESOLVABLE_WIDTH,
-        transverse_width_penalty: 0.35,
-    }
 }
 
 fn render_frame_to_plan_reference(
@@ -438,5 +382,4 @@ mod field_reference_and_scratch;
 mod projected_span_geometry;
 mod ribbon_dp_and_slice_candidates;
 mod ribbon_width_targets_and_taper;
-mod slice_state_enumeration;
 mod staged_deposits_and_metric_projection;

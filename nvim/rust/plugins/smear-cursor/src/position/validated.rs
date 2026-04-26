@@ -26,24 +26,6 @@ impl ScreenCell {
         Some(Self { row, col })
     }
 
-    /// Validates an exact host-reported screen cell without rounding.
-    #[cfg(test)]
-    pub(crate) fn from_host_point(point: RenderPoint) -> Option<Self> {
-        if !point.row.is_finite()
-            || !point.col.is_finite()
-            || point.row.fract() != 0.0
-            || point.col.fract() != 0.0
-            || point.row < 1.0
-            || point.col < 1.0
-            || point.row > i64::MAX as f64
-            || point.col > i64::MAX as f64
-        {
-            return None;
-        }
-
-        Self::new(point.row as i64, point.col as i64)
-    }
-
     pub(crate) fn from_rounded_point(point: RenderPoint) -> Option<Self> {
         if !point.row.is_finite() || !point.col.is_finite() {
             return None;

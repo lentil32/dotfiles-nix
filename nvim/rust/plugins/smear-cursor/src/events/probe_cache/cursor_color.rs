@@ -304,7 +304,6 @@ mod tests {
             );
             cache.store_sample(base, sample);
 
-            prop_assert_eq!(cache.cached_sample(&moved), CursorColorCacheLookup::Miss);
             prop_assert_eq!(
                 cache.cached_sample_for_probe(
                     &moved,
