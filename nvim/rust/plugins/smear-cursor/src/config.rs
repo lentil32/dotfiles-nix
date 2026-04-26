@@ -13,8 +13,8 @@ use std::sync::Arc;
 pub(crate) const DEFAULT_ANIMATION_FPS: f64 = 72.0;
 pub(crate) const DEFAULT_BLOCK_ASPECT_RATIO: f64 = 2.0;
 // Keep the default cap aligned with the measured window-switch scenarios: the
-// refreshed `perf/window-pool-cap-current.md` snapshot peaks at 18 requested
-// windows with zero cap hits, so 64 still leaves more than 3x burst headroom.
+// refreshed `perf/current.md` snapshot keeps peak requested windows well below
+// the 64-window cap, preserving burst headroom with zero cap hits.
 pub(crate) const DEFAULT_MAX_KEPT_WINDOWS: usize = 64;
 pub(crate) const MAX_COLOR_LEVELS: u32 = 256;
 
