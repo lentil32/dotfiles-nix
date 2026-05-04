@@ -9,6 +9,9 @@ use crate::events::ingress::AutocmdIngress;
 mod state;
 mod telemetry;
 
+use super::decayed_ewma::NonNegativeFiniteMs;
+use super::decayed_ewma::TelemetryInstantMs;
+use super::runtime::now_ms as runtime_now_ms;
 use super::runtime::read_event_loop_state as runtime_read_event_loop_state;
 use super::runtime::with_event_loop_state as runtime_with_event_loop_state;
 #[cfg(test)]
@@ -86,16 +89,20 @@ pub(super) fn clear_observation_request_timestamp() {
     with_event_loop_state(EventLoopState::clear_observation_request_timestamp);
 }
 
-pub(super) fn record_cursor_callback_duration(duration_ms: f64) {
-    with_event_loop_state(|state| state.record_cursor_callback_duration(duration_ms));
+pub(super) fn record_cursor_callback_duration(
+    duration: NonNegativeFiniteMs,
+    observed_at: TelemetryInstantMs,
+) {
+    with_event_loop_state(|state| state.record_cursor_callback_duration(duration, observed_at));
 }
 
 pub(super) fn clear_cursor_callback_duration_estimate() {
     with_event_loop_state(EventLoopState::clear_cursor_callback_duration_estimate);
 }
 
-pub(super) fn cursor_callback_duration_estimate_ms() -> f64 {
-    read_event_loop_state(EventLoopState::cursor_callback_duration_estimate_ms).unwrap_or(0.0)
+pub(super) fn cursor_callback_duration_estimate_ms_at(query_at: TelemetryInstantMs) -> f64 {
+    read_event_loop_state(|state| state.cursor_callback_duration_estimate_ms_at(query_at))
+        .unwrap_or(0.0)
 }
 
 pub(super) fn record_ingress_received() {
@@ -237,8 +244,9 @@ pub(super) fn record_probe_refresh_budget_exhausted_count(kind: ProbeKind, count
 }
 
 pub(super) fn diagnostics_snapshot() -> EventLoopDiagnostics {
-    read_event_loop_state(EventLoopState::diagnostics_snapshot)
-        .unwrap_or_else(|| EventLoopState::new().diagnostics_snapshot())
+    let query_at = TelemetryInstantMs::saturating_from(runtime_now_ms());
+    read_event_loop_state(|state| state.diagnostics_snapshot_at(query_at))
+        .unwrap_or_else(|| EventLoopState::new().diagnostics_snapshot_at(query_at))
 }
 
 pub(super) fn record_probe_extmark_fallback(kind: ProbeKind) {

@@ -26,10 +26,10 @@ use crate::core::types::TimerGeneration;
 use crate::core::types::TimerId;
 use crate::events::RealCursorVisibility;
 use crate::events::cursor::BufferMetadata;
+use crate::events::decayed_ewma::TelemetryInstantMs;
 #[cfg(feature = "perf-counters")]
 use crate::events::ingress::AutocmdIngress;
 use crate::events::policy::BufferEventPolicy;
-use crate::events::policy::BufferPerfTelemetry;
 use crate::events::timer_protocol::FiredHostTimer;
 use crate::events::timer_protocol::HostCallbackId;
 use crate::events::timer_protocol::HostTimerId;
@@ -211,8 +211,10 @@ fn colorscheme_boundary_clears_only_color_dependent_shell_caches() {
     assert_eq!(cached_metadata, Some(metadata));
     assert_eq!(cached_policy, Some(policy));
     assert_eq!(
-        cached_telemetry.map(BufferPerfTelemetry::callback_duration_estimate_ms),
-        Some(SHELL_CACHE_TEST_CALLBACK_DURATION_MS)
+        cached_telemetry.map(|telemetry| {
+            telemetry.callback_duration_estimate_ms_at(SHELL_CACHE_TEST_CALLBACK_OBSERVED_AT_MS)
+        }),
+        Some(Some(SHELL_CACHE_TEST_CALLBACK_DURATION_MS))
     );
     assert_eq!(text_revision, Some(Generation::new(1)));
     assert_eq!(colorscheme_generation, Generation::new(1));
@@ -682,6 +684,7 @@ fn validation_counters_report_marks_the_feature_as_disabled() {
 
 const SHELL_CACHE_TEST_BUFFER_HANDLE: i64 = 91;
 const SHELL_CACHE_TEST_CALLBACK_DURATION_MS: f64 = 12.0;
+const SHELL_CACHE_TEST_CALLBACK_OBSERVED_AT_MS: f64 = 1_000.0;
 
 fn shell_cache_context_key() -> super::super::probe_cache::CursorTextContextCacheKey {
     super::super::probe_cache::CursorTextContextCacheKey::new(
@@ -737,10 +740,13 @@ fn prime_shell_boundary_state() -> (
     let color_witness = shell_cache_color_witness(Generation::INITIAL, Generation::INITIAL);
 
     mutate_shell_state(|state| {
-        state.buffer_perf_telemetry_cache.record_callback_duration(
-            SHELL_CACHE_TEST_BUFFER_HANDLE,
-            SHELL_CACHE_TEST_CALLBACK_DURATION_MS,
-        );
+        state
+            .buffer_perf_telemetry_cache
+            .record_callback_duration_at(
+                SHELL_CACHE_TEST_BUFFER_HANDLE,
+                SHELL_CACHE_TEST_CALLBACK_DURATION_MS,
+                SHELL_CACHE_TEST_CALLBACK_OBSERVED_AT_MS,
+            );
     })
     .expect("shell state access should succeed");
 
@@ -748,7 +754,7 @@ fn prime_shell_boundary_state() -> (
         &snapshot,
         SHELL_CACHE_TEST_BUFFER_HANDLE,
         &metadata,
-        1_000.0,
+        /*observed_at_ms*/ 1_000.0,
     );
 
     mutate_shell_state(|state| {
@@ -803,7 +809,59 @@ fn ingress_snapshot_capture_with_current_buffer_uses_the_supplied_handle_for_cal
     let previous_core_state = core_state().expect("core state read should succeed");
     super::reset_event_loop_for_test();
     clear_cursor_callback_duration_estimate();
-    record_cursor_callback_duration(None, 3.0);
+    record_cursor_callback_duration(/*buffer_handle*/ None, /*duration_ms*/ 3.0);
+
+    let mut runtime = crate::state::RuntimeState::default();
+    runtime.set_enabled(false);
+    set_core_state(crate::core::state::CoreState::default().with_runtime(runtime))
+        .expect("core state write should succeed");
+    let callback_observed_at =
+        TelemetryInstantMs::new(1_000.0).expect("test callback timestamp must be finite");
+    mutate_shell_state(|state| {
+        state.buffer_perf_telemetry_cache.clear();
+        state
+            .buffer_perf_telemetry_cache
+            .record_callback_duration_at(
+                i64::from(TARGET_BUFFER_HANDLE),
+                /*duration_ms*/ 12.0,
+                callback_observed_at.get(),
+            );
+        state
+            .buffer_perf_telemetry_cache
+            .record_callback_duration_at(
+                OTHER_BUFFER_HANDLE,
+                /*duration_ms*/ 5.0,
+                callback_observed_at.get(),
+            );
+    })
+    .expect("shell state access should succeed");
+
+    let buffer = api::Buffer::from(TARGET_BUFFER_HANDLE);
+    let snapshot =
+        IngressReadSnapshot::capture_with_current_buffer_at(Some(&buffer), callback_observed_at)
+            .expect("ingress snapshot capture should succeed");
+
+    assert_eq!(snapshot.callback_duration_estimate_ms(), 12.0);
+    assert_eq!(snapshot.current_buffer_event_policy(), None);
+
+    set_core_state(previous_core_state).expect("core state restore should succeed");
+}
+
+#[test]
+fn pressure_only_local_telemetry_falls_back_to_global_callback_estimate() {
+    const TARGET_BUFFER_HANDLE: i32 = 41;
+
+    let previous_core_state = core_state().expect("core state read should succeed");
+    super::reset_event_loop_for_test();
+    clear_cursor_callback_duration_estimate();
+
+    let observed_at =
+        TelemetryInstantMs::new(1_000.0).expect("test callback timestamp must be finite");
+    record_cursor_callback_duration_at(
+        /*buffer_handle*/ None,
+        /*duration_ms*/ 12.0,
+        observed_at,
+    );
 
     let mut runtime = crate::state::RuntimeState::default();
     runtime.set_enabled(false);
@@ -813,19 +871,15 @@ fn ingress_snapshot_capture_with_current_buffer_uses_the_supplied_handle_for_cal
         state.buffer_perf_telemetry_cache.clear();
         state
             .buffer_perf_telemetry_cache
-            .record_callback_duration(i64::from(TARGET_BUFFER_HANDLE), 12.0);
-        state
-            .buffer_perf_telemetry_cache
-            .record_callback_duration(OTHER_BUFFER_HANDLE, 5.0);
+            .record_conceal_full_scan(i64::from(TARGET_BUFFER_HANDLE), observed_at.get());
     })
     .expect("shell state access should succeed");
 
     let buffer = api::Buffer::from(TARGET_BUFFER_HANDLE);
-    let snapshot = IngressReadSnapshot::capture_with_current_buffer(Some(&buffer))
+    let snapshot = IngressReadSnapshot::capture_with_current_buffer_at(Some(&buffer), observed_at)
         .expect("ingress snapshot capture should succeed");
 
     assert_eq!(snapshot.callback_duration_estimate_ms(), 12.0);
-    assert_eq!(snapshot.current_buffer_event_policy(), None);
 
     set_core_state(previous_core_state).expect("core state restore should succeed");
 }
@@ -856,6 +910,8 @@ fn resolve_policy_for_test(
     metadata: &BufferMetadata,
     observed_at_ms: f64,
 ) -> BufferEventPolicy {
-    resolve_buffer_event_policy_for_metadata(snapshot, buffer_handle, metadata, observed_at_ms)
+    let observed_at =
+        TelemetryInstantMs::new(observed_at_ms).expect("test policy timestamp must be finite");
+    resolve_buffer_event_policy_for_metadata(snapshot, buffer_handle, metadata, observed_at)
         .expect("runtime policy resolution should succeed")
 }

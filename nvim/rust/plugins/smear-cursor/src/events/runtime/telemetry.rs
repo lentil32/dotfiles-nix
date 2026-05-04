@@ -1,6 +1,7 @@
+use super::super::decayed_ewma::NonNegativeFiniteMs;
+use super::super::decayed_ewma::TelemetryInstantMs;
 use super::super::event_loop;
 use super::super::ingress::AutocmdIngress;
-use super::super::policy::BufferPerfTelemetry;
 use super::shell::try_record_telemetry;
 use super::shell::with_buffer_perf_telemetry_cache;
 use super::timers::now_ms;
@@ -42,13 +43,29 @@ pub(crate) fn clear_observation_request_timestamp() {
     event_loop::clear_observation_request_timestamp();
 }
 
+pub(crate) fn telemetry_instant_now() -> TelemetryInstantMs {
+    TelemetryInstantMs::saturating_from(now_ms())
+}
+
+#[cfg(test)]
 pub(crate) fn record_cursor_callback_duration(
     buffer_handle: Option<BufferHandle>,
     duration_ms: f64,
 ) {
-    event_loop::record_cursor_callback_duration(duration_ms);
+    record_cursor_callback_duration_at(buffer_handle, duration_ms, telemetry_instant_now());
+}
+
+pub(crate) fn record_cursor_callback_duration_at(
+    buffer_handle: Option<BufferHandle>,
+    duration_ms: f64,
+    observed_at: TelemetryInstantMs,
+) {
+    let Some(duration) = NonNegativeFiniteMs::new(duration_ms) else {
+        return;
+    };
+    event_loop::record_cursor_callback_duration(duration, observed_at);
     let _ = try_record_telemetry(buffer_handle, |telemetry, buffer_handle| {
-        telemetry.record_callback_duration(buffer_handle, duration_ms);
+        telemetry.record_callback_duration(buffer_handle, duration, observed_at);
     });
 }
 
@@ -56,17 +73,20 @@ pub(crate) fn clear_cursor_callback_duration_estimate() {
     event_loop::clear_cursor_callback_duration_estimate();
 }
 
-pub(crate) fn cursor_callback_duration_estimate_ms(buffer_handle: Option<BufferHandle>) -> f64 {
+pub(crate) fn cursor_callback_duration_estimate_ms_at(
+    buffer_handle: Option<BufferHandle>,
+    query_at: TelemetryInstantMs,
+) -> f64 {
     let local_estimate = buffer_handle.and_then(|buffer_handle| {
         with_buffer_perf_telemetry_cache(|telemetry| {
             telemetry
                 .telemetry(buffer_handle)
-                .map(BufferPerfTelemetry::callback_duration_estimate_ms)
+                .and_then(|telemetry| telemetry.callback_duration_estimate_ms(query_at))
         })
         .ok()
         .flatten()
     });
-    local_estimate.unwrap_or_else(event_loop::cursor_callback_duration_estimate_ms)
+    local_estimate.unwrap_or_else(|| event_loop::cursor_callback_duration_estimate_ms_at(query_at))
 }
 
 pub(crate) fn record_ingress_received() {

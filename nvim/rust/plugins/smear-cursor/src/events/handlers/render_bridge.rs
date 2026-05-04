@@ -3,10 +3,11 @@ use super::super::host_bridge::ensure_namespace_id;
 use super::super::logging::log_slow_callback;
 use super::super::logging::should_log_slow_callback;
 use super::super::logging::warn;
-use super::super::runtime::cursor_callback_duration_estimate_ms;
+use super::super::runtime::cursor_callback_duration_estimate_ms_at;
 use super::super::runtime::now_ms;
-use super::super::runtime::record_cursor_callback_duration;
+use super::super::runtime::record_cursor_callback_duration_at;
 use super::super::runtime::record_degraded_draw_application;
+use super::super::runtime::telemetry_instant_now;
 use super::super::runtime::to_core_millis;
 use super::super::trace::apply_report_summary;
 use super::super::trace::proposal_summary;
@@ -18,6 +19,7 @@ use crate::core::event::EffectFailedEvent;
 use crate::core::event::Event as CoreEvent;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::RealizationDivergence;
+use std::time::Instant;
 
 pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -> Vec<CoreEvent> {
     let observed_at = to_core_millis(now_ms());
@@ -33,7 +35,7 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
         )
     });
     let apply_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let apply_started_ms = now_ms();
+        let apply_started_at = Instant::now();
         let namespace_id = match ensure_namespace_id() {
             Ok(namespace_id) => namespace_id,
             Err(err) => {
@@ -66,9 +68,11 @@ pub(crate) fn execute_core_apply_proposal_effect(payload: ApplyProposalEffect) -
 
         let apply_result = apply_render_action(namespace_id, &proposal);
 
-        let apply_duration_ms = (now_ms() - apply_started_ms).max(0.0);
-        record_cursor_callback_duration(buffer_handle, apply_duration_ms);
-        let apply_duration_estimate_ms = cursor_callback_duration_estimate_ms(buffer_handle);
+        let apply_completed_at = telemetry_instant_now();
+        let apply_duration_ms = apply_started_at.elapsed().as_secs_f64() * 1000.0;
+        record_cursor_callback_duration_at(buffer_handle, apply_duration_ms, apply_completed_at);
+        let apply_duration_estimate_ms =
+            cursor_callback_duration_estimate_ms_at(buffer_handle, apply_completed_at);
         let should_log_apply_perf = should_log_slow_callback(apply_duration_ms);
 
         match apply_result {

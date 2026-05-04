@@ -46,6 +46,8 @@ use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
 use crate::core::types::TimerId;
+use crate::events::decayed_ewma::NonNegativeFiniteMs;
+use crate::events::decayed_ewma::TelemetryInstantMs;
 use crate::test_support::proptest::pure_config;
 use crate::test_support::proptest::timer_id;
 use pretty_assertions::assert_eq;
@@ -56,6 +58,14 @@ const PERF_COUNTERS_ENABLED: bool = cfg!(feature = "perf-counters");
 
 fn reset_event_loop_state() {
     with_event_loop_state_for_test(|state| *state = EventLoopState::new());
+}
+
+fn non_negative_ms(value_ms: f64) -> NonNegativeFiniteMs {
+    NonNegativeFiniteMs::new(value_ms).expect("test duration must be finite")
+}
+
+fn telemetry_instant(value_ms: f64) -> TelemetryInstantMs {
+    TelemetryInstantMs::new(value_ms).expect("test instant must be finite")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -732,6 +742,18 @@ proptest! {
 
         assert_diagnostics_match_model(diagnostics_snapshot(), &model);
     }
+}
+
+#[test]
+fn diagnostics_reports_decayed_callback_duration_estimate() {
+    reset_event_loop_state();
+
+    let diagnostics = with_event_loop_state_for_test(|state| {
+        state.record_cursor_callback_duration(non_negative_ms(16.0), telemetry_instant(1_000.0));
+        state.diagnostics_snapshot_at(telemetry_instant(11_000.0))
+    });
+
+    assert_eq!(diagnostics.callback_duration_ewma_ms, 4.0);
 }
 
 #[test]

@@ -33,10 +33,11 @@ use crate::host::NeovimHost;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::panic::resume_unwind;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+
+const MONOTONIC_CLOCK_OFFSET_MS: f64 = 1.0;
 
 fn with_timer_bridge<R>(accessor: impl FnOnce(&mut TimerBridge) -> R) -> RuntimeAccessResult<R> {
     let mut bridge = take_timer_bridge()?;
@@ -403,11 +404,13 @@ pub(crate) fn duration_to_micros(duration: Duration) -> u64 {
 }
 
 pub(crate) fn now_ms() -> f64 {
-    let duration = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration,
-        Err(err) => err.duration(),
-    };
-    duration.as_secs_f64() * 1000.0
+    static CLOCK_START: OnceLock<Instant> = OnceLock::new();
+    CLOCK_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs_f64()
+        * 1000.0
+        + MONOTONIC_CLOCK_OFFSET_MS
 }
 
 #[cfg(test)]

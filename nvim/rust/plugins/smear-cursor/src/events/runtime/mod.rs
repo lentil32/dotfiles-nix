@@ -119,7 +119,7 @@ pub(super) use shell::take_background_probe_request_scratch;
 pub(super) use shell::take_conceal_regions_scratch;
 #[cfg(test)]
 pub(super) use telemetry::clear_cursor_callback_duration_estimate;
-pub(super) use telemetry::cursor_callback_duration_estimate_ms;
+pub(super) use telemetry::cursor_callback_duration_estimate_ms_at;
 pub(super) use telemetry::note_autocmd_event_now;
 pub(super) use telemetry::record_buffer_metadata_read;
 pub(crate) use telemetry::record_compiled_field_cache_hit;
@@ -132,7 +132,9 @@ pub(super) use telemetry::record_conceal_screen_cell_cache_hit;
 pub(super) use telemetry::record_conceal_screen_cell_cache_miss;
 pub(super) use telemetry::record_cursor_autocmd_fast_path_continued;
 pub(super) use telemetry::record_cursor_autocmd_fast_path_dropped;
+#[cfg(test)]
 pub(super) use telemetry::record_cursor_callback_duration;
+pub(super) use telemetry::record_cursor_callback_duration_at;
 pub(super) use telemetry::record_cursor_color_cache_hit;
 pub(super) use telemetry::record_cursor_color_cache_miss;
 pub(super) use telemetry::record_cursor_color_probe_reuse;
@@ -172,6 +174,7 @@ pub(super) use telemetry::record_scheduled_drain_reschedule_for_thermal;
 pub(super) use telemetry::record_scheduled_queue_depth;
 pub(super) use telemetry::record_scheduled_queue_depth_for_thermal;
 pub(super) use telemetry::record_stale_token_event_count;
+pub(super) use telemetry::telemetry_instant_now;
 #[cfg(test)]
 pub(super) use timer_bridge::CoreTimerHandle;
 pub(super) use timers::dispatch_core_timer_fired;

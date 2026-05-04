@@ -3,6 +3,7 @@ use thiserror::Error;
 
 mod buffer_text_revision;
 mod cursor;
+mod decayed_ewma;
 mod event_loop;
 mod handlers;
 mod host_bridge;
@@ -79,20 +80,6 @@ pub(crate) use timers::schedule_guarded;
 
 const LOG_SOURCE_NAME: &str = "smear_cursor";
 const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
-const CALLBACK_DURATION_EWMA_ALPHA: f64 = 0.25;
-
-fn update_callback_duration_ewma(previous_estimate_ms: f64, duration_ms: f64) -> Option<f64> {
-    if !duration_ms.is_finite() {
-        return None;
-    }
-
-    let observed = duration_ms.max(0.0);
-    Some(if previous_estimate_ms <= 0.0 {
-        observed
-    } else {
-        previous_estimate_ms + CALLBACK_DURATION_EWMA_ALPHA * (observed - previous_estimate_ms)
-    })
-}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct HostBridgeRevision(u32);

@@ -1,39 +1,11 @@
+use super::super::decayed_ewma::DecayedCounter;
+use super::super::decayed_ewma::DecayedEwma;
+use super::super::decayed_ewma::NonNegativeFiniteMs;
+use super::super::decayed_ewma::TelemetryInstantMs;
 use super::super::lru_cache::LruCache;
 use crate::host::BufferHandle;
 
 const BUFFER_PERF_TELEMETRY_CACHE_CAPACITY: usize = 32;
-const PRESSURE_SIGNAL_HALF_LIFE_MS: f64 = 5_000.0;
-
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct DecayingPressureSignal {
-    score: f64,
-    last_event_at_ms: f64,
-}
-
-impl DecayingPressureSignal {
-    fn record_event(&mut self, observed_at_ms: f64) {
-        if !observed_at_ms.is_finite() {
-            return;
-        }
-
-        let observed_at_ms = observed_at_ms.max(0.0);
-        self.score = self.value_at(observed_at_ms) + 1.0;
-        self.last_event_at_ms = observed_at_ms;
-    }
-
-    fn value_at(self, observed_at_ms: f64) -> f64 {
-        if self.score <= 0.0 {
-            return 0.0;
-        }
-
-        if !observed_at_ms.is_finite() {
-            return self.score.max(0.0);
-        }
-
-        let elapsed_ms = (observed_at_ms.max(0.0) - self.last_event_at_ms.max(0.0)).max(0.0);
-        self.score * 0.5_f64.powf(elapsed_ms / PRESSURE_SIGNAL_HALF_LIFE_MS)
-    }
-}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(in crate::events) struct BufferPerfSignals {
@@ -56,51 +28,94 @@ impl BufferPerfSignals {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::events) struct BufferPerfTelemetry {
-    callback_duration_estimate_ms: f64,
-    cursor_color_extmark_fallback_pressure: DecayingPressureSignal,
-    conceal_full_scan_pressure: DecayingPressureSignal,
-    conceal_deferred_projection_pressure: DecayingPressureSignal,
+    callback_duration: DecayedEwma,
+    cursor_color_extmark_fallback_pressure: DecayedCounter,
+    conceal_full_scan_pressure: DecayedCounter,
+    conceal_deferred_projection_pressure: DecayedCounter,
+}
+
+impl Default for BufferPerfTelemetry {
+    fn default() -> Self {
+        Self {
+            callback_duration: DecayedEwma::callback_duration(),
+            cursor_color_extmark_fallback_pressure: DecayedCounter::pressure_signal(),
+            conceal_full_scan_pressure: DecayedCounter::pressure_signal(),
+            conceal_deferred_projection_pressure: DecayedCounter::pressure_signal(),
+        }
+    }
 }
 
 impl BufferPerfTelemetry {
-    pub(in crate::events) fn record_callback_duration(&mut self, duration_ms: f64) {
-        if let Some(next_estimate_ms) = super::super::update_callback_duration_ewma(
-            self.callback_duration_estimate_ms,
-            duration_ms,
-        ) {
-            self.callback_duration_estimate_ms = next_estimate_ms;
-        }
+    pub(in crate::events) fn record_callback_duration(
+        &mut self,
+        duration: NonNegativeFiniteMs,
+        observed_at: TelemetryInstantMs,
+    ) {
+        self.callback_duration.record_at(duration, observed_at);
     }
 
-    pub(in crate::events) const fn callback_duration_estimate_ms(self) -> f64 {
-        self.callback_duration_estimate_ms
+    pub(in crate::events) fn record_callback_duration_at(
+        &mut self,
+        duration_ms: f64,
+        observed_at_ms: f64,
+    ) {
+        let Some(duration) = NonNegativeFiniteMs::new(duration_ms) else {
+            return;
+        };
+        let Some(observed_at) = TelemetryInstantMs::new(observed_at_ms) else {
+            return;
+        };
+        self.record_callback_duration(duration, observed_at);
+    }
+
+    pub(in crate::events) fn callback_duration_estimate_ms(
+        self,
+        query_at: TelemetryInstantMs,
+    ) -> Option<f64> {
+        self.callback_duration.value_at(query_at)
+    }
+
+    pub(in crate::events) fn callback_duration_estimate_ms_at(
+        self,
+        query_at_ms: f64,
+    ) -> Option<f64> {
+        self.callback_duration.value_at_ms(query_at_ms)
     }
 
     pub(in crate::events) fn record_cursor_color_extmark_fallback(&mut self, observed_at_ms: f64) {
+        let Some(observed_at) = TelemetryInstantMs::new(observed_at_ms) else {
+            return;
+        };
         self.cursor_color_extmark_fallback_pressure
-            .record_event(observed_at_ms);
+            .record_at(observed_at);
     }
 
     pub(in crate::events) fn record_conceal_full_scan(&mut self, observed_at_ms: f64) {
-        self.conceal_full_scan_pressure.record_event(observed_at_ms);
+        let Some(observed_at) = TelemetryInstantMs::new(observed_at_ms) else {
+            return;
+        };
+        self.conceal_full_scan_pressure.record_at(observed_at);
     }
 
     pub(in crate::events) fn record_conceal_deferred_projection(&mut self, observed_at_ms: f64) {
+        let Some(observed_at) = TelemetryInstantMs::new(observed_at_ms) else {
+            return;
+        };
         self.conceal_deferred_projection_pressure
-            .record_event(observed_at_ms);
+            .record_at(observed_at);
     }
 
     pub(in crate::events) fn signals_at(self, observed_at_ms: f64) -> BufferPerfSignals {
         BufferPerfSignals {
             cursor_color_extmark_fallback_pressure: self
                 .cursor_color_extmark_fallback_pressure
-                .value_at(observed_at_ms),
-            conceal_full_scan_pressure: self.conceal_full_scan_pressure.value_at(observed_at_ms),
+                .value_at_ms(observed_at_ms),
+            conceal_full_scan_pressure: self.conceal_full_scan_pressure.value_at_ms(observed_at_ms),
             conceal_deferred_projection_pressure: self
                 .conceal_deferred_projection_pressure
-                .value_at(observed_at_ms),
+                .value_at_ms(observed_at_ms),
         }
     }
 }
@@ -144,13 +159,25 @@ impl BufferPerfTelemetryCache {
         telemetry
     }
 
-    pub(in crate::events) fn record_callback_duration(
+    pub(in crate::events) fn record_callback_duration_at(
         &mut self,
         buffer_handle: impl Into<BufferHandle>,
         duration_ms: f64,
+        observed_at_ms: f64,
     ) -> BufferPerfTelemetry {
         self.update_telemetry_entry(buffer_handle, |telemetry| {
-            telemetry.record_callback_duration(duration_ms);
+            telemetry.record_callback_duration_at(duration_ms, observed_at_ms);
+        })
+    }
+
+    pub(in crate::events) fn record_callback_duration(
+        &mut self,
+        buffer_handle: impl Into<BufferHandle>,
+        duration: NonNegativeFiniteMs,
+        observed_at: TelemetryInstantMs,
+    ) -> BufferPerfTelemetry {
+        self.update_telemetry_entry(buffer_handle, |telemetry| {
+            telemetry.record_callback_duration(duration, observed_at);
         })
     }
 
@@ -204,11 +231,14 @@ mod tests {
     use super::BufferPerfTelemetry;
     use super::BufferPerfTelemetryCache;
     use crate::test_support::proptest::pure_config;
+    use pretty_assertions::assert_eq;
     use proptest::collection::vec;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     const CALLBACK_DURATION_EWMA_ALPHA: f64 = 0.25;
+    const CALLBACK_DURATION_DECAY_HALF_LIFE_MS: f64 = 5_000.0;
+    const PRESSURE_SIGNAL_HALF_LIFE_MS: f64 = 5_000.0;
 
     #[derive(Clone, Copy, Debug)]
     enum FloatCase {
@@ -254,29 +284,68 @@ mod tests {
         Record {
             buffer_handle: i64,
             duration_ms: FloatCase,
+            observed_at_ms: FloatCase,
+            query_at_ms: FloatCase,
         },
     }
 
     fn callback_op() -> BoxedStrategy<CallbackOp> {
-        (0_i64..4_i64, duration_case())
-            .prop_map(|(buffer_handle, duration_ms)| CallbackOp::Record {
-                buffer_handle,
-                duration_ms,
-            })
+        (
+            0_i64..4_i64,
+            duration_case(),
+            timestamp_case(),
+            timestamp_case(),
+        )
+            .prop_map(
+                |(buffer_handle, duration_ms, observed_at_ms, query_at_ms)| CallbackOp::Record {
+                    buffer_handle,
+                    duration_ms,
+                    observed_at_ms,
+                    query_at_ms,
+                },
+            )
             .boxed()
     }
 
-    fn update_callback_estimate(previous_estimate_ms: f64, duration_ms: f64) -> f64 {
-        if !duration_ms.is_finite() {
-            return previous_estimate_ms;
+    fn update_callback_estimate(previous_estimate_ms: Option<f64>, duration_ms: f64) -> f64 {
+        let observed_ms = duration_ms.max(0.0);
+        match previous_estimate_ms {
+            Some(previous_estimate_ms) => {
+                previous_estimate_ms
+                    + CALLBACK_DURATION_EWMA_ALPHA * (observed_ms - previous_estimate_ms)
+            }
+            None => observed_ms,
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct CallbackDurationModel {
+        estimate_ms: Option<f64>,
+        recorded_at_ms: Option<f64>,
+    }
+
+    impl CallbackDurationModel {
+        fn record(&mut self, duration_ms: f64, observed_at_ms: f64) {
+            if !duration_ms.is_finite() || !observed_at_ms.is_finite() {
+                return;
+            }
+
+            let observed_at_ms = observed_at_ms.max(0.0);
+            self.estimate_ms = Some(update_callback_estimate(
+                self.value_at(observed_at_ms),
+                duration_ms,
+            ));
+            self.recorded_at_ms = Some(observed_at_ms);
         }
 
-        let observed_ms = duration_ms.max(0.0);
-        if previous_estimate_ms <= 0.0 {
-            observed_ms
-        } else {
-            previous_estimate_ms
-                + CALLBACK_DURATION_EWMA_ALPHA * (observed_ms - previous_estimate_ms)
+        fn value_at(self, query_at_ms: f64) -> Option<f64> {
+            let estimate_ms = self.estimate_ms?;
+            let recorded_at_ms = self.recorded_at_ms?;
+            if !query_at_ms.is_finite() {
+                return Some(estimate_ms);
+            }
+            let elapsed_ms = (query_at_ms.max(0.0) - recorded_at_ms.max(0.0)).max(0.0);
+            Some(estimate_ms * f64::exp2(-elapsed_ms / CALLBACK_DURATION_DECAY_HALF_LIFE_MS))
         }
     }
 
@@ -337,7 +406,7 @@ mod tests {
             }
 
             let elapsed_ms = (observed_at_ms.max(0.0) - self.last_event_at_ms.max(0.0)).max(0.0);
-            self.score * 0.5_f64.powf(elapsed_ms / super::PRESSURE_SIGNAL_HALF_LIFE_MS)
+            self.score * f64::exp2(-elapsed_ms / PRESSURE_SIGNAL_HALF_LIFE_MS)
         }
     }
 
@@ -406,6 +475,39 @@ mod tests {
             .boxed()
     }
 
+    #[test]
+    fn callback_duration_estimate_decays_after_idle() {
+        let mut telemetry = BufferPerfTelemetry::default();
+        telemetry.record_callback_duration_at(
+            /*duration_ms*/ 16.0, /*observed_at_ms*/ 1_000.0,
+        );
+
+        assert_eq!(
+            telemetry.callback_duration_estimate_ms_at(/*query_at_ms*/ 1_000.0),
+            Some(16.0)
+        );
+        assert_eq!(
+            telemetry.callback_duration_estimate_ms_at(/*query_at_ms*/ 11_000.0),
+            Some(4.0)
+        );
+    }
+
+    #[test]
+    fn callback_duration_record_after_idle_uses_decayed_prior_estimate() {
+        let mut telemetry = BufferPerfTelemetry::default();
+        telemetry.record_callback_duration_at(
+            /*duration_ms*/ 16.0, /*observed_at_ms*/ 1_000.0,
+        );
+        telemetry.record_callback_duration_at(
+            /*duration_ms*/ 2.0, /*observed_at_ms*/ 11_000.0,
+        );
+
+        assert_eq!(
+            telemetry.callback_duration_estimate_ms_at(/*query_at_ms*/ 11_000.0),
+            Some(3.5)
+        );
+    }
+
     proptest! {
         #![proptest_config(pure_config())]
 
@@ -414,32 +516,48 @@ mod tests {
             operations in vec(callback_op(), 1..64),
         ) {
             let mut cache = BufferPerfTelemetryCache::default();
-            let mut model = BTreeMap::<i64, f64>::new();
+            let mut model = BTreeMap::<i64, CallbackDurationModel>::new();
 
             for operation in operations {
                 match operation {
                     CallbackOp::Record {
                         buffer_handle,
                         duration_ms,
+                        observed_at_ms,
+                        query_at_ms,
                     } => {
                         let duration_ms = duration_ms.value();
-                        let estimate = model.entry(buffer_handle).or_insert(0.0);
-                        *estimate = update_callback_estimate(*estimate, duration_ms);
+                        let observed_at_ms = observed_at_ms.value();
+                        let query_at_ms = query_at_ms.value();
+                        model
+                            .entry(buffer_handle)
+                            .or_default()
+                            .record(duration_ms, observed_at_ms);
 
                         let actual = cache
-                            .record_callback_duration(buffer_handle, duration_ms)
-                            .callback_duration_estimate_ms();
-                        prop_assert_eq!(actual, *estimate);
-                    }
-                }
+                            .record_callback_duration_at(buffer_handle, duration_ms, observed_at_ms)
+                            .callback_duration_estimate_ms_at(query_at_ms);
+                        prop_assert_eq!(
+                            actual,
+                            model
+                                .get(&buffer_handle)
+                                .copied()
+                                .expect("the recorded buffer must exist in the reference model")
+                                .value_at(query_at_ms),
+                        );
 
-                for buffer_handle in 0_i64..4_i64 {
-                    prop_assert_eq!(
-                        cache
-                            .telemetry(buffer_handle)
-                            .map(BufferPerfTelemetry::callback_duration_estimate_ms),
-                        model.get(&buffer_handle).copied(),
-                    );
+                        for compare_buffer in 0_i64..4_i64 {
+                            prop_assert_eq!(
+                                cache
+                                    .telemetry(compare_buffer)
+                                    .map(|telemetry| telemetry.callback_duration_estimate_ms_at(query_at_ms)),
+                                model
+                                    .get(&compare_buffer)
+                                    .copied()
+                                    .map(|telemetry| telemetry.value_at(query_at_ms)),
+                            );
+                        }
+                    }
                 }
             }
         }

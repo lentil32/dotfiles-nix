@@ -216,7 +216,10 @@ fn buffer_churn_invalidation_clears_all_target_buffer_local_caches() {
         )
     );
 
-    assert_eq!(target_telemetry.callback_duration_estimate_ms(), 0.0);
+    assert_eq!(
+        target_telemetry.callback_duration_estimate_ms_at(/*query_at_ms*/ 0.0),
+        None
+    );
 }
 
 #[test]

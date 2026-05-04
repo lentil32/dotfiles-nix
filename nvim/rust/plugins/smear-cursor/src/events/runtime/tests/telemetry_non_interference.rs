@@ -18,6 +18,7 @@ use crate::core::state::RenderThermalState;
 use crate::core::types::IngressSeq;
 use crate::core::types::Lifecycle;
 use crate::core::types::Millis;
+use crate::events::decayed_ewma::TelemetryInstantMs;
 use crate::events::runtime::record_cursor_callback_duration;
 use crate::events::runtime::record_delayed_ingress_pending_update_count;
 use crate::events::runtime::record_ingress_coalesced_count;
@@ -121,9 +122,10 @@ fn record_representative_telemetry_samples() {
 
 fn record_representative_telemetry_samples_while_lane_is_borrowed() {
     with_event_loop_state_for_test(|state| {
-        let before = state.diagnostics_snapshot();
+        let query_at = TelemetryInstantMs::ZERO;
+        let before = state.diagnostics_snapshot_at(query_at);
         record_representative_telemetry_samples();
-        pretty_assert_eq!(state.diagnostics_snapshot(), before);
+        pretty_assert_eq!(state.diagnostics_snapshot_at(query_at), before);
     });
 }
 

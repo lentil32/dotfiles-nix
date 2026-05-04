@@ -8,6 +8,7 @@ use super::super::policy::IngressCursorPresentationPolicy;
 use crate::config::BufferPerfMode;
 use crate::position::ScreenCell;
 use crate::test_support::proptest::pure_config;
+use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 
 const LINES_REASON_BIT: u8 = 1 << 0;
@@ -463,6 +464,44 @@ fn hysteresis_reason_bit(reason: HysteresisReason) -> u8 {
         HysteresisReason::ConcealScan => CONCEAL_SCAN_REASON_BIT,
         HysteresisReason::ConcealDeferred => CONCEAL_DEFERRED_REASON_BIT,
     }
+}
+
+#[test]
+fn slow_callback_policy_releases_after_idle_decay() {
+    let mut telemetry = BufferPerfTelemetry::default();
+    telemetry
+        .record_callback_duration_at(/*duration_ms*/ 16.0, /*observed_at_ms*/ 1_000.0);
+    let slow_policy = BufferEventPolicy::from_test_input_with_perf_mode(
+        None,
+        supported_policy_input(
+            SupportedBufferCase::ListedNormal,
+            BufferPerfMode::Auto,
+            1,
+            telemetry
+                .callback_duration_estimate_ms_at(/*query_at_ms*/ 1_000.0)
+                .expect("callback sample should be present"),
+            BufferPerfSignals::default(),
+            false,
+        ),
+    );
+    let recovered_policy = BufferEventPolicy::from_test_input_with_perf_mode(
+        Some(slow_policy),
+        supported_policy_input(
+            SupportedBufferCase::ListedNormal,
+            BufferPerfMode::Auto,
+            1,
+            telemetry
+                .callback_duration_estimate_ms_at(/*query_at_ms*/ 11_000.0)
+                .expect("callback sample should be present"),
+            BufferPerfSignals::default(),
+            false,
+        ),
+    );
+
+    assert_eq!(slow_policy.perf_class(), BufferPerfClass::FastMotion);
+    assert_eq!(slow_policy.observed_reason_bits(), SLOW_CALLBACK_REASON_BIT);
+    assert_eq!(recovered_policy.perf_class(), BufferPerfClass::Full);
+    assert_eq!(recovered_policy.observed_reason_bits(), 0);
 }
 
 proptest! {

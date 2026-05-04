@@ -1,3 +1,6 @@
+use super::super::decayed_ewma::DecayedEwma;
+use super::super::decayed_ewma::NonNegativeFiniteMs;
+use super::super::decayed_ewma::TelemetryInstantMs;
 use super::RuntimeBehaviorMetrics;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -12,16 +15,16 @@ pub(in crate::events) struct EventLoopDiagnostics {
 pub(in crate::events) struct EventLoopState {
     last_autocmd_event_ms: f64,
     last_observation_request_ms: f64,
-    callback_duration_ewma_ms: f64,
+    callback_duration: DecayedEwma,
     runtime_metrics: RuntimeBehaviorMetrics,
 }
 
 impl EventLoopState {
-    pub(in crate::events) const fn new() -> Self {
+    pub(in crate::events) fn new() -> Self {
         Self {
             last_autocmd_event_ms: 0.0,
             last_observation_request_ms: 0.0,
-            callback_duration_ewma_ms: 0.0,
+            callback_duration: DecayedEwma::callback_duration(),
             runtime_metrics: RuntimeBehaviorMetrics::new(),
         }
     }
@@ -52,20 +55,23 @@ impl EventLoopState {
         self.last_observation_request_ms = 0.0;
     }
 
-    pub(in crate::events) fn record_cursor_callback_duration(&mut self, duration_ms: f64) {
-        if let Some(next_estimate_ms) =
-            super::super::update_callback_duration_ewma(self.callback_duration_ewma_ms, duration_ms)
-        {
-            self.callback_duration_ewma_ms = next_estimate_ms;
-        }
+    pub(in crate::events) fn record_cursor_callback_duration(
+        &mut self,
+        duration: NonNegativeFiniteMs,
+        observed_at: TelemetryInstantMs,
+    ) {
+        self.callback_duration.record_at(duration, observed_at);
     }
 
     pub(in crate::events) fn clear_cursor_callback_duration_estimate(&mut self) {
-        self.callback_duration_ewma_ms = 0.0;
+        self.callback_duration.clear();
     }
 
-    pub(in crate::events) fn cursor_callback_duration_estimate_ms(&self) -> f64 {
-        self.callback_duration_ewma_ms.max(0.0)
+    pub(in crate::events) fn cursor_callback_duration_estimate_ms_at(
+        &self,
+        query_at: TelemetryInstantMs,
+    ) -> f64 {
+        self.callback_duration.value_at(query_at).unwrap_or(0.0)
     }
 
     pub(in crate::events) fn runtime_metrics_mut(&mut self) -> &mut RuntimeBehaviorMetrics {
@@ -76,12 +82,15 @@ impl EventLoopState {
         self.runtime_metrics
     }
 
-    pub(in crate::events) fn diagnostics_snapshot(&self) -> EventLoopDiagnostics {
+    pub(in crate::events) fn diagnostics_snapshot_at(
+        &self,
+        query_at: TelemetryInstantMs,
+    ) -> EventLoopDiagnostics {
         EventLoopDiagnostics {
             metrics: self.runtime_metrics(),
             last_autocmd_event_ms: self.last_autocmd_event_ms,
             last_observation_request_ms: self.last_observation_request_ms,
-            callback_duration_ewma_ms: self.callback_duration_ewma_ms.max(0.0),
+            callback_duration_ewma_ms: self.cursor_callback_duration_estimate_ms_at(query_at),
         }
     }
 }

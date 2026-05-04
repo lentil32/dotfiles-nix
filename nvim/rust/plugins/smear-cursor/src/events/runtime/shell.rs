@@ -3,6 +3,7 @@ use super::super::HostBridgeState;
 use super::super::RealCursorVisibility;
 use super::super::ShellState;
 use super::super::cursor::BufferMetadata;
+use super::super::decayed_ewma::TelemetryInstantMs;
 use super::super::policy::BufferEventPolicy;
 use super::super::policy::buffer_event_policy_from_snapshot;
 use super::super::probe_cache::CachedCursorColorProbeSample;
@@ -24,7 +25,6 @@ use super::cell::take_shell_state;
 use super::editor_viewport::EditorViewportCache;
 use super::recovery::RuntimeRecoveryPlan;
 use super::timers::capture_runtime_timer_bridge_recovery_state;
-use super::timers::now_ms;
 use crate::core::effect::ProbePolicy;
 use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
@@ -129,19 +129,20 @@ pub(crate) fn buffer_text_revision(
 pub(crate) fn resolved_current_buffer_event_policy(
     snapshot: &IngressReadSnapshot,
     buffer: &api::Buffer,
+    observed_at: TelemetryInstantMs,
 ) -> Result<BufferEventPolicy> {
     let buffer_handle = BufferHandle::from_buffer(buffer);
     let metadata =
         mutate_shell_state(|state| state.buffer_metadata_cache.read(&NeovimHost, buffer))
             .map_err(nvim_oxi::Error::from)??;
-    resolve_buffer_event_policy_for_metadata(snapshot, buffer_handle, &metadata, now_ms())
+    resolve_buffer_event_policy_for_metadata(snapshot, buffer_handle, &metadata, observed_at)
 }
 
 pub(crate) fn resolve_buffer_event_policy_for_metadata(
     snapshot: &IngressReadSnapshot,
     buffer_handle: impl Into<BufferHandle>,
     metadata: &BufferMetadata,
-    observed_at_ms: f64,
+    observed_at: TelemetryInstantMs,
 ) -> Result<BufferEventPolicy> {
     let buffer_handle = buffer_handle.into();
     let (previous, telemetry) = read_shell_state(|state| {
@@ -154,8 +155,13 @@ pub(crate) fn resolve_buffer_event_policy_for_metadata(
         )
     })
     .map_err(nvim_oxi::Error::from)?;
-    let policy =
-        buffer_event_policy_from_snapshot(snapshot, metadata, previous, telemetry, observed_at_ms);
+    let policy = buffer_event_policy_from_snapshot(
+        snapshot,
+        metadata,
+        previous,
+        telemetry,
+        observed_at.get(),
+    );
     mutate_shell_state(|state| {
         state
             .buffer_perf_policy_cache

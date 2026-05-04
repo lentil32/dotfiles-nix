@@ -6,6 +6,7 @@ use super::with_core_read;
 use crate::config::BufferPerfMode;
 use crate::config::RuntimeConfig;
 use crate::core::state::BufferPerfClass;
+use crate::events::decayed_ewma::TelemetryInstantMs;
 use crate::host::BufferHandle;
 use crate::host::api;
 use crate::position::RenderPoint;
@@ -124,8 +125,16 @@ impl IngressReadSnapshot {
     pub(crate) fn capture_with_current_buffer(
         current_buffer: Option<&api::Buffer>,
     ) -> RuntimeAccessResult<Self> {
-        let callback_duration_estimate_ms = super::cursor_callback_duration_estimate_ms(
+        Self::capture_with_current_buffer_at(current_buffer, super::telemetry_instant_now())
+    }
+
+    pub(crate) fn capture_with_current_buffer_at(
+        current_buffer: Option<&api::Buffer>,
+        observed_at: TelemetryInstantMs,
+    ) -> RuntimeAccessResult<Self> {
+        let callback_duration_estimate_ms = super::cursor_callback_duration_estimate_ms_at(
             current_buffer.map(BufferHandle::from_buffer),
+            observed_at,
         );
         let mut snapshot = with_core_read(|state| {
             let runtime = state.runtime();
@@ -147,7 +156,7 @@ impl IngressReadSnapshot {
         })?;
         if snapshot.enabled {
             snapshot.current_buffer_event_policy =
-                snapshot.read_current_buffer_event_policy(current_buffer);
+                snapshot.read_current_buffer_event_policy(current_buffer, observed_at);
         }
         Ok(snapshot)
     }
@@ -233,10 +242,11 @@ impl IngressReadSnapshot {
     fn read_current_buffer_event_policy(
         &self,
         buffer: Option<&api::Buffer>,
+        observed_at: TelemetryInstantMs,
     ) -> Option<BufferEventPolicy> {
         let buffer = buffer?;
 
-        match resolved_current_buffer_event_policy(self, buffer) {
+        match resolved_current_buffer_event_policy(self, buffer, observed_at) {
             Ok(policy) => Some(policy),
             Err(err) => {
                 warn(&format!(
