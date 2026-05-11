@@ -74,45 +74,56 @@ mod tests {
     use super::path::strip_known_prefixes;
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
-    use rstest::rstest;
     use std::path::Component;
 
-    #[rstest]
-    #[case("oil://foo", "foo")]
-    #[case("file://bar", "bar")]
-    #[case("oil://file://baz", "baz")]
-    #[case("plain", "plain")]
-    #[case("file://oil://path", "oil://path")]
-    fn strip_known_prefixes_cases(#[case] input: &str, #[case] expected: &str) {
-        assert_eq!(strip_known_prefixes(input), expected);
+    #[test]
+    fn strip_known_prefixes_cases() {
+        let cases = [
+            ("oil://foo", "foo"),
+            ("file://bar", "bar"),
+            ("oil://file://baz", "baz"),
+            ("plain", "plain"),
+            ("file://oil://path", "oil://path"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(strip_known_prefixes(input), expected);
+        }
     }
 
-    #[rstest]
-    #[case("http://example.com", true)]
-    #[case("git+ssh://host", true)]
-    #[case("file://path", true)]
-    #[case("oil://path", true)]
-    #[case("abc:def", false)]
-    #[case("C:\\\\path", false)]
-    #[case("1://bad", false)]
-    #[case("", false)]
-    fn has_uri_scheme_cases(#[case] input: &str, #[case] expected: bool) {
-        assert_eq!(has_uri_scheme(input), expected);
+    #[test]
+    fn has_uri_scheme_cases() {
+        let cases = [
+            ("http://example.com", true),
+            ("git+ssh://host", true),
+            ("file://path", true),
+            ("oil://path", true),
+            ("abc:def", false),
+            ("C:\\\\path", false),
+            ("1://bad", false),
+            ("", false),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(has_uri_scheme(input), expected);
+        }
     }
 
-    #[rstest]
-    #[case("http://example.com", Some(("http", "example.com")))]
-    #[case("git+ssh://host/repo", Some(("git+ssh", "host/repo")))]
-    #[case("file://path", Some(("file", "path")))]
-    #[case("C:\\\\path", None)]
-    #[case("1://bad", None)]
-    #[case("://bad", None)]
-    #[case("", None)]
-    fn split_uri_scheme_and_rest_cases(
-        #[case] input: &str,
-        #[case] expected: Option<(&str, &str)>,
-    ) {
-        assert_eq!(split_uri_scheme_and_rest(input), expected);
+    #[test]
+    fn split_uri_scheme_and_rest_cases() {
+        let cases = [
+            ("http://example.com", Some(("http", "example.com"))),
+            ("git+ssh://host/repo", Some(("git+ssh", "host/repo"))),
+            ("file://path", Some(("file", "path"))),
+            ("C:\\\\path", None),
+            ("1://bad", None),
+            ("://bad", None),
+            ("", None),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(split_uri_scheme_and_rest(input), expected);
+        }
     }
 
     #[test]

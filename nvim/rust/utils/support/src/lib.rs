@@ -1,8 +1,6 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use derive_more::Display;
-
 pub mod cycle;
 
 /// Returns `Some(value)` when `value` is strictly positive, otherwise `None`.
@@ -21,7 +19,7 @@ impl std::fmt::Display for EmptyStringError {
 
 impl std::error::Error for EmptyStringError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Display)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct NonEmptyString(String);
 
 impl NonEmptyString {
@@ -56,6 +54,12 @@ impl From<NonEmptyString> for String {
     }
 }
 
+impl std::fmt::Display for NonEmptyString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRoot(PathBuf);
 
@@ -70,7 +74,7 @@ impl ProjectRoot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Display)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabTitle(NonEmptyString);
 
 impl TabTitle {
@@ -90,6 +94,12 @@ impl TabTitle {
 impl From<NonEmptyString> for TabTitle {
     fn from(value: NonEmptyString) -> Self {
         Self(value)
+    }
+}
+
+impl std::fmt::Display for TabTitle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

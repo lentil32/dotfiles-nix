@@ -31,15 +31,13 @@ nvimrs-nvim-utils = { path = "utils/nvim-utils" }
 nvimrs-support = { path = "utils/support" }
 
 # External
-derive_more = { version = "2.1.1", features = ["display"] }
 hostname = "0.4.2"
-insta = "1.47.2"
+insta = { version = "1.47.2", default-features = false }
 nonempty = "0.12.0"
 nvim-oxi = { version = "0.6.0", features = ["neovim-0-11"] }
 percent-encoding = "2.3.2"
 pretty_assertions = "1.4.1"
-proptest = "1.11.0"
-rstest = "0.26.1"
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 serde = "1.0.228"
 serde_json = "1.0.149"
 thiserror = "2.0.18"

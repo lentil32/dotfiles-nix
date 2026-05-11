@@ -366,6 +366,7 @@ mod tests {
     use crate::core::state::IngressObservationSurface;
     use crate::host::CurrentEditorCall;
     use crate::host::FakeCurrentEditorPort;
+    use crate::host::api;
     use crate::position::BufferLine;
     use crate::position::CursorObservation;
     use crate::position::ObservedCell;
@@ -413,14 +414,8 @@ mod tests {
         .expect("ingress-backed capture should succeed");
 
         assert_eq!(snapshot.mode(), "n");
-        assert_eq!(
-            snapshot.window().map(nvim_oxi::api::Window::handle),
-            Some(11)
-        );
-        assert_eq!(
-            snapshot.buffer().map(nvim_oxi::api::Buffer::handle),
-            Some(17)
-        );
+        assert_eq!(snapshot.window().map(api::Window::handle), Some(11));
+        assert_eq!(snapshot.buffer().map(api::Buffer::handle), Some(17));
         assert_eq!(snapshot.ingress_surface(), Some(&surface_snapshot()));
         assert_eq!(snapshot.ingress_cursor(), Some(cursor_observation()));
         assert_eq!(
@@ -446,14 +441,8 @@ mod tests {
                 .expect("live capture should succeed");
 
         assert_eq!(snapshot.mode(), "n");
-        assert_eq!(
-            snapshot.window().map(nvim_oxi::api::Window::handle),
-            Some(11)
-        );
-        assert_eq!(
-            snapshot.buffer().map(nvim_oxi::api::Buffer::handle),
-            Some(17)
-        );
+        assert_eq!(snapshot.window().map(api::Window::handle), Some(11));
+        assert_eq!(snapshot.buffer().map(api::Buffer::handle), Some(17));
         assert_eq!(snapshot.ingress_surface(), None);
         assert_eq!(snapshot.ingress_cursor(), None);
         assert_eq!(

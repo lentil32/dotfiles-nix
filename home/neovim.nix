@@ -47,9 +47,7 @@ in
           lockFile = rustWorkspace + "/Cargo.lock";
           outputHashes = rustLockHashes.byCrate;
         };
-        toKebab = lib.strings.replaceStrings [ "_" ] [ "-" ];
         toSnake = lib.strings.replaceStrings [ "-" ] [ "_" ];
-        mkPname = crate: "${toKebab crate}-nvim";
         runtimeDirs = [
           "autoload"
           "colors"
@@ -65,64 +63,29 @@ in
           "snippets"
           "syntax"
         ];
-        mkInstallPhase = libBase: outBase: runtimeRoot: ''
-          runHook preInstall
-          mkdir -p $out
-          ${lib.optionalString (runtimeRoot != null) ''
+        installRuntime =
+          {
+            runtimeRoot ? null,
+            ...
+          }:
+          lib.optionalString (runtimeRoot != null) ''
             for runtimeDir in ${lib.concatStringsSep " " runtimeDirs}; do
               if [ -d "${runtimeRoot}/$runtimeDir" ]; then
                 mkdir -p "$out/$runtimeDir"
                 cp -R "${runtimeRoot}/$runtimeDir"/. "$out/$runtimeDir/"
               fi
             done
-          ''}
-          mkdir -p $out/lua
-          lib=""
-          if [ -f target/release/lib${libBase}.dylib ]; then
-            lib=target/release/lib${libBase}.dylib
-          elif [ -f target/release/lib${libBase}.so ]; then
-            lib=target/release/lib${libBase}.so
-          elif [ -f target/release/${libBase}.dll ]; then
-            lib=target/release/${libBase}.dll
-          else
-            lib=$(find target -type f \( -name "lib${libBase}.dylib" -o -name "lib${libBase}.so" -o -name "${libBase}.dll" \) | head -n 1)
-          fi
-          if [ -z "$lib" ]; then
-            echo "${libBase} library not found" >&2
-            exit 1
-          fi
-          case "$lib" in
-            *.dll) install -m755 "$lib" "$out/lua/${outBase}.dll" ;;
-            *.dylib|*.so) install -m755 "$lib" "$out/lua/${outBase}.so" ;;
-            *)
-              echo "${libBase} library not found: $lib" >&2
-              exit 1
-              ;;
-          esac
-          runHook postInstall
-        '';
-        mkRustPlugin =
+          '';
+        installRustLibrary =
           {
             crate,
-            pname ? mkPname crate,
             libBase ? toSnake crate,
             outBase ? libBase,
-            runtimeRoot ? null,
-            cargoBuildFlags ? [
-              "--locked"
-              "--package"
-              crate
-            ],
+            ...
           }:
-          pkgs.rustPlatform.buildRustPackage {
-            inherit pname;
-            version = "0.1.0";
-            src = rustWorkspace;
-            cargoLock = rustCargoLock;
-            cargoBuildFlags = cargoBuildFlags;
-            doCheck = false;
-            installPhase = mkInstallPhase libBase outBase runtimeRoot;
-          };
+          ''
+            install_rust_plugin ${lib.escapeShellArg libBase} ${lib.escapeShellArg outBase}
+          '';
         rustPluginSpecs = [
           { crate = "nvimrs-project-root"; }
           { crate = "nvimrs-plugin-util"; }
@@ -136,7 +99,57 @@ in
           }
           { crate = "nvimrs-theme-switcher"; }
         ];
-        rustPluginList = map mkRustPlugin rustPluginSpecs;
+        rustPluginPackage = pkgs.rustPlatform.buildRustPackage {
+          pname = "nvimrs-native-plugins";
+          version = "0.1.0";
+          src = rustWorkspace;
+          cargoLock = rustCargoLock;
+          cargoBuildFlags = [
+            "--locked"
+          ]
+          ++ lib.concatMap (spec: [
+            "--package"
+            spec.crate
+          ]) rustPluginSpecs;
+          doCheck = false;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out $out/lua
+
+            install_rust_plugin() {
+              libBase="$1"
+              outBase="$2"
+              lib=""
+              if [ -f "target/release/lib''${libBase}.dylib" ]; then
+                lib="target/release/lib''${libBase}.dylib"
+              elif [ -f "target/release/lib''${libBase}.so" ]; then
+                lib="target/release/lib''${libBase}.so"
+              elif [ -f "target/release/''${libBase}.dll" ]; then
+                lib="target/release/''${libBase}.dll"
+              else
+                lib=$(find target -type f \( -name "lib''${libBase}.dylib" -o -name "lib''${libBase}.so" -o -name "''${libBase}.dll" \) | head -n 1)
+              fi
+              if [ -z "$lib" ]; then
+                echo "''${libBase} library not found" >&2
+                exit 1
+              fi
+              case "$lib" in
+                *.dll) install -m755 "$lib" "$out/lua/''${outBase}.dll" ;;
+                *.dylib|*.so) install -m755 "$lib" "$out/lua/''${outBase}.so" ;;
+                *)
+                  echo "''${libBase} library not found: $lib" >&2
+                  exit 1
+                  ;;
+              esac
+            }
+
+            ${lib.concatMapStrings installRuntime rustPluginSpecs}
+            ${lib.concatMapStrings installRustLibrary rustPluginSpecs}
+
+            runHook postInstall
+          '';
+        };
+        rustPluginList = [ rustPluginPackage ];
         categoriesConfig = {
           general = {
             startupPlugins = [
