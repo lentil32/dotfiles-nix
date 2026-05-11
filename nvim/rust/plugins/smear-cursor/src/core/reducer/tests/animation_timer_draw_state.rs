@@ -56,14 +56,6 @@ fn animation_timer_draw_stages_a_draw_proposal_against_the_retained_projection_t
     };
 
     pretty_assert_eq!(
-        scene
-            .retained_projection()
-            .expect("retained projection after draw render")
-            .reuse_key()
-            .target_cell_presentation(),
-        proposal.side_effects().target_cell_presentation
-    );
-    pretty_assert_eq!(
         draw.palette().color_levels(),
         state.runtime().config.color_levels
     );

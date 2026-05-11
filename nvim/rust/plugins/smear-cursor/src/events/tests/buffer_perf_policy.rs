@@ -512,7 +512,6 @@ proptest! {
         enabled in any::<bool>(),
         animating in any::<bool>(),
         mode_allowed in any::<bool>(),
-        hide_target_hack in any::<bool>(),
         outside_cmdline in any::<bool>(),
         with_prepaint_cell in any::<bool>(),
         row in 1_i64..64_i64,
@@ -526,18 +525,12 @@ proptest! {
             enabled,
             animating,
             mode_allowed,
-            hide_target_hack,
             outside_cmdline,
             prepaint_cell,
             windows_zindex,
         );
 
-        let expected = if enabled
-            && !animating
-            && mode_allowed
-            && !hide_target_hack
-            && outside_cmdline
-        {
+        let expected = if enabled && !animating && mode_allowed && outside_cmdline {
             prepaint_cell.map_or(
                 IngressCursorPresentationPolicy::HideCursor,
                 |cell| IngressCursorPresentationPolicy::HideCursorAndPrepaint {

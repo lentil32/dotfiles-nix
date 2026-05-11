@@ -351,11 +351,6 @@ pub(crate) fn record_planning_preview_copied_particles(particle_count: usize) {
 pub(crate) fn record_planning_preview_copied_particles(_particle_count: usize) {}
 
 #[cfg(feature = "perf-counters")]
-pub(crate) fn record_planning_preview_copy(particle_count: usize) {
-    event_loop::record_planning_preview_copy(particle_count);
-}
-
-#[cfg(feature = "perf-counters")]
 pub(crate) fn record_particle_simulation_step(particle_count: usize) {
     event_loop::record_particle_simulation_step(particle_count);
 }

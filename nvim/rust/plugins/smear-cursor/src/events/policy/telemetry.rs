@@ -56,6 +56,7 @@ impl BufferPerfTelemetry {
         self.callback_duration.record_at(duration, observed_at);
     }
 
+    #[cfg(test)]
     pub(in crate::events) fn record_callback_duration_at(
         &mut self,
         duration_ms: f64,
@@ -77,6 +78,7 @@ impl BufferPerfTelemetry {
         self.callback_duration.value_at(query_at)
     }
 
+    #[cfg(test)]
     pub(in crate::events) fn callback_duration_estimate_ms_at(
         self,
         query_at_ms: f64,
@@ -159,6 +161,7 @@ impl BufferPerfTelemetryCache {
         telemetry
     }
 
+    #[cfg(test)]
     pub(in crate::events) fn record_callback_duration_at(
         &mut self,
         buffer_handle: impl Into<BufferHandle>,

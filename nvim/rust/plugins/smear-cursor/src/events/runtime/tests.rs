@@ -604,8 +604,10 @@ fn validation_counters_report_renders_particle_counter_summary() {
     crate::events::record_particle_simulation_step(5);
     crate::events::record_particle_simulation_step(3);
     crate::events::record_particle_aggregation(7);
-    crate::events::record_planning_preview_copy(5);
-    crate::events::record_planning_preview_copy(3);
+    crate::events::record_planning_preview_invocation();
+    crate::events::record_planning_preview_copied_particles(5);
+    crate::events::record_planning_preview_invocation();
+    crate::events::record_planning_preview_copied_particles(3);
     crate::events::record_projection_reuse_hit();
     crate::events::record_projection_reuse_miss();
     crate::events::record_projection_reuse_miss();

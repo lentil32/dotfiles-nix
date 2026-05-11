@@ -29,6 +29,7 @@ impl NonNegativeFiniteMs {
 pub(in crate::events) struct PositiveFiniteMs(f64);
 
 impl PositiveFiniteMs {
+    #[cfg(test)]
     pub(in crate::events) fn new(value_ms: f64) -> Option<Self> {
         (value_ms.is_finite() && value_ms > 0.0).then_some(Self(value_ms))
     }
@@ -65,6 +66,7 @@ impl TelemetryInstantMs {
 pub(in crate::events) struct UnitInterval(f64);
 
 impl UnitInterval {
+    #[cfg(test)]
     pub(in crate::events) fn new(value: f64) -> Option<Self> {
         (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(Self(value))
     }
@@ -163,6 +165,7 @@ impl DecayedEwma {
             .map(|sample| sample.value_at(self.kernel, query_at))
     }
 
+    #[cfg(test)]
     pub(in crate::events) fn value_at_ms(&self, query_at_ms: f64) -> Option<f64> {
         let query_at = TelemetryInstantMs::new(query_at_ms)
             .or_else(|| self.sample.map(|sample| sample.recorded_at))?;

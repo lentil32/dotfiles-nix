@@ -24,12 +24,10 @@ proptest! {
 
     #[test]
     fn prop_clear_effects_show_cursor_and_only_cmdline_requests_clear_redraw(
-        hide_target_hack in any::<bool>(),
         cmdline_mode in any::<bool>(),
     ) {
         let mode = if cmdline_mode { "c" } else { "n" };
         let mut state = RuntimeState::default();
-        state.config.hide_target_hack = hide_target_hack;
         state.set_enabled(false);
 
         let transition = reduce_cursor_event(
@@ -42,7 +40,6 @@ proptest! {
 
         prop_assert!(matches!(render_action(&transition), RenderAction::ClearAll));
         prop_assert_eq!(side_effects.cursor_visibility, CursorVisibilityEffect::Show);
-        prop_assert_eq!(side_effects.allow_real_cursor_updates, !hide_target_hack);
         prop_assert!(!side_effects.redraw_after_draw_if_cmdline);
         prop_assert_eq!(side_effects.redraw_after_clear_if_cmdline, cmdline_mode);
     }

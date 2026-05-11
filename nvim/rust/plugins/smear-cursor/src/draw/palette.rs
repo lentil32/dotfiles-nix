@@ -15,7 +15,13 @@ use crate::host::HighlightPalettePort;
 use crate::host::HighlightStyle;
 use crate::host::NeovimHost;
 #[cfg(test)]
+use crate::position::RenderPoint;
+#[cfg(test)]
+use crate::types::ModeClass;
+#[cfg(test)]
 use crate::types::RenderFrame;
+#[cfg(test)]
+use crate::types::StaticRenderConfig;
 use nvim_oxi::Result;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -31,6 +37,49 @@ pub(crate) use lane::PaletteStateLane;
 const DEFAULT_CURSOR_COLOR: u32 = 0x00D0_D0D0;
 const DEFAULT_BACKGROUND_COLOR: u32 = 0x0030_3030;
 const HIGHLIGHT_GROUP_NAME_CACHE_MAX_ENTRIES: usize = 16;
+
+#[cfg(test)]
+fn test_palette_frame() -> RenderFrame {
+    RenderFrame {
+        mode: ModeClass::NormalLike,
+        corners: [RenderPoint::ZERO; 4],
+        step_samples: Vec::new().into(),
+        planner_idle_steps: 0,
+        target: RenderPoint::ZERO,
+        target_corners: [RenderPoint::ZERO; 4],
+        vertical_bar: false,
+        trail_stroke_id: crate::core::types::StrokeId::INITIAL,
+        retarget_epoch: 0,
+        particle_count: 0,
+        aggregated_particle_cells: Arc::default(),
+        particle_screen_cells: Arc::default(),
+        color_at_cursor: Some(0x00FF_FFFF),
+        projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
+        static_config: Arc::new(StaticRenderConfig {
+            cursor_color: Some("#112233".to_string()),
+            cursor_color_insert_mode: Some("none".to_string()),
+            normal_bg: Some("#202020".to_string()),
+            transparent_bg_fallback_color: "#303030".to_string(),
+            cterm_cursor_colors: Some(vec![17_u16, 42_u16]),
+            cterm_bg: Some(235_u16),
+            max_kept_windows: 32,
+            particle_max_lifetime: 250.0,
+            particle_switch_octant_braille: 0.5,
+            particles_over_text: true,
+            color_levels: 16,
+            gamma: 2.2,
+            block_aspect_ratio: 0.5,
+            tail_duration_ms: 120.0,
+            simulation_hz: 120.0,
+            trail_thickness: 1.0,
+            trail_thickness_x: 1.0,
+            spatial_coherence_weight: 0.0,
+            temporal_stability_weight: 0.0,
+            top_k_per_cell: 4,
+            windows_zindex: 50,
+        }),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct HighlightGroupNames {
@@ -507,17 +556,12 @@ fn ensure_highlight_palette_for_spec_with(
 mod tests {
     use super::*;
     use crate::config::MAX_COLOR_LEVELS;
-    use crate::core::types::StrokeId;
     use crate::host::FakeHighlightPalettePort;
     use crate::host::HighlightPaletteCall;
-    use crate::position::RenderPoint;
     use crate::test_support::proptest::ModeCase;
     use crate::test_support::proptest::cache_key_mutation_axis;
     use crate::test_support::proptest::mode_case;
     use crate::test_support::proptest::pure_config;
-    use crate::types::ModeClass;
-    use crate::types::RenderFrame;
-    use crate::types::StaticRenderConfig;
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
 
@@ -526,50 +570,6 @@ mod tests {
     fn reset_palette_state_for_test() {
         let epoch = next_palette_recovery_epoch().expect("palette state should be readable");
         assert_eq!(recover_palette_to_epoch(epoch), true);
-    }
-
-    fn test_frame() -> RenderFrame {
-        RenderFrame {
-            mode: ModeClass::NormalLike,
-            corners: [RenderPoint::ZERO; 4],
-            step_samples: Vec::new().into(),
-            planner_idle_steps: 0,
-            target: RenderPoint::ZERO,
-            target_corners: [RenderPoint::ZERO; 4],
-            vertical_bar: false,
-            trail_stroke_id: StrokeId::INITIAL,
-            retarget_epoch: 0,
-            particle_count: 0,
-            aggregated_particle_cells: Arc::default(),
-            particle_screen_cells: Arc::default(),
-            color_at_cursor: Some(0x00FF_FFFF),
-            projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
-            static_config: Arc::new(StaticRenderConfig {
-                cursor_color: Some("#112233".to_string()),
-                cursor_color_insert_mode: Some("none".to_string()),
-                normal_bg: Some("#202020".to_string()),
-                transparent_bg_fallback_color: "#303030".to_string(),
-                cterm_cursor_colors: Some(vec![17_u16, 42_u16]),
-                cterm_bg: Some(235_u16),
-                hide_target_hack: false,
-                max_kept_windows: 32,
-                never_draw_over_target: false,
-                particle_max_lifetime: 250.0,
-                particle_switch_octant_braille: 0.5,
-                particles_over_text: true,
-                color_levels: 16,
-                gamma: 2.2,
-                block_aspect_ratio: 0.5,
-                tail_duration_ms: 120.0,
-                simulation_hz: 120.0,
-                trail_thickness: 1.0,
-                trail_thickness_x: 1.0,
-                spatial_coherence_weight: 0.0,
-                temporal_stability_weight: 0.0,
-                top_k_per_cell: 4,
-                windows_zindex: 50,
-            }),
-        }
     }
 
     fn mutate_static_config(
@@ -604,7 +604,7 @@ mod tests {
     }
 
     fn palette_spec_for_levels(color_levels: u32, gamma: f64) -> PaletteSpec {
-        let mut frame = test_frame();
+        let mut frame = test_palette_frame();
         mutate_static_config(&mut frame, |config| {
             config.cursor_color = Some("#FFFFFF".to_string());
             config.normal_bg = Some("#000000".to_string());
@@ -618,7 +618,7 @@ mod tests {
     }
 
     fn frame_for_raw_key_properties(mode: &ModeCase, depends_on_cursor_text: bool) -> RenderFrame {
-        let mut frame = test_frame();
+        let mut frame = test_palette_frame();
         frame.mode = mode.mode().into();
         set_active_cursor_color_setting(
             &mut frame,
@@ -730,7 +730,7 @@ mod tests {
         let host = FakeHighlightPalettePort::default();
         host.set_highlight_color("CursorAccent", HighlightColorField::Background, 0x0011_2233);
         host.set_highlight_color("Paper", HighlightColorField::Background, 0x0020_2020);
-        let mut frame = test_frame();
+        let mut frame = test_palette_frame();
         mutate_static_config(&mut frame, |config| {
             config.cursor_color = Some("CursorAccent".to_string());
             config.normal_bg = Some("Paper".to_string());

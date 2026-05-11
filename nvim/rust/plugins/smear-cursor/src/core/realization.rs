@@ -12,14 +12,11 @@ use crate::core::state::RetainedProjection;
 use crate::core::state::ScenePatch;
 #[cfg(test)]
 use crate::core::state::ScenePatchKind;
-use crate::draw::PARTICLE_ZINDEX_OFFSET;
 use crate::draw::render_plan::CellOp;
 use crate::draw::render_plan::ClearOp;
 use crate::draw::render_plan::Glyph;
 use crate::draw::render_plan::HighlightRef;
 use crate::draw::render_plan::RenderPlan;
-use crate::draw::render_plan::TargetCellOverlay;
-use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::position::ScreenCell;
 use crate::position::ViewportBounds;
 use crate::types::ModeClass;
@@ -379,16 +376,6 @@ fn in_bounds(viewport: ViewportBounds, row: i64, col: i64) -> bool {
     row >= 1 && row <= viewport.max_row() && col >= 1 && col <= viewport.max_col()
 }
 
-fn overlay_cell(overlay: TargetCellOverlay) -> CellOp {
-    CellOp {
-        row: overlay.row,
-        col: overlay.col,
-        zindex: overlay.zindex,
-        glyph: Glyph::Static(overlay.shape.glyph()),
-        highlight: HighlightRef::Normal(overlay.level),
-    }
-}
-
 pub(crate) fn project_cell_ops_to_spans<'a>(
     ops: impl IntoIterator<Item = &'a CellOp>,
 ) -> Arc<[RealizationSpan]> {
@@ -464,109 +451,19 @@ pub(crate) fn project_particle_overlay_cells(
 
     let target_row = frame.target.row.round() as i64;
     let target_col = frame.target.col.round() as i64;
-    let particle_zindex = frame.windows_zindex.saturating_sub(PARTICLE_ZINDEX_OFFSET);
-    let particle_max_lifetime = if frame.particle_max_lifetime.is_finite() {
-        frame.particle_max_lifetime.max(0.0)
-    } else {
-        0.0
-    };
-    let switch_ratio = if frame.particle_switch_octant_braille.is_finite() {
-        frame.particle_switch_octant_braille.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let lifetime_switch_octant_braille = switch_ratio * particle_max_lifetime;
-    let requires_background_probe = !frame.particles_over_text;
     let mut cells = Vec::<CellOp>::with_capacity(frame.aggregated_particle_cells().len());
 
     // Keep overlay refresh on the cheap path: rebuild only the particle cells directly from the
     // retained aggregate instead of materializing a temporary one-off RenderPlan.
-    for aggregate in frame.aggregated_particle_cells() {
-        let row = aggregate.row();
-        let col = aggregate.col();
-        if row == target_row && col == target_col {
-            continue;
-        }
-
-        let Some(lifetime_average) = aggregate.lifetime_average() else {
-            continue;
-        };
-
-        let shade = if lifetime_average > lifetime_switch_octant_braille {
-            let denominator = (particle_max_lifetime - lifetime_switch_octant_braille).max(1.0e-9);
-            ((lifetime_average - lifetime_switch_octant_braille) / denominator).clamp(0.0, 1.0)
-        } else {
-            let denominator = lifetime_switch_octant_braille.max(1.0e-9);
-            (lifetime_average / denominator).clamp(0.0, 1.0)
-        };
-        if !shade.is_finite() || frame.color_levels == 0 {
-            continue;
-        }
-
-        let rounded_level = ((shade * f64::from(frame.color_levels)) + 0.5).floor() as i64;
-        if rounded_level <= 0 {
-            continue;
-        }
-        let clamped_level = rounded_level.min(i64::from(frame.color_levels));
-        let Some(level) = u32::try_from(clamped_level)
-            .ok()
-            .and_then(crate::draw::render_plan::HighlightLevel::try_new)
-        else {
-            continue;
-        };
-
-        let cell = aggregate.cell();
-        let glyph = if lifetime_average > lifetime_switch_octant_braille {
-            let octant_index = usize::from(cell[0][0] > 0.0)
-                + usize::from(cell[0][1] > 0.0) * 2
-                + usize::from(cell[1][0] > 0.0) * 4
-                + usize::from(cell[1][1] > 0.0) * 8
-                + usize::from(cell[2][0] > 0.0) * 16
-                + usize::from(cell[2][1] > 0.0) * 32
-                + usize::from(cell[3][0] > 0.0) * 64
-                + usize::from(cell[3][1] > 0.0) * 128;
-            if octant_index == 0 {
-                continue;
-            }
-            let Some(character) = OCTANT_CHARACTERS
-                .get(octant_index.saturating_sub(1))
-                .copied()
-            else {
-                continue;
-            };
-            Glyph::Static(character)
-        } else {
-            let braille_index = usize::from(cell[0][0] > 0.0)
-                + usize::from(cell[1][0] > 0.0) * 2
-                + usize::from(cell[2][0] > 0.0) * 4
-                + usize::from(cell[0][1] > 0.0) * 8
-                + usize::from(cell[1][1] > 0.0) * 16
-                + usize::from(cell[2][1] > 0.0) * 32
-                + usize::from(cell[3][0] > 0.0) * 64
-                + usize::from(cell[3][1] > 0.0) * 128;
-            if braille_index == 0 {
-                continue;
-            }
-            let Ok(character) = u8::try_from(braille_index) else {
-                continue;
-            };
-            Glyph::Braille(character)
-        };
-
+    crate::draw::render_plan::for_each_particle_overlay_op(frame, target_row, target_col, |op| {
         push_projected_particle_cell(
             &mut cells,
-            CellOp {
-                row,
-                col,
-                zindex: particle_zindex,
-                glyph,
-                highlight: HighlightRef::Normal(level),
-            },
-            requires_background_probe,
+            op.cell,
+            op.requires_background_probe,
             viewport,
             background_probe,
         );
-    }
+    });
 
     Arc::from(cells)
 }
@@ -577,7 +474,7 @@ pub(crate) fn project_render_plan(
     background_probe: Option<&BackgroundProbeBatch>,
 ) -> LogicalRaster {
     let particle_cells = project_particle_ops(&plan.particle_ops, viewport, background_probe);
-    let mut static_cells = Vec::<CellOp>::with_capacity(plan.cell_ops.len() + 1);
+    let mut static_cells = Vec::<CellOp>::with_capacity(plan.cell_ops.len());
 
     static_cells.extend(
         plan.cell_ops
@@ -585,12 +482,6 @@ pub(crate) fn project_render_plan(
             .filter(|op| in_bounds(viewport, op.row, op.col))
             .copied(),
     );
-
-    if let Some(overlay) = plan.target_cell_overlay
-        && in_bounds(viewport, overlay.row, overlay.col)
-    {
-        static_cells.push(overlay_cell(overlay));
-    }
 
     // background-dependent particle admission is resolved from the explicit
     // observation probe before snapshot retention. The retained projection keeps the
@@ -620,7 +511,6 @@ mod tests {
     use crate::position::ViewportBounds;
     use crate::test_support::proptest::pure_config;
     use crate::types::BASE_TIME_INTERVAL;
-    use crate::types::CursorCellShape;
     use crate::types::ModeClass;
     use crate::types::Particle;
     use crate::types::RenderFrame;
@@ -684,9 +574,7 @@ mod tests {
                 transparent_bg_fallback_color: "#303030".to_string(),
                 cterm_cursor_colors: None,
                 cterm_bg: None,
-                hide_target_hack: false,
                 max_kept_windows: 32,
-                never_draw_over_target: false,
                 particle_max_lifetime: 1.0,
                 particle_switch_octant_braille: 0.3,
                 particles_over_text: true,
@@ -733,15 +621,6 @@ mod tests {
             .boxed()
     }
 
-    fn cursor_cell_shape() -> BoxedStrategy<CursorCellShape> {
-        prop_oneof![
-            Just(CursorCellShape::Block),
-            Just(CursorCellShape::VerticalBar),
-            Just(CursorCellShape::HorizontalBar),
-        ]
-        .boxed()
-    }
-
     fn cell_op_strategy(max_row: u32, max_col: u32) -> BoxedStrategy<CellOp> {
         let row_limit = i64::from(max_row).saturating_add(2);
         let col_limit = i64::from(max_col).saturating_add(2);
@@ -772,30 +651,6 @@ mod tests {
             .boxed()
     }
 
-    fn target_cell_overlay_strategy(
-        max_row: u32,
-        max_col: u32,
-    ) -> BoxedStrategy<TargetCellOverlay> {
-        let row_limit = i64::from(max_row).saturating_add(2);
-        let col_limit = i64::from(max_col).saturating_add(2);
-
-        (
-            -1_i64..=row_limit,
-            -1_i64..=col_limit,
-            1_u32..=4_u32,
-            cursor_cell_shape(),
-            1_u32..=6_u32,
-        )
-            .prop_map(|(row, col, zindex, shape, level)| TargetCellOverlay {
-                row,
-                col,
-                zindex,
-                shape,
-                level: HighlightLevel::from_raw_clamped(level),
-            })
-            .boxed()
-    }
-
     #[derive(Clone, Debug)]
     struct RenderPlanFixture {
         viewport: ViewportBounds,
@@ -816,17 +671,10 @@ mod tests {
                     ),
                     vec(cell_op_strategy(max_row, max_col), 0..=6),
                     vec(particle_op_strategy(max_row, max_col), 0..=6),
-                    option::of(target_cell_overlay_strategy(max_row, max_col)),
                     option::of(vec(any::<bool>(), mask_len)),
                 )
                     .prop_map(
-                        move |(
-                            clear,
-                            cell_ops,
-                            particle_ops,
-                            target_cell_overlay,
-                            allowed_mask,
-                        )| {
+                        move |(clear, cell_ops, particle_ops, allowed_mask)| {
                             let background_probe = allowed_mask.map(|allowed_mask| {
                                 BackgroundProbeBatch::from_allowed_mask(viewport, allowed_mask)
                             });
@@ -836,7 +684,6 @@ mod tests {
                                     clear,
                                     cell_ops,
                                     particle_ops,
-                                    target_cell_overlay,
                                 },
                                 background_probe,
                             }
@@ -876,12 +723,6 @@ mod tests {
                 .copied(),
         );
 
-        if let Some(overlay) = plan.target_cell_overlay
-            && in_bounds(viewport, overlay.row, overlay.col)
-        {
-            cells.push(overlay_cell(overlay));
-        }
-
         cells
     }
 
@@ -902,13 +743,7 @@ mod tests {
     }
 
     fn reuse_key() -> ProjectionReuseKey {
-        ProjectionReuseKey::new(
-            None,
-            None,
-            None,
-            crate::core::runtime_reducer::TargetCellPresentation::None,
-            ProjectionPolicyRevision::INITIAL,
-        )
+        ProjectionReuseKey::new(None, None, None, ProjectionPolicyRevision::INITIAL)
     }
 
     fn snapshot_with(

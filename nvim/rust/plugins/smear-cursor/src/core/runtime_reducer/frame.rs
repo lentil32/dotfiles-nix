@@ -1,5 +1,6 @@
 use super::ScrollShift;
 use super::as_delay_ms;
+use crate::animation::corners_for_render;
 use crate::core::state::BufferPerfClass;
 use crate::core::types::Millis;
 use crate::position::RenderPoint;
@@ -73,6 +74,28 @@ pub(crate) struct RenderFrameRequest<'a> {
     pub(crate) buffer_perf_class: BufferPerfClass,
 }
 
+pub(crate) struct CurrentRenderFrameRequest<'a> {
+    pub(crate) mode: &'a str,
+    pub(crate) step_samples: Vec<RenderStepSample>,
+    pub(crate) planner_idle_steps: u32,
+    pub(crate) target: RenderPoint,
+    pub(crate) vertical_bar: bool,
+    pub(crate) buffer_perf_class: BufferPerfClass,
+}
+
+fn current_render_corners(state: &RuntimeState) -> [RenderPoint; 4] {
+    let current_corners = state.current_corners();
+    let target_corners = state.target_corners();
+    corners_for_render(&state.config, &current_corners, &target_corners)
+}
+
+pub(crate) fn current_render_step_sample(
+    state: &RuntimeState,
+    simulation_step_ms: f64,
+) -> RenderStepSample {
+    RenderStepSample::new(current_render_corners(state), simulation_step_ms)
+}
+
 pub(crate) fn build_render_frame(
     state: &mut RuntimeState,
     request: RenderFrameRequest<'_>,
@@ -127,6 +150,33 @@ pub(crate) fn build_render_frame(
         projection_policy_revision: state.projection_policy().revision(),
         static_config: state.static_render_config(),
     }
+}
+
+pub(crate) fn build_current_render_frame(
+    state: &mut RuntimeState,
+    request: CurrentRenderFrameRequest<'_>,
+) -> RenderFrame {
+    let CurrentRenderFrameRequest {
+        mode,
+        step_samples,
+        planner_idle_steps,
+        target,
+        vertical_bar,
+        buffer_perf_class,
+    } = request;
+    let render_corners = current_render_corners(state);
+    build_render_frame(
+        state,
+        RenderFrameRequest {
+            mode,
+            render_corners,
+            step_samples,
+            planner_idle_steps,
+            target,
+            vertical_bar,
+            buffer_perf_class,
+        },
+    )
 }
 
 pub(super) fn reset_animation_timing(state: &mut RuntimeState) {

@@ -40,32 +40,6 @@ pub(crate) fn frame_particle_overlay_signature(frame: &RenderFrame) -> Option<u6
     Some(hasher.finish())
 }
 
-/// Reserves the target cell for cursor punch-through when the render frame is
-/// allowed to hide the target directly.
-pub(crate) fn plan_target_cell_overlay(
-    frame: &RenderFrame,
-    viewport: ViewportBounds,
-    shape: crate::types::CursorCellShape,
-) -> Option<TargetCellOverlay> {
-    if !frame.hide_target_hack {
-        return None;
-    }
-
-    let row = frame.target.row.round() as i64;
-    let col = frame.target.col.round() as i64;
-    if row < 1 || row > viewport.max_row() || col < 1 || col > viewport.max_col() {
-        return None;
-    }
-
-    Some(TargetCellOverlay {
-        row,
-        col,
-        zindex: frame.windows_zindex,
-        shape,
-        level: HighlightLevel::from_raw_clamped(frame.color_levels),
-    })
-}
-
 #[cfg(test)]
 pub(crate) fn render_frame_to_plan(
     frame: &RenderFrame,
@@ -98,13 +72,12 @@ pub(crate) fn particle_overlay_plan(frame: &RenderFrame, viewport: ViewportBound
         let mut resources = PlanResources {
             builder: &mut builder,
             windows_zindex: frame.windows_zindex,
-            particle_zindex: frame.windows_zindex.saturating_sub(PARTICLE_ZINDEX_OFFSET),
         };
 
         draw_particles(&mut resources, frame, target_row, target_col);
     }
 
-    builder.finish(None, None)
+    builder.finish(None)
 }
 
 pub(in crate::draw::render_plan) fn decode_compiled_frame(
@@ -169,7 +142,6 @@ pub(in crate::draw::render_plan) fn decode_compiled_frame(
         let mut resources = PlanResources {
             builder: &mut builder,
             windows_zindex: frame.windows_zindex,
-            particle_zindex: frame.windows_zindex.saturating_sub(PARTICLE_ZINDEX_OFFSET),
         };
 
         draw_particles(&mut resources, frame, target_row, target_col);
@@ -181,12 +153,9 @@ pub(in crate::draw::render_plan) fn decode_compiled_frame(
 
     next_state.previous_cells = std::sync::Arc::new(next_cells);
 
-    let plan = builder.finish(
-        Some(ClearOp {
-            max_kept_windows: frame.max_kept_windows,
-        }),
-        None,
-    );
+    let plan = builder.finish(Some(ClearOp {
+        max_kept_windows: frame.max_kept_windows,
+    }));
 
     #[cfg(test)]
     {

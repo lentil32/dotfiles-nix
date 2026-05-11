@@ -1,4 +1,3 @@
-pub(crate) use super::strategies::CursorShapeCase;
 pub(crate) use super::strategies::DEFAULT_FLOAT_EPSILON;
 pub(crate) use super::strategies::ModeCase;
 pub(crate) use super::strategies::ModeFamily;

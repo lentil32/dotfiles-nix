@@ -1,4 +1,3 @@
-use crate::core::runtime_reducer::TargetCellPresentation;
 use crate::core::state::BackgroundProbeChunkMask;
 use crate::core::state::BackgroundProbePlan;
 use crate::core::state::BufferPerfClass;
@@ -22,7 +21,6 @@ use crate::position::RenderPoint;
 use crate::position::ScreenCell;
 use crate::position::ViewportBounds;
 use crate::state::TrackedCursor;
-use crate::types::CursorCellShape;
 use crate::types::ModeClass;
 use crate::types::Particle;
 use crate::types::RenderFrame;
@@ -120,9 +118,7 @@ pub(super) fn base_frame() -> RenderFrame {
             transparent_bg_fallback_color: "#303030".to_string(),
             cterm_cursor_colors: None,
             cterm_bg: None,
-            hide_target_hack: true,
             max_kept_windows: 32,
-            never_draw_over_target: false,
             particle_max_lifetime: 1.0,
             particle_switch_octant_braille: 0.3,
             particles_over_text: true,
@@ -213,7 +209,6 @@ fn observation_with_background_probe(
 pub(super) enum DirtyMutationAxis {
     None,
     PaletteOnly,
-    Presentation,
     Geometry,
 }
 
@@ -224,7 +219,6 @@ pub(super) enum ReuseMutationAxis {
     MotionRevision,
     SemanticRevision,
     ParticleOverlay,
-    Presentation,
     Policy,
 }
 
@@ -232,7 +226,6 @@ pub(super) fn dirty_mutation_axis_strategy() -> BoxedStrategy<DirtyMutationAxis>
     prop_oneof![
         Just(DirtyMutationAxis::None),
         Just(DirtyMutationAxis::PaletteOnly),
-        Just(DirtyMutationAxis::Presentation),
         Just(DirtyMutationAxis::Geometry),
     ]
     .boxed()
@@ -245,45 +238,9 @@ pub(super) fn reuse_mutation_axis_strategy() -> BoxedStrategy<ReuseMutationAxis>
         Just(ReuseMutationAxis::MotionRevision),
         Just(ReuseMutationAxis::SemanticRevision),
         Just(ReuseMutationAxis::ParticleOverlay),
-        Just(ReuseMutationAxis::Presentation),
         Just(ReuseMutationAxis::Policy),
     ]
     .boxed()
-}
-
-pub(super) fn target_cell_presentation_strategy() -> BoxedStrategy<TargetCellPresentation> {
-    prop_oneof![
-        Just(TargetCellPresentation::None),
-        Just(TargetCellPresentation::OverlayCursorCell(
-            CursorCellShape::Block
-        )),
-        Just(TargetCellPresentation::OverlayCursorCell(
-            CursorCellShape::VerticalBar,
-        )),
-        Just(TargetCellPresentation::OverlayCursorCell(
-            CursorCellShape::HorizontalBar,
-        )),
-    ]
-    .boxed()
-}
-
-pub(super) fn alternate_target_cell_presentation(
-    target_cell_presentation: TargetCellPresentation,
-) -> TargetCellPresentation {
-    match target_cell_presentation {
-        TargetCellPresentation::None => {
-            TargetCellPresentation::OverlayCursorCell(CursorCellShape::Block)
-        }
-        TargetCellPresentation::OverlayCursorCell(CursorCellShape::Block) => {
-            TargetCellPresentation::None
-        }
-        TargetCellPresentation::OverlayCursorCell(CursorCellShape::VerticalBar) => {
-            TargetCellPresentation::OverlayCursorCell(CursorCellShape::HorizontalBar)
-        }
-        TargetCellPresentation::OverlayCursorCell(CursorCellShape::HorizontalBar) => {
-            TargetCellPresentation::OverlayCursorCell(CursorCellShape::VerticalBar)
-        }
-    }
 }
 
 pub(super) fn frame_with_background_probe_requirement(mut frame: RenderFrame) -> RenderFrame {

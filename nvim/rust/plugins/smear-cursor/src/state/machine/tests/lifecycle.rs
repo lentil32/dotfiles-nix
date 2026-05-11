@@ -5,7 +5,6 @@ fn runtime_with_retained_motion_and_purgeable_storage() -> RuntimeState {
     let tracked = location(11, 22, 33, 44);
     let mut state = RuntimeState::default();
     state.config.delay_event_to_smear = 27.0;
-    state.config.hide_target_hack = false;
     state.commit_runtime_config_update();
     state.initialize_cursor(point(3.0, 4.0), default_shape(), 7, &tracked);
     replace_target_preserving_tracking(&mut state, point(8.0, 9.0), default_shape());

@@ -89,12 +89,11 @@ fn diagonal_zig_zag_motion() {
 }
 
 #[test]
-fn surface_retarget_with_overlay_for_small_cross_window_motion() {
+fn surface_retarget_for_small_cross_window_motion() {
     let mut state = RuntimeState::default();
     state.config.delay_event_to_smear = 0.0;
     state.config.simulation_hz = 240.0;
     state.config.max_simulation_steps_per_frame = 16;
-    state.config.hide_target_hack = true;
     state.config.smear_between_windows = true;
     state.commit_runtime_config_update();
     let seed_state = state.clone();

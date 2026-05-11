@@ -4,7 +4,6 @@ use crate::core::types::StrokeId;
 use crate::draw::BRAILLE_CODE_MIN;
 use crate::position::RenderPoint;
 use crate::position::ViewportBounds;
-use crate::types::CursorCellShape;
 use crate::types::RenderFrame;
 use crate::types::RenderStepSample;
 use std::collections::BTreeMap;
@@ -106,15 +105,6 @@ pub(crate) struct ParticleOp {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TargetCellOverlay {
-    pub(crate) row: i64,
-    pub(crate) col: i64,
-    pub(crate) zindex: u32,
-    pub(crate) shape: CursorCellShape,
-    pub(crate) level: HighlightLevel,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ClearOp {
     pub(crate) max_kept_windows: usize,
 }
@@ -124,7 +114,6 @@ pub(crate) struct RenderPlan {
     pub(crate) clear: Option<ClearOp>,
     pub(crate) cell_ops: Vec<CellOp>,
     pub(crate) particle_ops: Vec<ParticleOp>,
-    pub(crate) target_cell_overlay: Option<TargetCellOverlay>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -430,16 +419,11 @@ impl PlanBuilder {
         true
     }
 
-    pub(crate) fn finish(
-        self,
-        clear: Option<ClearOp>,
-        target_cell_overlay: Option<TargetCellOverlay>,
-    ) -> RenderPlan {
+    pub(crate) fn finish(self, clear: Option<ClearOp>) -> RenderPlan {
         RenderPlan {
             clear,
             cell_ops: self.cell_ops,
             particle_ops: self.particle_ops,
-            target_cell_overlay,
         }
     }
 }
@@ -447,7 +431,6 @@ impl PlanBuilder {
 pub(crate) struct PlanResources<'a> {
     pub(crate) builder: &'a mut PlanBuilder,
     pub(crate) windows_zindex: u32,
-    pub(crate) particle_zindex: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

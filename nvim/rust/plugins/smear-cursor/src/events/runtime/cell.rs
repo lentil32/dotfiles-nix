@@ -117,100 +117,38 @@ impl RuntimeCell {
     }
 }
 
+type ReducerStateLane = ExclusiveStateLane<ReducerState>;
+type ShellStateLane = ExclusiveStateLane<ShellState>;
+type TimerBridgeLane = ExclusiveStateLane<TimerBridge>;
+
 #[derive(Debug, Default)]
-struct ReducerStateLane {
-    state: RefCell<ReducerStateSlot>,
+struct ExclusiveStateLane<T> {
+    state: RefCell<ExclusiveStateSlot<T>>,
 }
 
-impl ReducerStateLane {
-    fn take_state(&self) -> Result<ReducerState, RuntimeAccessError> {
+impl<T> ExclusiveStateLane<T> {
+    fn take_state(&self) -> Result<T, RuntimeAccessError> {
         let mut slot = self.state.borrow_mut();
-        match std::mem::replace(&mut *slot, ReducerStateSlot::InUse) {
-            ReducerStateSlot::Ready(state) => Ok(*state),
-            ReducerStateSlot::InUse => Err(RuntimeAccessError::Reentered),
+        match std::mem::replace(&mut *slot, ExclusiveStateSlot::InUse) {
+            ExclusiveStateSlot::Ready(state) => Ok(*state),
+            ExclusiveStateSlot::InUse => Err(RuntimeAccessError::Reentered),
         }
     }
 
-    fn restore_state(&self, state: ReducerState) {
+    fn restore_state(&self, state: T) {
         let mut slot = self.state.borrow_mut();
-        let previous = std::mem::replace(&mut *slot, ReducerStateSlot::Ready(Box::new(state)));
-        debug_assert!(matches!(previous, ReducerStateSlot::InUse));
+        let previous = std::mem::replace(&mut *slot, ExclusiveStateSlot::Ready(Box::new(state)));
+        debug_assert!(matches!(previous, ExclusiveStateSlot::InUse));
     }
 }
 
 #[derive(Debug)]
-enum ReducerStateSlot {
-    Ready(Box<ReducerState>),
+enum ExclusiveStateSlot<T> {
+    Ready(Box<T>),
     InUse,
 }
 
-impl Default for ReducerStateSlot {
-    fn default() -> Self {
-        Self::Ready(Box::default())
-    }
-}
-
-#[derive(Debug, Default)]
-struct ShellStateLane {
-    state: RefCell<ShellStateSlot>,
-}
-
-impl ShellStateLane {
-    fn take_state(&self) -> Result<ShellState, RuntimeAccessError> {
-        let mut slot = self.state.borrow_mut();
-        match std::mem::replace(&mut *slot, ShellStateSlot::InUse) {
-            ShellStateSlot::Ready(state) => Ok(*state),
-            ShellStateSlot::InUse => Err(RuntimeAccessError::Reentered),
-        }
-    }
-
-    fn restore_state(&self, state: ShellState) {
-        let mut slot = self.state.borrow_mut();
-        let previous = std::mem::replace(&mut *slot, ShellStateSlot::Ready(Box::new(state)));
-        debug_assert!(matches!(previous, ShellStateSlot::InUse));
-    }
-}
-
-#[derive(Debug)]
-enum ShellStateSlot {
-    Ready(Box<ShellState>),
-    InUse,
-}
-
-impl Default for ShellStateSlot {
-    fn default() -> Self {
-        Self::Ready(Box::default())
-    }
-}
-
-#[derive(Debug, Default)]
-struct TimerBridgeLane {
-    state: RefCell<TimerBridgeSlot>,
-}
-
-impl TimerBridgeLane {
-    fn take_state(&self) -> Result<TimerBridge, RuntimeAccessError> {
-        let mut slot = self.state.borrow_mut();
-        match std::mem::replace(&mut *slot, TimerBridgeSlot::InUse) {
-            TimerBridgeSlot::Ready(bridge) => Ok(*bridge),
-            TimerBridgeSlot::InUse => Err(RuntimeAccessError::Reentered),
-        }
-    }
-
-    fn restore_state(&self, bridge: TimerBridge) {
-        let mut slot = self.state.borrow_mut();
-        let previous = std::mem::replace(&mut *slot, TimerBridgeSlot::Ready(Box::new(bridge)));
-        debug_assert!(matches!(previous, TimerBridgeSlot::InUse));
-    }
-}
-
-#[derive(Debug)]
-enum TimerBridgeSlot {
-    Ready(Box<TimerBridge>),
-    InUse,
-}
-
-impl Default for TimerBridgeSlot {
+impl<T: Default> Default for ExclusiveStateSlot<T> {
     fn default() -> Self {
         Self::Ready(Box::default())
     }

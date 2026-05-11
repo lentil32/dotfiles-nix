@@ -1,9 +1,7 @@
 use super::CursorVisibilityEffect;
 use super::RenderAction;
 use super::RenderSideEffects;
-use super::TargetCellPresentation;
 use crate::position::RenderPoint;
-use crate::types::CursorCellShape;
 use crate::types::RenderFrame;
 use nvimrs_nvim_utils::mode::is_cmdline_mode;
 
@@ -54,7 +52,6 @@ fn frame_reaches_target_cell(frame: &RenderFrame) -> bool {
 pub(super) fn render_side_effects_for_action(
     mode: &str,
     render_action: &RenderAction,
-    allow_real_cursor_updates: bool,
 ) -> RenderSideEffects {
     match render_action {
         RenderAction::Draw(frame) => {
@@ -66,16 +63,6 @@ pub(super) fn render_side_effects_for_action(
                 // for each animation frame.
                 redraw_after_draw_if_cmdline: false,
                 redraw_after_clear_if_cmdline: false,
-                target_cell_presentation: if !cmdline_mode
-                    && !should_show_cursor
-                    && frame.hide_target_hack
-                {
-                    TargetCellPresentation::OverlayCursorCell(CursorCellShape::from_corners(
-                        &frame.target_corners,
-                    ))
-                } else {
-                    TargetCellPresentation::None
-                },
                 cursor_visibility: if should_show_cursor {
                     CursorVisibilityEffect::Show
                 } else if !cmdline_mode {
@@ -83,20 +70,14 @@ pub(super) fn render_side_effects_for_action(
                 } else {
                     CursorVisibilityEffect::Keep
                 },
-                allow_real_cursor_updates: !frame.hide_target_hack,
             }
         }
         RenderAction::ClearAll => RenderSideEffects {
             redraw_after_draw_if_cmdline: false,
             redraw_after_clear_if_cmdline: is_cmdline_mode(mode),
-            target_cell_presentation: TargetCellPresentation::None,
             cursor_visibility: CursorVisibilityEffect::Show,
-            allow_real_cursor_updates,
         },
-        RenderAction::Noop => RenderSideEffects {
-            allow_real_cursor_updates,
-            ..RenderSideEffects::default()
-        },
+        RenderAction::Noop => RenderSideEffects::default(),
     }
 }
 
@@ -106,8 +87,6 @@ mod tests {
     use crate::config::DerivedConfigCache;
     use crate::config::RuntimeConfig;
     use crate::core::types::StrokeId;
-    use crate::test_support::proptest::CursorShapeCase;
-    use crate::test_support::proptest::cursor_rectangle;
     use crate::test_support::proptest::pure_config;
     use crate::types::ModeClass;
     use crate::types::RenderStepSample;
@@ -135,16 +114,9 @@ mod tests {
         ]
     }
 
-    fn test_frame(
-        corners: [RenderPoint; 4],
-        target_corners: [RenderPoint; 4],
-        hide_target_hack: bool,
-    ) -> RenderFrame {
-        let config = RuntimeConfig {
-            hide_target_hack,
-            ..RuntimeConfig::default()
-        };
-        let static_config = DerivedConfigCache::new(&config).static_render_config();
+    fn test_frame(corners: [RenderPoint; 4], target_corners: [RenderPoint; 4]) -> RenderFrame {
+        let static_config =
+            DerivedConfigCache::new(&RuntimeConfig::default()).static_render_config();
 
         RenderFrame {
             mode: ModeClass::NormalLike,
@@ -172,7 +144,7 @@ mod tests {
         #![proptest_config(pure_config())]
 
         #[test]
-        fn prop_border_touch_keeps_target_overlay_visible_until_interior_overlap(
+        fn prop_border_touch_keeps_cursor_hidden_until_interior_overlap(
             target_row in 1_i64..128_i64,
             target_col in 1_i64..128_i64,
             target_height in 1_i64..8_i64,
@@ -197,7 +169,6 @@ mod tests {
                     target_min_col,
                 ),
                 target_corners,
-                true,
             );
             let interior_overlap_frame = test_frame(
                 rectangle(
@@ -207,30 +178,19 @@ mod tests {
                     target_min_col + 0.5,
                 ),
                 target_corners,
-                true,
             );
 
             let border_touch = render_side_effects_for_action(
                 "n",
                 &RenderAction::Draw(Box::new(border_touch_frame)),
-                /*allow_real_cursor_updates*/ false,
             );
             let interior_overlap = render_side_effects_for_action(
                 "n",
                 &RenderAction::Draw(Box::new(interior_overlap_frame)),
-                /*allow_real_cursor_updates*/ false,
             );
 
             prop_assert_eq!(border_touch.cursor_visibility, CursorVisibilityEffect::Hide);
-            prop_assert_eq!(
-                border_touch.target_cell_presentation,
-                TargetCellPresentation::OverlayCursorCell(CursorCellShape::Block)
-            );
             prop_assert_eq!(interior_overlap.cursor_visibility, CursorVisibilityEffect::Show);
-            prop_assert_eq!(
-                interior_overlap.target_cell_presentation,
-                TargetCellPresentation::None
-            );
         }
 
         #[test]
@@ -256,44 +216,9 @@ mod tests {
                     (target_col + target_width + col_padding) as f64,
                 ),
                 target_corners,
-                false,
             );
 
             prop_assert!(frame_reaches_target_cell(&wide_frame));
-        }
-
-        #[test]
-        fn prop_target_hack_preserves_overlay_shape_before_overlap(
-            fixture in cursor_rectangle(),
-        ) {
-            let frame = test_frame(
-                rectangle(
-                    fixture.position.row,
-                    fixture.position.row + 1.0,
-                    fixture.position.col - 1.0,
-                    fixture.position.col,
-                ),
-                fixture.corners,
-                true,
-            );
-
-            let side_effects = render_side_effects_for_action(
-                "n",
-                &RenderAction::Draw(Box::new(frame)),
-                /*allow_real_cursor_updates*/ false,
-            );
-
-            let expected_shape = match fixture.shape {
-                CursorShapeCase::Block => CursorCellShape::Block,
-                CursorShapeCase::VerticalBar => CursorCellShape::VerticalBar,
-                CursorShapeCase::HorizontalBar => CursorCellShape::HorizontalBar,
-            };
-
-            prop_assert_eq!(side_effects.cursor_visibility, CursorVisibilityEffect::Hide);
-            prop_assert_eq!(
-                side_effects.target_cell_presentation,
-                TargetCellPresentation::OverlayCursorCell(expected_shape)
-            );
         }
     }
 }

@@ -9,7 +9,6 @@ use crate::core::event::RenderPlanFailedEvent;
 use crate::core::runtime_reducer::CursorVisibilityEffect;
 use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderSideEffects;
-use crate::core::runtime_reducer::TargetCellPresentation;
 use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
 use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
 use crate::core::state::AnimationSchedule;
@@ -355,21 +354,6 @@ fn render_cleanup_action_name(action: RenderCleanupAction) -> &'static str {
     }
 }
 
-fn target_cell_presentation_name(effect: TargetCellPresentation) -> &'static str {
-    match effect {
-        TargetCellPresentation::None => "none",
-        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::Block) => {
-            "overlay_block_cell"
-        }
-        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::VerticalBar) => {
-            "overlay_vertical_bar_cell"
-        }
-        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::HorizontalBar) => {
-            "overlay_horizontal_bar_cell"
-        }
-    }
-}
-
 fn cursor_visibility_effect_name(effect: CursorVisibilityEffect) -> &'static str {
     match effect {
         CursorVisibilityEffect::Keep => "keep",
@@ -380,12 +364,10 @@ fn cursor_visibility_effect_name(effect: CursorVisibilityEffect) -> &'static str
 
 pub(super) fn render_side_effects_summary(side_effects: RenderSideEffects) -> String {
     format!(
-        "redraw_draw_cmdline={} redraw_clear_cmdline={} target_cell={} cursor_visibility={} allow_real_cursor_updates={}",
+        "redraw_draw_cmdline={} redraw_clear_cmdline={} cursor_visibility={}",
         side_effects.redraw_after_draw_if_cmdline,
         side_effects.redraw_after_clear_if_cmdline,
-        target_cell_presentation_name(side_effects.target_cell_presentation),
         cursor_visibility_effect_name(side_effects.cursor_visibility),
-        side_effects.allow_real_cursor_updates,
     )
 }
 

@@ -69,8 +69,6 @@ impl From<&RuntimeConfig> for WindowPoolPolicy {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PlannerPolicy {
-    hide_target_hack: bool,
-    never_draw_over_target: bool,
     particles_over_text: bool,
     particle_max_lifetime: f64,
     particle_switch_octant_braille: f64,
@@ -87,8 +85,6 @@ pub(crate) struct PlannerPolicy {
 impl From<&RuntimeConfig> for PlannerPolicy {
     fn from(config: &RuntimeConfig) -> Self {
         Self {
-            hide_target_hack: config.hide_target_hack,
-            never_draw_over_target: config.never_draw_over_target,
             particles_over_text: config.particles_over_text,
             particle_max_lifetime: config.particle_max_lifetime,
             particle_switch_octant_braille: config.particle_switch_octant_braille,
@@ -136,9 +132,7 @@ impl From<&DerivedConfigCache> for StaticRenderConfig {
             transparent_bg_fallback_color: config.palette.transparent_bg_fallback_color.clone(),
             cterm_cursor_colors: config.palette.cterm_cursor_colors.clone(),
             cterm_bg: config.palette.cterm_bg,
-            hide_target_hack: config.planner.hide_target_hack,
             max_kept_windows: config.window_pool.max_kept_windows,
-            never_draw_over_target: config.planner.never_draw_over_target,
             particle_max_lifetime: config.planner.particle_max_lifetime,
             particle_switch_octant_braille: config.planner.particle_switch_octant_braille,
             particles_over_text: config.planner.particles_over_text,

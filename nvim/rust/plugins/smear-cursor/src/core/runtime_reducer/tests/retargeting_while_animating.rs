@@ -88,3 +88,44 @@ fn changed_cell_external_retarget_draws_immediately_and_bumps_the_retarget_epoch
         }
     );
 }
+
+#[test]
+fn rapid_far_external_retargets_keep_particle_storage_bounded() {
+    let (mut state, _) = animating_runtime_after_kickoff(|state| {
+        state.config.delay_event_to_smear = 0.0;
+        state.config.particle_max_num = 7;
+        state.config.particles_per_second = 10_000.0;
+        state.config.particles_per_length = 10_000.0;
+        state.config.particle_max_lifetime = 60_000.0;
+        state.config.min_distance_emit_particles = 0.0;
+    });
+    let particle_cap = state.config.particle_max_num;
+    let mut max_seen_particles = 0_usize;
+
+    for index in 0_u32..240_u32 {
+        let target_row = if index % 2 == 0 { 5_000.0 } else { 1.0 };
+        let transition = reduce_cursor_event(
+            &mut state,
+            "n",
+            event_at(target_row, 12.0, 124.0 + f64::from(index) * 2.0),
+            EventSource::External,
+        );
+        let frame_particle_count =
+            draw_frame(&transition).map_or(0_usize, |frame| frame.particle_count);
+        max_seen_particles = max_seen_particles.max(state.particles().len());
+        let _ = state.shared_particle_screen_cells();
+
+        assert_eq!(transition.motion_class, MotionClass::DiscontinuousJump);
+        assert!(
+            state.particles().len() <= particle_cap,
+            "state particle count exceeded cap: count={} cap={particle_cap} index={index}",
+            state.particles().len(),
+        );
+        assert!(
+            frame_particle_count <= particle_cap,
+            "frame particle count exceeded cap: count={frame_particle_count} cap={particle_cap} index={index}",
+        );
+    }
+
+    assert_eq!(max_seen_particles, particle_cap);
+}

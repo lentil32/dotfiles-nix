@@ -10,7 +10,6 @@ use super::RenderAllocationPolicy;
 use super::RenderCleanupAction;
 use super::RenderSideEffects;
 use super::ScrollShift;
-use super::TargetCellPresentation;
 use super::decide_cleanup_directive;
 use super::keep_warm_until_ms;
 use super::next_cleanup_check_delay_ms;
@@ -541,21 +540,6 @@ fn render_cursor_visibility(effect: CursorVisibilityEffect) -> &'static str {
     }
 }
 
-fn render_target_cell_presentation(presentation: TargetCellPresentation) -> &'static str {
-    match presentation {
-        TargetCellPresentation::None => "none",
-        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::Block) => {
-            "overlay"
-        }
-        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::VerticalBar) => {
-            "overlay_vbar"
-        }
-        TargetCellPresentation::OverlayCursorCell(crate::types::CursorCellShape::HorizontalBar) => {
-            "overlay_hbar"
-        }
-    }
-}
-
 impl RenderActionSummary {
     fn render(&self) -> String {
         match self {
@@ -646,23 +630,6 @@ impl TrajectoryRecord {
             .redraw_after_clear_if_cmdline
         {
             fields.push("cmdline_clear_redraw=1".to_string());
-        }
-        if self.transition.render_side_effects.target_cell_presentation
-            != TargetCellPresentation::None
-        {
-            fields.push(format!(
-                "target_cell={}",
-                render_target_cell_presentation(
-                    self.transition.render_side_effects.target_cell_presentation
-                )
-            ));
-        }
-        if !self
-            .transition
-            .render_side_effects
-            .allow_real_cursor_updates
-        {
-            fields.push("real_cursor=off".to_string());
         }
         fields.push(format!(
             "sched={}",

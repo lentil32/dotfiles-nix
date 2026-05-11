@@ -4,7 +4,6 @@ use crate::core::types::AnimationSchedule;
 use crate::core::types::Millis;
 use crate::position::ScreenCell;
 use crate::state::TrackedCursor;
-use crate::types::CursorCellShape;
 use crate::types::RenderFrame;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -75,21 +74,10 @@ pub(crate) enum CursorVisibilityEffect {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub(crate) enum TargetCellPresentation {
-    #[default]
-    None,
-    OverlayCursorCell(CursorCellShape),
-}
-
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) struct RenderSideEffects {
     pub(crate) redraw_after_draw_if_cmdline: bool,
     pub(crate) redraw_after_clear_if_cmdline: bool,
-    pub(crate) target_cell_presentation: TargetCellPresentation,
     pub(crate) cursor_visibility: CursorVisibilityEffect,
-    // apply consumes this reducer-owned policy directly instead of re-reading
-    // `hide_target_hack` from live runtime config.
-    pub(crate) allow_real_cursor_updates: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,10 +100,8 @@ impl CursorTransition {
         mode: &str,
         render_action: RenderAction,
         render_allocation_policy: RenderAllocationPolicy,
-        allow_real_cursor_updates: bool,
     ) -> Self {
-        let render_side_effects =
-            render_side_effects_for_action(mode, &render_action, allow_real_cursor_updates);
+        let render_side_effects = render_side_effects_for_action(mode, &render_action);
         Self {
             render_decision: RenderDecision {
                 render_action,
@@ -168,12 +154,11 @@ impl CursorTransition {
 pub(super) struct CursorTransitions;
 
 impl CursorTransitions {
-    pub(super) fn clear_all(mode: &str, allow_real_cursor_updates: bool) -> CursorTransition {
+    pub(super) fn clear_all(mode: &str) -> CursorTransition {
         CursorTransition::with_render_action(
             mode,
             RenderAction::ClearAll,
             RenderAllocationPolicy::ReuseOnly,
-            allow_real_cursor_updates,
         )
     }
 
@@ -183,23 +168,16 @@ impl CursorTransitions {
         animation_schedule: AnimationSchedule,
         render_allocation_policy: RenderAllocationPolicy,
     ) -> CursorTransition {
-        let allow_real_cursor_updates = !frame.hide_target_hack;
         let render_action = RenderAction::Draw(Box::new(frame));
-        CursorTransition::with_render_action(
-            mode,
-            render_action,
-            render_allocation_policy,
-            allow_real_cursor_updates,
-        )
-        .with_animation_schedule(animation_schedule)
+        CursorTransition::with_render_action(mode, render_action, render_allocation_policy)
+            .with_animation_schedule(animation_schedule)
     }
 
-    pub(super) fn noop(mode: &str, allow_real_cursor_updates: bool) -> CursorTransition {
+    pub(super) fn noop(mode: &str) -> CursorTransition {
         CursorTransition::with_render_action(
             mode,
             RenderAction::Noop,
             RenderAllocationPolicy::ReuseOnly,
-            allow_real_cursor_updates,
         )
     }
 }

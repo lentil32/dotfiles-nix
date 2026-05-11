@@ -2,12 +2,12 @@ use super::cursor_color::current_cursor_color_probe_generations;
 use super::cursor_color::mode_requires_cursor_color_sampling;
 use super::text_context::current_cursor_text_context;
 use crate::core::effect::CursorPositionReadPolicy;
-use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::ProbePolicy;
 use crate::core::effect::RequestObservationBaseEffect;
 use crate::core::event::Event as CoreEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
 use crate::core::state::CursorTextContextState;
+use crate::core::state::IngressObservationSurface;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationMotion;
 use crate::core::types::Generation;
@@ -84,37 +84,9 @@ pub(super) struct CurrentEditorSnapshot {
 }
 
 #[derive(Clone, Copy)]
-enum ObservationCaptureSource<'a> {
-    Live,
-    Ingress(&'a IngressObservationSurface),
-}
-
-#[derive(Clone, Copy)]
 enum ViewportCapture {
     Omit,
     Include,
-}
-
-impl<'a> ObservationCaptureSource<'a> {
-    const fn from_ingress(
-        ingress_observation_surface: Option<&'a IngressObservationSurface>,
-    ) -> Self {
-        match ingress_observation_surface {
-            Some(surface) => Self::Ingress(surface),
-            None => Self::Live,
-        }
-    }
-
-    fn map_or_else<T>(
-        self,
-        ingress: impl FnOnce(&IngressObservationSurface) -> T,
-        live: impl FnOnce() -> T,
-    ) -> T {
-        match self {
-            Self::Live => live(),
-            Self::Ingress(surface) => ingress(surface),
-        }
-    }
 }
 
 impl CurrentEditorSnapshot {
@@ -137,19 +109,19 @@ impl CurrentEditorSnapshot {
         viewport_capture: ViewportCapture,
         ingress_observation_surface: Option<&IngressObservationSurface>,
     ) -> ObservationReadResult<Self> {
-        let source = ObservationCaptureSource::from_ingress(ingress_observation_surface);
-        let mode = source.map_or_else(|surface| surface.mode().to_owned(), || host.current_mode());
+        let mode = ingress_observation_surface
+            .map_or_else(|| host.current_mode(), |surface| surface.mode().to_owned());
         let viewport = match viewport_capture {
             ViewportCapture::Omit => None,
             ViewportCapture::Include => Some(current_viewport_snapshot()?),
         };
-        let window = source.map_or_else(
-            |surface| window_from_ingress_surface(host, surface),
+        let window = ingress_observation_surface.map_or_else(
             || current_window_snapshot(host),
+            |surface| window_from_ingress_surface(host, surface),
         );
-        let buffer = source.map_or_else(
-            |surface| buffer_from_ingress_surface(host, surface),
+        let buffer = ingress_observation_surface.map_or_else(
             || current_buffer_snapshot(host),
+            |surface| buffer_from_ingress_surface(host, surface),
         );
         let text_revision = match buffer.as_ref() {
             Some(buffer) => Some(
@@ -261,26 +233,13 @@ pub(super) fn current_viewport_snapshot() -> ObservationReadResult<ViewportBound
         .ok_or(ObservationReadError::MissingViewport)
 }
 
-fn observation_surface_from_sources(
-    ingress_surface: Option<&WindowSurfaceSnapshot>,
-    live_surface: impl FnOnce() -> ObservationReadResult<WindowSurfaceSnapshot>,
-) -> ObservationReadResult<WindowSurfaceSnapshot> {
-    ingress_surface.copied().map_or_else(live_surface, Ok)
-}
-
 fn current_observation_surface(
     snapshot: &CurrentEditorSnapshot,
 ) -> ObservationReadResult<WindowSurfaceSnapshot> {
-    observation_surface_from_sources(snapshot.ingress_surface(), || {
-        current_window_surface_snapshot(snapshot.current_window()?).map_err(Into::into)
-    })
-}
-
-fn cursor_observation_from_sources(
-    ingress_cursor: Option<CursorObservation>,
-    live_cursor: impl FnOnce() -> ObservationReadResult<CursorObservation>,
-) -> ObservationReadResult<CursorObservation> {
-    ingress_cursor.map_or_else(live_cursor, Ok)
+    snapshot.ingress_surface().copied().map_or_else(
+        || current_window_surface_snapshot(snapshot.current_window()?).map_err(Into::into),
+        Ok,
+    )
 }
 
 fn current_core_cursor_observation(
@@ -289,16 +248,19 @@ fn current_core_cursor_observation(
     probe_policy: ProbePolicy,
     surface: Option<&WindowSurfaceSnapshot>,
 ) -> ObservationReadResult<CursorObservation> {
-    cursor_observation_from_sources(snapshot.ingress_cursor(), || {
-        cursor_observation_for_mode_with_probe_policy_typed(
-            snapshot.current_window()?,
-            snapshot.mode(),
-            policy.smear_to_cmd(),
-            probe_policy,
-            surface,
-        )
-        .map_err(Into::into)
-    })
+    snapshot.ingress_cursor().map_or_else(
+        || {
+            cursor_observation_for_mode_with_probe_policy_typed(
+                snapshot.current_window()?,
+                snapshot.mode(),
+                policy.smear_to_cmd(),
+                probe_policy,
+                surface,
+            )
+            .map_err(Into::into)
+        },
+        Ok,
+    )
 }
 
 fn collect_observation_basis(
@@ -394,19 +356,14 @@ pub(crate) fn execute_core_request_observation_base_effect(
 #[cfg(test)]
 mod tests {
     use super::CurrentEditorSnapshot;
-    use super::ObservationCaptureSource;
     use super::ObservationReadError;
+    use super::ViewportCapture;
     use super::buffer_from_ingress_surface;
     use super::current_buffer_snapshot;
     use super::current_viewport_snapshot;
     use super::current_window_snapshot;
-    use super::cursor_observation_from_sources;
-    use super::observation_surface_from_sources;
     use super::window_from_ingress_surface;
-    use crate::core::effect::IngressObservationSurface;
-    use crate::events::cursor::CursorParseError;
-    use crate::events::cursor::CursorReadError;
-    use crate::events::surface::WindowSurfaceReadError;
+    use crate::core::state::IngressObservationSurface;
     use crate::host::CurrentEditorCall;
     use crate::host::FakeCurrentEditorPort;
     use crate::position::BufferLine;
@@ -441,29 +398,73 @@ mod tests {
     }
 
     #[test]
-    fn observation_capture_source_prefers_ingress_values_without_live_fallback() {
+    fn current_editor_snapshot_prefers_ingress_facts_without_live_current_reads() {
+        crate::events::runtime::reset_transient_event_state();
+        let host = FakeCurrentEditorPort::default();
+        host.set_current_window_handle(99);
+        host.set_current_buffer_handle(101);
         let ingress_surface = ingress_surface();
-        let source = ObservationCaptureSource::from_ingress(Some(&ingress_surface));
 
+        let snapshot = CurrentEditorSnapshot::capture_with_viewport(
+            &host,
+            ViewportCapture::Omit,
+            Some(&ingress_surface),
+        )
+        .expect("ingress-backed capture should succeed");
+
+        assert_eq!(snapshot.mode(), "n");
         assert_eq!(
-            source.map_or_else(
-                |surface| surface.mode().to_owned(),
-                || panic!("ingress-backed capture should not consult the live fallback"),
-            ),
-            "n".to_string(),
+            snapshot.window().map(nvim_oxi::api::Window::handle),
+            Some(11)
+        );
+        assert_eq!(
+            snapshot.buffer().map(nvim_oxi::api::Buffer::handle),
+            Some(17)
+        );
+        assert_eq!(snapshot.ingress_surface(), Some(&surface_snapshot()));
+        assert_eq!(snapshot.ingress_cursor(), Some(cursor_observation()));
+        assert_eq!(
+            host.calls(),
+            vec![
+                CurrentEditorCall::ValidWindowFromHandle { window_handle: 11 },
+                CurrentEditorCall::ValidBufferFromHandle {
+                    buffer_handle: 17.into(),
+                },
+            ],
         );
     }
 
     #[test]
-    fn observation_capture_source_uses_live_values_without_ingress_surface() {
-        let source = ObservationCaptureSource::from_ingress(None);
+    fn current_editor_snapshot_uses_live_facts_without_ingress_surface() {
+        crate::events::runtime::reset_transient_event_state();
+        let host = FakeCurrentEditorPort::default();
+        host.set_current_window_handle(11);
+        host.set_current_buffer_handle(17);
 
+        let snapshot =
+            CurrentEditorSnapshot::capture_with_viewport(&host, ViewportCapture::Omit, None)
+                .expect("live capture should succeed");
+
+        assert_eq!(snapshot.mode(), "n");
         assert_eq!(
-            source.map_or_else(
-                |_| panic!("live capture should not use ingress-only values"),
-                || "n".to_string(),
-            ),
-            "n".to_string(),
+            snapshot.window().map(nvim_oxi::api::Window::handle),
+            Some(11)
+        );
+        assert_eq!(
+            snapshot.buffer().map(nvim_oxi::api::Buffer::handle),
+            Some(17)
+        );
+        assert_eq!(snapshot.ingress_surface(), None);
+        assert_eq!(snapshot.ingress_cursor(), None);
+        assert_eq!(
+            host.calls(),
+            vec![
+                CurrentEditorCall::CurrentMode,
+                CurrentEditorCall::CurrentWindow,
+                CurrentEditorCall::WindowIsValid { window_handle: 11 },
+                CurrentEditorCall::CurrentBuffer,
+                CurrentEditorCall::BufferIsValid { buffer_handle: 17 },
+            ],
         );
     }
 
@@ -615,61 +616,5 @@ mod tests {
         );
 
         crate::events::runtime::reset_transient_event_state();
-    }
-
-    #[test]
-    fn observation_surface_uses_ingress_snapshot_without_touching_the_live_reader() {
-        let surface = surface_snapshot();
-
-        assert_eq!(
-            observation_surface_from_sources(Some(&surface), || {
-                panic!("ingress snapshot should bypass the live surface reader")
-            })
-            .expect("ingress surface should win"),
-            surface,
-        );
-    }
-
-    #[test]
-    fn malformed_surface_payloads_fail_without_fabricating_a_zero_surface_snapshot() {
-        let error = observation_surface_from_sources(None, || {
-            Err(WindowSurfaceReadError::InvalidTopline { topline: 0 }.into())
-        })
-        .expect_err("malformed surface payload should fail");
-
-        assert!(matches!(
-            error,
-            ObservationReadError::Surface(WindowSurfaceReadError::InvalidTopline { topline: 0 })
-        ));
-    }
-
-    #[test]
-    fn observation_cursor_uses_ingress_snapshot_without_touching_the_live_reader() {
-        let cursor = cursor_observation();
-
-        assert_eq!(
-            cursor_observation_from_sources(Some(cursor), || {
-                panic!("ingress cursor should bypass the live cursor reader")
-            })
-            .expect("ingress cursor should win"),
-            cursor,
-        );
-    }
-
-    #[test]
-    fn malformed_cursor_payloads_fail_without_fabricating_unavailable_cursor_state() {
-        let error = cursor_observation_from_sources(None, || {
-            Err(ObservationReadError::Cursor(CursorReadError::Parse(
-                CursorParseError::ScreenposInvalidCell { row: 0, col: 3 },
-            )))
-        })
-        .expect_err("malformed cursor payload should fail");
-
-        assert!(matches!(
-            error,
-            ObservationReadError::Cursor(CursorReadError::Parse(
-                CursorParseError::ScreenposInvalidCell { row: 0, col: 3 }
-            ))
-        ));
     }
 }

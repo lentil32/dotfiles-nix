@@ -392,6 +392,7 @@ impl AnimationSchedule {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn next_animation_at_ms(self) -> Option<u64> {
         match self {
             Self::Idle | Self::DefaultDelay => None,

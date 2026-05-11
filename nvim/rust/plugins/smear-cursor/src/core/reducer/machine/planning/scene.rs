@@ -91,9 +91,7 @@ fn next_cursor_trail_for_render_decision(
     render_decision: &RenderDecision,
 ) -> Option<CursorTrailSemantic> {
     match &render_decision.render_action {
-        RenderAction::Draw(_frame) => Some(CursorTrailSemantic::new(
-            render_decision.render_side_effects.target_cell_presentation,
-        )),
+        RenderAction::Draw(_frame) => Some(CursorTrailSemantic::new()),
         RenderAction::ClearAll => None,
         RenderAction::Noop => current.cloned(),
     }
@@ -146,7 +144,7 @@ pub(super) fn update_scene_from_render_decision_with_context(
             let next_render_revision =
                 RenderRevision::new(next_motion_revision, next_semantic_revision);
 
-            let Some(trail_semantic) = next_cursor_trail.as_ref() else {
+            if next_cursor_trail.is_none() {
                 // Surprising: draw planning lost its semantic trail payload before projection.
                 let next_scene = PlannedSceneUpdate::new(
                     next_semantic_revision,
@@ -156,7 +154,7 @@ pub(super) fn update_scene_from_render_decision_with_context(
                     PlannedProjectionUpdate::Replace(None),
                 );
                 return (next_scene, None, Some(ApplyFailureKind::MissingProjection));
-            };
+            }
             let Some(observation) = observation else {
                 // Surprising: render planning completed without an active observation basis.
                 // Keep semantic truth updated, but do not fabricate a projection.
@@ -189,9 +187,7 @@ pub(super) fn update_scene_from_render_decision_with_context(
                 }
             };
 
-            if let Some(reused) =
-                reusable_prepared_projection(current_scene, &prepared, trail_semantic)
-            {
+            if let Some(reused) = reusable_prepared_projection(current_scene, &prepared) {
                 crate::events::record_projection_reuse_hit();
                 let retained_projection = reused.clone();
                 let next_scene = PlannedSceneUpdate::new(
@@ -205,7 +201,7 @@ pub(super) fn update_scene_from_render_decision_with_context(
             }
             crate::events::record_projection_reuse_miss();
 
-            let retained_projection = project_prepared_frame(prepared, trail_semantic);
+            let retained_projection = project_prepared_frame(prepared);
             let next_scene = PlannedSceneUpdate::new(
                 next_semantic_revision,
                 next_motion_revision,
@@ -297,7 +293,6 @@ mod tests {
     use crate::config::RuntimeConfig;
     use crate::core::runtime_reducer::RenderAction;
     use crate::core::runtime_reducer::RenderDecision;
-    use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::state::CursorTrailSemantic;
     use crate::core::state::RealizationClear;
     use crate::core::state::RealizationDivergence;
@@ -310,11 +305,9 @@ mod tests {
     use proptest::prelude::*;
 
     use super::super::projection::project_draw_frame;
-    use super::super::test_support::alternate_target_cell_presentation;
     use super::super::test_support::base_frame;
     use super::super::test_support::dirty_mutation_axis_strategy;
     use super::super::test_support::observation;
-    use super::super::test_support::target_cell_presentation_strategy;
     use crate::core::types::RenderRevision;
     use crate::test_support::proptest::pure_config;
 
@@ -324,41 +317,15 @@ mod tests {
         #[test]
         fn prop_dirty_entities_track_semantic_cursor_trail_identity(
             mutation_axis in dirty_mutation_axis_strategy(),
-            initial_presentation in target_cell_presentation_strategy(),
             _color_at_cursor in any::<u32>(),
         ) {
-            let next_presentation = match mutation_axis {
-                super::super::test_support::DirtyMutationAxis::None => initial_presentation,
-                super::super::test_support::DirtyMutationAxis::PaletteOnly
-                | super::super::test_support::DirtyMutationAxis::Geometry => {
-                    initial_presentation
-                }
-                super::super::test_support::DirtyMutationAxis::Presentation => {
-                    alternate_target_cell_presentation(initial_presentation)
-                }
-            };
-
-            let previous = Some(CursorTrailSemantic::new(initial_presentation));
-            let next = Some(CursorTrailSemantic::new(next_presentation));
+            let previous = Some(CursorTrailSemantic::new());
+            let next = Some(CursorTrailSemantic::new());
             let dirty = dirty_entities(previous.as_ref(), next.as_ref());
-            let expected_dirty = previous != next;
-
-            prop_assert_eq!(dirty.is_empty(), !expected_dirty);
-            if expected_dirty {
-                prop_assert_eq!(
-                    &dirty,
-                    &std::collections::BTreeSet::from([
-                        crate::core::state::SemanticEntityId::CursorTrail,
-                    ]),
-                );
-            }
 
             match mutation_axis {
                 super::super::test_support::DirtyMutationAxis::PaletteOnly => {
                     prop_assert!(dirty.is_empty())
-                }
-                super::super::test_support::DirtyMutationAxis::Presentation => {
-                    prop_assert!(!dirty.is_empty())
                 }
                 super::super::test_support::DirtyMutationAxis::Geometry => {
                     prop_assert!(dirty.is_empty())
@@ -400,12 +367,11 @@ mod tests {
             RenderRevision::INITIAL,
             &cached_observation,
             &frame,
-            TargetCellPresentation::None,
         )
         .expect("projection without probe-gated particles");
         let scene = SceneState::default()
             .with_retained_projection(cached.clone())
-            .with_cursor_trail(CursorTrailSemantic::new(TargetCellPresentation::None));
+            .with_cursor_trail(CursorTrailSemantic::new());
         let realization = RealizationLedger::Diverged {
             last_consistent: Some(cached),
             divergence: RealizationDivergence::ShellStateUnknown,

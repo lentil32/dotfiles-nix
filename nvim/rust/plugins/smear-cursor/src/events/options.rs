@@ -16,6 +16,7 @@ use crate::state::OptionalChange;
 use crate::state::ParticleOptionsPatch;
 use crate::state::RenderingOptionsPatch;
 use crate::state::RuntimeOptionsPatch;
+#[cfg(test)]
 use crate::state::RuntimeState;
 use crate::state::RuntimeSwitchesPatch;
 use crate::state::SmearBehaviorPatch;
@@ -40,10 +41,6 @@ enum OptionKey {
     SmearTerminalMode,
     AnimateInInsertMode,
     AnimateCommandLine,
-    VerticalBarCursor,
-    VerticalBarCursorInsertMode,
-    HorizontalBarCursorReplaceMode,
-    HideTargetHack,
     MaxKeptWindows,
     WindowsZindex,
     BufferPerfMode,
@@ -93,7 +90,6 @@ enum OptionKey {
     MinDistanceEmitParticles,
     ParticleSwitchOctantBraille,
     ParticlesOverText,
-    NeverDrawOverTarget,
     ColorLevels,
     Gamma,
     TailDurationMs,
@@ -116,10 +112,6 @@ impl OptionKey {
             Self::SmearTerminalMode => "smear_terminal_mode",
             Self::AnimateInInsertMode => "animate_in_insert_mode",
             Self::AnimateCommandLine => "animate_command_line",
-            Self::VerticalBarCursor => "vertical_bar_cursor",
-            Self::VerticalBarCursorInsertMode => "vertical_bar_cursor_insert_mode",
-            Self::HorizontalBarCursorReplaceMode => "horizontal_bar_cursor_replace_mode",
-            Self::HideTargetHack => "hide_target_hack",
             Self::MaxKeptWindows => "max_kept_windows",
             Self::WindowsZindex => "windows_zindex",
             Self::BufferPerfMode => "buffer_perf_mode",
@@ -169,7 +161,6 @@ impl OptionKey {
             Self::MinDistanceEmitParticles => "min_distance_emit_particles",
             Self::ParticleSwitchOctantBraille => "particle_switch_octant_braille",
             Self::ParticlesOverText => "particles_over_text",
-            Self::NeverDrawOverTarget => "never_draw_over_target",
             Self::ColorLevels => "color_levels",
             Self::Gamma => "gamma",
             Self::TailDurationMs => "tail_duration_ms",
@@ -558,34 +549,6 @@ define_option_spec!(
     runtime.animate_command_line
 );
 define_option_spec!(
-    spec_vertical_bar_cursor_apply,
-    SPEC_VERTICAL_BAR_CURSOR,
-    VerticalBarCursor,
-    parse_optional_bool,
-    runtime.vertical_bar_cursor
-);
-define_option_spec!(
-    spec_vertical_bar_cursor_insert_mode_apply,
-    SPEC_VERTICAL_BAR_CURSOR_INSERT_MODE,
-    VerticalBarCursorInsertMode,
-    parse_optional_bool,
-    runtime.vertical_bar_cursor_insert_mode
-);
-define_option_spec!(
-    spec_horizontal_bar_cursor_replace_mode_apply,
-    SPEC_HORIZONTAL_BAR_CURSOR_REPLACE_MODE,
-    HorizontalBarCursorReplaceMode,
-    parse_optional_bool,
-    runtime.horizontal_bar_cursor_replace_mode
-);
-define_option_spec!(
-    spec_hide_target_hack_apply,
-    SPEC_HIDE_TARGET_HACK,
-    HideTargetHack,
-    parse_optional_bool,
-    runtime.hide_target_hack
-);
-define_option_spec!(
     spec_max_kept_windows_apply,
     SPEC_MAX_KEPT_WINDOWS,
     MaxKeptWindows,
@@ -929,13 +892,6 @@ define_option_spec!(
     particles.particles_over_text
 );
 define_option_spec!(
-    spec_never_draw_over_target_apply,
-    SPEC_NEVER_DRAW_OVER_TARGET,
-    NeverDrawOverTarget,
-    parse_optional_bool,
-    rendering.never_draw_over_target
-);
-define_option_spec!(
     spec_color_levels_apply,
     SPEC_COLOR_LEVELS,
     ColorLevels,
@@ -990,10 +946,6 @@ const OPTION_SPECS: &[OptionSpec] = &[
     SPEC_SMEAR_TERMINAL_MODE,
     SPEC_ANIMATE_IN_INSERT_MODE,
     SPEC_ANIMATE_COMMAND_LINE,
-    SPEC_VERTICAL_BAR_CURSOR,
-    SPEC_VERTICAL_BAR_CURSOR_INSERT_MODE,
-    SPEC_HORIZONTAL_BAR_CURSOR_REPLACE_MODE,
-    SPEC_HIDE_TARGET_HACK,
     SPEC_MAX_KEPT_WINDOWS,
     SPEC_WINDOWS_ZINDEX,
     SPEC_BUFFER_PERF_MODE,
@@ -1043,7 +995,6 @@ const OPTION_SPECS: &[OptionSpec] = &[
     SPEC_MIN_DISTANCE_EMIT_PARTICLES,
     SPEC_PARTICLE_SWITCH_OCTANT_BRAILLE,
     SPEC_PARTICLES_OVER_TEXT,
-    SPEC_NEVER_DRAW_OVER_TARGET,
     SPEC_COLOR_LEVELS,
     SPEC_GAMMA,
     SPEC_TAIL_DURATION_MS,
@@ -1093,6 +1044,7 @@ impl RuntimeOptionsPatch {
     }
 }
 
+#[cfg(test)]
 pub(super) fn apply_runtime_options(state: &mut RuntimeState, opts: &Dictionary) -> Result<()> {
     let patch = RuntimeOptionsPatch::parse(opts)?;
     patch.validate_against(&state.config)?;

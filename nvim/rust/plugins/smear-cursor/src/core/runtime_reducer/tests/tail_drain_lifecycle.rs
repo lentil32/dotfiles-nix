@@ -366,3 +366,47 @@ fn tail_drain_advances_existing_particles_without_emitting_new_ones() {
         "drain ticks should advance or retire existing particles"
     );
 }
+
+#[test]
+fn terminal_tail_drain_clear_drops_remaining_particles() {
+    let mut state = RuntimeState::default();
+    state.config.particles_enabled = true;
+    state.config.time_interval = 16.0;
+    state.config.simulation_hz = 1_000.0;
+    state.config.max_simulation_steps_per_frame = 16;
+    state.initialize_cursor(
+        RenderPoint { row: 5.0, col: 6.0 },
+        CursorShape::block(),
+        7,
+        &TrackedCursor::fixture(10, 20, 1, 1),
+    );
+    state.apply_step_output(StepOutput {
+        current_corners: state.current_corners(),
+        velocity_corners: state.velocity_corners(),
+        spring_velocity_corners: state.spring_velocity_corners(),
+        trail_elapsed_ms: state.trail_elapsed_ms(),
+        particles: vec![Particle {
+            position: RenderPoint { row: 5.0, col: 7.0 },
+            velocity: RenderPoint { row: 0.0, col: 0.0 },
+            lifetime: 500.0,
+        }],
+        previous_center: state.previous_center(),
+        index_head: 0,
+        index_tail: 0,
+        rng_state: state.rng_state(),
+    });
+    state.start_tail_drain(1, 100.0);
+    state.set_last_tick_ms(Some(100.0));
+
+    let transition = reduce_cursor_event(
+        &mut state,
+        "n",
+        event_at(5.0, 6.0, 116.0),
+        EventSource::AnimationTick,
+    );
+
+    assert!(matches!(render_action(&transition), RenderAction::ClearAll));
+    assert!(!transition.should_schedule_next_animation());
+    assert_eq!(state.drain_steps_remaining(), 0);
+    assert!(state.particles().is_empty());
+}

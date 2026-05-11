@@ -9,7 +9,6 @@ use crate::core::realization::LogicalRaster;
 use crate::core::runtime_reducer::CursorVisibilityEffect;
 use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderSideEffects;
-use crate::core::runtime_reducer::TargetCellPresentation;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::BufferPerfClass;
@@ -66,7 +65,6 @@ use crate::position::ViewportBounds;
 use crate::position::WindowSurfaceSnapshot;
 use crate::state::RuntimeState;
 use crate::state::TrackedCursor;
-use crate::types::CursorCellShape;
 use insta::assert_snapshot;
 use std::sync::Arc;
 
@@ -156,13 +154,7 @@ fn retained_projection(
             viewport(),
             ProjectorRevision::CURRENT,
         ),
-        ProjectionReuseKey::new(
-            Some(77),
-            Some(88),
-            None,
-            TargetCellPresentation::None,
-            ProjectionPolicyRevision::INITIAL,
-        ),
+        ProjectionReuseKey::new(Some(77), Some(88), None, ProjectionPolicyRevision::INITIAL),
         PlannerState::default(),
         LogicalRaster::new(None, Arc::from(cells)),
     )
@@ -219,11 +211,7 @@ fn applying_proposal(acknowledged: ProjectionHandle, target: ProjectionHandle) -
         RenderSideEffects {
             redraw_after_draw_if_cmdline: true,
             redraw_after_clear_if_cmdline: false,
-            target_cell_presentation: TargetCellPresentation::OverlayCursorCell(
-                CursorCellShape::VerticalBar,
-            ),
             cursor_visibility: CursorVisibilityEffect::Hide,
-            allow_real_cursor_updates: false,
         },
         AnimationSchedule::Deadline(Millis::new(360)),
     )

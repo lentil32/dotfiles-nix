@@ -154,7 +154,6 @@ pub(crate) struct RuntimeConfig {
     pub(crate) animate_in_insert_mode: bool,
     pub(crate) animate_command_line: bool,
     pub(crate) smear_to_cmd: bool,
-    pub(crate) hide_target_hack: bool,
     pub(crate) max_kept_windows: usize,
     pub(crate) windows_zindex: u32,
     pub(crate) buffer_perf_mode: BufferPerfMode,
@@ -166,9 +165,6 @@ pub(crate) struct RuntimeConfig {
     pub(crate) transparent_bg_fallback_color: String,
     pub(crate) cterm_cursor_colors: Option<Vec<u16>>,
     pub(crate) cterm_bg: Option<u16>,
-    pub(crate) vertical_bar_cursor: bool,
-    pub(crate) vertical_bar_cursor_insert_mode: bool,
-    pub(crate) horizontal_bar_cursor_replace_mode: bool,
     pub(crate) particle_damping: f64,
     pub(crate) particles_enabled: bool,
     pub(crate) particle_gravity: f64,
@@ -185,7 +181,6 @@ pub(crate) struct RuntimeConfig {
     pub(crate) particle_switch_octant_braille: f64,
     pub(crate) particles_over_text: bool,
     pub(crate) block_aspect_ratio: f64,
-    pub(crate) never_draw_over_target: bool,
     pub(crate) color_levels: u32,
     pub(crate) gamma: f64,
     pub(crate) spatial_coherence_weight: f64,
@@ -201,16 +196,10 @@ impl RuntimeConfig {
         (1000.0 / fps).max(1.0)
     }
 
-    pub(crate) fn cursor_cell_shape(&self, mode: &str) -> CursorCellShape {
-        if is_replace_like_mode(mode) && self.horizontal_bar_cursor_replace_mode {
+    pub(crate) fn cursor_cell_shape(mode: &str) -> CursorCellShape {
+        if is_replace_like_mode(mode) {
             CursorCellShape::HorizontalBar
         } else if is_insert_like_mode(mode) {
-            if self.vertical_bar_cursor_insert_mode {
-                CursorCellShape::VerticalBar
-            } else {
-                CursorCellShape::Block
-            }
-        } else if self.vertical_bar_cursor {
             CursorCellShape::VerticalBar
         } else {
             CursorCellShape::Block
@@ -289,7 +278,6 @@ impl Default for RuntimeConfig {
             animate_in_insert_mode: true,
             animate_command_line: true,
             smear_to_cmd: true,
-            hide_target_hack: false,
             // Keep the peak pool cap distinct from the adaptive retained-budget ceiling.
             // Cleanup already converges retained windows toward the adaptive budget floor, but
             // one hot frame can still need more simultaneous windows than we keep warm when idle.
@@ -304,11 +292,8 @@ impl Default for RuntimeConfig {
             transparent_bg_fallback_color: "#303030".to_string(),
             cterm_cursor_colors: Some((240_u16..=255_u16).collect()),
             cterm_bg: Some(235),
-            vertical_bar_cursor: false,
-            vertical_bar_cursor_insert_mode: true,
-            horizontal_bar_cursor_replace_mode: true,
             particle_damping: 0.2,
-            particles_enabled: false,
+            particles_enabled: true,
             particle_gravity: 20.0,
             particle_random_velocity: 100.0,
             particle_max_num: 100,
@@ -323,7 +308,6 @@ impl Default for RuntimeConfig {
             particle_switch_octant_braille: 0.3,
             particles_over_text: false,
             block_aspect_ratio: DEFAULT_BLOCK_ASPECT_RATIO,
-            never_draw_over_target: false,
             color_levels: 128,
             gamma: 2.2,
             spatial_coherence_weight: 1.0,
@@ -349,40 +333,16 @@ mod tests {
         #![proptest_config(pure_config())]
 
         #[test]
-        fn prop_cursor_cell_shape_uses_mode_specific_precedence(
-            mode_family in mode_family(),
-            vertical_bar_cursor in any::<bool>(),
-            vertical_bar_cursor_insert_mode in any::<bool>(),
-            horizontal_bar_cursor_replace_mode in any::<bool>(),
-        ) {
-            let config = RuntimeConfig {
-                vertical_bar_cursor,
-                vertical_bar_cursor_insert_mode,
-                horizontal_bar_cursor_replace_mode,
-                ..RuntimeConfig::default()
-            };
+        fn prop_cursor_cell_shape_uses_mode_family_defaults(mode_family in mode_family()) {
             let mode = representative_mode(mode_family);
 
             let expected = match mode_family {
-                ModeFamily::Replace if horizontal_bar_cursor_replace_mode => {
-                    CursorCellShape::HorizontalBar
-                }
-                ModeFamily::Replace if vertical_bar_cursor => CursorCellShape::VerticalBar,
-                ModeFamily::Insert if vertical_bar_cursor_insert_mode => {
-                    CursorCellShape::VerticalBar
-                }
-                ModeFamily::Normal
-                | ModeFamily::Terminal
-                | ModeFamily::Cmdline
-                | ModeFamily::Other
-                    if vertical_bar_cursor =>
-                {
-                    CursorCellShape::VerticalBar
-                }
+                ModeFamily::Replace => CursorCellShape::HorizontalBar,
+                ModeFamily::Insert => CursorCellShape::VerticalBar,
                 _ => CursorCellShape::Block,
             };
 
-            prop_assert_eq!(config.cursor_cell_shape(mode), expected);
+            prop_assert_eq!(RuntimeConfig::cursor_cell_shape(mode), expected);
         }
 
         #[test]

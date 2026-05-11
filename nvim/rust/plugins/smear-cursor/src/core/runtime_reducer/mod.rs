@@ -38,7 +38,6 @@ pub(crate) use decision::RenderCleanupAction;
 pub(crate) use decision::RenderDecision;
 pub(crate) use decision::RenderSideEffects;
 pub(crate) use decision::ScrollShift;
-pub(crate) use decision::TargetCellPresentation;
 #[cfg(test)]
 pub(crate) use frame::RenderFrameRequest;
 #[cfg(test)]

@@ -61,8 +61,6 @@ pub(crate) use runtime::record_planner_local_query_compile;
 pub(crate) use runtime::record_planner_local_query_envelope_area_cells;
 pub(crate) use runtime::record_planner_reference_compile;
 pub(crate) use runtime::record_planning_preview_copied_particles;
-#[cfg(feature = "perf-counters")]
-pub(crate) use runtime::record_planning_preview_copy;
 pub(crate) use runtime::record_planning_preview_invocation;
 pub(crate) use runtime::record_projection_reuse_hit;
 pub(crate) use runtime::record_projection_reuse_miss;

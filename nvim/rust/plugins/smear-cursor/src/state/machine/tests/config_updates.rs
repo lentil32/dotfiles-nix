@@ -7,7 +7,6 @@ fn commit_runtime_config_update_rebuilds_derived_config_from_runtime_config() {
     let initial_revision = state.config_revision;
     let initial_derived_config = state.derived_config.clone();
     state.config.color_levels = 32;
-    state.config.hide_target_hack = false;
     state.config.max_kept_windows = 12;
 
     state.commit_runtime_config_update();

@@ -2,6 +2,9 @@ use super::BufferPerfClass;
 use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
 use crate::core::types::ProposalId;
+use crate::host::BufferHandle;
+use crate::position::CursorObservation;
+use crate::position::WindowSurfaceSnapshot;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ExternalDemandKind {
@@ -69,31 +72,94 @@ impl ExternalDemand {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct QueuedDemand(ExternalDemand);
+pub(crate) struct IngressObservationSurface {
+    surface: WindowSurfaceSnapshot,
+    cursor: Option<CursorObservation>,
+    mode: String,
+}
+
+impl IngressObservationSurface {
+    pub(crate) fn new(
+        surface: WindowSurfaceSnapshot,
+        cursor: Option<CursorObservation>,
+        mode: String,
+    ) -> Self {
+        Self {
+            surface,
+            cursor,
+            mode,
+        }
+    }
+
+    pub(crate) const fn surface(&self) -> WindowSurfaceSnapshot {
+        self.surface
+    }
+
+    pub(crate) const fn window_handle(&self) -> i64 {
+        self.surface.id().window_handle()
+    }
+
+    pub(crate) const fn buffer_handle(&self) -> BufferHandle {
+        self.surface.id().buffer_handle()
+    }
+
+    pub(crate) const fn cursor(&self) -> Option<CursorObservation> {
+        self.cursor
+    }
+
+    pub(crate) fn mode(&self) -> &str {
+        self.mode.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct QueuedDemand {
+    demand: ExternalDemand,
+    // Captured at ingress so delayed drains do not reread a different current
+    // window after focus/mode churn.
+    ingress_observation_surface: Option<IngressObservationSurface>,
+}
 
 impl QueuedDemand {
     pub(crate) fn ready(demand: ExternalDemand) -> Self {
-        Self(demand)
+        Self::new(demand, None)
+    }
+
+    pub(crate) fn ready_with_ingress_surface(
+        demand: ExternalDemand,
+        ingress_observation_surface: IngressObservationSurface,
+    ) -> Self {
+        Self::new(demand, Some(ingress_observation_surface))
+    }
+
+    fn new(
+        demand: ExternalDemand,
+        ingress_observation_surface: Option<IngressObservationSurface>,
+    ) -> Self {
+        Self {
+            demand,
+            ingress_observation_surface,
+        }
     }
 
     pub(crate) const fn as_demand(&self) -> &ExternalDemand {
-        &self.0
+        &self.demand
     }
 
     pub(crate) const fn seq(&self) -> IngressSeq {
-        self.0.seq()
+        self.demand.seq()
     }
 
     pub(crate) const fn kind(&self) -> ExternalDemandKind {
-        self.0.kind()
+        self.demand.kind()
     }
 
     pub(crate) const fn is_cursor(&self) -> bool {
         self.kind().is_cursor()
     }
 
-    pub(crate) fn into_ready(self) -> ExternalDemand {
-        self.0
+    pub(crate) fn into_ready_parts(self) -> (ExternalDemand, Option<IngressObservationSurface>) {
+        (self.demand, self.ingress_observation_surface)
     }
 }
 
@@ -164,11 +230,11 @@ impl DemandQueue {
             .map(|(kind, _)| kind)
     }
 
-    fn take_ready_demand(&mut self, kind: ExternalDemandKind) -> Option<ExternalDemand> {
-        self.slots.take(kind).map(QueuedDemand::into_ready)
+    fn take_ready_demand(&mut self, kind: ExternalDemandKind) -> Option<QueuedDemand> {
+        self.slots.take(kind)
     }
 
-    pub(crate) fn dequeue_ready(mut self) -> (Self, Option<ExternalDemand>) {
+    pub(crate) fn dequeue_ready(mut self) -> (Self, Option<QueuedDemand>) {
         let Some(kind) = self.next_ready_kind() else {
             return (self, None);
         };

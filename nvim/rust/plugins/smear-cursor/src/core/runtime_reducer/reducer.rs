@@ -9,10 +9,13 @@ use super::RenderAllocationPolicy;
 use super::RenderCleanupAction;
 use super::ScrollShift;
 use super::decision::CursorTransitions;
+use super::frame::CurrentRenderFrameRequest;
 use super::frame::RenderFrameRequest;
 use super::frame::apply_scroll_shift_to_state;
+use super::frame::build_current_render_frame;
 use super::frame::build_render_frame;
 use super::frame::clamp_row_to_window;
+use super::frame::current_render_step_sample;
 use super::frame::next_animation_deadline_from_clock;
 use super::frame::next_animation_deadline_from_settling;
 use super::frame::reset_animation_timing;
@@ -22,11 +25,11 @@ use super::policy::external_mode_ignores_cursor;
 use super::policy::external_mode_requires_immediate_movement;
 use super::policy::external_mode_requires_jump;
 use crate::animation::corners_for_cursor;
-use crate::animation::corners_for_render;
 use crate::animation::outside_stop_exit;
 use crate::animation::simulate_step;
 use crate::animation::stop_metrics;
 use crate::animation::within_stop_enter;
+use crate::config::RuntimeConfig;
 use crate::core::state::BufferPerfClass;
 use crate::core::state::SemanticEvent;
 use crate::core::types::AnimationSchedule;
@@ -203,30 +206,27 @@ fn promote_settled_target(state: &mut RuntimeState) {
 fn waiting_for_settled_target(
     state: &RuntimeState,
     mode: &str,
-    allow_real_cursor_updates: bool,
     motion_class: MotionClass,
     now_ms: f64,
 ) -> CursorTransition {
-    CursorTransitions::noop(mode, allow_real_cursor_updates)
+    CursorTransitions::noop(mode)
         .with_motion_class(motion_class)
         .with_next_animation_deadline(next_animation_deadline_from_settling(state, now_ms))
         .with_cursor_visibility(CursorVisibilityEffect::Show)
         .with_render_cleanup_action(RenderCleanupAction::Invalidate)
 }
 
-fn clock_discontinuity_transition(
-    state: &mut RuntimeState,
-    mode: &str,
-    allow_real_cursor_updates: bool,
-) -> CursorTransition {
+fn clock_discontinuity_transition(state: &mut RuntimeState, mode: &str) -> CursorTransition {
     // A broken or oversized wall-clock sample severs motion continuity. Snap reducer truth to the
-    // latest target, discard residual tail state, and force the shell to clear stale smear output.
+    // latest target, discard residual tail state and cold particle storage, and force the shell to
+    // clear stale smear output.
     state.start_new_trail_stroke();
     state.settle_at_target();
     state.clear_particles();
+    state.release_cleanup_cold_storage();
     reset_animation_timing(state);
     state.stop_animation();
-    CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+    CursorTransitions::clear_all(mode)
         .with_motion_class(MotionClass::DiscontinuousJump)
         .with_render_cleanup_action(RenderCleanupAction::Schedule)
 }
@@ -239,13 +239,12 @@ fn draw_drain_frame(
     vertical_bar: bool,
     buffer_perf_class: BufferPerfClass,
 ) -> CursorTransition {
-    let allow_real_cursor_updates = !state.config.hide_target_hack;
     let keeps_ornamental_effects = buffer_perf_class.keeps_ornamental_effects();
     let configured_interval = state.config.time_interval.max(1.0);
     match state.take_animation_clock_sample(event_now_ms, configured_interval) {
         AnimationClockSample::Advance { elapsed_ms } => state.push_simulation_elapsed(elapsed_ms),
         AnimationClockSample::Discontinuity => {
-            return clock_discontinuity_transition(state, mode, allow_real_cursor_updates);
+            return clock_discontinuity_transition(state, mode);
         }
     }
 
@@ -289,25 +288,24 @@ fn draw_drain_frame(
         // Surprising: keep-warm cleanup intentionally preserves hidden cached windows. Terminal
         // tail drain therefore must collapse into an explicit clear instead of relying on a later
         // soft cleanup pass, or the last smear frame can remain visible until unrelated ingress.
-        return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+        // The clear is also the terminal ownership boundary for particles whose lifetime outlasts
+        // the planner drain window.
+        state.clear_particles();
+        return CursorTransitions::clear_all(mode)
             .with_render_cleanup_action(RenderCleanupAction::Schedule);
     }
 
     if planner_idle_steps == 0 {
-        return CursorTransitions::noop(mode, allow_real_cursor_updates)
+        return CursorTransitions::noop(mode)
             .with_animation_schedule(animation_schedule)
             .with_cursor_visibility(CursorVisibilityEffect::Show)
             .with_render_cleanup_action(RenderCleanupAction::Invalidate);
     }
 
-    let current_corners = state.current_corners();
-    let target_corners = state.target_corners();
-    let render_corners = corners_for_render(&state.config, &current_corners, &target_corners);
-    let frame = build_render_frame(
+    let frame = build_current_render_frame(
         state,
-        RenderFrameRequest {
+        CurrentRenderFrameRequest {
             mode,
-            render_corners,
             step_samples: Vec::new(),
             planner_idle_steps,
             target: target_position,
@@ -322,6 +320,44 @@ fn draw_drain_frame(
         RenderAllocationPolicy::ReuseOnly,
     )
     .with_render_cleanup_action(RenderCleanupAction::Invalidate)
+}
+
+#[derive(Clone, Copy)]
+struct SimulationStepRequest<'a> {
+    mode: &'a str,
+    simulation_step_ms: f64,
+    vertical_bar: bool,
+    horizontal_bar: bool,
+    keeps_ornamental_effects: bool,
+    buffer_perf_class: BufferPerfClass,
+}
+
+fn advance_simulation_step(
+    state: &mut RuntimeState,
+    request: SimulationStepRequest<'_>,
+    step_samples: &mut Vec<RenderStepSample>,
+) {
+    let particles = if request.keeps_ornamental_effects {
+        state.take_particles()
+    } else {
+        Vec::new()
+    };
+    let step_input = step_input(
+        state,
+        request.mode,
+        request.simulation_step_ms,
+        request.vertical_bar,
+        request.horizontal_bar,
+        particles,
+        request.buffer_perf_class,
+    );
+    crate::events::record_particle_simulation_step(step_input.particles.len());
+    let step_output = simulate_step(step_input);
+    state.apply_step_output(step_output);
+    step_samples.push(current_render_step_sample(
+        state,
+        request.simulation_step_ms,
+    ));
 }
 
 #[cfg(test)]
@@ -346,12 +382,11 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
 
     let transition = (|| {
         let event = event.borrow();
-        let allow_real_cursor_updates = !state.config.hide_target_hack;
         if !state.is_enabled() {
             state.clear_pending_target();
             state.stop_animation();
             reset_animation_timing(state);
-            return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+            return CursorTransitions::clear_all(mode)
                 .with_render_cleanup_action(RenderCleanupAction::Invalidate);
         }
 
@@ -360,7 +395,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             state.clear_particles();
         }
 
-        let cursor_shape = CursorShape::from_cell_shape(state.config.cursor_cell_shape(mode));
+        let cursor_shape = CursorShape::from_cell_shape(RuntimeConfig::cursor_cell_shape(mode));
         let vertical_bar = cursor_shape.is_vertical_bar();
         let horizontal_bar = cursor_shape.is_horizontal_bar();
         let event_target = RenderPoint {
@@ -392,7 +427,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
         match source {
             EventSource::External => {
                 if external_mode_ignores_cursor(&state.config, mode) {
-                    return CursorTransitions::noop(mode, allow_real_cursor_updates)
+                    return CursorTransitions::noop(mode)
                         .with_cursor_visibility(CursorVisibilityEffect::Show)
                         .with_render_cleanup_action(RenderCleanupAction::Schedule);
                 }
@@ -402,7 +437,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                         cursor_shape,
                         &event.tracked_cursor,
                     );
-                    return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+                    return CursorTransitions::clear_all(mode)
                         .with_render_cleanup_action(RenderCleanupAction::Schedule);
                 }
                 if window_dimensions_changed && !window_changed && !buffer_changed {
@@ -412,7 +447,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                         cursor_shape,
                         &event.tracked_cursor,
                     );
-                    return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+                    return CursorTransitions::clear_all(mode)
                         .with_motion_class(motion_class)
                         .with_render_cleanup_action(RenderCleanupAction::Schedule);
                 }
@@ -539,7 +574,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
 
             if path_segmentation.should_jump {
                 state.jump_and_stop_animation(target_position, cursor_shape, &event.tracked_cursor);
-                return CursorTransitions::clear_all(mode, allow_real_cursor_updates)
+                return CursorTransitions::clear_all(mode)
                     .with_motion_class(motion_class)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
             }
@@ -597,13 +632,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     promote_settled_target(state);
                     just_started = true;
                 } else {
-                    return waiting_for_settled_target(
-                        state,
-                        mode,
-                        allow_real_cursor_updates,
-                        motion_class,
-                        event.now_ms,
-                    );
+                    return waiting_for_settled_target(state, mode, motion_class, event.now_ms);
                 }
             } else {
                 state.clear_pending_target();
@@ -612,7 +641,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 reset_animation_timing(state);
                 // a same-target external ingress after drain does not supersede the last
                 // rendered trail. Keep cleanup intent alive so the final smear frame still clears.
-                return CursorTransitions::noop(mode, allow_real_cursor_updates)
+                return CursorTransitions::noop(mode)
                     .with_motion_class(motion_class)
                     .with_cursor_visibility(CursorVisibilityEffect::Show)
                     .with_render_cleanup_action(RenderCleanupAction::Schedule);
@@ -645,13 +674,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                         event.now_ms,
                     );
                 }
-                return waiting_for_settled_target(
-                    state,
-                    mode,
-                    allow_real_cursor_updates,
-                    motion_class,
-                    event.now_ms,
-                );
+                return waiting_for_settled_target(state, mode, motion_class, event.now_ms);
             }
         }
 
@@ -668,7 +691,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
 
         match source {
             EventSource::AnimationTick if !state.is_animating() => {
-                return CursorTransitions::noop(mode, allow_real_cursor_updates)
+                return CursorTransitions::noop(mode)
                     .with_motion_class(motion_class)
                     .with_cursor_visibility(CursorVisibilityEffect::Show);
             }
@@ -689,7 +712,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     state.push_simulation_elapsed(elapsed_ms);
                 }
                 AnimationClockSample::Discontinuity => {
-                    return clock_discontinuity_transition(state, mode, allow_real_cursor_updates);
+                    return clock_discontinuity_transition(state, mode);
                 }
             }
             let simulation_step_ms = state.config.simulation_step_interval_ms().max(1.0);
@@ -699,58 +722,24 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             let mut step_samples = state.take_render_step_samples_scratch();
             step_samples.clear();
             step_samples.reserve(max_simulation_steps.saturating_sub(step_samples.len()));
+            let step_request = SimulationStepRequest {
+                mode,
+                simulation_step_ms,
+                vertical_bar,
+                horizontal_bar,
+                keeps_ornamental_effects,
+                buffer_perf_class,
+            };
 
             while executed_steps < max_simulation_steps
                 && state.consume_simulation_step(simulation_step_ms)
             {
-                let particles = if keeps_ornamental_effects {
-                    state.take_particles()
-                } else {
-                    Vec::new()
-                };
-                let step_input = step_input(
-                    state,
-                    mode,
-                    simulation_step_ms,
-                    vertical_bar,
-                    horizontal_bar,
-                    particles,
-                    buffer_perf_class,
-                );
-                crate::events::record_particle_simulation_step(step_input.particles.len());
-                let step_output = simulate_step(step_input);
-                state.apply_step_output(step_output);
-                let current_corners = state.current_corners();
-                let target_corners = state.target_corners();
-                let render_corners =
-                    corners_for_render(&state.config, &current_corners, &target_corners);
-                step_samples.push(RenderStepSample::new(render_corners, simulation_step_ms));
+                advance_simulation_step(state, step_request, &mut step_samples);
                 executed_steps = executed_steps.saturating_add(1);
             }
 
             if executed_steps == 0 && just_started {
-                let particles = if keeps_ornamental_effects {
-                    state.take_particles()
-                } else {
-                    Vec::new()
-                };
-                let step_input = step_input(
-                    state,
-                    mode,
-                    simulation_step_ms,
-                    vertical_bar,
-                    horizontal_bar,
-                    particles,
-                    buffer_perf_class,
-                );
-                crate::events::record_particle_simulation_step(step_input.particles.len());
-                let step_output = simulate_step(step_input);
-                state.apply_step_output(step_output);
-                let current_corners = state.current_corners();
-                let target_corners = state.target_corners();
-                let render_corners =
-                    corners_for_render(&state.config, &current_corners, &target_corners);
-                step_samples.push(RenderStepSample::new(render_corners, simulation_step_ms));
+                advance_simulation_step(state, step_request, &mut step_samples);
             }
 
             let current_corners = state.current_corners();
@@ -766,15 +755,10 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
             if state.note_settle_probe(within_stop_enter(&state.config, metrics)) {
                 state.settle_at_target();
                 state.start_tail_drain(planner_tail_drain_steps(state), event.now_ms);
-                let current_corners = state.current_corners();
-                let target_corners = state.target_corners();
-                let render_corners =
-                    corners_for_render(&state.config, &current_corners, &target_corners);
-                let frame = build_render_frame(
+                let frame = build_current_render_frame(
                     state,
-                    RenderFrameRequest {
+                    CurrentRenderFrameRequest {
                         mode,
-                        render_corners,
                         step_samples,
                         planner_idle_steps: 0,
                         target: target_position,
@@ -795,15 +779,10 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                 .with_render_cleanup_action(RenderCleanupAction::Invalidate);
             }
 
-            let current_corners = state.current_corners();
-            let target_corners = state.target_corners();
-            let render_corners =
-                corners_for_render(&state.config, &current_corners, &target_corners);
-            let frame = build_render_frame(
+            let frame = build_current_render_frame(
                 state,
-                RenderFrameRequest {
+                CurrentRenderFrameRequest {
                     mode,
-                    render_corners,
                     step_samples,
                     planner_idle_steps: 0,
                     target: target_position,
@@ -845,7 +824,7 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     // `Cooling` and `Cold` without waiting for unrelated future ingress.
                     RenderCleanupAction::Schedule
                 };
-                CursorTransitions::noop(mode, allow_real_cursor_updates)
+                CursorTransitions::noop(mode)
                     .with_motion_class(motion_class)
                     .with_animation_schedule(animation_schedule)
                     .with_cursor_visibility(if state.is_animating() {
@@ -856,15 +835,10 @@ pub(crate) fn reduce_cursor_event_for_perf_class(
                     .with_render_cleanup_action(cleanup_action)
             }
             EventSource::AnimationTick => {
-                let current_corners = state.current_corners();
-                let target_corners = state.target_corners();
-                let render_corners =
-                    corners_for_render(&state.config, &current_corners, &target_corners);
-                let frame = build_render_frame(
+                let frame = build_current_render_frame(
                     state,
-                    RenderFrameRequest {
+                    CurrentRenderFrameRequest {
                         mode,
-                        render_corners,
                         step_samples: Vec::new(),
                         planner_idle_steps: 0,
                         target: target_position,

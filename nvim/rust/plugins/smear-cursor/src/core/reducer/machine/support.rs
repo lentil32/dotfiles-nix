@@ -6,7 +6,6 @@ use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
 use crate::core::effect::IngressCursorPresentationEffect;
 use crate::core::effect::IngressCursorPresentationRequest;
-use crate::core::effect::IngressObservationSurface;
 use crate::core::effect::ObservationRuntimeContext;
 use crate::core::effect::ObservationRuntimeContextArgs;
 use crate::core::effect::ProbePolicy;
@@ -32,6 +31,7 @@ use crate::core::state::CursorTextContextBoundary;
 use crate::core::state::ExternalDemand;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
+use crate::core::state::IngressObservationSurface;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationSnapshot;
 use crate::core::state::PendingObservation;
@@ -408,7 +408,6 @@ pub(super) fn ingress_cursor_presentation_effect(
     if !runtime.is_enabled()
         || runtime.is_animating()
         || !request.mode_allowed()
-        || runtime.config.hide_target_hack
         || !request.outside_cmdline()
     {
         return None;

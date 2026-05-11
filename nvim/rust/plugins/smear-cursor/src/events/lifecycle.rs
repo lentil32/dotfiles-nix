@@ -93,13 +93,11 @@ fn jump_to_current_cursor_with(host: &impl CurrentEditorPort) -> Result<()> {
     let tracked_cursor = TrackedCursor::new(surface_snapshot, observation.buffer_line());
 
     set_namespace_id(namespace_id)?;
-    let hide_target_hack = sync_core_runtime_to_current_cursor(position, &mode, &tracked_cursor)?;
+    sync_core_runtime_to_current_cursor(position, &mode, &tracked_cursor)?;
 
     reset_transient_event_state();
     let _ = purge_render_windows(namespace_id);
-    if !hide_target_hack {
-        unhide_real_cursor();
-    }
+    unhide_real_cursor();
 
     Ok(())
 }
@@ -247,9 +245,7 @@ pub(crate) fn toggle() -> Result<()> {
             clear_autocmd_group();
             reset_transient_event_state();
             let _ = purge_render_windows(namespace_id);
-            if !toggle.hide_target_hack {
-                unhide_real_cursor();
-            }
+            unhide_real_cursor();
         }
     }
 

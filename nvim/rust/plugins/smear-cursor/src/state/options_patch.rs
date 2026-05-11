@@ -31,10 +31,6 @@ pub(crate) struct RuntimeSwitchesPatch {
     pub(crate) smear_terminal_mode: Option<bool>,
     pub(crate) animate_in_insert_mode: Option<bool>,
     pub(crate) animate_command_line: Option<bool>,
-    pub(crate) vertical_bar_cursor: Option<bool>,
-    pub(crate) vertical_bar_cursor_insert_mode: Option<bool>,
-    pub(crate) horizontal_bar_cursor_replace_mode: Option<bool>,
-    pub(crate) hide_target_hack: Option<bool>,
     pub(crate) max_kept_windows: Option<usize>,
     pub(crate) windows_zindex: Option<u32>,
     pub(crate) buffer_perf_mode: Option<BufferPerfMode>,
@@ -104,7 +100,6 @@ pub(crate) struct ParticleOptionsPatch {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct RenderingOptionsPatch {
-    pub(crate) never_draw_over_target: Option<bool>,
     pub(crate) color_levels: Option<u32>,
     pub(crate) gamma: Option<f64>,
     pub(crate) tail_duration_ms: Option<f64>,
@@ -259,10 +254,6 @@ impl RuntimeSwitchesPatch {
                 smear_terminal_mode,
                 animate_in_insert_mode,
                 animate_command_line,
-                vertical_bar_cursor,
-                vertical_bar_cursor_insert_mode,
-                horizontal_bar_cursor_replace_mode,
-                hide_target_hack,
                 max_kept_windows,
                 windows_zindex,
                 buffer_perf_mode,
@@ -381,7 +372,6 @@ impl RenderingOptionsPatch {
             config,
             self,
             [
-                never_draw_over_target,
                 gamma,
                 tail_duration_ms,
                 spatial_coherence_weight,

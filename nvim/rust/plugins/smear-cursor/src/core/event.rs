@@ -1,5 +1,4 @@
 use crate::core::effect::IngressCursorPresentationRequest;
-use crate::core::effect::IngressObservationSurface;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::BackgroundProbeBatch;
 use crate::core::state::BackgroundProbeChunk;
@@ -8,6 +7,7 @@ use crate::core::state::BufferPerfClass;
 use crate::core::state::CursorColorProbeGenerations;
 use crate::core::state::CursorColorSample;
 use crate::core::state::ExternalDemandKind;
+use crate::core::state::IngressObservationSurface;
 use crate::core::state::ObservationBasis;
 use crate::core::state::ObservationMotion;
 use crate::core::state::PlannedRender;

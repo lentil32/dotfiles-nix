@@ -18,7 +18,6 @@ use super::support::reset_recovery_attempt;
 use super::support::schedule_timer_with_delay;
 use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
-use crate::core::effect::IngressObservationSurface;
 use crate::core::event::ExternalDemandQueuedEvent;
 use crate::core::event::InitializeEvent;
 use crate::core::event::ObservationBaseCollectedEvent;
@@ -32,43 +31,22 @@ use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::ProbeState;
 use crate::core::state::QueuedDemand;
-use crate::core::types::IngressSeq;
 use crate::core::types::Millis;
 use crate::core::types::TimerId;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct ImmediateIngressObservation {
-    seq: IngressSeq,
-    surface: Option<IngressObservationSurface>,
-}
-
-impl ImmediateIngressObservation {
-    const fn new(seq: IngressSeq, surface: Option<IngressObservationSurface>) -> Self {
-        Self { seq, surface }
-    }
-
-    fn surface_for(self, demand: &ExternalDemand) -> Option<IngressObservationSurface> {
-        (self.seq == demand.seq()).then_some(self.surface).flatten()
-    }
-}
-
-fn start_next_observation_with_ingress_surface(
-    state: CoreState,
-    ingress_observation: Option<ImmediateIngressObservation>,
-) -> (CoreState, Option<Effect>) {
+fn start_next_observation_from_queue(state: CoreState) -> (CoreState, Option<Effect>) {
     let (next_state, next_demand) =
         state.map_demand_queue(crate::core::state::DemandQueue::dequeue_ready);
-    let Some(demand) = next_demand else {
+    let Some(queued_demand) = next_demand else {
         return (next_state, None);
     };
+    let (demand, ingress_observation_surface) = queued_demand.into_ready_parts();
 
     let cleared_ingress_policy = next_state.ingress_policy().clear_pending_delay();
     let next_state = next_state.with_ingress_policy(cleared_ingress_policy);
     let buffer_perf_class = demand.buffer_perf_class();
     let pending =
         PendingObservation::new(demand, probe_requests_for(&next_state, buffer_perf_class));
-    let ingress_observation_surface =
-        ingress_observation.and_then(|observation| observation.surface_for(pending.demand()));
     let Some(next_state) = next_state.enter_observing_request(pending.clone()) else {
         unreachable!("queued observations should only start from primed or ready states");
     };
@@ -77,7 +55,7 @@ fn start_next_observation_with_ingress_surface(
 }
 
 pub(super) fn start_next_observation(state: CoreState) -> (CoreState, Option<Effect>) {
-    start_next_observation_with_ingress_surface(state, None)
+    start_next_observation_from_queue(state)
 }
 
 pub(super) fn plan_or_stay(state: CoreState, observed_at: Millis) -> Transition {
@@ -93,20 +71,12 @@ pub(super) fn plan_or_stay(state: CoreState, observed_at: Millis) -> Transition 
 }
 
 pub(super) fn transition_ready_or_observe(state: CoreState) -> Transition {
-    transition_ready_or_observe_with_ingress_surface(state, None)
-}
-
-fn transition_ready_or_observe_with_ingress_surface(
-    state: CoreState,
-    ingress_observation: Option<ImmediateIngressObservation>,
-) -> Transition {
     debug_assert!(matches!(
         state.lifecycle(),
         crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
     ));
 
-    let (next_state, effect) =
-        start_next_observation_with_ingress_surface(state, ingress_observation);
+    let (next_state, effect) = start_next_observation_from_queue(state);
     if let Some(effect) = effect {
         return Transition::new(next_state, vec![effect]);
     }
@@ -173,7 +143,6 @@ fn queue_external_demand(
     state: CoreState,
     queued_demand: QueuedDemand,
     observed_at: Millis,
-    ingress_observation: Option<ImmediateIngressObservation>,
 ) -> Transition {
     let should_delay_cursor_ingress = queued_demand.is_cursor();
     let active_cursor_superseded = state
@@ -188,16 +157,10 @@ fn queue_external_demand(
         crate::core::types::Lifecycle::Idle => Transition::stay(&queued_state),
         crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready => {
             if should_delay_cursor_ingress {
-                delayed_cursor_ingress_transition(queued_state.clone(), observed_at).unwrap_or_else(
-                    || {
-                        transition_ready_or_observe_with_ingress_surface(
-                            queued_state,
-                            ingress_observation,
-                        )
-                    },
-                )
+                delayed_cursor_ingress_transition(queued_state.clone(), observed_at)
+                    .unwrap_or_else(|| transition_ready_or_observe(queued_state))
             } else {
-                transition_ready_or_observe_with_ingress_surface(queued_state, ingress_observation)
+                transition_ready_or_observe(queued_state)
             }
         }
         crate::core::types::Lifecycle::Observing
@@ -246,14 +209,11 @@ pub(super) fn reduce_external_demand_queued(
         ingress_cursor_presentation_effect(&state_with_policy, ingress_cursor_presentation);
     let (state_with_seq, seq) = state_with_policy.allocate_ingress_seq();
     let demand = ExternalDemand::new(seq, kind, observed_at, buffer_perf_class);
-    let immediate_ingress_observation =
-        ImmediateIngressObservation::new(seq, ingress_observation_surface);
-    let mut transition = queue_external_demand(
-        state_with_seq,
-        QueuedDemand::ready(demand),
-        observed_at,
-        Some(immediate_ingress_observation),
-    );
+    let queued_demand = match ingress_observation_surface {
+        Some(surface) => QueuedDemand::ready_with_ingress_surface(demand, surface),
+        None => QueuedDemand::ready(demand),
+    };
+    let mut transition = queue_external_demand(state_with_seq, queued_demand, observed_at);
     if let Some(effect) = ingress_effect {
         transition.effects.insert(0, effect);
     }

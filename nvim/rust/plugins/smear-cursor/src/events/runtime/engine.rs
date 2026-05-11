@@ -9,6 +9,7 @@ use super::recovery::RuntimeRecoveryPlan;
 use super::shell::capture_runtime_shell_recovery_state;
 use super::timers::capture_runtime_timer_bridge_recovery_state;
 use crate::config::LogLevel;
+use crate::config::RuntimeConfig;
 use crate::core::state::CoreState;
 use crate::host::api;
 use crate::position::RenderPoint;
@@ -55,7 +56,6 @@ pub(crate) struct CoreRuntimeSetup {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct CoreRuntimeToggle {
     pub(crate) is_enabled: bool,
-    pub(crate) hide_target_hack: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -68,13 +68,12 @@ pub(crate) fn sync_core_runtime_to_current_cursor(
     position: RenderPoint,
     mode: &str,
     tracked_cursor: &TrackedCursor,
-) -> RuntimeAccessResult<bool> {
+) -> RuntimeAccessResult<()> {
     with_reducer_state_access(|state| {
         let runtime = state.core_state_mut().runtime_mut();
         let cursor_shape =
-            crate::state::CursorShape::from_cell_shape(runtime.config.cursor_cell_shape(mode));
+            crate::state::CursorShape::from_cell_shape(RuntimeConfig::cursor_cell_shape(mode));
         runtime.sync_to_current_cursor(position, cursor_shape, tracked_cursor);
-        runtime.config.hide_target_hack
     })
 }
 
@@ -145,7 +144,6 @@ pub(crate) fn toggle_core_runtime() -> RuntimeAccessResult<CoreRuntimeToggle> {
 
         CoreRuntimeToggle {
             is_enabled: runtime.is_enabled(),
-            hide_target_hack: runtime.config.hide_target_hack,
         }
     })
 }

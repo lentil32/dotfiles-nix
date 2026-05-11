@@ -72,6 +72,59 @@ fn delayed_cursor_timer_fire_starts_the_queued_observation() {
 }
 
 #[test]
+fn delayed_cursor_timer_fire_preserves_the_queued_ingress_surface() {
+    let ready = delayed_ready_state();
+    let ingress_surface = IngressObservationSurface::new(
+        crate::position::WindowSurfaceSnapshot::new(
+            crate::position::SurfaceId::new(31, 37).expect("positive handles"),
+            crate::position::BufferLine::new(9).expect("positive top buffer line"),
+            4,
+            1,
+            crate::position::ScreenCell::new(5, 6).expect("one-based window origin"),
+            crate::position::ViewportBounds::new(20, 80).expect("positive window size"),
+        ),
+        Some(crate::position::CursorObservation::new(
+            crate::position::BufferLine::new(11).expect("positive buffer line"),
+            crate::position::ObservedCell::Exact(
+                crate::position::ScreenCell::new(12, 17).expect("one-based screen cell"),
+            ),
+        )),
+        "n".to_string(),
+    );
+    let delayed = reduce(
+        &ready,
+        Event::ExternalDemandQueued(ExternalDemandQueuedEvent {
+            kind: ExternalDemandKind::ExternalCursor,
+            observed_at: Millis::new(20),
+            buffer_perf_class: BufferPerfClass::Full,
+            ingress_cursor_presentation: None,
+            ingress_observation_surface: Some(ingress_surface.clone()),
+        }),
+    )
+    .next;
+    let ingress_token = delayed
+        .timers()
+        .active_token(TimerId::Ingress)
+        .expect("ingress timer token");
+
+    let fired = reduce(
+        &delayed,
+        Event::TimerFiredWithToken(TimerFiredWithTokenEvent {
+            token: ingress_token,
+            observed_at: Millis::new(60),
+        }),
+    );
+
+    let [Effect::RequestObservationBase(payload)] = fired.effects.as_slice() else {
+        panic!("expected delayed observation-base request");
+    };
+    pretty_assert_eq!(
+        payload.context.ingress_observation_surface(),
+        Some(&ingress_surface)
+    );
+}
+
+#[test]
 fn delayed_cursor_burst_updates_pending_deadline_without_stale_timer_token_churn() {
     let ready = delayed_ready_state();
     let first = reduce(

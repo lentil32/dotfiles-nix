@@ -546,7 +546,6 @@ mod tests {
     use crate::core::runtime_reducer::RenderAllocationPolicy;
     use crate::core::runtime_reducer::RenderCleanupAction;
     use crate::core::runtime_reducer::RenderSideEffects;
-    use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::state::PatchBasis;
     use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ProjectionWitness;
@@ -563,7 +562,6 @@ mod tests {
     use crate::draw::render_plan::CellOp;
     use crate::position::ViewportBounds;
     use crate::test_support::proptest::pure_config;
-    use crate::types::CursorCellShape;
     use proptest::prelude::*;
     use std::sync::Arc;
 
@@ -581,13 +579,7 @@ mod tests {
                 ViewportBounds::new(20, 40).expect("positive viewport bounds"),
                 ProjectorRevision::CURRENT,
             ),
-            ProjectionReuseKey::new(
-                None,
-                None,
-                None,
-                TargetCellPresentation::None,
-                ProjectionPolicyRevision::INITIAL,
-            ),
+            ProjectionReuseKey::new(None, None, None, ProjectionPolicyRevision::INITIAL),
             crate::draw::render_plan::PlannerState::default(),
             LogicalRaster::new(None, Arc::from(Vec::<CellOp>::new())),
         )
@@ -649,9 +641,7 @@ mod tests {
                     transparent_bg_fallback_color: String::new(),
                     cterm_cursor_colors: None,
                     cterm_bg: None,
-                    hide_target_hack: false,
                     max_kept_windows: 32,
-                    never_draw_over_target: false,
                     particle_max_lifetime: 0.0,
                     particle_switch_octant_braille: 0.0,
                     particles_over_text: true,
@@ -682,22 +672,6 @@ mod tests {
         .boxed()
     }
 
-    fn target_cell_presentation_strategy() -> BoxedStrategy<TargetCellPresentation> {
-        prop_oneof![
-            Just(TargetCellPresentation::None),
-            Just(TargetCellPresentation::OverlayCursorCell(
-                CursorCellShape::Block
-            )),
-            Just(TargetCellPresentation::OverlayCursorCell(
-                CursorCellShape::VerticalBar,
-            )),
-            Just(TargetCellPresentation::OverlayCursorCell(
-                CursorCellShape::HorizontalBar,
-            )),
-        ]
-        .boxed()
-    }
-
     fn cursor_visibility_effect_strategy() -> BoxedStrategy<CursorVisibilityEffect> {
         prop_oneof![
             Just(CursorVisibilityEffect::Keep),
@@ -711,23 +685,17 @@ mod tests {
         (
             any::<bool>(),
             any::<bool>(),
-            target_cell_presentation_strategy(),
             cursor_visibility_effect_strategy(),
-            any::<bool>(),
         )
             .prop_map(
                 |(
                     redraw_after_draw_if_cmdline,
                     redraw_after_clear_if_cmdline,
-                    target_cell_presentation,
                     cursor_visibility,
-                    allow_real_cursor_updates,
                 )| RenderSideEffects {
                     redraw_after_draw_if_cmdline,
                     redraw_after_clear_if_cmdline,
-                    target_cell_presentation,
                     cursor_visibility,
-                    allow_real_cursor_updates,
                 },
             )
             .boxed()

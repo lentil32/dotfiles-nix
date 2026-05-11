@@ -2,7 +2,6 @@ use crate::core::realization::LogicalRaster;
 use crate::core::realization::RealizationProjection;
 use crate::core::realization::realize_logical_raster;
 use crate::core::realization::realize_particle_cells;
-use crate::core::runtime_reducer::TargetCellPresentation;
 use crate::core::types::MotionRevision;
 use crate::core::types::ObservationId;
 use crate::core::types::ProjectionPolicyRevision;
@@ -22,22 +21,11 @@ pub(crate) enum SemanticEntityId {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CursorTrailSemantic {
-    target_cell_presentation: TargetCellPresentation,
-}
+pub(crate) struct CursorTrailSemantic;
 
 impl CursorTrailSemantic {
-    // target-cell presentation is currently derivable from the frame inputs, but
-    // projection identity depends on it as an explicit reducer fact rather than an implicit
-    // render-plan convention.
-    pub(crate) const fn new(target_cell_presentation: TargetCellPresentation) -> Self {
-        Self {
-            target_cell_presentation,
-        }
-    }
-
-    pub(crate) const fn target_cell_presentation(&self) -> TargetCellPresentation {
-        self.target_cell_presentation
+    pub(crate) const fn new() -> Self {
+        Self
     }
 }
 
@@ -117,7 +105,6 @@ pub(crate) struct ProjectionReuseKey {
     trail_signature: Option<u64>,
     particle_overlay_signature: Option<u64>,
     planner_clock: Option<ProjectionPlannerClock>,
-    target_cell_presentation: TargetCellPresentation,
     projection_policy_revision: ProjectionPolicyRevision,
 }
 
@@ -126,14 +113,12 @@ impl ProjectionReuseKey {
         trail_signature: Option<u64>,
         particle_overlay_signature: Option<u64>,
         planner_clock: Option<ProjectionPlannerClock>,
-        target_cell_presentation: TargetCellPresentation,
         projection_policy_revision: ProjectionPolicyRevision,
     ) -> Self {
         Self {
             trail_signature,
             particle_overlay_signature,
             planner_clock,
-            target_cell_presentation,
             projection_policy_revision,
         }
     }
@@ -148,10 +133,6 @@ impl ProjectionReuseKey {
 
     pub(crate) const fn planner_clock(self) -> Option<ProjectionPlannerClock> {
         self.planner_clock
-    }
-
-    pub(crate) const fn target_cell_presentation(self) -> TargetCellPresentation {
-        self.target_cell_presentation
     }
 
     pub(crate) const fn projection_policy_revision(self) -> ProjectionPolicyRevision {
@@ -583,7 +564,6 @@ mod tests {
     use super::RetainedProjection;
     use crate::core::realization::LogicalRaster;
     use crate::core::realization::realize_logical_raster;
-    use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::types::IngressSeq;
     use crate::core::types::MotionRevision;
     use crate::core::types::ObservationId;
@@ -610,13 +590,7 @@ mod tests {
     }
 
     fn projection_reuse_key() -> ProjectionReuseKey {
-        ProjectionReuseKey::new(
-            None,
-            None,
-            None,
-            TargetCellPresentation::None,
-            ProjectionPolicyRevision::INITIAL,
-        )
+        ProjectionReuseKey::new(None, None, None, ProjectionPolicyRevision::INITIAL)
     }
 
     fn projection_witness() -> ProjectionWitness {

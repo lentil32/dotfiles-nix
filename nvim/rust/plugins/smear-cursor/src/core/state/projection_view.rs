@@ -100,7 +100,6 @@ mod tests {
     use super::ProjectionWitness;
     use super::RetainedProjection;
     use crate::core::realization::LogicalRaster;
-    use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::state::PatchBasis;
     use crate::core::state::ProjectionReuseKey;
     use crate::core::state::ScenePatchKind;
@@ -133,7 +132,6 @@ mod tests {
             trail_signature,
             None,
             None,
-            TargetCellPresentation::None,
             ProjectionPolicyRevision::INITIAL,
         )
     }

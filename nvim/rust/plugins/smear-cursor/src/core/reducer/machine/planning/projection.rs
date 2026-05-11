@@ -2,10 +2,8 @@
 use super::render_planning_observation;
 use crate::core::realization::project_particle_overlay_cells;
 use crate::core::realization::project_render_plan;
-use crate::core::runtime_reducer::TargetCellPresentation;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::BackgroundProbeBatch;
-use crate::core::state::CursorTrailSemantic;
 #[cfg(test)]
 use crate::core::state::ObservationSnapshot;
 use crate::core::state::ProjectionHandle;
@@ -123,12 +121,11 @@ impl PreparedProjection<'_> {
         )
     }
 
-    fn reuse_key(&self, target_cell_presentation: TargetCellPresentation) -> ProjectionReuseKey {
+    fn reuse_key(&self) -> ProjectionReuseKey {
         ProjectionReuseKey::new(
             self.trail_signature(),
             self.particle_overlay_signature(),
             self.reuse_planner_clock,
-            target_cell_presentation,
             self.projection_policy_revision(),
         )
     }
@@ -167,24 +164,16 @@ pub(super) fn prepare_projection<'a>(
     })
 }
 
-pub(super) fn project_prepared_frame(
-    prepared: PreparedProjection<'_>,
-    trail_semantic: &CursorTrailSemantic,
-) -> ProjectionHandle {
-    let target_cell_presentation = trail_semantic.target_cell_presentation();
+pub(super) fn project_prepared_frame(prepared: PreparedProjection<'_>) -> ProjectionHandle {
     let trail_signature = prepared.trail_signature();
     let witness = prepared.witness();
-    let reuse_key = prepared.reuse_key(target_cell_presentation);
-    let mut planner_output = render_plan::render_frame_to_plan_with_signature(
+    let reuse_key = prepared.reuse_key();
+    let planner_output = render_plan::render_frame_to_plan_with_signature(
         &prepared.frame,
         prepared.planner_state,
         prepared.viewport,
         trail_signature,
     );
-    if let TargetCellPresentation::OverlayCursorCell(shape) = target_cell_presentation {
-        planner_output.plan.target_cell_overlay =
-            render_plan::plan_target_cell_overlay(&prepared.frame, prepared.viewport, shape);
-    }
 
     let logical_raster = project_render_plan(
         &planner_output.plan,
@@ -203,12 +192,10 @@ pub(super) fn project_prepared_frame(
 pub(super) fn reusable_prepared_projection(
     current_scene: &SceneState,
     prepared: &PreparedProjection<'_>,
-    trail_semantic: &CursorTrailSemantic,
 ) -> Option<ProjectionHandle> {
-    let target_cell_presentation = trail_semantic.target_cell_presentation();
     let projection_policy_revision = prepared.projection_policy_revision();
     let witness = prepared.witness();
-    let reuse_key = prepared.reuse_key(target_cell_presentation);
+    let reuse_key = prepared.reuse_key();
     let retained_projection = retained_projection_for_reuse(
         current_scene,
         witness.viewport(),
@@ -217,9 +204,7 @@ pub(super) fn reusable_prepared_projection(
     let retained_witness = retained_projection.witness();
     let retained_reuse_key = retained_projection.reuse_key();
 
-    if retained_reuse_key.planner_clock() != reuse_key.planner_clock()
-        || retained_reuse_key.target_cell_presentation() != target_cell_presentation
-    {
+    if retained_reuse_key.planner_clock() != reuse_key.planner_clock() {
         return None;
     }
     if retained_reuse_key.trail_signature() != reuse_key.trail_signature() {
@@ -251,12 +236,10 @@ pub(super) fn project_draw_frame(
     render_revision: RenderRevision,
     observation: &ObservationSnapshot,
     frame: &RenderFrame,
-    target_cell_presentation: TargetCellPresentation,
 ) -> Result<ProjectionHandle, ApplyFailureKind> {
     let observation = render_planning_observation(observation);
     let prepared = prepare_projection(current_scene, render_revision, &observation, frame.clone())?;
-    let trail_semantic = CursorTrailSemantic::new(target_cell_presentation);
-    Ok(project_prepared_frame(prepared, &trail_semantic))
+    Ok(project_prepared_frame(prepared))
 }
 
 #[cfg(test)]
@@ -265,13 +248,11 @@ pub(super) fn reusable_projection(
     render_revision: RenderRevision,
     observation: &ObservationSnapshot,
     frame: &RenderFrame,
-    target_cell_presentation: TargetCellPresentation,
 ) -> Option<ProjectionHandle> {
     let observation = render_planning_observation(observation);
     let prepared =
         prepare_projection(current_scene, render_revision, &observation, frame.clone()).ok()?;
-    let trail_semantic = CursorTrailSemantic::new(target_cell_presentation);
-    reusable_prepared_projection(current_scene, &prepared, &trail_semantic)
+    reusable_prepared_projection(current_scene, &prepared)
 }
 
 #[cfg(test)]
@@ -279,7 +260,6 @@ mod tests {
     use super::planner_seed;
     use super::project_draw_frame;
     use super::reusable_projection;
-    use crate::core::runtime_reducer::TargetCellPresentation;
     use crate::core::state::SceneState;
     use crate::core::types::MotionRevision;
     use crate::core::types::RenderRevision;
@@ -300,18 +280,16 @@ mod tests {
     use super::super::test_support::projection_policy_revision;
     use super::super::test_support::render_revision;
     use super::super::test_support::reuse_mutation_axis_strategy;
-    use super::super::test_support::target_cell_presentation_strategy;
     use crate::test_support::proptest::pure_config;
 
     proptest! {
         #![proptest_config(pure_config())]
 
         #[test]
-        fn prop_projection_reuse_and_planner_seed_follow_presentation_policy_and_clock_boundaries(
+        fn prop_projection_reuse_and_planner_seed_follow_policy_and_clock_boundaries(
             mutation_axis in reuse_mutation_axis_strategy(),
             advances_planner in any::<bool>(),
             requires_background_probe in any::<bool>(),
-            target_cell_presentation in target_cell_presentation_strategy(),
             observation_seq in 1_u64..=(u16::MAX as u64 - 1),
         ) {
             let mut frame = base_frame();
@@ -331,7 +309,6 @@ mod tests {
                 RenderRevision::INITIAL,
                 &cached_observation,
                 &frame,
-                target_cell_presentation,
             )
             .expect("cached projection fixture should be valid");
             let cached_planner_state = cached.cached_planner_state().clone();
@@ -344,7 +321,6 @@ mod tests {
                 | super::super::test_support::ReuseMutationAxis::ObservationWitness
                 | super::super::test_support::ReuseMutationAxis::MotionRevision
                 | super::super::test_support::ReuseMutationAxis::SemanticRevision
-                | super::super::test_support::ReuseMutationAxis::Presentation
                 | super::super::test_support::ReuseMutationAxis::Policy => frame.clone(),
             };
             let query_observation = match mutation_axis {
@@ -358,7 +334,6 @@ mod tests {
                 | super::super::test_support::ReuseMutationAxis::MotionRevision
                 | super::super::test_support::ReuseMutationAxis::SemanticRevision
                 | super::super::test_support::ReuseMutationAxis::ParticleOverlay
-                | super::super::test_support::ReuseMutationAxis::Presentation
                 | super::super::test_support::ReuseMutationAxis::Policy => cached_observation,
             };
             let render_revision = match mutation_axis {
@@ -371,23 +346,7 @@ mod tests {
                 super::super::test_support::ReuseMutationAxis::Exact
                 | super::super::test_support::ReuseMutationAxis::ObservationWitness
                 | super::super::test_support::ReuseMutationAxis::ParticleOverlay
-                | super::super::test_support::ReuseMutationAxis::Presentation
                 | super::super::test_support::ReuseMutationAxis::Policy => RenderRevision::INITIAL,
-            };
-            let query_presentation = match mutation_axis {
-                super::super::test_support::ReuseMutationAxis::Presentation => {
-                    super::super::test_support::alternate_target_cell_presentation(
-                        target_cell_presentation,
-                    )
-                }
-                super::super::test_support::ReuseMutationAxis::Exact
-                | super::super::test_support::ReuseMutationAxis::ObservationWitness
-                | super::super::test_support::ReuseMutationAxis::MotionRevision
-                | super::super::test_support::ReuseMutationAxis::SemanticRevision
-                | super::super::test_support::ReuseMutationAxis::ParticleOverlay
-                | super::super::test_support::ReuseMutationAxis::Policy => {
-                    target_cell_presentation
-                }
             };
             let query_policy_revision = match mutation_axis {
                 super::super::test_support::ReuseMutationAxis::Policy => {
@@ -397,8 +356,7 @@ mod tests {
                 | super::super::test_support::ReuseMutationAxis::ObservationWitness
                 | super::super::test_support::ReuseMutationAxis::MotionRevision
                 | super::super::test_support::ReuseMutationAxis::SemanticRevision
-                | super::super::test_support::ReuseMutationAxis::ParticleOverlay
-                | super::super::test_support::ReuseMutationAxis::Presentation => {
+                | super::super::test_support::ReuseMutationAxis::ParticleOverlay => {
                     cached_policy_revision
                 }
             };
@@ -412,7 +370,6 @@ mod tests {
                 render_revision,
                 &query_observation,
                 &query_frame,
-                query_presentation,
             );
             let expected_seed = match mutation_axis {
                 super::super::test_support::ReuseMutationAxis::Policy => {
@@ -422,8 +379,7 @@ mod tests {
                 | super::super::test_support::ReuseMutationAxis::ObservationWitness
                 | super::super::test_support::ReuseMutationAxis::MotionRevision
                 | super::super::test_support::ReuseMutationAxis::SemanticRevision
-                | super::super::test_support::ReuseMutationAxis::ParticleOverlay
-                | super::super::test_support::ReuseMutationAxis::Presentation => {
+                | super::super::test_support::ReuseMutationAxis::ParticleOverlay => {
                     cached_planner_state
                 }
             };
@@ -444,10 +400,6 @@ mod tests {
 
             if let Some(reused) = reused {
                 prop_assert_eq!(
-                    reused.reuse_key().target_cell_presentation(),
-                    target_cell_presentation
-                );
-                prop_assert_eq!(
                     reused.witness().observation_id(),
                     query_observation.observation_id(),
                 );
@@ -457,7 +409,6 @@ mod tests {
         #[test]
         fn prop_project_draw_frame_advances_planner_history_across_observations(
             observation_seq in 1_u64..=(u16::MAX as u64 - 1),
-            target_cell_presentation in target_cell_presentation_strategy(),
         ) {
             let frame = base_frame();
             let policy_revision = projection_policy_revision(&frame);
@@ -467,7 +418,6 @@ mod tests {
                 RenderRevision::INITIAL,
                 &first_observation,
                 &frame,
-                target_cell_presentation,
             )
             .expect("first projection should succeed");
             let current_scene = SceneState::default().with_retained_projection(first.clone());
@@ -476,7 +426,6 @@ mod tests {
                 render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
                 &observation(observation_seq.saturating_add(1)),
                 &frame,
-                target_cell_presentation,
             )
             .expect("second projection should succeed");
 
@@ -518,7 +467,6 @@ mod tests {
             RenderRevision::INITIAL,
             &cached_observation,
             &cached_frame,
-            TargetCellPresentation::None,
         )
         .expect("cached particle projection should succeed");
         let current_scene = SceneState::default().with_retained_projection(cached);
@@ -527,7 +475,6 @@ mod tests {
             render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
             &query_observation,
             &query_frame,
-            TargetCellPresentation::None,
         )
         .expect("particle-only drift should still reuse the cached trail");
         let fully_reprojected = project_draw_frame(
@@ -535,7 +482,6 @@ mod tests {
             render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
             &query_observation,
             &query_frame,
-            TargetCellPresentation::None,
         )
         .expect("full particle reprojection should succeed");
 
@@ -570,7 +516,6 @@ mod tests {
             RenderRevision::INITIAL,
             &cached_observation,
             &cached_frame,
-            TargetCellPresentation::None,
         )
         .expect("cached projection fixture should be valid");
         let warm_scene = SceneState::default().with_retained_projection(cached);
@@ -580,7 +525,6 @@ mod tests {
             render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
             &query_observation,
             &cached_frame,
-            TargetCellPresentation::None,
         )
         .expect("warm projection cache should be reusable");
         let stripped_projection = project_draw_frame(
@@ -588,7 +532,6 @@ mod tests {
             render_revision(MotionRevision::INITIAL.next(), SemanticRevision::INITIAL),
             &query_observation,
             &cached_frame,
-            TargetCellPresentation::None,
         )
         .expect("projection recompute should succeed without reuse cache");
 

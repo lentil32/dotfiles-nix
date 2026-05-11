@@ -394,11 +394,6 @@ pub(super) fn record_planning_preview_copied_particles(particle_count: usize) {
 }
 
 #[cfg(feature = "perf-counters")]
-pub(super) fn record_planning_preview_copy(particle_count: usize) {
-    with_runtime_metrics(|metrics| metrics.record_planning_preview_copy(particle_count));
-}
-
-#[cfg(feature = "perf-counters")]
 pub(super) fn record_particle_simulation_step(particle_count: usize) {
     with_runtime_metrics(|metrics| metrics.record_particle_simulation_step(particle_count));
 }

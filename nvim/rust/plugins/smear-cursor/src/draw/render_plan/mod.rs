@@ -1,5 +1,4 @@
 use crate::core::types::ArcLenQ16;
-use crate::draw::PARTICLE_ZINDEX_OFFSET;
 use crate::octant_chars::OCTANT_CHARACTERS;
 use crate::position::RenderPoint;
 use crate::position::ViewportBounds;
@@ -12,8 +11,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 
-#[path = "../render/cell_draw.rs"]
-mod cell_draw;
 mod compile;
 mod decode_candidates;
 #[path = "../render/geometry.rs"]
@@ -44,7 +41,6 @@ pub(crate) use self::infra::shared::ParticleOp;
 pub(crate) use self::infra::shared::PlannerOutput;
 pub(crate) use self::infra::shared::PlannerState;
 pub(crate) use self::infra::shared::RenderPlan;
-pub(crate) use self::infra::shared::TargetCellOverlay;
 use self::infra::shared::*;
 use self::latent_field::AgeMoment;
 use self::latent_field::CompiledCell;
@@ -55,7 +51,6 @@ use self::latent_field::MICRO_W;
 use self::latent_field::MicroTile;
 use self::latent_field::TailBand;
 use self::local_envelope::SliceSearchBounds;
-#[cfg(test)]
 #[cfg(test)]
 use self::local_envelope::build_ribbon_slices;
 #[cfg(test)]
@@ -72,6 +67,7 @@ use self::local_envelope::resample_centerline;
 #[cfg(test)]
 use self::local_envelope::to_q16;
 use self::particles::draw_particles;
+pub(crate) use self::particles::for_each_particle_overlay_op;
 #[cfg(test)]
 use self::solver::RunEnumerationCursor;
 #[cfg(test)]

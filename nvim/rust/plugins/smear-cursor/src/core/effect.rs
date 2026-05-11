@@ -10,6 +10,7 @@ use crate::core::state::CursorColorSample;
 use crate::core::state::CursorTextContextBoundary;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::InFlightProposal;
+use crate::core::state::IngressObservationSurface;
 use crate::core::state::ObservationBasis;
 use crate::core::state::PendingObservation;
 use crate::core::state::ProbeKind;
@@ -24,7 +25,6 @@ use crate::core::types::ProposalId;
 use crate::core::types::TimerToken;
 use crate::host::BufferHandle;
 use crate::position::BufferLine;
-use crate::position::CursorObservation;
 use crate::position::RenderPoint;
 use crate::position::ScreenCell;
 use crate::position::ViewportBounds;
@@ -44,47 +44,6 @@ pub(crate) struct ScheduleTimerEffect {
 pub(crate) struct RequestObservationBaseEffect {
     pub(crate) request: PendingObservation,
     pub(crate) context: ObservationRuntimeContext,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct IngressObservationSurface {
-    surface: WindowSurfaceSnapshot,
-    cursor: Option<CursorObservation>,
-    mode: String,
-}
-
-impl IngressObservationSurface {
-    pub(crate) fn new(
-        surface: WindowSurfaceSnapshot,
-        cursor: Option<CursorObservation>,
-        mode: String,
-    ) -> Self {
-        Self {
-            surface,
-            cursor,
-            mode,
-        }
-    }
-
-    pub(crate) const fn surface(&self) -> WindowSurfaceSnapshot {
-        self.surface
-    }
-
-    pub(crate) const fn window_handle(&self) -> i64 {
-        self.surface.id().window_handle()
-    }
-
-    pub(crate) const fn buffer_handle(&self) -> BufferHandle {
-        self.surface.id().buffer_handle()
-    }
-
-    pub(crate) const fn cursor(&self) -> Option<CursorObservation> {
-        self.cursor
-    }
-
-    pub(crate) fn mode(&self) -> &str {
-        self.mode.as_str()
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

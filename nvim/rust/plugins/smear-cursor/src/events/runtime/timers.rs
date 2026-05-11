@@ -60,14 +60,20 @@ fn allocate_host_callback_id() -> RuntimeAccessResult<HostCallbackId> {
     with_timer_bridge(TimerBridge::allocate_host_callback_id)
 }
 
-#[cfg(not(test))]
-fn set_core_timer_handle(handle: CoreTimerHandle) -> RuntimeAccessResult<bool> {
-    set_core_timer_handle_with(&NeovimHost, handle)
+#[cfg(test)]
+fn with_default_host_bridge_port<R>(
+    callback: impl FnOnce(&crate::host::FakeHostBridgePort) -> R,
+) -> R {
+    callback(&crate::host::FakeHostBridgePort::default())
 }
 
-#[cfg(test)]
+#[cfg(not(test))]
+fn with_default_host_bridge_port<R>(callback: impl FnOnce(&NeovimHost) -> R) -> R {
+    callback(&NeovimHost)
+}
+
 fn set_core_timer_handle(handle: CoreTimerHandle) -> RuntimeAccessResult<bool> {
-    set_core_timer_handle_with(&crate::host::FakeHostBridgePort::default(), handle)
+    with_default_host_bridge_port(|host| set_core_timer_handle_with(host, handle))
 }
 
 fn set_core_timer_handle_with(
@@ -117,14 +123,8 @@ fn stop_core_timer_handles_with(
     }
 }
 
-#[cfg(not(test))]
 pub(super) fn stop_recovered_core_timer_handles(handles: Vec<CoreTimerHandle>) {
-    stop_recovered_core_timer_handles_with(&NeovimHost, handles);
-}
-
-#[cfg(test)]
-pub(super) fn stop_recovered_core_timer_handles(handles: Vec<CoreTimerHandle>) {
-    stop_recovered_core_timer_handles_with(&crate::host::FakeHostBridgePort::default(), handles);
+    with_default_host_bridge_port(|host| stop_recovered_core_timer_handles_with(host, handles));
 }
 
 fn stop_recovered_core_timer_handles_with(
@@ -134,14 +134,8 @@ fn stop_recovered_core_timer_handles_with(
     stop_core_timer_handles_with(host, handles, "panic_recovery");
 }
 
-#[cfg(not(test))]
 pub(crate) fn reset_core_timer_bridge() {
-    reset_core_timer_bridge_with(&NeovimHost);
-}
-
-#[cfg(test)]
-pub(crate) fn reset_core_timer_bridge() {
-    reset_core_timer_bridge_with(&crate::host::FakeHostBridgePort::default());
+    with_default_host_bridge_port(reset_core_timer_bridge_with);
 }
 
 fn reset_core_timer_bridge_with(host: &impl HostBridgePort) {
@@ -340,14 +334,9 @@ pub(crate) fn schedule_core_timer_effect(
                     warn(&format!(
                         "timer bridge re-entered while recording core timer handle; stopping scheduled timer: {err}"
                     ));
-                    #[cfg(not(test))]
-                    let stop_result =
-                        InstalledHostBridge.stop_timer_with(&NeovimHost, host_timer_id.get());
-                    #[cfg(test)]
-                    let stop_result = InstalledHostBridge.stop_timer_with(
-                        &crate::host::FakeHostBridgePort::default(),
-                        host_timer_id.get(),
-                    );
+                    let stop_result = with_default_host_bridge_port(|host| {
+                        InstalledHostBridge.stop_timer_with(host, host_timer_id.get())
+                    });
                     if let Err(stop_err) = stop_result {
                         warn(&format!(
                             "failed to stop unslotted core timer after state re-entry: {stop_err}"

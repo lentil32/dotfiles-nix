@@ -45,7 +45,7 @@ impl ValidationReadTelemetry {
     }
 }
 
-#[cfg(feature = "perf-counters")]
+#[cfg(all(test, feature = "perf-counters"))]
 impl ValidationReadTelemetry {
     pub(super) fn record_current_buffer_changedtick_read(&mut self) {
         self.current_buffer_changedtick_reads =
@@ -75,12 +75,6 @@ impl PlanningPreviewTelemetry {
     #[cfg(feature = "perf-counters")]
     pub(super) fn record_copied_particles(&mut self, particle_count: usize) {
         saturating_add_count(&mut self.copied_particles, particle_count);
-    }
-
-    #[cfg(feature = "perf-counters")]
-    pub(super) fn record_copy(&mut self, particle_count: usize) {
-        self.record_invocation();
-        self.record_copied_particles(particle_count);
     }
 }
 
@@ -946,11 +940,6 @@ impl RuntimeBehaviorMetrics {
     }
 
     #[cfg(feature = "perf-counters")]
-    pub(in crate::events) fn record_planning_preview_copy(&mut self, particle_count: usize) {
-        self.planning_preview.record_copy(particle_count);
-    }
-
-    #[cfg(feature = "perf-counters")]
     pub(in crate::events) fn record_particle_simulation_step(&mut self, particle_count: usize) {
         self.particle_path.record_simulation_step(particle_count);
     }
@@ -981,7 +970,7 @@ impl RuntimeBehaviorMetrics {
     }
 }
 
-#[cfg(feature = "perf-counters")]
+#[cfg(all(test, feature = "perf-counters"))]
 impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_current_buffer_changedtick_read(&mut self) {
         self.validation_reads

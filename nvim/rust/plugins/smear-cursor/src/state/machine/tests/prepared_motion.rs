@@ -14,7 +14,6 @@ fn prepared_motion_round_trips_runtime_dynamics_without_overwriting_config() {
 
     let mut target = RuntimeState::default();
     target.config.delay_event_to_smear = 27.0;
-    target.config.hide_target_hack = false;
     target.commit_runtime_config_update();
     target.set_enabled(false);
 

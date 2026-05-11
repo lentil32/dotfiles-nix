@@ -60,6 +60,11 @@ pub(in crate::core::reducer::tests) fn observation_request_with_perf_class(
     observed_at: u64,
     buffer_perf_class: BufferPerfClass,
 ) -> PendingObservation {
+    let requested_probes = if buffer_perf_class.keeps_ornamental_effects() {
+        ProbeRequestSet::only(ProbeKind::Background)
+    } else {
+        ProbeRequestSet::none()
+    };
     PendingObservation::new(
         ExternalDemand::new(
             IngressSeq::new(seq),
@@ -67,7 +72,7 @@ pub(in crate::core::reducer::tests) fn observation_request_with_perf_class(
             Millis::new(observed_at),
             buffer_perf_class,
         ),
-        ProbeRequestSet::default(),
+        requested_probes,
     )
 }
 

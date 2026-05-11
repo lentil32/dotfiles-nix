@@ -215,56 +215,10 @@ pub(super) enum PaletteRefreshPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::StrokeId;
-    use crate::position::RenderPoint;
-    use crate::types::ModeClass;
-    use crate::types::RenderFrame;
-    use crate::types::StaticRenderConfig;
     use pretty_assertions::assert_eq;
-    use std::sync::Arc;
 
     fn test_palette_spec() -> PaletteSpec {
-        PaletteSpec::from_frame(&RenderFrame {
-            mode: ModeClass::NormalLike,
-            corners: [RenderPoint::ZERO; 4],
-            step_samples: Vec::new().into(),
-            planner_idle_steps: 0,
-            target: RenderPoint::ZERO,
-            target_corners: [RenderPoint::ZERO; 4],
-            vertical_bar: false,
-            trail_stroke_id: StrokeId::INITIAL,
-            retarget_epoch: 0,
-            particle_count: 0,
-            aggregated_particle_cells: Arc::default(),
-            particle_screen_cells: Arc::default(),
-            color_at_cursor: Some(0x00FF_FFFF),
-            projection_policy_revision: crate::core::types::ProjectionPolicyRevision::INITIAL,
-            static_config: Arc::new(StaticRenderConfig {
-                cursor_color: Some("#112233".to_string()),
-                cursor_color_insert_mode: Some("none".to_string()),
-                normal_bg: Some("#202020".to_string()),
-                transparent_bg_fallback_color: "#303030".to_string(),
-                cterm_cursor_colors: Some(vec![17_u16, 42_u16]),
-                cterm_bg: Some(235_u16),
-                hide_target_hack: false,
-                max_kept_windows: 32,
-                never_draw_over_target: false,
-                particle_max_lifetime: 250.0,
-                particle_switch_octant_braille: 0.5,
-                particles_over_text: true,
-                color_levels: 16,
-                gamma: 2.2,
-                block_aspect_ratio: 0.5,
-                tail_duration_ms: 120.0,
-                simulation_hz: 120.0,
-                trail_thickness: 1.0,
-                trail_thickness_x: 1.0,
-                spatial_coherence_weight: 0.0,
-                temporal_stability_weight: 0.0,
-                top_k_per_cell: 4,
-                windows_zindex: 50,
-            }),
-        })
+        PaletteSpec::from_frame(&super::super::test_palette_frame())
     }
 
     fn palette_key() -> HighlightPaletteKey {

@@ -425,7 +425,6 @@ pub(super) struct IngressCursorPresentationContext {
     pub(super) enabled: bool,
     pub(super) animating: bool,
     pub(super) mode_allowed: bool,
-    pub(super) hide_target_hack: bool,
     pub(super) outside_cmdline: bool,
     pub(super) prepaint_cell: Option<ScreenCell>,
     pub(super) windows_zindex: u32,
@@ -437,7 +436,6 @@ impl IngressCursorPresentationContext {
         enabled: bool,
         animating: bool,
         mode_allowed: bool,
-        hide_target_hack: bool,
         outside_cmdline: bool,
         prepaint_cell: Option<ScreenCell>,
         windows_zindex: u32,
@@ -446,7 +444,6 @@ impl IngressCursorPresentationContext {
             enabled,
             animating,
             mode_allowed,
-            hide_target_hack,
             outside_cmdline,
             prepaint_cell,
             windows_zindex,
@@ -472,7 +469,6 @@ impl BufferEventPolicy {
             || !context.enabled
             || context.animating
             || !context.mode_allowed
-            || context.hide_target_hack
             || !context.outside_cmdline
         {
             return IngressCursorPresentationPolicy::NoAction;

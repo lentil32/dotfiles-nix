@@ -227,13 +227,7 @@ mod tests {
                 ViewportBounds::new(20, 40).expect("positive viewport bounds"),
                 ProjectorRevision::CURRENT,
             ),
-            ProjectionReuseKey::new(
-                None,
-                None,
-                None,
-                crate::core::runtime_reducer::TargetCellPresentation::None,
-                ProjectionPolicyRevision::INITIAL,
-            ),
+            ProjectionReuseKey::new(None, None, None, ProjectionPolicyRevision::INITIAL),
             crate::draw::render_plan::PlannerState::default(),
             LogicalRaster::new(None, Arc::from(cells)),
         )

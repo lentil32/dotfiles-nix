@@ -135,6 +135,25 @@ fn cursor_shape_flags() -> BoxedStrategy<(bool, bool)> {
     .boxed()
 }
 
+fn set_block_target(input: &mut StepInput, row: f64, col: f64) {
+    input.trail_origin_corners = input.current_corners;
+    input.target_corners = [
+        RenderPoint { row, col },
+        RenderPoint {
+            row,
+            col: col + 1.0,
+        },
+        RenderPoint {
+            row: row + 1.0,
+            col: col + 1.0,
+        },
+        RenderPoint {
+            row: row + 1.0,
+            col,
+        },
+    ];
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PoseInputSpec {
     start: RenderPoint,
@@ -405,6 +424,74 @@ mod simulation_step_behavior {
                 "underdamped response did not settle: settled={settled_col} target={target_col}"
             );
         }
+    }
+}
+
+mod particle_lifetime_bounds {
+    use super::*;
+
+    #[test]
+    fn enabled_particle_replay_saturates_at_the_configured_cap() {
+        let mut input = make_input();
+        input.particle_max_num = 7;
+        input.particles_per_second = 10_000.0;
+        input.particles_per_length = 10_000.0;
+        input.particle_max_lifetime = 10_000.0;
+        input.min_distance_emit_particles = 0.0;
+        let particle_cap = input.particle_max_num;
+        let mut max_seen_particles = 0_usize;
+
+        for step_index in 0..240 {
+            let target_col = if step_index % 2 == 0 { 60.0 } else { 2.0 };
+            set_block_target(&mut input, 1.0, target_col);
+
+            let output = simulate_step(input.clone());
+            max_seen_particles = max_seen_particles.max(output.particles.len());
+            assert!(
+                output.particles.len() <= particle_cap,
+                "particle count exceeded cap: count={} cap={particle_cap} step={step_index}",
+                output.particles.len(),
+            );
+            input.current_corners = output.current_corners;
+            input.spring_velocity_corners = output.spring_velocity_corners;
+            input.trail_elapsed_ms = output.trail_elapsed_ms;
+            input.particles = output.particles;
+            input.previous_center = output.previous_center;
+            input.rng_state = output.rng_state;
+        }
+
+        pretty_assertions::assert_eq!(max_seen_particles, particle_cap);
+    }
+
+    #[test]
+    fn disabled_particle_replay_does_not_replenish_expired_particles() {
+        let mut input = make_input();
+        input.particles_enabled = false;
+        input.time_interval = 50.0;
+        input.config_time_interval = 50.0;
+        input.particles_per_second = 10_000.0;
+        input.particles_per_length = 10_000.0;
+        input.min_distance_emit_particles = 0.0;
+        input.particles = vec![
+            Particle {
+                position: RenderPoint { row: 1.0, col: 1.0 },
+                velocity: RenderPoint::ZERO,
+                lifetime: 10.0,
+            },
+            Particle {
+                position: RenderPoint {
+                    row: 1.25,
+                    col: 1.25,
+                },
+                velocity: RenderPoint::ZERO,
+                lifetime: 20.0,
+            },
+        ];
+        set_block_target(&mut input, 1.0, 60.0);
+
+        let output = simulate_step(input);
+
+        pretty_assertions::assert_eq!(output.particles, Vec::<Particle>::new());
     }
 }
 

@@ -46,6 +46,7 @@ impl TrackedWindowBufferCloseOutcome {
         matches!(self.window, TrackedResourceCloseOutcome::ClosedOrGone)
     }
 
+    #[cfg(test)]
     pub(crate) fn aggregate(self) -> TrackedResourceCloseOutcome {
         if self.should_retain() {
             TrackedResourceCloseOutcome::Retained

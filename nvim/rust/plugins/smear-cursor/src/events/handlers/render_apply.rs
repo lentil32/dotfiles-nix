@@ -239,14 +239,7 @@ fn to_draw_allocation_policy(effect: RenderAllocationPolicy) -> AllocationPolicy
     }
 }
 
-fn apply_cursor_visibility_effect(
-    effect: CursorVisibilityEffect,
-    allow_real_cursor_updates: bool,
-) -> bool {
-    if !allow_real_cursor_updates {
-        return false;
-    }
-
+fn apply_cursor_visibility_effect(effect: CursorVisibilityEffect) -> bool {
     match effect {
         CursorVisibilityEffect::Keep => false,
         CursorVisibilityEffect::Hide => {
@@ -327,10 +320,7 @@ pub(super) fn apply_render_action(
                 flush_shell_redraw("draw_release_redraw");
             }
             metrics.had_visual_change = metrics.had_visual_change
-                || apply_cursor_visibility_effect(
-                    render_side_effects.cursor_visibility,
-                    render_side_effects.allow_real_cursor_updates,
-                );
+                || apply_cursor_visibility_effect(render_side_effects.cursor_visibility);
         }
         ProposalExecution::Clear {
             realization: clear, ..
@@ -347,16 +337,11 @@ pub(super) fn apply_render_action(
                 .saturating_add(clear_summary.invalid_removed_windows);
             metrics.had_visual_change = metrics.had_visual_change
                 || clear_summary.had_visual_change()
-                || apply_cursor_visibility_effect(
-                    render_side_effects.cursor_visibility,
-                    render_side_effects.allow_real_cursor_updates,
-                );
+                || apply_cursor_visibility_effect(render_side_effects.cursor_visibility);
         }
         ProposalExecution::Noop { .. } => {
-            metrics.had_visual_change = apply_cursor_visibility_effect(
-                render_side_effects.cursor_visibility,
-                render_side_effects.allow_real_cursor_updates,
-            );
+            metrics.had_visual_change =
+                apply_cursor_visibility_effect(render_side_effects.cursor_visibility);
         }
         ProposalExecution::Failure { failure, .. } => {
             return Err(ApplyRenderActionError::FailureProposalReachedShell(
@@ -422,13 +407,7 @@ mod tests {
                 viewport,
                 ProjectorRevision::CURRENT,
             ),
-            ProjectionReuseKey::new(
-                None,
-                None,
-                None,
-                crate::core::runtime_reducer::TargetCellPresentation::None,
-                ProjectionPolicyRevision::INITIAL,
-            ),
+            ProjectionReuseKey::new(None, None, None, ProjectionPolicyRevision::INITIAL),
             crate::draw::render_plan::PlannerState::default(),
             LogicalRaster::new(None, Arc::from(Vec::<CellOp>::new())),
         )
@@ -678,9 +657,7 @@ mod tests {
                         transparent_bg_fallback_color: String::new(),
                         cterm_cursor_colors: None,
                         cterm_bg: None,
-                        hide_target_hack: false,
                         max_kept_windows: 32,
-                        never_draw_over_target: false,
                         particle_max_lifetime: 0.0,
                         particle_switch_octant_braille: 0.0,
                         particles_over_text: true,

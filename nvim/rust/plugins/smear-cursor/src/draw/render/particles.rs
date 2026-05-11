@@ -1,14 +1,55 @@
+use super::CellOp;
+use super::Glyph;
+use super::HighlightRef;
+use super::ParticleOp;
 use super::PlanResources;
 use super::RenderFrame;
-use super::cell_draw::draw_braille_character;
-use super::cell_draw::draw_octant_character;
 use super::geometry::level_from_shade;
+use crate::draw::PARTICLE_ZINDEX_OFFSET;
+use crate::octant_chars::OCTANT_CHARACTERS;
 
-pub(super) fn draw_particles(
-    resources: &mut PlanResources<'_>,
+fn octant_glyph(cell: &[[f64; 2]; 4]) -> Option<Glyph> {
+    let octant_index = usize::from(cell[0][0] > 0.0)
+        + usize::from(cell[0][1] > 0.0) * 2
+        + usize::from(cell[1][0] > 0.0) * 4
+        + usize::from(cell[1][1] > 0.0) * 8
+        + usize::from(cell[2][0] > 0.0) * 16
+        + usize::from(cell[2][1] > 0.0) * 32
+        + usize::from(cell[3][0] > 0.0) * 64
+        + usize::from(cell[3][1] > 0.0) * 128;
+
+    if octant_index == 0 {
+        return None;
+    }
+
+    OCTANT_CHARACTERS
+        .get(octant_index.saturating_sub(1))
+        .copied()
+        .map(Glyph::Static)
+}
+
+fn braille_glyph(cell: &[[f64; 2]; 4]) -> Option<Glyph> {
+    let braille_index = usize::from(cell[0][0] > 0.0)
+        + usize::from(cell[1][0] > 0.0) * 2
+        + usize::from(cell[2][0] > 0.0) * 4
+        + usize::from(cell[0][1] > 0.0) * 8
+        + usize::from(cell[1][1] > 0.0) * 16
+        + usize::from(cell[2][1] > 0.0) * 32
+        + usize::from(cell[3][0] > 0.0) * 64
+        + usize::from(cell[3][1] > 0.0) * 128;
+
+    if braille_index == 0 {
+        return None;
+    }
+
+    u8::try_from(braille_index).ok().map(Glyph::Braille)
+}
+
+pub(crate) fn for_each_particle_overlay_op(
     frame: &RenderFrame,
     target_row: i64,
     target_col: i64,
+    mut emit: impl FnMut(ParticleOp),
 ) {
     if !frame.has_particles() {
         return;
@@ -52,26 +93,43 @@ pub(super) fn draw_particles(
             continue;
         };
 
-        if lifetime_average > lifetime_switch_octant_braille {
-            draw_octant_character(
-                resources,
-                row,
-                col,
-                aggregate.cell(),
-                level,
-                resources.particle_zindex,
-                requires_background_probe,
-            );
+        let cell = aggregate.cell();
+        let glyph = if lifetime_average > lifetime_switch_octant_braille {
+            octant_glyph(cell)
         } else {
-            draw_braille_character(
-                resources,
+            braille_glyph(cell)
+        };
+        let Some(glyph) = glyph else {
+            continue;
+        };
+
+        emit(ParticleOp {
+            cell: CellOp {
                 row,
                 col,
-                aggregate.cell(),
-                level,
-                resources.particle_zindex,
-                requires_background_probe,
-            );
-        }
+                zindex: frame.windows_zindex.saturating_sub(PARTICLE_ZINDEX_OFFSET),
+                glyph,
+                highlight: HighlightRef::Normal(level),
+            },
+            requires_background_probe,
+        });
     }
+}
+
+pub(super) fn draw_particles(
+    resources: &mut PlanResources<'_>,
+    frame: &RenderFrame,
+    target_row: i64,
+    target_col: i64,
+) {
+    for_each_particle_overlay_op(frame, target_row, target_col, |op| {
+        resources.builder.push_particle(
+            op.cell.row,
+            op.cell.col,
+            op.cell.zindex,
+            op.cell.glyph,
+            op.cell.highlight,
+            op.requires_background_probe,
+        );
+    });
 }
