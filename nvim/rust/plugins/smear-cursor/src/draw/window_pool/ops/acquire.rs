@@ -408,8 +408,11 @@ pub(crate) fn ensure_capacity_in_tab(
             "delete staged render buffer",
             "close staged render window",
         );
-        let window =
-            host.open_floating_window(staged.buffer(), FloatingWindowEnter::DoNotEnter, &hidden_config)?;
+        let window = host.open_floating_window(
+            staged.buffer(),
+            FloatingWindowEnter::DoNotEnter,
+            &hidden_config,
+        )?;
         let attached = staged.attach_window(window);
         initialize_buffer_options(attached.buffer())?;
         initialize_window_options(attached.window())?;

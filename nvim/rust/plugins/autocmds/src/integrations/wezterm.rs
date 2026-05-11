@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
 use std::io::Error;
 use std::io::ErrorKind;
-use std::io::Write;
-use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -21,46 +19,45 @@ use crate::machines::wezterm::WeztermState;
 use crate::machines::wezterm::derive_tab_title;
 use crate::machines::wezterm::format_cli_failure;
 use crate::machines::wezterm::format_set_working_dir_failure;
-use nvim_oxi::Array;
 use nvim_oxi::Result;
-use nvim_oxi::String as NvimString;
 use nvim_oxi::api;
 use nvim_oxi::api::opts::CreateAugroupOpts;
 use nvim_oxi::api::opts::CreateAutocmdOpts;
 use nvim_oxi::api::opts::CreateCommandOpts;
-use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::types::AutocmdCallbackArgs;
 use nvim_oxi::api::types::CommandArgs;
 use nvim_oxi::libuv::AsyncHandle;
 use nvimrs_nvim_oxi_utils::notify;
 use nvimrs_nvim_oxi_utils::state::StateCell;
-use nvimrs_support::ProjectRoot;
 use nvimrs_support::TabTitle;
-use percent_encoding::AsciiSet;
-use percent_encoding::NON_ALPHANUMERIC;
-use percent_encoding::percent_encode;
 
 use crate::types::AutocmdAction;
 
+mod context;
 mod sync;
+mod terminal;
+mod work;
 
+use self::context::WeztermContext;
+use self::context::current_buf_project_root;
+use self::context::current_window_cwd;
+use self::context::should_skip_sync_for_current_buffer;
 use self::sync::WeztermRuntimeMode;
 use self::sync::WeztermSyncGate;
 use self::sync::WeztermSyncPolicy;
 use self::sync::WeztermSyncSnapshot;
 use self::sync::WeztermSyncStats;
+use self::terminal::EscapeSequenceWeztermCommandRunner;
+use self::work::WeztermCommandBatch;
+use self::work::WeztermCommandResult;
+use self::work::WeztermWorkItem;
+use self::work::command_error_result;
+use self::work::run_wezterm_command;
 
 const WEZTERM_LOG_CONTEXT: &str = "wezterm_tab";
-const PROJECT_ROOT_VAR: &str = "project_root";
 const WEZTERM_WORKER_QUEUE_CAPACITY: usize = 64;
 const WEZTERM_DEFAULT_COMPLETION_DRAIN_BATCH_SIZE: usize = 16;
 const WEZTERM_DEFAULT_SYNC_DEBOUNCE_WINDOW_MS: u64 = 75;
-const FILE_URL_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'/')
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'~');
 
 static WEZTERM_STATE: StateCell<WeztermState> = StateCell::new(WeztermState::new());
 static WEZTERM_DISPATCHER: LazyLock<WeztermDispatcher> = LazyLock::new(WeztermDispatcher::new);
@@ -68,110 +65,6 @@ static WEZTERM_SYNC_POLICY: LazyLock<WeztermSyncPolicy> =
     LazyLock::new(WeztermSyncPolicy::default_policy);
 static WEZTERM_SYNC_GATE: LazyLock<Mutex<WeztermSyncGate>> =
     LazyLock::new(|| Mutex::new(WeztermSyncGate::new()));
-
-#[derive(Debug)]
-enum WeztermCommandResult {
-    TabTitle {
-        title: TabTitle,
-        status: std::io::Result<ExitStatus>,
-    },
-    WorkingDir {
-        cwd: String,
-        status: std::io::Result<ExitStatus>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WeztermCommandKind {
-    TabTitle,
-    WorkingDir,
-}
-
-impl WeztermCommand {
-    const fn kind(&self) -> WeztermCommandKind {
-        match self {
-            Self::SetTabTitle(_) => WeztermCommandKind::TabTitle,
-            Self::SetWorkingDir(_) => WeztermCommandKind::WorkingDir,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WeztermCommandBatch {
-    first: WeztermCommand,
-    second: Option<WeztermCommand>,
-}
-
-impl WeztermCommandBatch {
-    fn single(command: WeztermCommand) -> Self {
-        Self {
-            first: command,
-            second: None,
-        }
-    }
-
-    fn pair(first: WeztermCommand, second: WeztermCommand) -> Self {
-        debug_assert!(
-            first.kind() != second.kind(),
-            "batch pairs are expected to contain distinct command kinds"
-        );
-        Self {
-            first,
-            second: Some(second),
-        }
-    }
-
-    fn from_optional(
-        first: Option<WeztermCommand>,
-        second: Option<WeztermCommand>,
-    ) -> Option<Self> {
-        match (first, second) {
-            (Some(first), Some(second)) => Some(Self::pair(first, second)),
-            (Some(first), None) | (None, Some(first)) => Some(Self::single(first)),
-            (None, None) => None,
-        }
-    }
-
-    fn for_each<F>(self, mut f: F)
-    where
-        F: FnMut(WeztermCommand),
-    {
-        f(self.first);
-        if let Some(second) = self.second {
-            f(second);
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WeztermWorkItem {
-    Single(WeztermCommand),
-    Batch(WeztermCommandBatch),
-}
-
-impl WeztermWorkItem {
-    fn from_command(command: WeztermCommand) -> Self {
-        Self::Single(command)
-    }
-
-    fn from_batch(batch: WeztermCommandBatch) -> Self {
-        if batch.second.is_none() {
-            Self::Single(batch.first)
-        } else {
-            Self::Batch(batch)
-        }
-    }
-
-    fn for_each_command<F>(self, mut f: F)
-    where
-        F: FnMut(WeztermCommand),
-    {
-        match self {
-            Self::Single(command) => f(command),
-            Self::Batch(batch) => batch.for_each(f),
-        }
-    }
-}
 
 struct WeztermDispatcherShared {
     completed: Mutex<VecDeque<WeztermCommandResult>>,
@@ -368,92 +261,6 @@ trait WeztermCommandRunner: Send + Sync {
     fn run_working_dir(&self, cwd: &str) -> std::io::Result<ExitStatus>;
 }
 
-#[cfg(unix)]
-fn successful_exit_status() -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    ExitStatus::from_raw(0)
-}
-
-#[cfg(windows)]
-fn successful_exit_status() -> ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-    ExitStatus::from_raw(0)
-}
-
-fn tmux_passthrough_enabled() -> bool {
-    std::env::var_os("TMUX").is_some()
-}
-
-fn with_tmux_passthrough(osc: &str, passthrough_enabled: bool) -> String {
-    if !passthrough_enabled {
-        return osc.to_string();
-    }
-    let mut tmux_passthrough = String::from("\u{1b}Ptmux;");
-    for ch in osc.chars() {
-        if ch == '\u{1b}' {
-            tmux_passthrough.push(ch);
-        }
-        tmux_passthrough.push(ch);
-    }
-    tmux_passthrough.push_str("\u{1b}\\");
-    tmux_passthrough.push_str(osc);
-    tmux_passthrough
-}
-
-fn build_tab_title_sequence(title: &TabTitle) -> String {
-    let osc = format!("\u{1b}]1;{}\u{1b}\\", title.as_str());
-    with_tmux_passthrough(&osc, tmux_passthrough_enabled())
-}
-
-fn build_working_dir_sequence(cwd: &str) -> std::io::Result<String> {
-    let cwd = std::path::Path::new(cwd);
-    if !cwd.is_absolute() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("cwd {cwd:?} is not an absolute path"),
-        ));
-    }
-    let host = hostname::get()
-        .ok()
-        .and_then(|host| host.into_string().ok())
-        .filter(|host| !host.is_empty())
-        .unwrap_or_else(|| "localhost".to_string());
-    #[cfg(unix)]
-    let encoded_path = {
-        use std::os::unix::ffi::OsStrExt;
-        percent_encode(cwd.as_os_str().as_bytes(), FILE_URL_PATH_ENCODE_SET).to_string()
-    };
-    #[cfg(windows)]
-    let encoded_path = {
-        let normalized = cwd.to_string_lossy().replace('\\', "/");
-        percent_encode(normalized.as_bytes(), FILE_URL_PATH_ENCODE_SET).to_string()
-    };
-
-    let osc = format!("\u{1b}]7;file://{host}{encoded_path}\u{1b}\\");
-    Ok(with_tmux_passthrough(&osc, tmux_passthrough_enabled()))
-}
-
-#[derive(Debug, Default)]
-struct EscapeSequenceWeztermCommandRunner;
-
-impl WeztermCommandRunner for EscapeSequenceWeztermCommandRunner {
-    fn run_tab_title(&self, title: &TabTitle) -> std::io::Result<ExitStatus> {
-        let sequence = build_tab_title_sequence(title);
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(sequence.as_bytes())?;
-        stdout.flush()?;
-        Ok(successful_exit_status())
-    }
-
-    fn run_working_dir(&self, cwd: &str) -> std::io::Result<ExitStatus> {
-        let sequence = build_working_dir_sequence(cwd)?;
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(sequence.as_bytes())?;
-        stdout.flush()?;
-        Ok(successful_exit_status())
-    }
-}
-
 impl WeztermDispatcher {
     fn new() -> Self {
         let wakeup = match AsyncHandle::new(|| {
@@ -559,30 +366,10 @@ fn run_wezterm_work_item(
             shared.on_worker_result(run_wezterm_command(command, runner));
         }
         WeztermWorkItem::Batch(WeztermCommandBatch { first, second }) => {
-            if let Some(second) = second {
-                let first_result = run_wezterm_command(first, runner);
-                let second_result = run_wezterm_command(second, runner);
-                shared.on_worker_results([first_result, second_result]);
-            } else {
-                shared.on_worker_result(run_wezterm_command(first, runner));
-            }
+            let first_result = run_wezterm_command(first, runner);
+            let second_result = run_wezterm_command(second, runner);
+            shared.on_worker_results([first_result, second_result]);
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct WeztermContext {
-    home: Option<PathBuf>,
-}
-
-impl WeztermContext {
-    fn detect() -> Option<Self> {
-        let in_wezterm = std::env::var_os("WEZTERM_PANE").is_some_and(|value| !value.is_empty());
-        if !in_wezterm {
-            return None;
-        }
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        Some(Self { home })
     }
 }
 
@@ -636,56 +423,6 @@ where
 {
     if state.take_warn_cwd_failed() {
         notify::warn(WEZTERM_LOG_CONTEXT, &message());
-    }
-}
-
-fn current_buf_project_root() -> Result<Option<ProjectRoot>> {
-    let buf = api::get_current_buf();
-    if !buf.is_valid() {
-        return Ok(None);
-    }
-    let root = match buf.get_var::<NvimString>(PROJECT_ROOT_VAR) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    Ok(ProjectRoot::try_new(root.to_string_lossy().into_owned()).ok())
-}
-
-fn current_window_cwd() -> Result<Option<String>> {
-    let cwd: NvimString = api::call_function("getcwd", Array::new())?;
-    let cwd = cwd.to_string_lossy().into_owned();
-    if !crate::is_dir(&cwd) {
-        return Ok(None);
-    }
-    Ok(Some(cwd))
-}
-
-fn run_wezterm_command(
-    command: WeztermCommand,
-    runner: &dyn WeztermCommandRunner,
-) -> WeztermCommandResult {
-    match command {
-        WeztermCommand::SetTabTitle(title) => WeztermCommandResult::TabTitle {
-            status: runner.run_tab_title(&title),
-            title,
-        },
-        WeztermCommand::SetWorkingDir(cwd) => WeztermCommandResult::WorkingDir {
-            status: runner.run_working_dir(&cwd),
-            cwd,
-        },
-    }
-}
-
-fn command_error_result(command: WeztermCommand, err: std::io::Error) -> WeztermCommandResult {
-    match command {
-        WeztermCommand::SetTabTitle(title) => WeztermCommandResult::TabTitle {
-            title,
-            status: Err(err),
-        },
-        WeztermCommand::SetWorkingDir(cwd) => WeztermCommandResult::WorkingDir {
-            cwd,
-            status: Err(err),
-        },
     }
 }
 
@@ -787,10 +524,6 @@ fn start_wezterm_update(command: WeztermCommand) {
     start_wezterm_work_item(WeztermWorkItem::from_command(command));
 }
 
-fn start_wezterm_batch(batch: WeztermCommandBatch) {
-    start_wezterm_work_item(WeztermWorkItem::from_batch(batch));
-}
-
 fn drain_wezterm_completions() -> Result<AutocmdAction> {
     if WEZTERM_DISPATCHER.take_degraded_warning_pending() {
         notify::warn(
@@ -849,20 +582,6 @@ fn next_wezterm_working_dir_command() -> Result<Option<WeztermCommand>> {
     Ok(next_command)
 }
 
-fn should_skip_sync_for_current_buffer() -> Result<bool> {
-    let current = api::get_current_buf();
-    if !current.is_valid() {
-        return Ok(true);
-    }
-    let buftype: NvimString =
-        api::get_option_value("buftype", &OptionOpts::builder().buf(current).build())?;
-    Ok(!buftype_requires_wezterm_sync(&buftype.to_string_lossy()))
-}
-
-fn buftype_requires_wezterm_sync(buftype: &str) -> bool {
-    matches!(buftype, "" | "acwrite")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WeztermSyncTrigger {
     Autocmd,
@@ -890,8 +609,8 @@ fn sync_wezterm_state_for(trigger: WeztermSyncTrigger) -> Result<AutocmdAction> 
 
     let title_command = next_wezterm_tab_title_command(&context)?;
     let cwd_command = next_wezterm_working_dir_command()?;
-    if let Some(batch) = WeztermCommandBatch::from_optional(title_command, cwd_command) {
-        start_wezterm_batch(batch);
+    if let Some(work_item) = WeztermWorkItem::from_optional(title_command, cwd_command) {
+        start_wezterm_work_item(work_item);
     }
     Ok(AutocmdAction::Keep)
 }
@@ -961,6 +680,7 @@ pub fn setup_wezterm_autocmd() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::collections::VecDeque as StdVecDeque;
     type TestResult<T = ()> = std::result::Result<T, &'static str>;
 
@@ -1183,56 +903,5 @@ mod tests {
         assert_eq!(snapshot.stats.executed, 1);
         assert_eq!(snapshot.stats.wakeup_failures, 1);
         assert_eq!(snapshot.stats.enqueue_failures, 1);
-    }
-
-    #[test]
-    fn buftype_requires_wezterm_sync_allows_normal_and_acwrite_buffers() {
-        assert!(super::buftype_requires_wezterm_sync(""));
-        assert!(super::buftype_requires_wezterm_sync("acwrite"));
-    }
-
-    #[test]
-    fn buftype_requires_wezterm_sync_skips_special_ui_buffers() {
-        assert!(!super::buftype_requires_wezterm_sync("terminal"));
-        assert!(!super::buftype_requires_wezterm_sync("nofile"));
-        assert!(!super::buftype_requires_wezterm_sync("prompt"));
-    }
-
-    #[test]
-    fn command_batch_preserves_input_order() -> TestResult {
-        let tab = title("batched")?;
-        let first = WeztermCommand::SetTabTitle(tab);
-        let second = WeztermCommand::SetWorkingDir("/tmp".to_string());
-        let Some(batch) =
-            WeztermCommandBatch::from_optional(Some(first.clone()), Some(second.clone()))
-        else {
-            return Err("expected batch");
-        };
-        let mut seen = Vec::new();
-        batch.for_each(|command| seen.push(command));
-        assert_eq!(seen, vec![first, second]);
-        Ok(())
-    }
-
-    #[test]
-    fn with_tmux_passthrough_noop_when_disabled() {
-        let osc = "\u{1b}]1;tab-title\u{1b}\\";
-        assert_eq!(super::with_tmux_passthrough(osc, false), osc);
-    }
-
-    #[test]
-    fn with_tmux_passthrough_wraps_when_enabled() {
-        let osc = "\u{1b}]1;tab-title\u{1b}\\";
-        let wrapped = super::with_tmux_passthrough(osc, true);
-        assert!(wrapped.starts_with("\u{1b}Ptmux;"));
-        assert!(wrapped.ends_with(osc));
-    }
-
-    #[test]
-    fn working_dir_sequence_contains_osc7_payload() -> TestResult {
-        let sequence = super::build_working_dir_sequence("/tmp")
-            .map_err(|_| "expected valid OSC7 sequence")?;
-        assert!(sequence.contains("]7;file://"));
-        Ok(())
     }
 }

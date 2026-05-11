@@ -98,8 +98,8 @@ let
       desc = "Slack CLI for developing Slack App";
       cask = "slack-cli";
     }
+    { formulae = "rtk"; }
     { formulae = "sqlfmt"; }
-    { formulae = "supabase/tap/supabase"; }
     { formulae = "uv"; }
     { formulae = "wget"; }
 

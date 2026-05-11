@@ -6,11 +6,11 @@
 let
   openIsland = pkgs.stdenvNoCC.mkDerivation rec {
     pname = "open-island";
-    version = "1.0.27";
+    version = "1.0.29";
 
     src = pkgs.fetchzip {
       url = "https://github.com/Octane0411/open-vibe-island/releases/download/v${version}/Open.Island.zip";
-      hash = "sha256-FwNz1zXLKwqXveqIeya/i5vwWhlqt2fb0JoBkSFV6to=";
+      hash = "sha256-cGg+arPQCzqZi9jKsfpRb+/ZMtA04PRn3ykC8J0lU2g=";
       stripRoot = false;
     };
 

@@ -382,7 +382,11 @@ fn window_buffer(window: &api::Window) -> Option<api::Buffer> {
     }
 }
 
-fn buffer_matches_marker(buffer: &api::Buffer, filetype_marker: &str, buftype_marker: &str) -> bool {
+fn buffer_matches_marker(
+    buffer: &api::Buffer,
+    filetype_marker: &str,
+    buftype_marker: &str,
+) -> bool {
     let host = NeovimHost;
     let Ok(filetype) = host.buffer_string_option(buffer, "filetype") else {
         return false;
@@ -475,10 +479,7 @@ pub(crate) fn close_orphan_smear_resources(
 pub(crate) fn purge_tab_with_closer(
     tab_windows: &mut TabWindows,
     namespace_id: NamespaceId,
-    close_cached_window: &mut impl FnMut(
-        NamespaceId,
-        WindowBufferHandle,
-    ) -> TrackedResourceCloseOutcome,
+    close_cached_window: &mut impl FnMut(NamespaceId, WindowBufferHandle) -> TrackedResourceCloseOutcome,
 ) -> TrackedResourceCloseSummary {
     #[cfg(not(test))]
     let _event_ignore = EventIgnoreGuard::set_all();

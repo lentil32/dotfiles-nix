@@ -90,7 +90,7 @@ fn tabclosed_mapping_fallback_drops_all_tracked_handles_absent_from_live_handles
 }
 
 #[test]
-fn option_set_metadata_invalidation_drops_only_target_buffer_metadata_and_policy() {
+fn option_set_metadata_invalidation_drops_only_target_buffer_metadata() {
     const TARGET_BUFFER_HANDLE: i64 = 11;
     const OTHER_BUFFER_HANDLE: i64 = 29;
 
@@ -138,7 +138,12 @@ fn option_set_metadata_invalidation_drops_only_target_buffer_metadata_and_policy
 
     assert_eq!(
         cached_entries,
-        (None, Some(other_metadata), None, Some(other_policy))
+        (
+            None,
+            Some(other_metadata),
+            Some(target_policy),
+            Some(other_policy),
+        )
     );
 }
 

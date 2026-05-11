@@ -197,7 +197,12 @@ fn reuse_tab_windows_from_specs(
 
 fn reuse_window_signature(
     cached: CachedRenderWindow,
-) -> (i32, BufferHandle, CachedWindowLifecycle, Option<WindowPlacement>) {
+) -> (
+    i32,
+    BufferHandle,
+    CachedWindowLifecycle,
+    Option<WindowPlacement>,
+) {
     (
         cached.handles.window_id,
         cached.handles.buffer_id,
@@ -208,7 +213,12 @@ fn reuse_window_signature(
 
 fn reuse_window_signatures(
     windows: &[CachedRenderWindow],
-) -> Vec<(i32, BufferHandle, CachedWindowLifecycle, Option<WindowPlacement>)> {
+) -> Vec<(
+    i32,
+    BufferHandle,
+    CachedWindowLifecycle,
+    Option<WindowPlacement>,
+)> {
     windows
         .iter()
         .copied()

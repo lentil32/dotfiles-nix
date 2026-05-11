@@ -9,11 +9,11 @@ mod tests {
         lru_prune_indices, next_adaptive_budget, purge_tab_with_closer, rollover_in_use_windows,
         tab_pool_snapshot_from_tab,
     };
+    use crate::draw::TrackedResourceCloseOutcome;
+    use crate::draw::TrackedResourceCloseSummary;
     use crate::host::BufferHandle;
     use crate::host::NamespaceId;
     use crate::host::TabHandle;
-    use crate::draw::TrackedResourceCloseOutcome;
-    use crate::draw::TrackedResourceCloseSummary;
     use crate::test_support::proptest::pure_config;
     use pretty_assertions::assert_eq;
     use proptest::collection::vec;

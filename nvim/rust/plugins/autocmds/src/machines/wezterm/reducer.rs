@@ -61,6 +61,7 @@ impl WeztermState {
         }
         if completion == WeztermCompletion::Unavailable {
             self.clear_pending_updates();
+            return WeztermTransition::default();
         }
 
         Self::transition_from_next(next, make_command)
@@ -96,6 +97,7 @@ impl WeztermState {
 mod tests {
     use super::*;
     use nvimrs_support::TabTitle;
+    use pretty_assertions::assert_eq;
 
     fn title(value: &str) -> Result<TabTitle, &'static str> {
         TabTitle::try_new(value.to_string()).map_err(|_| "expected non-empty tab title")
@@ -235,6 +237,62 @@ mod tests {
             state
                 .reduce(WeztermEvent::RequestTitle { title: b })
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wezterm_unavailable_drops_queued_updates_without_dispatching() -> Result<(), &'static str> {
+        let mut state = WeztermState::new();
+        let current = title("current")?;
+        let queued = title("queued")?;
+        let cwd = "/tmp".to_string();
+
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::RequestTitle {
+                    title: current.clone()
+                })
+                .command,
+            Some(WeztermCommand::SetTabTitle(current.clone()))
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::RequestTitle {
+                    title: queued.clone()
+                })
+                .is_empty()
+        );
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::RequestWorkingDir { cwd: cwd.clone() })
+                .command,
+            Some(WeztermCommand::SetWorkingDir(cwd.clone()))
+        );
+
+        assert!(
+            state
+                .reduce(WeztermEvent::TitleCompleted {
+                    title: current,
+                    completion: WeztermCompletion::Unavailable
+                })
+                .is_empty()
+        );
+        assert!(
+            state
+                .reduce(WeztermEvent::WorkingDirCompleted {
+                    cwd,
+                    completion: WeztermCompletion::Success
+                })
+                .is_empty()
+        );
+        assert_eq!(
+            state
+                .reduce(WeztermEvent::RequestTitle {
+                    title: queued.clone()
+                })
+                .command,
+            Some(WeztermCommand::SetTabTitle(queued))
         );
         Ok(())
     }

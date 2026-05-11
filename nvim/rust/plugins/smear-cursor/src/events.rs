@@ -156,10 +156,6 @@ impl ShellState {
 
     fn invalidate_buffer_metadata(&mut self, buffer_handle: BufferHandle) {
         self.buffer_metadata_cache.invalidate_buffer(buffer_handle);
-        // Buffer event policy is derived from buffer-local metadata, so this
-        // metadata boundary remains the single owner of policy invalidation.
-        self.buffer_perf_policy_cache
-            .invalidate_buffer(buffer_handle);
     }
 
     fn invalidate_conceal_probe_caches(&mut self, buffer_handle: BufferHandle) {
@@ -172,6 +168,8 @@ impl ShellState {
 
     fn invalidate_buffer_local_caches(&mut self, buffer_handle: BufferHandle) {
         self.invalidate_buffer_metadata(buffer_handle);
+        self.buffer_perf_policy_cache
+            .invalidate_buffer(buffer_handle);
         self.buffer_perf_telemetry_cache
             .invalidate_buffer(buffer_handle);
         self.invalidate_buffer_local_probe_caches(buffer_handle);

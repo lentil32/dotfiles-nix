@@ -884,6 +884,39 @@ fn pressure_only_local_telemetry_falls_back_to_global_callback_estimate() {
     set_core_state(previous_core_state).expect("core state restore should succeed");
 }
 
+#[test]
+fn metadata_invalidation_preserves_policy_hysteresis_state() {
+    const TARGET_BUFFER_HANDLE: i64 = 51;
+
+    super::reset_event_loop_for_test();
+    reset_transient_event_state();
+
+    let snapshot = snapshot_for_perf_mode(BufferPerfMode::Auto);
+    let entering_metadata = listed_buffer_metadata(20_000);
+    let previous_policy = resolve_policy_for_test(
+        &snapshot,
+        TARGET_BUFFER_HANDLE,
+        &entering_metadata,
+        /*observed_at_ms*/ 1_000.0,
+    );
+
+    assert_eq!(previous_policy.perf_class(), BufferPerfClass::FastMotion);
+
+    invalidate_buffer_metadata(TARGET_BUFFER_HANDLE)
+        .expect("metadata invalidation should preserve policy hysteresis state");
+
+    let hysteresis_metadata = listed_buffer_metadata(18_000);
+    let retained_policy = resolve_policy_for_test(
+        &snapshot,
+        TARGET_BUFFER_HANDLE,
+        &hysteresis_metadata,
+        /*observed_at_ms*/ 1_000.0,
+    );
+
+    assert_eq!(retained_policy.perf_class(), BufferPerfClass::FastMotion);
+    assert_eq!(retained_policy.line_count(), 18_000);
+}
+
 fn snapshot_for_perf_mode(perf_mode: BufferPerfMode) -> IngressReadSnapshot {
     IngressReadSnapshot::new_for_test(IngressReadSnapshotTestInput {
         enabled: true,
