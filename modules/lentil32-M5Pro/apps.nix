@@ -27,7 +27,7 @@ let
     # Productivity
     { cask = "hammerspoon"; }
     { cask = "karabiner-elements"; }
-    { cask = "linear-linear"; }
+    { cask = "linear"; }
     { cask = "linearmouse"; }
     { cask = "monitorcontrol"; }
     { cask = "raycast"; }

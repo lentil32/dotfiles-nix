@@ -194,7 +194,14 @@ in
     bun = {
       enable = true;
       package = pkgs-unstable.bun;
-      settings.telemetry = false;
+      settings = {
+        telemetry = false;
+        install = {
+          exact = true;
+          # Require packages to be at least 3 days old to reduce supply chain risk.
+          minimumReleaseAge = 259200;
+        };
+      };
     };
     direnv = {
       enable = true;
