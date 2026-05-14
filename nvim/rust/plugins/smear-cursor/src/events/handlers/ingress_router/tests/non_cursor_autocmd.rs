@@ -1,24 +1,18 @@
-use super::super::LiveTabSnapshot;
 use super::super::advance_buffer_text_revision;
 use super::super::invalidate_buffer_local_caches;
 use super::super::invalidate_buffer_metadata;
+use super::super::parse_closed_tab_number;
 use super::super::parse_closed_window_id;
 use super::super::should_invalidate_buffer_metadata_for_option;
 use super::super::should_invalidate_conceal_probe_cache_for_option;
 use super::super::should_refresh_editor_viewport_for_option;
-use super::super::stale_tracked_tab_handles;
 use super::reset_buffer_local_cache_state;
 use crate::core::types::Generation;
 use crate::events::cursor::BufferMetadata;
 use crate::events::policy::BufferEventPolicy;
 use crate::events::runtime::mutate_shell_state;
 use crate::events::runtime::read_shell_state;
-use crate::host::TabHandle;
 use pretty_assertions::assert_eq;
-
-fn tab_handle(value: i32) -> TabHandle {
-    TabHandle::from_raw_for_test(value)
-}
 
 #[test]
 fn buffer_metadata_invalidation_only_tracks_the_buffer_local_policy_inputs() {
@@ -62,31 +56,11 @@ fn winclosed_payload_uses_match_name_as_window_id() {
 }
 
 #[test]
-fn tabclosed_mapping_fallback_drops_all_tracked_handles_absent_from_live_handles() {
-    let live_tabs = [
-        LiveTabSnapshot {
-            tab_handle: tab_handle(11),
-            tab_number: None,
-        },
-        LiveTabSnapshot {
-            tab_handle: tab_handle(44),
-            tab_number: None,
-        },
-    ];
-
-    assert_eq!(
-        stale_tracked_tab_handles(
-            [
-                tab_handle(44),
-                tab_handle(22),
-                tab_handle(11),
-                tab_handle(33),
-                tab_handle(22),
-            ],
-            &live_tabs,
-        ),
-        vec![tab_handle(22), tab_handle(33)]
-    );
+fn tabclosed_payload_uses_file_name_as_closed_tab_number() {
+    assert_eq!(parse_closed_tab_number(Some("42")), Some(42));
+    assert_eq!(parse_closed_tab_number(Some("0")), None);
+    assert_eq!(parse_closed_tab_number(Some("not-a-tab")), None);
+    assert_eq!(parse_closed_tab_number(None), None);
 }
 
 #[test]

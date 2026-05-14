@@ -62,7 +62,6 @@ pub(crate) use scheduler::FakeSchedulerPort;
 pub(crate) use scheduler::SchedulerCall;
 pub(crate) use scheduler::SchedulerPort;
 pub(crate) use tabpage::HostTabSnapshot;
-pub(crate) use tabpage::TabPagePort;
 #[cfg(test)]
 pub(crate) use window_surface::FakeWindowSurfacePort;
 #[cfg(test)]

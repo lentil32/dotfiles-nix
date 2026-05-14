@@ -33,8 +33,10 @@ use crate::core::types::Generation;
 use crate::events::policy::BufferPerfTelemetryCache;
 use crate::events::probe_cache::ProbeCacheState;
 use crate::host::BufferHandle;
+use crate::host::HostTabSnapshot;
 use crate::host::NamespaceId;
 use crate::host::NeovimHost;
+use crate::host::TabHandle;
 use crate::host::api;
 use nvim_oxi::Object;
 use nvim_oxi::Result;
@@ -316,6 +318,16 @@ pub(crate) fn set_namespace_id(namespace_id: NamespaceId) -> RuntimeAccessResult
     mutate_shell_state(|state| {
         state.set_namespace_id(namespace_id);
     })
+}
+
+pub(crate) fn note_tab_snapshot(snapshot: HostTabSnapshot) -> RuntimeAccessResult<()> {
+    mutate_shell_state(|state| {
+        state.note_tab_snapshot(snapshot);
+    })
+}
+
+pub(crate) fn close_tab_number(closed_tab_number: u32) -> RuntimeAccessResult<Option<TabHandle>> {
+    mutate_shell_state(|state| state.close_tab_number(closed_tab_number))
 }
 
 pub(crate) fn host_bridge_state() -> RuntimeAccessResult<HostBridgeState> {

@@ -51,6 +51,7 @@ struct RegisteredAutocmdPayload {
     event: String,
     buffer_handle: Option<BufferHandle>,
     match_name: Option<String>,
+    file_name: Option<String>,
 }
 
 fn jump_to_current_cursor() -> Result<()> {
@@ -125,6 +126,11 @@ fn parse_optional_match_name(raw: Option<Object>) -> Result<Option<String>> {
         .and_then(|match_name| (!match_name.is_empty()).then_some(match_name)))
 }
 
+fn parse_optional_file_name(raw: Option<Object>) -> Result<Option<String>> {
+    Ok(parse_optional_with(raw, "file", string_from_object)?
+        .and_then(|file_name| (!file_name.is_empty()).then_some(file_name)))
+}
+
 fn parse_registered_autocmd_payload(payload: &Dictionary) -> Result<RegisteredAutocmdPayload> {
     let event = require_with_typed(
         raw_payload_field(payload, "event"),
@@ -140,12 +146,13 @@ fn parse_registered_autocmd_payload(payload: &Dictionary) -> Result<RegisteredAu
         event,
         buffer_handle: parse_optional_buffer_handle(raw_payload_field(payload, "buffer"))?,
         match_name: parse_optional_match_name(raw_payload_field(payload, "match"))?,
+        file_name: parse_optional_file_name(raw_payload_field(payload, "file"))?,
     })
 }
 
 fn autocmd_dispatch_command(event: &str) -> String {
     format!(
-        "call {DISPATCH_AUTOCMD_FUNCTION_NAME}('{event}', str2nr(expand('<abuf>')), expand('<amatch>'))",
+        "call {DISPATCH_AUTOCMD_FUNCTION_NAME}('{event}', str2nr(expand('<abuf>')), expand('<amatch>'), expand('<afile>'))",
     )
 }
 
@@ -155,6 +162,7 @@ pub(crate) fn on_autocmd_payload_event(payload: &Dictionary) -> Result<()> {
         &payload.event,
         payload.buffer_handle,
         payload.match_name.as_deref(),
+        payload.file_name.as_deref(),
     )
 }
 
@@ -281,7 +289,7 @@ mod tests {
         assert_eq!(
             autocmd_dispatch_command("OptionSet"),
             format!(
-                "call {DISPATCH_AUTOCMD_FUNCTION_NAME}('OptionSet', str2nr(expand('<abuf>')), expand('<amatch>'))",
+                "call {DISPATCH_AUTOCMD_FUNCTION_NAME}('OptionSet', str2nr(expand('<abuf>')), expand('<amatch>'), expand('<afile>'))",
             )
         );
     }
@@ -376,6 +384,7 @@ mod tests {
                 event: "OptionSet".to_string(),
                 buffer_handle: None,
                 match_name: None,
+                file_name: None,
             }
         );
     }

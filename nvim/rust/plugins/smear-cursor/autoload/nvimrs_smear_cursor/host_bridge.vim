@@ -4,11 +4,11 @@ let s:smear_module_expr = "(package.loaded['nvimrs_smear_cursor'] or require('nv
 let s:probe_module_expr = "(package.loaded['nvimrs_smear_cursor.probes'] or require('nvimrs_smear_cursor.probes'))"
 
 function! nvimrs_smear_cursor#host_bridge#revision() abort
-  return 15
+  return 16
 endfunction
 
-function! nvimrs_smear_cursor#host_bridge#dispatch_autocmd(event, buffer, match) abort
-  call luaeval(s:smear_module_expr . ".on_autocmd_payload(_A)", {'event': a:event, 'buffer': a:buffer, 'match': a:match})
+function! nvimrs_smear_cursor#host_bridge#dispatch_autocmd(event, buffer, match, file) abort
+  call luaeval(s:smear_module_expr . ".on_autocmd_payload(_A)", {'event': a:event, 'buffer': a:buffer, 'match': a:match, 'file': a:file})
   return 0
 endfunction
 

@@ -15,6 +15,7 @@ use crate::config::normalize_color_levels;
 use crate::core::realization::RealizationProjection;
 use crate::core::realization::RealizationSpan;
 use crate::events::editor_viewport_for_bounds;
+use crate::events::note_tab_snapshot;
 use crate::host::DrawResourcePort;
 use crate::host::NamespaceId;
 use crate::host::NeovimHost;
@@ -56,7 +57,11 @@ pub(crate) fn editor_bounds() -> Result<ViewportBounds> {
 }
 
 pub(crate) fn current_tab_handle() -> TabHandle {
-    NeovimHost.current_tab_handle()
+    let snapshot = NeovimHost.current_tab_snapshot();
+    if let Err(err) = note_tab_snapshot(snapshot) {
+        log_draw_error("record current tab snapshot", &err);
+    }
+    snapshot.tab_handle
 }
 
 pub(crate) fn clear_namespace_all_buffers(namespace_id: NamespaceId) -> usize {

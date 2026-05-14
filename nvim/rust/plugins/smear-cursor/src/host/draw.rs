@@ -1,4 +1,5 @@
 use super::BufferHandle;
+use super::HostTabSnapshot;
 use super::NamespaceId;
 use super::NeovimHost;
 use super::TabHandle;
@@ -65,7 +66,7 @@ pub(crate) trait DrawResourcePort {
     fn valid_window_i32(&self, handle: i32) -> Option<api::Window>;
     fn window_from_handle_i32_unchecked(&self, handle: i32) -> api::Window;
     fn buffer_from_handle_unchecked(&self, handle: BufferHandle) -> Option<api::Buffer>;
-    fn current_tab_handle(&self) -> TabHandle;
+    fn current_tab_snapshot(&self) -> HostTabSnapshot;
     fn list_buffers(&self) -> Vec<api::Buffer>;
     fn list_windows(&self) -> Vec<api::Window>;
     fn window_buffer(&self, window: &api::Window) -> Result<api::Buffer>;
@@ -218,8 +219,12 @@ impl DrawResourcePort for NeovimHost {
         handle.as_i32().map(api::Buffer::from)
     }
 
-    fn current_tab_handle(&self) -> TabHandle {
-        TabHandle::from_tabpage(&api::get_current_tabpage())
+    fn current_tab_snapshot(&self) -> HostTabSnapshot {
+        let tabpage = api::get_current_tabpage();
+        HostTabSnapshot {
+            tab_handle: TabHandle::from_tabpage(&tabpage),
+            tab_number: tabpage.get_number().ok(),
+        }
     }
 
     fn list_buffers(&self) -> Vec<api::Buffer> {
@@ -298,7 +303,7 @@ pub(crate) enum DrawResourceCall {
     CloseWindowForce {
         window_id: i32,
     },
-    CurrentTabHandle,
+    CurrentTabSnapshot,
     ListBuffers,
     ListWindows,
     WindowBuffer {
@@ -317,7 +322,7 @@ pub(crate) enum DrawResourceCall {
 pub(crate) struct FakeDrawResourcePort {
     calls: std::cell::RefCell<Vec<DrawResourceCall>>,
     eventignore_results: std::cell::RefCell<std::collections::VecDeque<Result<String>>>,
-    current_tab_handle: std::cell::Cell<TabHandle>,
+    current_tab_snapshot: std::cell::Cell<HostTabSnapshot>,
 }
 
 #[cfg(test)]
@@ -326,9 +331,10 @@ impl Default for FakeDrawResourcePort {
         Self {
             calls: std::cell::RefCell::new(Vec::new()),
             eventignore_results: std::cell::RefCell::new(std::collections::VecDeque::new()),
-            current_tab_handle: std::cell::Cell::new(TabHandle::from_raw_for_test(
-                /*value*/ 1,
-            )),
+            current_tab_snapshot: std::cell::Cell::new(HostTabSnapshot {
+                tab_handle: TabHandle::from_raw_for_test(/*value*/ 1),
+                tab_number: Some(1),
+            }),
         }
     }
 }
@@ -507,9 +513,9 @@ impl DrawResourcePort for FakeDrawResourcePort {
         handle.as_i32().map(api::Buffer::from)
     }
 
-    fn current_tab_handle(&self) -> TabHandle {
-        self.record(DrawResourceCall::CurrentTabHandle);
-        self.current_tab_handle.get()
+    fn current_tab_snapshot(&self) -> HostTabSnapshot {
+        self.record(DrawResourceCall::CurrentTabSnapshot);
+        self.current_tab_snapshot.get()
     }
 
     fn list_buffers(&self) -> Vec<api::Buffer> {

@@ -1,3 +1,4 @@
+use crate::events::ingress::AutocmdHostPhase;
 use crate::events::ingress::AutocmdIngress;
 use crate::events::ingress::Ingress;
 use crate::events::ingress::parse_autocmd_ingress;
@@ -9,7 +10,9 @@ use crate::host::BufferHandle;
 use nvim_oxi::Result;
 
 mod cursor_autocmd;
+mod deferred_teardown;
 mod non_cursor_autocmd;
+mod teardown_autocmd;
 #[cfg(test)]
 mod tests;
 
@@ -28,15 +31,8 @@ use self::cursor_autocmd::should_coalesce_window_follow_up_autocmd;
 #[cfg(test)]
 use self::cursor_autocmd::should_drop_unchanged_cursor_autocmd;
 #[cfg(test)]
-use self::non_cursor_autocmd::LiveTabSnapshot;
-#[cfg(test)]
 use self::non_cursor_autocmd::advance_buffer_text_revision;
-#[cfg(test)]
-use self::non_cursor_autocmd::invalidate_buffer_local_caches;
-#[cfg(test)]
 use self::non_cursor_autocmd::invalidate_buffer_metadata;
-#[cfg(test)]
-use self::non_cursor_autocmd::parse_closed_window_id;
 #[cfg(test)]
 use self::non_cursor_autocmd::should_invalidate_buffer_metadata_for_option;
 #[cfg(test)]
@@ -44,7 +40,15 @@ use self::non_cursor_autocmd::should_invalidate_conceal_probe_cache_for_option;
 #[cfg(test)]
 use self::non_cursor_autocmd::should_refresh_editor_viewport_for_option;
 #[cfg(test)]
-use self::non_cursor_autocmd::stale_tracked_tab_handles;
+use self::teardown_autocmd::DeferredTeardownEffect;
+#[cfg(test)]
+use self::teardown_autocmd::invalidate_buffer_local_caches;
+#[cfg(test)]
+use self::teardown_autocmd::on_teardown_autocmd_ingress;
+#[cfg(test)]
+use self::teardown_autocmd::parse_closed_tab_number;
+#[cfg(test)]
+use self::teardown_autocmd::parse_closed_window_id;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum IngressDispatchOutcome {
     Applied,
@@ -56,22 +60,34 @@ enum IngressDispatchOutcome {
 struct AutocmdDispatchContext<'a> {
     buffer_handle: Option<BufferHandle>,
     match_name: Option<&'a str>,
+    file_name: Option<&'a str>,
 }
 
 fn on_autocmd_ingress(
     ingress: AutocmdIngress,
     context: AutocmdDispatchContext<'_>,
 ) -> Result<IngressDispatchOutcome> {
+    if matches!(ingress.host_phase(), AutocmdHostPhase::ShellOnlyTeardown) {
+        let Some(teardown_ingress) = ingress.teardown_ingress() else {
+            return Err(crate::lua::invalid_key("event", "teardown autocmd ingress"));
+        };
+        let dispatch = teardown_autocmd::on_teardown_autocmd_ingress(teardown_ingress, context)?;
+        if let Some(effect) = dispatch.deferred_effect() {
+            deferred_teardown::schedule_deferred_teardown_effect(effect);
+        }
+        return Ok(IngressDispatchOutcome::Dropped);
+    }
+
     match ingress {
         AutocmdIngress::ColorScheme => non_cursor_autocmd::on_colorscheme_ingress(),
-        AutocmdIngress::BufWipeout
-        | AutocmdIngress::OptionSet
-        | AutocmdIngress::TabClosed
+        AutocmdIngress::OptionSet
         | AutocmdIngress::TextChanged
         | AutocmdIngress::TextChangedInsert
-        | AutocmdIngress::VimResized
-        | AutocmdIngress::WinClosed => {
+        | AutocmdIngress::VimResized => {
             non_cursor_autocmd::on_non_cursor_autocmd_ingress(ingress, context)
+        }
+        AutocmdIngress::BufWipeout | AutocmdIngress::TabClosed | AutocmdIngress::WinClosed => {
+            unreachable!("shell-only teardown autocmd returned to host-allowed routing")
         }
         AutocmdIngress::CmdlineChanged
         | AutocmdIngress::CursorMoved
@@ -118,6 +134,7 @@ pub(in crate::events) fn on_autocmd_payload_event(
     event: &str,
     buffer_handle: Option<BufferHandle>,
     match_name: Option<&str>,
+    file_name: Option<&str>,
 ) -> Result<()> {
     let Some(ingress) = parse_autocmd_ingress(event) else {
         return Err(crate::lua::invalid_key("event", "registered autocmd event"));
@@ -127,6 +144,7 @@ pub(in crate::events) fn on_autocmd_payload_event(
         AutocmdDispatchContext {
             buffer_handle,
             match_name,
+            file_name,
         },
     )
 }

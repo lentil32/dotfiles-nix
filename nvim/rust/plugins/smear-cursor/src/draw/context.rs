@@ -10,7 +10,6 @@ use crate::events::restore_draw_render_tabs;
 use crate::events::runtime_render_tab_handles_for_test;
 use crate::events::take_draw_prepaint_by_tab;
 use crate::events::take_draw_render_tabs;
-use crate::events::tracked_runtime_draw_tab_handles;
 use crate::host::HostLoggingPort;
 use crate::host::NeovimHost;
 use crate::host::TabHandle;
@@ -73,19 +72,6 @@ impl DrawResourcesLane {
         prepaint_by_tab: HashMap<TabHandle, PrepaintOverlay>,
     ) {
         self.context.borrow_mut().prepaint_by_tab = prepaint_by_tab;
-    }
-
-    pub(crate) fn tracked_tab_handles(&self) -> Vec<TabHandle> {
-        let context = self.context.borrow();
-        let mut handles = context
-            .render_tabs
-            .keys()
-            .chain(context.prepaint_by_tab.keys())
-            .copied()
-            .collect::<Vec<_>>();
-        handles.sort_unstable();
-        handles.dedup();
-        handles
     }
 
     #[cfg(test)]
@@ -219,10 +205,6 @@ pub(crate) fn render_pool_diagnostics() -> RenderPoolDiagnostics {
         }
         diagnostics
     })
-}
-
-pub(crate) fn tracked_draw_tab_handles() -> Vec<TabHandle> {
-    tracked_runtime_draw_tab_handles()
 }
 
 #[cfg(test)]

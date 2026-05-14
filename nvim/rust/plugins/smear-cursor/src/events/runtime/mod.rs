@@ -36,7 +36,6 @@ pub(super) use cell::set_runtime_log_level;
 pub(super) use cell::should_runtime_log;
 pub(crate) use cell::take_draw_prepaint_by_tab;
 pub(crate) use cell::take_draw_render_tabs;
-pub(crate) use cell::tracked_runtime_draw_tab_handles;
 pub(super) use cell::with_dispatch_queue;
 pub(super) use cell::with_event_loop_state;
 #[cfg(test)]
@@ -80,6 +79,7 @@ pub(super) use shell::cached_conceal_screen_cell;
 pub(super) use shell::cached_cursor_color_sample_for_probe;
 pub(super) use shell::cached_cursor_text_context;
 pub(super) use shell::clear_real_cursor_visibility;
+pub(super) use shell::close_tab_number;
 pub(super) use shell::cursor_color_cache_generation;
 pub(super) use shell::cursor_color_colorscheme_generation;
 pub(crate) use shell::editor_viewport_for_bounds;
@@ -97,6 +97,7 @@ pub(super) use shell::note_cursor_color_colorscheme_change;
 pub(super) use shell::note_cursor_color_observation_boundary;
 pub(super) use shell::note_host_bridge_verified;
 pub(super) use shell::note_real_cursor_visibility;
+pub(crate) use shell::note_tab_snapshot;
 #[cfg(test)]
 pub(in crate::events) use shell::read_shell_state;
 pub(super) use shell::real_cursor_visibility_matches;

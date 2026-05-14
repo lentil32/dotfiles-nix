@@ -1,5 +1,6 @@
 mod cursor_autocmd;
 mod non_cursor_autocmd;
+mod teardown_autocmd;
 
 use super::CursorAutocmdFastPathSnapshot;
 use crate::config::BufferPerfMode;

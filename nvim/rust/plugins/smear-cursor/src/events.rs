@@ -21,7 +21,9 @@ mod timers;
 mod trace;
 
 use crate::host::BufferHandle;
+use crate::host::HostTabSnapshot;
 use crate::host::NamespaceId;
+use crate::host::TabHandle;
 use buffer_text_revision::BufferTextRevisionCache;
 use cursor::BufferMetadataCache;
 use nvim_oxi::Object;
@@ -30,6 +32,7 @@ use policy::BufferPerfTelemetryCache;
 use probe_cache::ConcealRegion;
 use probe_cache::ProbeCacheState;
 use runtime::EditorViewportCache;
+use std::collections::HashMap;
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +49,7 @@ pub(crate) use runtime::FlushRedrawCapability;
 pub(crate) use runtime::clear_runtime_draw_context_for_test;
 pub(crate) use runtime::editor_viewport_for_bounds;
 pub(crate) use runtime::flush_redraw_capability;
+pub(crate) use runtime::note_tab_snapshot;
 pub(crate) use runtime::record_compiled_field_cache_hit;
 pub(crate) use runtime::record_compiled_field_cache_miss;
 pub(crate) use runtime::record_effect_failure;
@@ -71,7 +75,6 @@ pub(crate) use runtime::runtime_render_tab_handles_for_test;
 pub(crate) use runtime::set_flush_redraw_capability;
 pub(crate) use runtime::take_draw_prepaint_by_tab;
 pub(crate) use runtime::take_draw_render_tabs;
-pub(crate) use runtime::tracked_runtime_draw_tab_handles;
 pub(crate) use runtime::with_runtime_palette_lane;
 pub(crate) use timers::on_core_timer_fired_event;
 pub(crate) use timers::schedule_guarded;
@@ -83,10 +86,87 @@ const AUTOCMD_GROUP_NAME: &str = "RsSmearCursor";
 struct HostBridgeRevision(u32);
 
 impl HostBridgeRevision {
-    const CURRENT: Self = Self(15);
+    const CURRENT: Self = Self(16);
 
     const fn get(self) -> u32 {
         self.0
+    }
+}
+
+#[derive(Debug, Default)]
+struct TabPageRegistry {
+    by_number: HashMap<u32, TabHandle>,
+}
+
+impl TabPageRegistry {
+    fn record_snapshot(&mut self, snapshot: HostTabSnapshot) {
+        let Some(tab_number) = snapshot.tab_number else {
+            return;
+        };
+        self.by_number.insert(tab_number, snapshot.tab_handle);
+    }
+
+    fn close_number(&mut self, closed_tab_number: u32) -> Option<TabHandle> {
+        let closed_tab_handle = self.by_number.remove(&closed_tab_number);
+
+        self.by_number = self
+            .by_number
+            .drain()
+            .map(|(tab_number, tab_handle)| {
+                let next_tab_number = if tab_number > closed_tab_number {
+                    tab_number.saturating_sub(1)
+                } else {
+                    tab_number
+                };
+                (next_tab_number, tab_handle)
+            })
+            .collect();
+        closed_tab_handle
+    }
+}
+
+#[cfg(test)]
+mod tab_page_registry_tests {
+    use super::HostTabSnapshot;
+    use super::TabPageRegistry;
+    use crate::host::TabHandle;
+    use pretty_assertions::assert_eq;
+
+    fn snapshot(tab_number: u32, tab_handle: i32) -> HostTabSnapshot {
+        HostTabSnapshot {
+            tab_handle: TabHandle::from_raw_for_test(tab_handle),
+            tab_number: Some(tab_number),
+        }
+    }
+
+    #[test]
+    fn close_number_resolves_cached_tab_handle_and_renumbers_remaining_tabs() {
+        let mut registry = TabPageRegistry::default();
+        registry.record_snapshot(snapshot(1, 11));
+        registry.record_snapshot(snapshot(2, 22));
+        registry.record_snapshot(snapshot(3, 33));
+
+        assert_eq!(
+            registry.close_number(/*closed_tab_number*/ 2),
+            Some(TabHandle::from_raw_for_test(22))
+        );
+        assert_eq!(
+            registry.close_number(/*closed_tab_number*/ 2),
+            Some(TabHandle::from_raw_for_test(33))
+        );
+    }
+
+    #[test]
+    fn close_number_renumbers_observed_tabs_after_an_unobserved_tab_closes() {
+        let mut registry = TabPageRegistry::default();
+        registry.record_snapshot(snapshot(3, 33));
+
+        assert_eq!(registry.close_number(/*closed_tab_number*/ 4), None);
+        assert_eq!(registry.close_number(/*closed_tab_number*/ 1), None);
+        assert_eq!(
+            registry.close_number(/*closed_tab_number*/ 2),
+            Some(TabHandle::from_raw_for_test(33))
+        );
     }
 }
 
@@ -122,6 +202,7 @@ struct ShellState {
     conceal_regions_scratch: Vec<ConcealRegion>,
     buffer_text_revision_cache: BufferTextRevisionCache,
     buffer_perf_policy_cache: BufferEventPolicyCache,
+    tab_page_registry: TabPageRegistry,
     // telemetry: execution-cost and probe-pressure signals derived from shell work.
     buffer_perf_telemetry_cache: BufferPerfTelemetryCache,
 }
@@ -141,6 +222,14 @@ impl ShellState {
 
     fn note_host_bridge_verified(&mut self, revision: HostBridgeRevision) {
         self.host_bridge_state = HostBridgeState::Verified { revision };
+    }
+
+    fn note_tab_snapshot(&mut self, snapshot: HostTabSnapshot) {
+        self.tab_page_registry.record_snapshot(snapshot);
+    }
+
+    fn close_tab_number(&mut self, closed_tab_number: u32) -> Option<TabHandle> {
+        self.tab_page_registry.close_number(closed_tab_number)
     }
 
     fn note_cursor_color_colorscheme_change(&mut self) {

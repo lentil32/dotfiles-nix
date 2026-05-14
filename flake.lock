@@ -260,11 +260,11 @@
     "homebrew-steipete": {
       "flake": false,
       "locked": {
-        "lastModified": 1778657964,
-        "narHash": "sha256-+dv7NpE/7RSqRNlV3eTeMWjOmNbnDHdSZF0iKkrSA7M=",
+        "lastModified": 1778750339,
+        "narHash": "sha256-ZF63K/JuNKo8vWOIhXvsxbisUSVaUIeYqJLGI7uA9g4=",
         "owner": "steipete",
         "repo": "homebrew-tap",
-        "rev": "373e8757d7c27e8491576c010e9cbdb500d9b3f8",
+        "rev": "ccc12256eff15e1da74e6701db136e5c81036715",
         "type": "github"
       },
       "original": {

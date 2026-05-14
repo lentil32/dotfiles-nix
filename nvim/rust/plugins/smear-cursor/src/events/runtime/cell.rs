@@ -280,10 +280,6 @@ pub(crate) fn restore_draw_prepaint_by_tab(prepaint_by_tab: HashMap<TabHandle, P
     });
 }
 
-pub(crate) fn tracked_runtime_draw_tab_handles() -> Vec<TabHandle> {
-    RUNTIME_CELL.with(|runtime| runtime.draw_resources.tracked_tab_handles())
-}
-
 pub(crate) fn with_runtime_palette_lane<R>(accessor: impl FnOnce(&PaletteStateLane) -> R) -> R {
     RUNTIME_CELL.with(|runtime| accessor(&runtime.palette))
 }

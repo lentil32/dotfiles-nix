@@ -38,7 +38,6 @@ pub(crate) use constants::PREPAINT_BUFFER_TYPE;
 pub(crate) use context::DrawResourcesLane;
 pub(crate) use context::log_draw_error;
 pub(crate) use context::render_pool_diagnostics;
-pub(crate) use context::tracked_draw_tab_handles;
 pub(crate) use floating_windows::FloatingWindowPlacement;
 pub(crate) use floating_windows::FloatingWindowVisibility;
 pub(crate) use floating_windows::clear_namespace_and_hide_floating_window;

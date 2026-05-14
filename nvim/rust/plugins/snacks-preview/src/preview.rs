@@ -157,15 +157,19 @@ fn close_preview_or_delete_group(buf_handle: BufHandle, group: u32) {
     }
 }
 
-fn run_close_autocmd(label: &'static str, buf_handle: BufHandle, group: u32) -> bool {
+fn run_scheduled_close_autocmd(label: &'static str, buf_handle: BufHandle, group: u32) {
     guard::with_panic(
-        false,
+        (),
         || {
             close_preview_or_delete_group(buf_handle, group);
-            false
         },
         |info| report_panic(label, &info),
-    )
+    );
+}
+
+fn run_close_autocmd(label: &'static str, buf_handle: BufHandle, group: u32) -> bool {
+    schedule(move |()| run_scheduled_close_autocmd(label, buf_handle, group));
+    false
 }
 
 fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) -> Result<()> {

@@ -23,6 +23,19 @@ pub(super) enum AutocmdIngress {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum AutocmdHostPhase {
+    ImmediateHostAllowed,
+    ShellOnlyTeardown,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum TeardownAutocmdIngress {
+    BufWipeout,
+    TabClosed,
+    WinClosed,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct AutocmdIngressMapping {
     event_name: &'static str,
     ingress: AutocmdIngress,
@@ -109,6 +122,46 @@ pub(super) fn registered_autocmd_event_names() -> impl Iterator<Item = &'static 
 }
 
 impl AutocmdIngress {
+    pub(super) const fn host_phase(self) -> AutocmdHostPhase {
+        match self {
+            Self::BufWipeout | Self::TabClosed | Self::WinClosed => {
+                AutocmdHostPhase::ShellOnlyTeardown
+            }
+            Self::CmdlineChanged
+            | Self::CursorMoved
+            | Self::CursorMovedInsert
+            | Self::ModeChanged
+            | Self::OptionSet
+            | Self::TextChanged
+            | Self::TextChangedInsert
+            | Self::VimResized
+            | Self::WinEnter
+            | Self::WinScrolled
+            | Self::BufEnter
+            | Self::ColorScheme => AutocmdHostPhase::ImmediateHostAllowed,
+        }
+    }
+
+    pub(super) const fn teardown_ingress(self) -> Option<TeardownAutocmdIngress> {
+        match self {
+            Self::BufWipeout => Some(TeardownAutocmdIngress::BufWipeout),
+            Self::TabClosed => Some(TeardownAutocmdIngress::TabClosed),
+            Self::WinClosed => Some(TeardownAutocmdIngress::WinClosed),
+            Self::CmdlineChanged
+            | Self::CursorMoved
+            | Self::CursorMovedInsert
+            | Self::ModeChanged
+            | Self::OptionSet
+            | Self::TextChanged
+            | Self::TextChangedInsert
+            | Self::VimResized
+            | Self::WinEnter
+            | Self::WinScrolled
+            | Self::BufEnter
+            | Self::ColorScheme => None,
+        }
+    }
+
     pub(super) const fn requests_observation_base(self) -> bool {
         matches!(
             self,
@@ -129,7 +182,9 @@ impl AutocmdIngress {
 
 #[cfg(test)]
 mod tests {
+    use super::AutocmdHostPhase;
     use super::AutocmdIngress;
+    use super::TeardownAutocmdIngress;
     use super::parse_autocmd_ingress;
     use super::registered_autocmd_event_names;
     use pretty_assertions::assert_eq;
@@ -151,6 +206,63 @@ mod tests {
             parse_autocmd_ingress("WinClosed"),
             Some(AutocmdIngress::WinClosed)
         );
+    }
+
+    #[test]
+    fn close_autocmds_are_the_only_shell_only_teardown_ingresses() {
+        for ingress in [
+            AutocmdIngress::BufWipeout,
+            AutocmdIngress::CmdlineChanged,
+            AutocmdIngress::CursorMoved,
+            AutocmdIngress::CursorMovedInsert,
+            AutocmdIngress::ModeChanged,
+            AutocmdIngress::OptionSet,
+            AutocmdIngress::TabClosed,
+            AutocmdIngress::TextChanged,
+            AutocmdIngress::TextChangedInsert,
+            AutocmdIngress::VimResized,
+            AutocmdIngress::WinEnter,
+            AutocmdIngress::WinClosed,
+            AutocmdIngress::WinScrolled,
+            AutocmdIngress::BufEnter,
+            AutocmdIngress::ColorScheme,
+        ] {
+            let expected_phase = match ingress {
+                AutocmdIngress::BufWipeout
+                | AutocmdIngress::TabClosed
+                | AutocmdIngress::WinClosed => AutocmdHostPhase::ShellOnlyTeardown,
+                AutocmdIngress::CmdlineChanged
+                | AutocmdIngress::CursorMoved
+                | AutocmdIngress::CursorMovedInsert
+                | AutocmdIngress::ModeChanged
+                | AutocmdIngress::OptionSet
+                | AutocmdIngress::TextChanged
+                | AutocmdIngress::TextChangedInsert
+                | AutocmdIngress::VimResized
+                | AutocmdIngress::WinEnter
+                | AutocmdIngress::WinScrolled
+                | AutocmdIngress::BufEnter
+                | AutocmdIngress::ColorScheme => AutocmdHostPhase::ImmediateHostAllowed,
+            };
+            assert_eq!(ingress.host_phase(), expected_phase);
+        }
+    }
+
+    #[test]
+    fn teardown_ingress_projection_is_explicit() {
+        assert_eq!(
+            AutocmdIngress::BufWipeout.teardown_ingress(),
+            Some(TeardownAutocmdIngress::BufWipeout)
+        );
+        assert_eq!(
+            AutocmdIngress::TabClosed.teardown_ingress(),
+            Some(TeardownAutocmdIngress::TabClosed)
+        );
+        assert_eq!(
+            AutocmdIngress::WinClosed.teardown_ingress(),
+            Some(TeardownAutocmdIngress::WinClosed)
+        );
+        assert_eq!(AutocmdIngress::OptionSet.teardown_ingress(), None);
     }
 
     #[test]
