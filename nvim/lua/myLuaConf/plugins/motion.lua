@@ -77,18 +77,62 @@ return {
   {
     "nvim-surround",
     for_cat = "general",
-    event = "DeferredUIEnter",
-    after = function()
-      require("nvim-surround").setup({
-        keymaps = {
-          normal = "s",
-          normal_cur = "ss",
-          normal_line = "sS",
-          normal_cur_line = "sSS",
-          visual = "s",
-          visual_line = false,
-        },
-      })
+    beforeAll = function()
+      vim.g.nvim_surround_no_normal_mappings = true
+      vim.g.nvim_surround_no_visual_mappings = true
     end,
+    after = function()
+      require("nvim-surround").setup()
+    end,
+    keys = {
+      {
+        "s",
+        "<Plug>(nvim-surround-normal)",
+        mode = "n",
+        desc = "Add a surrounding pair around a motion",
+      },
+      {
+        "ss",
+        "<Plug>(nvim-surround-normal-cur)",
+        mode = "n",
+        desc = "Add a surrounding pair around the current line",
+      },
+      {
+        "sS",
+        "<Plug>(nvim-surround-normal-line)",
+        mode = "n",
+        desc = "Add a surrounding pair around a motion, on new lines",
+      },
+      {
+        "sSS",
+        "<Plug>(nvim-surround-normal-cur-line)",
+        mode = "n",
+        desc = "Add a surrounding pair around the current line, on new lines",
+      },
+      {
+        "s",
+        "<Plug>(nvim-surround-visual)",
+        mode = "x",
+        desc = "Add a surrounding pair around a visual selection",
+      },
+      {
+        "ds",
+        "<Plug>(nvim-surround-delete)",
+        mode = "n",
+        desc = "Delete a surrounding pair",
+      },
+      {
+        "cs",
+        "<Plug>(nvim-surround-change)",
+        mode = "n",
+        desc = "Change a surrounding pair",
+      },
+      {
+        "cS",
+        "<Plug>(nvim-surround-change-line)",
+        mode = "n",
+        desc = "Change a surrounding pair, putting replacements on new lines",
+      },
+    },
   },
 }

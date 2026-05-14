@@ -39,8 +39,11 @@ in
       }@packageDef:
       let
         lib = pkgs.lib;
-        vim = pkgs.vimPlugins;
+        vim = pkgs-unstable.vimPlugins;
         p = pkgs;
+        sidekick-nvim = vim.sidekick-nvim.overrideAttrs (_old: {
+          runtimeDeps = [ ];
+        });
         rustWorkspace = ../nvim/rust;
         rustLockHashes = import ../nvim/rust/lock-hashes.nix;
         rustCargoLock = {
@@ -171,7 +174,7 @@ in
               vim.hop-nvim
               vim.nvim-autopairs
               vim.nvim-surround
-              vim.sidekick-nvim
+              sidekick-nvim
               vim.overseer-nvim
               (mkPlugin "witch-line" (
                 pkgs.fetchFromGitHub {
@@ -202,6 +205,7 @@ in
           git = {
             optionalPlugins = [
               vim.neogit
+              vim.baleia-nvim
               vim.diffview-nvim
               vim.gitsigns-nvim
               vim.git-blame-nvim
@@ -251,9 +255,7 @@ in
           };
 
           typescript = {
-            optionalPlugins = [
-              vim.nvim-vtsls
-            ];
+            optionalPlugins = [ ];
             runtimeDeps = [
               # Oxfmt is only packaged in nixpkgs-unstable on this pinned flake.
               pkgs-unstable.oxfmt

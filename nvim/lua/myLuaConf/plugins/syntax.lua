@@ -2,7 +2,7 @@ return {
   {
     "nvim-treesitter",
     for_cat = "treesitter",
-    event = "BufReadPost",
+    lazy = false,
     after = function()
       local function is_mise_filename(filename)
         return filename:match(".*mise.*%.toml$") ~= nil
@@ -20,15 +20,36 @@ return {
         all = false,
       })
 
-      require("nvim-treesitter.configs").setup({
-        modules = {},
-        ensure_installed = {},
-        sync_install = false,
-        auto_install = false,
-        ignore_install = {},
-        highlight = { enable = true },
-        indent = { enable = true },
+      require("nvim-treesitter").setup()
+
+      local function attach_treesitter(bufnr, language)
+        if not vim.treesitter.language.add(language) then
+          return
+        end
+        vim.treesitter.start(bufnr, language)
+        vim.bo[bufnr].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+        vim.wo.foldexpr = "v:lua.vim.treesitter.foldexpr()"
+        vim.wo.foldmethod = "expr"
+        vim.o.foldlevel = 99
+      end
+
+      vim.api.nvim_create_autocmd("FileType", {
+        group = vim.api.nvim_create_augroup("myLuaConf_treesitter", { clear = true }),
+        callback = function(event)
+          local language = vim.treesitter.language.get_lang(event.match)
+          if not language then
+            return
+          end
+          attach_treesitter(event.buf, language)
+        end,
       })
+
+      if vim.bo.filetype ~= "" then
+        local language = vim.treesitter.language.get_lang(vim.bo.filetype)
+        if language then
+          attach_treesitter(vim.api.nvim_get_current_buf(), language)
+        end
+      end
     end,
   },
 }

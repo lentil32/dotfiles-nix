@@ -5,9 +5,12 @@ return {
     cmd = "Neogit",
     load = function(name)
       vim.cmd.packadd(name)
+      vim.cmd.packadd("baleia.nvim")
       vim.cmd.packadd("diffview.nvim")
     end,
     after = function()
+      vim.g.baleia = require("baleia").setup({})
+
       require("neogit").setup({
         kind = "auto",
         preview_buffer = {
