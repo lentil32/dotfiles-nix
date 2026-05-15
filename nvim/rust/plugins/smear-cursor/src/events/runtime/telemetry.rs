@@ -1,7 +1,7 @@
 use super::super::decayed_ewma::NonNegativeFiniteMs;
 use super::super::decayed_ewma::TelemetryInstantMs;
 use super::super::event_loop;
-use super::super::ingress::AutocmdIngress;
+use super::super::ingress::CursorAutocmdIngress;
 use super::shell::try_record_telemetry;
 use super::shell::with_buffer_perf_telemetry_cache;
 use super::timers::now_ms;
@@ -118,20 +118,20 @@ pub(crate) fn record_ingress_applied() {
 }
 
 #[cfg(feature = "perf-counters")]
-pub(crate) fn record_cursor_autocmd_fast_path_dropped(ingress: AutocmdIngress) {
+pub(crate) fn record_cursor_autocmd_fast_path_dropped(ingress: CursorAutocmdIngress) {
     event_loop::record_cursor_autocmd_fast_path_dropped(ingress);
 }
 
 #[cfg(not(feature = "perf-counters"))]
-pub(crate) fn record_cursor_autocmd_fast_path_dropped(_ingress: AutocmdIngress) {}
+pub(crate) fn record_cursor_autocmd_fast_path_dropped(_ingress: CursorAutocmdIngress) {}
 
 #[cfg(feature = "perf-counters")]
-pub(crate) fn record_cursor_autocmd_fast_path_continued(ingress: AutocmdIngress) {
+pub(crate) fn record_cursor_autocmd_fast_path_continued(ingress: CursorAutocmdIngress) {
     event_loop::record_cursor_autocmd_fast_path_continued(ingress);
 }
 
 #[cfg(not(feature = "perf-counters"))]
-pub(crate) fn record_cursor_autocmd_fast_path_continued(_ingress: AutocmdIngress) {}
+pub(crate) fn record_cursor_autocmd_fast_path_continued(_ingress: CursorAutocmdIngress) {}
 
 pub(crate) fn record_observation_request_executed() {
     event_loop::record_observation_request_executed();

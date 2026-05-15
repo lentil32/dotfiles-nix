@@ -1,5 +1,5 @@
-use super::super::ingress::AutocmdIngress;
+use super::super::ingress::CursorAutocmdIngress;
 
-pub(crate) fn should_request_observation_for_autocmd(ingress: AutocmdIngress) -> bool {
+pub(crate) fn should_request_observation_for_autocmd(ingress: CursorAutocmdIngress) -> bool {
     ingress.requests_observation_base()
 }

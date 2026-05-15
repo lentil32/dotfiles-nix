@@ -1,4 +1,4 @@
-use crate::events::ingress::AutocmdHostPhase;
+use crate::events::ingress::AutocmdDispatchRoute;
 use crate::events::ingress::AutocmdIngress;
 use crate::events::ingress::Ingress;
 use crate::events::ingress::parse_autocmd_ingress;
@@ -32,6 +32,7 @@ use self::cursor_autocmd::should_coalesce_window_follow_up_autocmd;
 use self::cursor_autocmd::should_drop_unchanged_cursor_autocmd;
 #[cfg(test)]
 use self::non_cursor_autocmd::advance_buffer_text_revision;
+#[cfg(test)]
 use self::non_cursor_autocmd::invalidate_buffer_metadata;
 #[cfg(test)]
 use self::non_cursor_autocmd::should_invalidate_buffer_metadata_for_option;
@@ -67,35 +68,22 @@ fn on_autocmd_ingress(
     ingress: AutocmdIngress,
     context: AutocmdDispatchContext<'_>,
 ) -> Result<IngressDispatchOutcome> {
-    if matches!(ingress.host_phase(), AutocmdHostPhase::ShellOnlyTeardown) {
-        let Some(teardown_ingress) = ingress.teardown_ingress() else {
-            return Err(crate::lua::invalid_key("event", "teardown autocmd ingress"));
-        };
-        let dispatch = teardown_autocmd::on_teardown_autocmd_ingress(teardown_ingress, context)?;
-        if let Some(effect) = dispatch.deferred_effect() {
-            deferred_teardown::schedule_deferred_teardown_effect(effect);
+    match ingress.dispatch_route() {
+        AutocmdDispatchRoute::ShellOnlyTeardown(teardown_ingress) => {
+            let dispatch =
+                teardown_autocmd::on_teardown_autocmd_ingress(teardown_ingress, context)?;
+            if let Some(effect) = dispatch.deferred_effect() {
+                deferred_teardown::schedule_deferred_teardown_effect(effect);
+            }
+            Ok(IngressDispatchOutcome::Dropped)
         }
-        return Ok(IngressDispatchOutcome::Dropped);
-    }
-
-    match ingress {
-        AutocmdIngress::ColorScheme => non_cursor_autocmd::on_colorscheme_ingress(),
-        AutocmdIngress::OptionSet
-        | AutocmdIngress::TextChanged
-        | AutocmdIngress::TextChangedInsert
-        | AutocmdIngress::VimResized => {
-            non_cursor_autocmd::on_non_cursor_autocmd_ingress(ingress, context)
+        AutocmdDispatchRoute::ColorScheme => non_cursor_autocmd::on_colorscheme_ingress(),
+        AutocmdDispatchRoute::NonCursor(non_cursor_ingress) => {
+            non_cursor_autocmd::on_non_cursor_autocmd_ingress(non_cursor_ingress, context)
         }
-        AutocmdIngress::BufWipeout | AutocmdIngress::TabClosed | AutocmdIngress::WinClosed => {
-            unreachable!("shell-only teardown autocmd returned to host-allowed routing")
+        AutocmdDispatchRoute::Cursor(cursor_ingress) => {
+            cursor_autocmd::on_cursor_event_core_for_autocmd(cursor_ingress)
         }
-        AutocmdIngress::CmdlineChanged
-        | AutocmdIngress::CursorMoved
-        | AutocmdIngress::CursorMovedInsert
-        | AutocmdIngress::ModeChanged
-        | AutocmdIngress::WinEnter
-        | AutocmdIngress::WinScrolled
-        | AutocmdIngress::BufEnter => cursor_autocmd::on_cursor_event_core_for_autocmd(ingress),
     }
 }
 

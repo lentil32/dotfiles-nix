@@ -1,7 +1,7 @@
 use super::AutocmdDispatchContext;
 use super::IngressDispatchOutcome;
 use crate::draw::clear_highlight_cache;
-use crate::events::ingress::AutocmdIngress;
+use crate::events::ingress::NonCursorAutocmdIngress;
 use crate::events::runtime;
 use crate::events::runtime::note_cursor_color_colorscheme_change;
 use crate::events::runtime::refresh_editor_viewport_cache;
@@ -15,34 +15,21 @@ pub(super) fn on_colorscheme_ingress() -> Result<IngressDispatchOutcome> {
 }
 
 pub(super) fn on_non_cursor_autocmd_ingress(
-    ingress: AutocmdIngress,
+    ingress: NonCursorAutocmdIngress,
     context: AutocmdDispatchContext<'_>,
 ) -> Result<IngressDispatchOutcome> {
     match ingress {
-        AutocmdIngress::OptionSet => {
+        NonCursorAutocmdIngress::OptionSet => {
             handle_option_set_autocmd(context)?;
             Ok(IngressDispatchOutcome::Dropped)
         }
-        AutocmdIngress::TextChanged | AutocmdIngress::TextChangedInsert => {
+        NonCursorAutocmdIngress::TextChanged | NonCursorAutocmdIngress::TextChangedInsert => {
             handle_text_mutation_autocmd(context)?;
             Ok(IngressDispatchOutcome::Dropped)
         }
-        AutocmdIngress::VimResized => {
+        NonCursorAutocmdIngress::VimResized => {
             refresh_editor_viewport_cache()?;
             Ok(IngressDispatchOutcome::Dropped)
-        }
-        AutocmdIngress::BufWipeout | AutocmdIngress::TabClosed | AutocmdIngress::WinClosed => {
-            unreachable!("teardown autocmd routed through non_cursor_autocmd")
-        }
-        AutocmdIngress::CmdlineChanged
-        | AutocmdIngress::CursorMoved
-        | AutocmdIngress::CursorMovedInsert
-        | AutocmdIngress::ModeChanged
-        | AutocmdIngress::WinEnter
-        | AutocmdIngress::WinScrolled
-        | AutocmdIngress::BufEnter
-        | AutocmdIngress::ColorScheme => {
-            unreachable!("cursor/color autocmd routed through non_cursor_autocmd")
         }
     }
 }

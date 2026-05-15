@@ -28,7 +28,7 @@ use crate::events::RealCursorVisibility;
 use crate::events::cursor::BufferMetadata;
 use crate::events::decayed_ewma::TelemetryInstantMs;
 #[cfg(feature = "perf-counters")]
-use crate::events::ingress::AutocmdIngress;
+use crate::events::ingress::CursorAutocmdIngress;
 use crate::events::policy::BufferEventPolicy;
 use crate::events::timer_protocol::FiredHostTimer;
 use crate::events::timer_protocol::HostCallbackId;
@@ -620,10 +620,10 @@ fn validation_counters_report_renders_particle_counter_summary() {
     crate::events::record_planner_candidate_cells_built_count(2);
     super::super::event_loop::with_event_loop_state_for_test(|state| {
         let metrics = state.runtime_metrics_mut();
-        metrics.record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinEnter);
-        metrics.record_cursor_autocmd_fast_path_continued(AutocmdIngress::WinEnter);
-        metrics.record_cursor_autocmd_fast_path_dropped(AutocmdIngress::WinScrolled);
-        metrics.record_cursor_autocmd_fast_path_continued(AutocmdIngress::BufEnter);
+        metrics.record_cursor_autocmd_fast_path_dropped(CursorAutocmdIngress::WinEnter);
+        metrics.record_cursor_autocmd_fast_path_continued(CursorAutocmdIngress::WinEnter);
+        metrics.record_cursor_autocmd_fast_path_dropped(CursorAutocmdIngress::WinScrolled);
+        metrics.record_cursor_autocmd_fast_path_continued(CursorAutocmdIngress::BufEnter);
     });
     crate::events::record_particle_overlay_refresh(4);
     super::super::event_loop::with_event_loop_state_for_test(|state| {

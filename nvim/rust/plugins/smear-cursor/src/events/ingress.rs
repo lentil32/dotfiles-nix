@@ -23,9 +23,30 @@ pub(super) enum AutocmdIngress {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum AutocmdHostPhase {
-    ImmediateHostAllowed,
-    ShellOnlyTeardown,
+pub(super) enum AutocmdDispatchRoute {
+    Cursor(CursorAutocmdIngress),
+    NonCursor(NonCursorAutocmdIngress),
+    ColorScheme,
+    ShellOnlyTeardown(TeardownAutocmdIngress),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum CursorAutocmdIngress {
+    CmdlineChanged,
+    CursorMoved,
+    CursorMovedInsert,
+    ModeChanged,
+    WinEnter,
+    WinScrolled,
+    BufEnter,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum NonCursorAutocmdIngress {
+    OptionSet,
+    TextChanged,
+    TextChangedInsert,
+    VimResized,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -122,46 +143,44 @@ pub(super) fn registered_autocmd_event_names() -> impl Iterator<Item = &'static 
 }
 
 impl AutocmdIngress {
-    pub(super) const fn host_phase(self) -> AutocmdHostPhase {
+    pub(super) const fn dispatch_route(self) -> AutocmdDispatchRoute {
         match self {
-            Self::BufWipeout | Self::TabClosed | Self::WinClosed => {
-                AutocmdHostPhase::ShellOnlyTeardown
+            Self::BufWipeout => {
+                AutocmdDispatchRoute::ShellOnlyTeardown(TeardownAutocmdIngress::BufWipeout)
             }
-            Self::CmdlineChanged
-            | Self::CursorMoved
-            | Self::CursorMovedInsert
-            | Self::ModeChanged
-            | Self::OptionSet
-            | Self::TextChanged
-            | Self::TextChangedInsert
-            | Self::VimResized
-            | Self::WinEnter
-            | Self::WinScrolled
-            | Self::BufEnter
-            | Self::ColorScheme => AutocmdHostPhase::ImmediateHostAllowed,
+            Self::CmdlineChanged => {
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::CmdlineChanged)
+            }
+            Self::CursorMoved => AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::CursorMoved),
+            Self::CursorMovedInsert => {
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::CursorMovedInsert)
+            }
+            Self::ModeChanged => AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::ModeChanged),
+            Self::OptionSet => AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::OptionSet),
+            Self::TabClosed => {
+                AutocmdDispatchRoute::ShellOnlyTeardown(TeardownAutocmdIngress::TabClosed)
+            }
+            Self::TextChanged => {
+                AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::TextChanged)
+            }
+            Self::TextChangedInsert => {
+                AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::TextChangedInsert)
+            }
+            Self::VimResized => {
+                AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::VimResized)
+            }
+            Self::WinEnter => AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::WinEnter),
+            Self::WinClosed => {
+                AutocmdDispatchRoute::ShellOnlyTeardown(TeardownAutocmdIngress::WinClosed)
+            }
+            Self::WinScrolled => AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::WinScrolled),
+            Self::BufEnter => AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::BufEnter),
+            Self::ColorScheme => AutocmdDispatchRoute::ColorScheme,
         }
     }
+}
 
-    pub(super) const fn teardown_ingress(self) -> Option<TeardownAutocmdIngress> {
-        match self {
-            Self::BufWipeout => Some(TeardownAutocmdIngress::BufWipeout),
-            Self::TabClosed => Some(TeardownAutocmdIngress::TabClosed),
-            Self::WinClosed => Some(TeardownAutocmdIngress::WinClosed),
-            Self::CmdlineChanged
-            | Self::CursorMoved
-            | Self::CursorMovedInsert
-            | Self::ModeChanged
-            | Self::OptionSet
-            | Self::TextChanged
-            | Self::TextChangedInsert
-            | Self::VimResized
-            | Self::WinEnter
-            | Self::WinScrolled
-            | Self::BufEnter
-            | Self::ColorScheme => None,
-        }
-    }
-
+impl CursorAutocmdIngress {
     pub(super) const fn requests_observation_base(self) -> bool {
         matches!(
             self,
@@ -182,8 +201,10 @@ impl AutocmdIngress {
 
 #[cfg(test)]
 mod tests {
-    use super::AutocmdHostPhase;
+    use super::AutocmdDispatchRoute;
     use super::AutocmdIngress;
+    use super::CursorAutocmdIngress;
+    use super::NonCursorAutocmdIngress;
     use super::TeardownAutocmdIngress;
     use super::parse_autocmd_ingress;
     use super::registered_autocmd_event_names;
@@ -209,73 +230,114 @@ mod tests {
     }
 
     #[test]
-    fn close_autocmds_are_the_only_shell_only_teardown_ingresses() {
-        for ingress in [
-            AutocmdIngress::BufWipeout,
-            AutocmdIngress::CmdlineChanged,
-            AutocmdIngress::CursorMoved,
-            AutocmdIngress::CursorMovedInsert,
-            AutocmdIngress::ModeChanged,
-            AutocmdIngress::OptionSet,
-            AutocmdIngress::TabClosed,
-            AutocmdIngress::TextChanged,
-            AutocmdIngress::TextChangedInsert,
-            AutocmdIngress::VimResized,
-            AutocmdIngress::WinEnter,
-            AutocmdIngress::WinClosed,
-            AutocmdIngress::WinScrolled,
-            AutocmdIngress::BufEnter,
-            AutocmdIngress::ColorScheme,
-        ] {
-            let expected_phase = match ingress {
-                AutocmdIngress::BufWipeout
-                | AutocmdIngress::TabClosed
-                | AutocmdIngress::WinClosed => AutocmdHostPhase::ShellOnlyTeardown,
-                AutocmdIngress::CmdlineChanged
-                | AutocmdIngress::CursorMoved
-                | AutocmdIngress::CursorMovedInsert
-                | AutocmdIngress::ModeChanged
-                | AutocmdIngress::OptionSet
-                | AutocmdIngress::TextChanged
-                | AutocmdIngress::TextChangedInsert
-                | AutocmdIngress::VimResized
-                | AutocmdIngress::WinEnter
-                | AutocmdIngress::WinScrolled
-                | AutocmdIngress::BufEnter
-                | AutocmdIngress::ColorScheme => AutocmdHostPhase::ImmediateHostAllowed,
-            };
-            assert_eq!(ingress.host_phase(), expected_phase);
-        }
-    }
+    fn dispatch_route_classifies_each_autocmd_once() {
+        let routes = [
+            (
+                AutocmdIngress::BufWipeout,
+                AutocmdDispatchRoute::ShellOnlyTeardown(TeardownAutocmdIngress::BufWipeout),
+            ),
+            (
+                AutocmdIngress::CmdlineChanged,
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::CmdlineChanged),
+            ),
+            (
+                AutocmdIngress::CursorMoved,
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::CursorMoved),
+            ),
+            (
+                AutocmdIngress::CursorMovedInsert,
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::CursorMovedInsert),
+            ),
+            (
+                AutocmdIngress::ModeChanged,
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::ModeChanged),
+            ),
+            (
+                AutocmdIngress::OptionSet,
+                AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::OptionSet),
+            ),
+            (
+                AutocmdIngress::TabClosed,
+                AutocmdDispatchRoute::ShellOnlyTeardown(TeardownAutocmdIngress::TabClosed),
+            ),
+            (
+                AutocmdIngress::TextChanged,
+                AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::TextChanged),
+            ),
+            (
+                AutocmdIngress::TextChangedInsert,
+                AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::TextChangedInsert),
+            ),
+            (
+                AutocmdIngress::VimResized,
+                AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::VimResized),
+            ),
+            (
+                AutocmdIngress::WinEnter,
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::WinEnter),
+            ),
+            (
+                AutocmdIngress::WinClosed,
+                AutocmdDispatchRoute::ShellOnlyTeardown(TeardownAutocmdIngress::WinClosed),
+            ),
+            (
+                AutocmdIngress::WinScrolled,
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::WinScrolled),
+            ),
+            (
+                AutocmdIngress::BufEnter,
+                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::BufEnter),
+            ),
+            (
+                AutocmdIngress::ColorScheme,
+                AutocmdDispatchRoute::ColorScheme,
+            ),
+        ];
 
-    #[test]
-    fn teardown_ingress_projection_is_explicit() {
         assert_eq!(
-            AutocmdIngress::BufWipeout.teardown_ingress(),
-            Some(TeardownAutocmdIngress::BufWipeout)
+            routes
+                .into_iter()
+                .map(|(ingress, _)| ingress)
+                .collect::<Vec<_>>(),
+            [
+                AutocmdIngress::BufWipeout,
+                AutocmdIngress::CmdlineChanged,
+                AutocmdIngress::CursorMoved,
+                AutocmdIngress::CursorMovedInsert,
+                AutocmdIngress::ModeChanged,
+                AutocmdIngress::OptionSet,
+                AutocmdIngress::TabClosed,
+                AutocmdIngress::TextChanged,
+                AutocmdIngress::TextChangedInsert,
+                AutocmdIngress::VimResized,
+                AutocmdIngress::WinEnter,
+                AutocmdIngress::WinClosed,
+                AutocmdIngress::WinScrolled,
+                AutocmdIngress::BufEnter,
+                AutocmdIngress::ColorScheme,
+            ]
         );
         assert_eq!(
-            AutocmdIngress::TabClosed.teardown_ingress(),
-            Some(TeardownAutocmdIngress::TabClosed)
+            routes
+                .into_iter()
+                .map(|(ingress, _)| ingress.dispatch_route())
+                .collect::<Vec<_>>(),
+            routes
+                .into_iter()
+                .map(|(_, route)| route)
+                .collect::<Vec<_>>()
         );
-        assert_eq!(
-            AutocmdIngress::WinClosed.teardown_ingress(),
-            Some(TeardownAutocmdIngress::WinClosed)
-        );
-        assert_eq!(AutocmdIngress::OptionSet.teardown_ingress(), None);
     }
 
     #[test]
     fn unchanged_fast_path_stays_limited_to_window_surface_events() {
         for (ingress, expected) in [
-            (AutocmdIngress::CursorMoved, false),
-            (AutocmdIngress::CursorMovedInsert, false),
-            (AutocmdIngress::ModeChanged, false),
-            (AutocmdIngress::TabClosed, false),
-            (AutocmdIngress::WinEnter, true),
-            (AutocmdIngress::WinClosed, false),
-            (AutocmdIngress::WinScrolled, true),
-            (AutocmdIngress::BufEnter, true),
+            (CursorAutocmdIngress::CursorMoved, false),
+            (CursorAutocmdIngress::CursorMovedInsert, false),
+            (CursorAutocmdIngress::ModeChanged, false),
+            (CursorAutocmdIngress::WinEnter, true),
+            (CursorAutocmdIngress::WinScrolled, true),
+            (CursorAutocmdIngress::BufEnter, true),
         ] {
             assert_eq!(
                 ingress.supports_unchanged_fast_path(),

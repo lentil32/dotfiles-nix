@@ -148,6 +148,7 @@ in
     masApps = {
       # DrawThings = 6444050820;
       Enpass = 732710998;
+      "Microsoft Excel" = 462058435;
       SparkMail = 6445813049;
       WireGuard = 1451685025;
       Xcode = 497799835;

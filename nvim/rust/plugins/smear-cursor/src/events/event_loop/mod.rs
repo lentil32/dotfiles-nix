@@ -4,7 +4,7 @@ use crate::core::state::RenderThermalState;
 use crate::core::types::Millis;
 use crate::core::types::TimerId;
 #[cfg(feature = "perf-counters")]
-use crate::events::ingress::AutocmdIngress;
+use crate::events::ingress::CursorAutocmdIngress;
 
 mod state;
 mod telemetry;
@@ -129,12 +129,12 @@ pub(super) fn record_ingress_applied() {
 }
 
 #[cfg(feature = "perf-counters")]
-pub(super) fn record_cursor_autocmd_fast_path_dropped(ingress: AutocmdIngress) {
+pub(super) fn record_cursor_autocmd_fast_path_dropped(ingress: CursorAutocmdIngress) {
     with_runtime_metrics(|metrics| metrics.record_cursor_autocmd_fast_path_dropped(ingress));
 }
 
 #[cfg(feature = "perf-counters")]
-pub(super) fn record_cursor_autocmd_fast_path_continued(ingress: AutocmdIngress) {
+pub(super) fn record_cursor_autocmd_fast_path_continued(ingress: CursorAutocmdIngress) {
     with_runtime_metrics(|metrics| metrics.record_cursor_autocmd_fast_path_continued(ingress));
 }
 

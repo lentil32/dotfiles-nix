@@ -1,5 +1,5 @@
 #[cfg(feature = "perf-counters")]
-use super::super::ingress::AutocmdIngress;
+use super::super::ingress::CursorAutocmdIngress;
 use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::state::RenderThermalState;
@@ -321,23 +321,26 @@ impl CursorAutocmdFastPathTelemetry {
 impl CursorAutocmdFastPathTelemetry {
     fn ingress_metrics_mut(
         &mut self,
-        ingress: AutocmdIngress,
+        ingress: CursorAutocmdIngress,
     ) -> Option<&mut DropContinueTelemetry> {
         match ingress {
-            AutocmdIngress::WinEnter => Some(&mut self.win_enter),
-            AutocmdIngress::WinScrolled => Some(&mut self.win_scrolled),
-            AutocmdIngress::BufEnter => Some(&mut self.buf_enter),
-            _ => None,
+            CursorAutocmdIngress::WinEnter => Some(&mut self.win_enter),
+            CursorAutocmdIngress::WinScrolled => Some(&mut self.win_scrolled),
+            CursorAutocmdIngress::BufEnter => Some(&mut self.buf_enter),
+            CursorAutocmdIngress::CmdlineChanged
+            | CursorAutocmdIngress::CursorMoved
+            | CursorAutocmdIngress::CursorMovedInsert
+            | CursorAutocmdIngress::ModeChanged => None,
         }
     }
 
-    pub(super) fn record_dropped(&mut self, ingress: AutocmdIngress) {
+    pub(super) fn record_dropped(&mut self, ingress: CursorAutocmdIngress) {
         if let Some(metrics) = self.ingress_metrics_mut(ingress) {
             metrics.record_dropped();
         }
     }
 
-    pub(super) fn record_continued(&mut self, ingress: AutocmdIngress) {
+    pub(super) fn record_continued(&mut self, ingress: CursorAutocmdIngress) {
         if let Some(metrics) = self.ingress_metrics_mut(ingress) {
             metrics.record_continued();
         }
@@ -680,14 +683,14 @@ impl RuntimeBehaviorMetrics {
 impl RuntimeBehaviorMetrics {
     pub(in crate::events) fn record_cursor_autocmd_fast_path_dropped(
         &mut self,
-        ingress: AutocmdIngress,
+        ingress: CursorAutocmdIngress,
     ) {
         self.cursor_autocmd_fast_path.record_dropped(ingress);
     }
 
     pub(in crate::events) fn record_cursor_autocmd_fast_path_continued(
         &mut self,
-        ingress: AutocmdIngress,
+        ingress: CursorAutocmdIngress,
     ) {
         self.cursor_autocmd_fast_path.record_continued(ingress);
     }

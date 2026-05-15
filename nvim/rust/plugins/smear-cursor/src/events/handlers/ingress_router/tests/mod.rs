@@ -8,7 +8,7 @@ use crate::core::effect::IngressCursorCommandLineLocation;
 use crate::core::effect::IngressCursorModeAdmission;
 use crate::core::effect::IngressCursorPresentationRequest;
 use crate::core::state::BufferPerfClass;
-use crate::events::ingress::AutocmdIngress;
+use crate::events::ingress::CursorAutocmdIngress;
 use crate::events::runtime::IngressReadSnapshot;
 use crate::events::runtime::IngressReadSnapshotTestInput;
 use crate::events::runtime::reset_transient_shell_caches;
@@ -26,15 +26,15 @@ pub(super) fn presentation() -> IngressCursorPresentationRequest {
     )
 }
 
-pub(super) fn autocmd_ingress_strategy() -> BoxedStrategy<AutocmdIngress> {
+pub(super) fn cursor_autocmd_ingress_strategy() -> BoxedStrategy<CursorAutocmdIngress> {
     prop_oneof![
-        Just(AutocmdIngress::CmdlineChanged),
-        Just(AutocmdIngress::CursorMoved),
-        Just(AutocmdIngress::CursorMovedInsert),
-        Just(AutocmdIngress::ModeChanged),
-        Just(AutocmdIngress::WinEnter),
-        Just(AutocmdIngress::WinScrolled),
-        Just(AutocmdIngress::BufEnter),
+        Just(CursorAutocmdIngress::CmdlineChanged),
+        Just(CursorAutocmdIngress::CursorMoved),
+        Just(CursorAutocmdIngress::CursorMovedInsert),
+        Just(CursorAutocmdIngress::ModeChanged),
+        Just(CursorAutocmdIngress::WinEnter),
+        Just(CursorAutocmdIngress::WinScrolled),
+        Just(CursorAutocmdIngress::BufEnter),
     ]
     .boxed()
 }

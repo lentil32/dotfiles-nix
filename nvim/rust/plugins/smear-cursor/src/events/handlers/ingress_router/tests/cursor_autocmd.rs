@@ -4,7 +4,7 @@ use super::super::cursor_autocmd_preflight;
 use super::super::demand_kind_for_autocmd;
 use super::super::should_coalesce_window_follow_up_autocmd;
 use super::super::should_drop_unchanged_cursor_autocmd;
-use super::autocmd_ingress_strategy;
+use super::cursor_autocmd_ingress_strategy;
 use super::fast_path_snapshot;
 use super::perf_class_strategy;
 use super::presentation;
@@ -14,7 +14,7 @@ use crate::core::event::ExternalDemandQueuedEvent;
 use crate::core::event::InitializeEvent;
 use crate::core::state::BufferPerfClass;
 use crate::core::types::Millis;
-use crate::events::ingress::AutocmdIngress;
+use crate::events::ingress::CursorAutocmdIngress;
 use crate::position::RenderPoint;
 use crate::state::TrackedCursor;
 use crate::test_support::proptest::pure_config;
@@ -26,7 +26,7 @@ proptest! {
 
     #[test]
     fn prop_cursor_autocmd_builder_matches_routing_and_presentation_rules(
-        ingress in autocmd_ingress_strategy(),
+        ingress in cursor_autocmd_ingress_strategy(),
         observed_at in any::<u64>(),
         needs_initialize in any::<bool>(),
         buffer_perf_class in prop_oneof![
@@ -95,7 +95,7 @@ proptest! {
 
     #[test]
     fn prop_window_follow_up_coalescing_depends_only_on_buf_enter_and_window_change(
-        ingress in autocmd_ingress_strategy(),
+        ingress in cursor_autocmd_ingress_strategy(),
         tracked_window_handle in 1_i64..=64_i64,
         current_window_handle in 1_i64..=64_i64,
         tracked_cursor_present in any::<bool>(),
@@ -107,7 +107,7 @@ proptest! {
             Some(BufferPerfClass::Full),
             tracked_cursor,
         );
-        let expected = ingress == AutocmdIngress::BufEnter
+        let expected = ingress == CursorAutocmdIngress::BufEnter
             && tracked_cursor_present
             && tracked_window_handle != current_window_handle;
 
@@ -138,7 +138,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
     for (label, ingress, snapshot, current_location, current_target, expected) in [
         (
             "cursor moved always stays live",
-            AutocmdIngress::CursorMoved,
+            CursorAutocmdIngress::CursorMoved,
             matching_snapshot.clone(),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -146,7 +146,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "insert repeat always stays live",
-            AutocmdIngress::CursorMovedInsert,
+            CursorAutocmdIngress::CursorMovedInsert,
             matching_snapshot.clone(),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -154,7 +154,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "window scrolled repeat",
-            AutocmdIngress::WinScrolled,
+            CursorAutocmdIngress::WinScrolled,
             matching_snapshot.clone(),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -162,7 +162,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "window enter repeat",
-            AutocmdIngress::WinEnter,
+            CursorAutocmdIngress::WinEnter,
             matching_snapshot.clone(),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -170,7 +170,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "buffer enter repeat",
-            AutocmdIngress::BufEnter,
+            CursorAutocmdIngress::BufEnter,
             matching_snapshot.clone(),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -178,7 +178,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "mode changes still require full path",
-            AutocmdIngress::ModeChanged,
+            CursorAutocmdIngress::ModeChanged,
             matching_snapshot.clone(),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -186,7 +186,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "surface changes stay live",
-            AutocmdIngress::CursorMoved,
+            CursorAutocmdIngress::CursorMoved,
             matching_snapshot.clone(),
             Some(TrackedCursor::fixture(10, 20, 4, 13)),
             Some(matching_target),
@@ -194,7 +194,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "target changes stay live",
-            AutocmdIngress::CursorMoved,
+            CursorAutocmdIngress::CursorMoved,
             matching_snapshot.clone(),
             Some(tracked_cursor.clone()),
             Some(RenderPoint {
@@ -205,7 +205,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "missing live position disables the fast path",
-            AutocmdIngress::CursorMoved,
+            CursorAutocmdIngress::CursorMoved,
             matching_snapshot,
             Some(tracked_cursor.clone()),
             None,
@@ -213,7 +213,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "uninitialized runtime disables the fast path",
-            AutocmdIngress::CursorMoved,
+            CursorAutocmdIngress::CursorMoved,
             fast_path_snapshot(true, true, Some(tracked_cursor.clone()), matching_target),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -221,7 +221,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "disabled runtime disables the fast path",
-            AutocmdIngress::CursorMoved,
+            CursorAutocmdIngress::CursorMoved,
             fast_path_snapshot(false, false, Some(tracked_cursor.clone()), matching_target),
             Some(tracked_cursor.clone()),
             Some(matching_target),
@@ -229,7 +229,7 @@ fn unchanged_cursor_fast_path_requires_matching_surface_and_target() {
         ),
         (
             "missing tracked cursor disables the fast path",
-            AutocmdIngress::CursorMoved,
+            CursorAutocmdIngress::CursorMoved,
             fast_path_snapshot(true, false, None, matching_target),
             Some(tracked_cursor),
             Some(matching_target),
