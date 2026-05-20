@@ -1,4 +1,4 @@
-.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc mas-reset fmt check check-lua check-smear-cursor clean help
+.PHONY: darwin darwin-debug nvim nvim-profile update-flake update-all deploy-flake deploy-all history gc mas-reset mas-reindex fmt check check-lua check-smear-cursor clean help
 
 hostname := $(shell hostname)
 user := $(shell whoami)
@@ -56,6 +56,10 @@ gc:
 mas-reset:
 	mas reset
 
+mas-reindex: mas-reset
+	sudo mdutil -Eai on
+	mas list
+
 fmt:
 	nix fmt
 
@@ -82,6 +86,7 @@ help:
 	@echo "deploy-flake - Update flake.lock and rebuild"
 	@echo "gc           - Full garbage collection"
 	@echo "mas-reset    - Reset mas state"
+	@echo "mas-reindex  - Reset mas and rebuild Spotlight index for App Store apps"
 	@echo "fmt          - Format Nix files"
 	@echo "check        - Run EmmyLua and flake checks"
 	@echo "check-lua    - Run EmmyLua checks"
