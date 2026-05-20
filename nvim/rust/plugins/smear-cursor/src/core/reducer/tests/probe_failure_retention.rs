@@ -30,7 +30,10 @@ fn failed_probe_report_is_retained_without_collapsing_to_missing() {
         }),
     );
 
-    let completed = reduce(&based.next, cursor_color_probe_failed(&request));
+    let completed = reduce(
+        &based.next,
+        cursor_color_probe_failed(&request, ProbeFailure::CacheAccessFailed),
+    );
 
     let observation = completed
         .next
@@ -39,7 +42,7 @@ fn failed_probe_report_is_retained_without_collapsing_to_missing() {
     pretty_assert_eq!(observation.cursor_color(), None);
     match observation.probes().cursor_color() {
         ProbeSlot::Requested(ProbeState::Failed { failure, .. }) => {
-            pretty_assert_eq!(*failure, ProbeFailure::ShellReadFailed)
+            pretty_assert_eq!(*failure, ProbeFailure::CacheAccessFailed)
         }
         other => panic!("expected failed cursor color probe, got {other:?}"),
     }

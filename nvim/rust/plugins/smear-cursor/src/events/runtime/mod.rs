@@ -54,8 +54,12 @@ pub(super) use dispatch_queue::ScheduledEffectQueueState;
 pub(super) use dispatch_queue::ScheduledWorkItem;
 pub(super) use dispatch_queue::ScheduledWorkUnit;
 pub(super) use dispatch_queue::ShellOnlyStep;
+pub(super) use effects::EffectExecutionError;
+pub(super) use effects::EffectExecutionFailureKind;
+pub(super) use effects::EffectExecutionResult;
 pub(super) use effects::EffectExecutor;
 pub(super) use effects::NeovimEffectExecutor;
+pub(super) use effects::ObservationCancellationReason;
 pub(crate) use effects::record_effect_failure;
 pub(super) use engine::apply_core_setup_options;
 #[cfg(test)]

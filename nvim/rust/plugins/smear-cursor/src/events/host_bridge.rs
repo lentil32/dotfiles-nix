@@ -29,7 +29,7 @@ fn note_host_bridge_verified(revision: HostBridgeRevision) -> Result<(), Runtime
 type HostBridgeResult<T> = std::result::Result<T, HostBridgeError>;
 
 #[derive(Debug, Error)]
-pub(super) enum HostBridgeError {
+pub(in crate::events) enum HostBridgeError {
     #[error(
         "smear cursor host bridge revision mismatch: expected v{expected}, found v{found}",
         expected = .expected.get(),

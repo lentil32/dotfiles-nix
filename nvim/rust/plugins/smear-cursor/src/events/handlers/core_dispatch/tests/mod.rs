@@ -26,6 +26,7 @@ use crate::core::state::ProbeKind;
 use crate::core::state::ProbeReuse;
 use crate::core::types::Lifecycle;
 use crate::core::types::Millis;
+use crate::events::runtime::EffectExecutionResult;
 use crate::events::runtime::core_state;
 use crate::events::runtime::set_core_state;
 use crate::mutex::lock_with_poison_recovery;
@@ -38,7 +39,6 @@ use crate::position::ViewportBounds;
 use crate::position::WindowSurfaceSnapshot;
 use crate::test_support::cursor;
 use crate::test_support::sparse_probe_cells;
-use nvim_oxi::Result;
 use std::collections::VecDeque;
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -63,7 +63,7 @@ struct RecordingExecutor {
 }
 
 impl EffectExecutor for RecordingExecutor {
-    fn execute_effect(&mut self, effect: Effect) -> Result<Vec<CoreEvent>> {
+    fn execute_effect(&mut self, effect: Effect) -> EffectExecutionResult<Vec<CoreEvent>> {
         self.executed_effects.push(effect);
         Ok(self.planned_follow_ups.pop_front().unwrap_or_default())
     }

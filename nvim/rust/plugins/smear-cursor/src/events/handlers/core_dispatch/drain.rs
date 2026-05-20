@@ -32,9 +32,14 @@ pub(super) fn reset_scheduled_queue_after_failure() {
     super::reset_scheduled_effect_queue();
 }
 
-fn handle_scheduled_work_drain_failure(work_name: &'static str, error: &nvim_oxi::Error) {
+fn handle_scheduled_work_drain_failure(error: ScheduledWorkExecutionError) {
     reset_scheduled_queue_after_failure();
-    warn(&format!("scheduled core work failed: {work_name}: {error}"));
+    if error.error.should_report_scheduled_work_failure() {
+        warn(&format!(
+            "scheduled core work failed: {}: {}",
+            error.work_name, error.error
+        ));
+    }
     let observed_at = to_core_millis(now_ms());
     stage_core_event_with_default_scheduler(CoreEvent::EffectFailed(EffectFailedEvent {
         proposal_id: None,
@@ -185,8 +190,12 @@ pub(super) fn drain_scheduled_work_with_executor(
                 }
                 ScheduledWorkUnit::CoreEvent(event) => {
                     let work_name = core_event_label(&event);
-                    dispatch_scheduled_core_event(*event)
-                        .map_err(|error| ScheduledWorkExecutionError { work_name, error })?;
+                    dispatch_scheduled_core_event(*event).map_err(|error| {
+                        ScheduledWorkExecutionError {
+                            work_name,
+                            error: error.into(),
+                        }
+                    })?;
                 }
                 ScheduledWorkUnit::ShellOnlyStep(step) => {
                     execute_shell_only_step(step, executor)?;
@@ -241,7 +250,10 @@ pub(super) fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) 
     let mut executor = match NeovimEffectExecutor::new() {
         Ok(executor) => executor,
         Err(err) => {
-            handle_scheduled_work_drain_failure(entrypoint.context(), &err);
+            handle_scheduled_work_drain_failure(ScheduledWorkExecutionError {
+                work_name: entrypoint.context(),
+                error: err.into(),
+            });
             return;
         }
     };
@@ -253,7 +265,7 @@ pub(super) fn run_scheduled_effect_drain(entrypoint: ScheduledEffectDrainEntry) 
         Ok(true) => schedule_scheduled_effect_drain(entrypoint),
         Ok(false) => {}
         Err(err) => {
-            handle_scheduled_work_drain_failure(err.work_name, &err.error);
+            handle_scheduled_work_drain_failure(err);
         }
     }
 }

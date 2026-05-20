@@ -12,7 +12,9 @@ use crate::core::state::CursorColorProbeWitness;
 use crate::core::state::CursorColorSample;
 use crate::core::state::ProbeFailure;
 use crate::core::state::ProbeReuse;
+use crate::events::cursor::CursorColorProbeReadError;
 use crate::events::cursor::sampled_cursor_color_at_current_position;
+use crate::events::host_bridge::HostBridgeError;
 use crate::events::runtime::cached_cursor_color_sample_for_probe;
 use crate::events::runtime::cursor_color_cache_generation;
 use crate::events::runtime::cursor_color_colorscheme_generation;
@@ -173,11 +175,24 @@ fn cursor_color_ready_event(
     })
 }
 
-fn cursor_color_failed_event(payload: &RequestProbeEffect) -> CoreEvent {
+fn cursor_color_failed_event_with_failure(
+    payload: &RequestProbeEffect,
+    failure: ProbeFailure,
+) -> CoreEvent {
     CoreEvent::ProbeReported(ProbeReportedEvent::CursorColorFailed {
         observation_id: payload.observation_id,
-        failure: ProbeFailure::ShellReadFailed,
+        failure,
     })
+}
+
+fn cursor_color_sample_failure(error: &CursorColorProbeReadError) -> ProbeFailure {
+    match error {
+        CursorColorProbeReadError::HostBridge(HostBridgeError::RuntimeAccess(_)) => {
+            ProbeFailure::RuntimeAccessFailed
+        }
+        CursorColorProbeReadError::HostBridge(_) => ProbeFailure::HostBridgeFailed,
+        CursorColorProbeReadError::Decode(_) => ProbeFailure::DecodeFailed,
+    }
 }
 
 pub(super) fn collect_cursor_color_report(
@@ -186,7 +201,7 @@ pub(super) fn collect_cursor_color_report(
 ) -> CoreEvent {
     let Some(expected_witness) = payload.cursor_color_probe_witness() else {
         crate::events::logging::warn("cursor color probe missing boundary-derived witness");
-        return cursor_color_failed_event(payload);
+        return cursor_color_failed_event_with_failure(payload, ProbeFailure::MissingWitness);
     };
     let probe_policy = payload.probe_policy();
     let validation = match dispatch_wave {
@@ -203,7 +218,10 @@ pub(super) fn collect_cursor_color_report(
                 crate::events::logging::warn(&format!(
                     "cursor color probe witness read failed: {err}"
                 ));
-                return cursor_color_failed_event(payload);
+                return cursor_color_failed_event_with_failure(
+                    payload,
+                    ProbeFailure::WitnessReadFailed,
+                );
             }
         },
     };
@@ -214,7 +232,7 @@ pub(super) fn collect_cursor_color_report(
     }
     let Some(cache_witness) = validation.cache_witness() else {
         crate::events::logging::warn("cursor color probe reuse missing cache witness");
-        return cursor_color_failed_event(payload);
+        return cursor_color_failed_event_with_failure(payload, ProbeFailure::MissingWitness);
     };
 
     match cached_cursor_color_sample_for_probe(cache_witness, probe_policy, reuse) {
@@ -227,7 +245,10 @@ pub(super) fn collect_cursor_color_report(
         }
         Err(err) => {
             crate::events::logging::warn(&format!("cursor color cache read failed: {err}"));
-            return cursor_color_failed_event(payload);
+            return cursor_color_failed_event_with_failure(
+                payload,
+                ProbeFailure::CacheAccessFailed,
+            );
         }
     }
 
@@ -258,7 +279,7 @@ pub(super) fn collect_cursor_color_report(
         }
         Err(err) => {
             crate::events::logging::warn(&format!("cursor color sampling failed: {err}"));
-            cursor_color_failed_event(payload)
+            cursor_color_failed_event_with_failure(payload, cursor_color_sample_failure(&err))
         }
     }
 }
@@ -268,6 +289,7 @@ mod tests {
     use super::CursorColorProbeValidation;
     use super::compatible_cursor_color_fallback_sample;
     use super::cursor_color_probe_validation;
+    use super::cursor_color_sample_failure;
     use super::validate_cursor_color_probe_witness;
     use crate::core::effect::CursorColorFallback;
     use crate::core::effect::CursorColorFallbackMode;
@@ -276,7 +298,13 @@ mod tests {
     use crate::core::effect::ProbePolicy;
     use crate::core::effect::ProbeQuality;
     use crate::core::state::CursorColorSample;
+    use crate::core::state::ProbeFailure;
     use crate::core::state::ProbeReuse;
+    use crate::events::RuntimeAccessError;
+    use crate::events::cursor::CursorColorProbeReadError;
+    use crate::events::cursor::CursorParseError;
+    use crate::events::cursor::CursorReadError;
+    use crate::events::host_bridge::HostBridgeError;
     use crate::test_support::cursor;
     use crate::test_support::cursor_color_probe_witness_with_cache_generation as witness_with_cache_generation;
     use pretty_assertions::assert_eq;
@@ -342,6 +370,32 @@ mod tests {
                 &same_line_current,
             ),
             None,
+        );
+    }
+
+    #[test]
+    fn cursor_color_sample_failure_classifies_typed_error_sources() {
+        let failures = [
+            cursor_color_sample_failure(&CursorColorProbeReadError::HostBridge(
+                HostBridgeError::RuntimeAccess(RuntimeAccessError::Reentered),
+            )),
+            cursor_color_sample_failure(&CursorColorProbeReadError::HostBridge(
+                HostBridgeError::Unverified,
+            )),
+            cursor_color_sample_failure(&CursorColorProbeReadError::Decode(
+                CursorReadError::Parse(CursorParseError::InvalidDictionary {
+                    context: "cursor_color_host_bridge",
+                }),
+            )),
+        ];
+
+        assert_eq!(
+            failures,
+            [
+                ProbeFailure::RuntimeAccessFailed,
+                ProbeFailure::HostBridgeFailed,
+                ProbeFailure::DecodeFailed,
+            ],
         );
     }
 }

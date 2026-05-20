@@ -240,7 +240,7 @@ fn background_probe_terminal_states_reject_further_transitions() {
         !ready_snapshot
             .probes_mut()
             .background_mut()
-            .set_failed(ProbeFailure::ShellReadFailed)
+            .set_failed(ProbeFailure::WitnessReadFailed)
     );
 
     let mut failed_snapshot = ObservationSnapshot::new(
@@ -249,8 +249,9 @@ fn background_probe_terminal_states_reject_further_transitions() {
         ObservationMotion::default(),
     );
     failed_snapshot = with_background_probe_plan(failed_snapshot, plan);
-    failed_snapshot = with_background_probe_failed(failed_snapshot, ProbeFailure::ShellReadFailed)
-        .expect("collecting background probe should accept a failure transition");
+    failed_snapshot =
+        with_background_probe_failed(failed_snapshot, ProbeFailure::WitnessReadFailed)
+            .expect("collecting background probe should accept a failure transition");
     let viewport = failed_snapshot.basis().viewport();
     assert!(!failed_snapshot.probes_mut().background_mut().accept_batch(
         viewport,
@@ -261,7 +262,7 @@ fn background_probe_terminal_states_reject_further_transitions() {
         !failed_snapshot
             .probes_mut()
             .background_mut()
-            .set_failed(ProbeFailure::ShellReadFailed)
+            .set_failed(ProbeFailure::WitnessReadFailed)
     );
 }
 

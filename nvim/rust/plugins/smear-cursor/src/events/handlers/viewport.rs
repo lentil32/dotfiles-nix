@@ -11,6 +11,18 @@ use crate::position::WindowSurfaceSnapshot;
 use nvim_oxi::Result;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum IngressFastPathSurfaceCapture {
+    Captured(WindowSurfaceSnapshot),
+    InvalidCurrentWindow,
+    InvalidCurrentBuffer,
+    SurfaceReadFailed,
+    BufferMismatch {
+        expected: BufferHandle,
+        actual: BufferHandle,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct SurfaceTranslationDelta {
     vertical_rows: Option<(i64, i64)>,
     horizontal_cols: i64,
@@ -18,15 +30,11 @@ struct SurfaceTranslationDelta {
     window_col_delta: i64,
 }
 
-fn snapshot_matches_buffer(snapshot: WindowSurfaceSnapshot, buffer: &api::Buffer) -> bool {
-    snapshot.id().buffer_handle() == BufferHandle::from_buffer(buffer)
-}
-
 pub(crate) fn surface_for_ingress_fast_path_with_current_editor(
     current_host: &impl CurrentEditorPort,
     window: &api::Window,
     buffer: &api::Buffer,
-) -> Option<WindowSurfaceSnapshot> {
+) -> IngressFastPathSurfaceCapture {
     surface_for_ingress_fast_path_with_hosts(current_host, &NeovimHost, window, buffer)
 }
 
@@ -35,13 +43,24 @@ fn surface_for_ingress_fast_path_with_hosts(
     surface_host: &impl WindowSurfacePort,
     window: &api::Window,
     buffer: &api::Buffer,
-) -> Option<WindowSurfaceSnapshot> {
-    if !current_host.window_is_valid(window) || !current_host.buffer_is_valid(buffer) {
-        return None;
+) -> IngressFastPathSurfaceCapture {
+    if !current_host.window_is_valid(window) {
+        return IngressFastPathSurfaceCapture::InvalidCurrentWindow;
+    }
+    if !current_host.buffer_is_valid(buffer) {
+        return IngressFastPathSurfaceCapture::InvalidCurrentBuffer;
     }
 
-    let surface_snapshot = current_window_surface_snapshot_with(surface_host, window).ok()?;
-    snapshot_matches_buffer(surface_snapshot, buffer).then_some(surface_snapshot)
+    let surface_snapshot = match current_window_surface_snapshot_with(surface_host, window) {
+        Ok(surface_snapshot) => surface_snapshot,
+        Err(_) => return IngressFastPathSurfaceCapture::SurfaceReadFailed,
+    };
+    let expected = BufferHandle::from_buffer(buffer);
+    let actual = surface_snapshot.id().buffer_handle();
+    if actual != expected {
+        return IngressFastPathSurfaceCapture::BufferMismatch { expected, actual };
+    }
+    IngressFastPathSurfaceCapture::Captured(surface_snapshot)
 }
 
 fn line_index_1_to_0(row: i64) -> usize {
@@ -164,14 +183,73 @@ pub(super) fn maybe_scroll_shift_for_core_event(
 
 #[cfg(test)]
 mod tests {
+    use super::IngressFastPathSurfaceCapture;
     use super::SurfaceTranslationDelta;
     use super::screen_distance;
+    use super::surface_for_ingress_fast_path_with_hosts;
     use super::surface_translation_delta;
+    use crate::host::CurrentEditorCall;
+    use crate::host::FakeCurrentEditorPort;
     use crate::host::FakeWindowSurfacePort;
     use crate::host::WindowSurfaceCall;
     use crate::host::api;
+    use crate::position::BufferLine;
+    use crate::position::ScreenCell;
+    use crate::position::SurfaceId;
+    use crate::position::ViewportBounds;
+    use crate::position::WindowSurfaceSnapshot;
     use crate::state::TrackedCursor;
+    use nvim_oxi::Array;
+    use nvim_oxi::Dictionary;
+    use nvim_oxi::Object;
     use pretty_assertions::assert_eq;
+
+    fn getwininfo_dict(entries: impl IntoIterator<Item = (&'static str, i64)>) -> Dictionary {
+        let mut dict = Dictionary::new();
+        for (key, value) in entries {
+            dict.insert(key, Object::from(value));
+        }
+        dict
+    }
+
+    fn canonical_getwininfo_dict() -> Dictionary {
+        getwininfo_dict([
+            ("topline", 23),
+            ("leftcol", 5),
+            ("textoff", 2),
+            ("winrow", 7),
+            ("wincol", 13),
+            ("width", 80),
+            ("height", 24),
+        ])
+    }
+
+    fn getwininfo_object(dict: Dictionary) -> Object {
+        Object::from(Array::from_iter([Object::from(dict)]))
+    }
+
+    fn surface_snapshot(window_handle: i64, buffer_handle: i64) -> WindowSurfaceSnapshot {
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(window_handle, buffer_handle).expect("positive surface handles"),
+            BufferLine::new(23).expect("positive top line"),
+            5,
+            2,
+            ScreenCell::new(7, 13).expect("one-based origin"),
+            ViewportBounds::new(24, 80).expect("positive viewport"),
+        )
+    }
+
+    fn capture_fast_path_surface(
+        current_host: &FakeCurrentEditorPort,
+        surface_host: &FakeWindowSurfacePort,
+    ) -> IngressFastPathSurfaceCapture {
+        surface_for_ingress_fast_path_with_hosts(
+            current_host,
+            surface_host,
+            &api::Window::from(11),
+            &api::Buffer::from(17),
+        )
+    }
 
     fn complete_surface_location(location: TrackedCursor) -> TrackedCursor {
         location.with_window_dimensions(80, 20)
@@ -210,6 +288,108 @@ mod tests {
                     end_row: 5,
                 }],
             )
+        );
+    }
+
+    #[test]
+    fn surface_for_ingress_fast_path_returns_captured_surface_for_matching_handles() {
+        let current_host = FakeCurrentEditorPort::default();
+        let surface_host = FakeWindowSurfacePort::default();
+        surface_host.push_getwininfo(getwininfo_object(canonical_getwininfo_dict()));
+        surface_host.push_window_buffer_handle(17);
+
+        let capture = capture_fast_path_surface(&current_host, &surface_host);
+
+        assert_eq!(
+            (capture, current_host.calls(), surface_host.calls(),),
+            (
+                IngressFastPathSurfaceCapture::Captured(surface_snapshot(11, 17)),
+                vec![
+                    CurrentEditorCall::WindowIsValid { window_handle: 11 },
+                    CurrentEditorCall::BufferIsValid { buffer_handle: 17 },
+                ],
+                vec![
+                    WindowSurfaceCall::Getwininfo { window_handle: 11 },
+                    WindowSurfaceCall::WindowBufferHandle { window_handle: 11 },
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn surface_for_ingress_fast_path_classifies_invalid_current_window() {
+        let current_host = FakeCurrentEditorPort::default();
+        current_host.set_window_validity(11, false);
+        let surface_host = FakeWindowSurfacePort::default();
+
+        let capture = capture_fast_path_surface(&current_host, &surface_host);
+
+        assert_eq!(
+            (capture, current_host.calls(), surface_host.calls(),),
+            (
+                IngressFastPathSurfaceCapture::InvalidCurrentWindow,
+                vec![CurrentEditorCall::WindowIsValid { window_handle: 11 }],
+                Vec::new(),
+            )
+        );
+    }
+
+    #[test]
+    fn surface_for_ingress_fast_path_classifies_invalid_current_buffer() {
+        let current_host = FakeCurrentEditorPort::default();
+        current_host.set_buffer_validity(17, false);
+        let surface_host = FakeWindowSurfacePort::default();
+
+        let capture = capture_fast_path_surface(&current_host, &surface_host);
+
+        assert_eq!(
+            (capture, current_host.calls(), surface_host.calls(),),
+            (
+                IngressFastPathSurfaceCapture::InvalidCurrentBuffer,
+                vec![
+                    CurrentEditorCall::WindowIsValid { window_handle: 11 },
+                    CurrentEditorCall::BufferIsValid { buffer_handle: 17 },
+                ],
+                Vec::new(),
+            )
+        );
+    }
+
+    #[test]
+    fn surface_for_ingress_fast_path_classifies_surface_read_failure() {
+        let current_host = FakeCurrentEditorPort::default();
+        let surface_host = FakeWindowSurfacePort::default();
+
+        let capture = capture_fast_path_surface(&current_host, &surface_host);
+
+        assert_eq!(
+            (capture, current_host.calls(), surface_host.calls(),),
+            (
+                IngressFastPathSurfaceCapture::SurfaceReadFailed,
+                vec![
+                    CurrentEditorCall::WindowIsValid { window_handle: 11 },
+                    CurrentEditorCall::BufferIsValid { buffer_handle: 17 },
+                ],
+                vec![WindowSurfaceCall::Getwininfo { window_handle: 11 }],
+            )
+        );
+    }
+
+    #[test]
+    fn surface_for_ingress_fast_path_classifies_buffer_mismatch() {
+        let current_host = FakeCurrentEditorPort::default();
+        let surface_host = FakeWindowSurfacePort::default();
+        surface_host.push_getwininfo(getwininfo_object(canonical_getwininfo_dict()));
+        surface_host.push_window_buffer_handle(19);
+
+        let capture = capture_fast_path_surface(&current_host, &surface_host);
+
+        assert_eq!(
+            capture,
+            IngressFastPathSurfaceCapture::BufferMismatch {
+                expected: 17.into(),
+                actual: 19.into(),
+            }
         );
     }
 

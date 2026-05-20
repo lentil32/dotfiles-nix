@@ -122,15 +122,29 @@ fn batch_background_allowed_mask(
     })
 }
 
+fn background_failed_event(payload: &RequestProbeEffect, failure: ProbeFailure) -> CoreEvent {
+    CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
+        observation_id: payload.observation_id,
+        failure,
+    })
+}
+
+fn background_probe_mask_failure(error: &BackgroundProbeMaskError) -> ProbeFailure {
+    match error {
+        BackgroundProbeMaskError::RuntimeAccess(_) => ProbeFailure::RuntimeAccessFailed,
+        BackgroundProbeMaskError::BridgeCall(_) => ProbeFailure::HostBridgeFailed,
+        BackgroundProbeMaskError::Shape(_) | BackgroundProbeMaskError::ValueDecode { .. } => {
+            ProbeFailure::DecodeFailed
+        }
+    }
+}
+
 pub(super) fn collect_background_report(payload: &RequestProbeEffect) -> CoreEvent {
     let current_viewport = match current_viewport_snapshot() {
         Ok(viewport) => viewport,
         Err(err) => {
             crate::events::logging::warn(&format!("background probe viewport read failed: {err}"));
-            return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
-                observation_id: payload.observation_id,
-                failure: ProbeFailure::ShellReadFailed,
-            });
+            return background_failed_event(payload, ProbeFailure::WitnessReadFailed);
         }
     };
 
@@ -145,19 +159,13 @@ pub(super) fn collect_background_report(payload: &RequestProbeEffect) -> CoreEve
     let viewport = payload.observation_basis.viewport();
     let Some(chunk) = payload.background_chunk.as_ref() else {
         crate::events::logging::warn("background probe missing chunk request");
-        return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
-            observation_id: payload.observation_id,
-            failure: ProbeFailure::ShellReadFailed,
-        });
+        return background_failed_event(payload, ProbeFailure::MissingRequest);
     };
     let allowed_mask = match batch_background_allowed_mask(viewport, chunk) {
         Ok(allowed_mask) => allowed_mask,
         Err(err) => {
             crate::events::logging::warn(&format!("background sampling failed: {err}"));
-            return CoreEvent::ProbeReported(ProbeReportedEvent::BackgroundFailed {
-                observation_id: payload.observation_id,
-                failure: ProbeFailure::ShellReadFailed,
-            });
+            return background_failed_event(payload, background_probe_mask_failure(&err));
         }
     };
 
@@ -173,6 +181,8 @@ mod tests {
     use super::*;
     use crate::core::state::BackgroundProbePlan;
     use crate::core::state::BackgroundProbeProgress;
+    use crate::events::RuntimeAccessError;
+    use crate::events::host_bridge::HostBridgeError;
     use crate::lua::i64_from_object_typed;
     use crate::position::ScreenCell;
     use pretty_assertions::assert_eq;
@@ -233,5 +243,35 @@ mod tests {
         assert_eq!(scratch.capacity(), scratch_capacity);
         assert_eq!(scratch.as_ptr(), scratch_ptr);
         reclaim_background_probe_request_scratch(scratch).expect("scratch should be reclaimable");
+    }
+
+    #[test]
+    fn background_probe_mask_failure_classifies_typed_error_sources() {
+        let shape_error =
+            crate::lua::invalid_key_error("background_probe_mask", "packed byte array");
+        let value_error = crate::lua::invalid_key_error("background_probe_mask", "u8 byte");
+        let failures = [
+            background_probe_mask_failure(&BackgroundProbeMaskError::RuntimeAccess(
+                RuntimeAccessError::Reentered,
+            )),
+            background_probe_mask_failure(&BackgroundProbeMaskError::BridgeCall(
+                HostBridgeError::Unverified.into(),
+            )),
+            background_probe_mask_failure(&BackgroundProbeMaskError::Shape(shape_error)),
+            background_probe_mask_failure(&BackgroundProbeMaskError::ValueDecode {
+                index: 0,
+                source: value_error,
+            }),
+        ];
+
+        assert_eq!(
+            failures,
+            [
+                ProbeFailure::RuntimeAccessFailed,
+                ProbeFailure::HostBridgeFailed,
+                ProbeFailure::DecodeFailed,
+                ProbeFailure::DecodeFailed,
+            ],
+        );
     }
 }

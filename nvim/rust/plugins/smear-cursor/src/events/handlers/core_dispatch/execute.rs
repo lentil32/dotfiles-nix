@@ -1,4 +1,5 @@
 use super::super::super::logging::trace_lazy;
+use super::super::super::runtime::EffectExecutionError;
 use super::super::super::runtime::EffectExecutor;
 use super::super::super::runtime::PendingMetricEffects;
 use super::super::super::runtime::ShellOnlyStep;
@@ -64,14 +65,14 @@ where
 #[derive(Debug)]
 pub(super) struct ScheduledWorkExecutionError {
     pub(super) work_name: &'static str,
-    pub(super) error: nvim_oxi::Error,
+    pub(super) error: EffectExecutionError,
 }
 
 impl From<nvim_oxi::Error> for ScheduledWorkExecutionError {
     fn from(error: nvim_oxi::Error) -> Self {
         Self {
             work_name: "core event dispatch",
-            error,
+            error: error.into(),
         }
     }
 }

@@ -149,6 +149,10 @@ impl FakeCursorReadPort {
             .push_back(Ok(synconcealed));
     }
 
+    pub(crate) fn push_screenpos(&self, screenpos: Object) {
+        self.screenpos_results.borrow_mut().push_back(Ok(screenpos));
+    }
+
     pub(crate) fn push_string_display_width(&self, width: Object) {
         self.string_display_width_results
             .borrow_mut()

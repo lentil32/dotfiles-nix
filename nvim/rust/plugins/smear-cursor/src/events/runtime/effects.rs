@@ -21,7 +21,8 @@ use crate::core::event::EffectFailedEvent;
 use crate::core::event::EffectFailureSource;
 use crate::core::event::Event;
 use crate::events::handlers::ProbeDispatchWave;
-use nvim_oxi::Result;
+use nvim_oxi::Result as NvimResult;
+use std::fmt;
 use std::time::Instant;
 
 pub(crate) fn record_effect_failure(source: EffectFailureSource, context: &'static str) {
@@ -38,14 +39,77 @@ pub(crate) fn record_effect_failure(source: EffectFailureSource, context: &'stat
     }));
 }
 
+pub(crate) type EffectExecutionResult<T> = std::result::Result<T, EffectExecutionError>;
+
+#[derive(Debug)]
+pub(crate) struct EffectExecutionError {
+    source: nvim_oxi::Error,
+    kind: EffectExecutionFailureKind,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum EffectExecutionFailureKind {
+    Reportable,
+    BenignObservationCancellation {
+        reason: ObservationCancellationReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ObservationCancellationReason {
+    CurrentWindow,
+    CurrentBuffer,
+    CurrentViewport,
+    Surface,
+}
+
+impl EffectExecutionError {
+    pub(crate) fn reportable(source: nvim_oxi::Error) -> Self {
+        Self {
+            source,
+            kind: EffectExecutionFailureKind::Reportable,
+        }
+    }
+
+    pub(crate) fn benign_observation_cancellation(
+        source: nvim_oxi::Error,
+        reason: ObservationCancellationReason,
+    ) -> Self {
+        Self {
+            source,
+            kind: EffectExecutionFailureKind::BenignObservationCancellation { reason },
+        }
+    }
+
+    pub(crate) fn kind(&self) -> EffectExecutionFailureKind {
+        self.kind
+    }
+
+    pub(crate) fn should_report_scheduled_work_failure(&self) -> bool {
+        self.kind == EffectExecutionFailureKind::Reportable
+    }
+}
+
+impl fmt::Display for EffectExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl From<nvim_oxi::Error> for EffectExecutionError {
+    fn from(error: nvim_oxi::Error) -> Self {
+        Self::reportable(error)
+    }
+}
+
 pub(crate) trait EffectExecutor {
-    fn execute_effect(&mut self, effect: Effect) -> Result<Vec<Event>>;
+    fn execute_effect(&mut self, effect: Effect) -> EffectExecutionResult<Vec<Event>>;
 
     fn execute_probe_effect(
         &mut self,
         payload: RequestProbeEffect,
         _dispatch_wave: ProbeDispatchWave,
-    ) -> Result<Vec<Event>> {
+    ) -> EffectExecutionResult<Vec<Event>> {
         self.execute_effect(Effect::RequestProbe(payload))
     }
 }
@@ -56,7 +120,7 @@ pub(crate) struct NeovimEffectExecutor {
 }
 
 impl NeovimEffectExecutor {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new() -> NvimResult<Self> {
         Ok(Self {
             host_bridge: installed_host_bridge()?,
         })
@@ -68,7 +132,7 @@ impl EffectExecutor for NeovimEffectExecutor {
         &mut self,
         payload: RequestProbeEffect,
         dispatch_wave: ProbeDispatchWave,
-    ) -> Result<Vec<Event>> {
+    ) -> EffectExecutionResult<Vec<Event>> {
         let kind = payload.kind;
         let started_at = Instant::now();
         let result = match dispatch_wave {
@@ -83,7 +147,7 @@ impl EffectExecutor for NeovimEffectExecutor {
         Ok(result)
     }
 
-    fn execute_effect(&mut self, effect: Effect) -> Result<Vec<Event>> {
+    fn execute_effect(&mut self, effect: Effect) -> EffectExecutionResult<Vec<Event>> {
         match effect {
             Effect::ScheduleTimer(payload) => Ok(schedule_core_timer_effect(
                 self.host_bridge,

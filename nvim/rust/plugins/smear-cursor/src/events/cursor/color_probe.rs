@@ -1,8 +1,10 @@
 use super::CursorParseError;
 use super::CursorReadError;
+use super::CursorResult;
 use super::cursor_parse_error;
 use crate::core::effect::ProbePolicy;
 use crate::core::state::ProbeKind;
+use crate::events::host_bridge::HostBridgeError;
 use crate::events::host_bridge::installed_host_bridge;
 use crate::events::runtime::record_probe_extmark_fallback;
 use crate::host::BufferHandle;
@@ -11,9 +13,16 @@ use crate::lua::bool_from_object_typed;
 use crate::lua::i64_from_object_typed;
 use nvim_oxi::Dictionary;
 use nvim_oxi::Object;
-use nvim_oxi::Result;
 use nvim_oxi::String as NvimString;
 use nvim_oxi::conversion::FromObject;
+
+#[derive(Debug, thiserror::Error)]
+pub(in crate::events) enum CursorColorProbeReadError {
+    #[error("cursor color host bridge failed: {0}")]
+    HostBridge(#[from] HostBridgeError),
+    #[error("cursor color host bridge response decode failed: {0}")]
+    Decode(#[source] CursorReadError),
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct CursorColorProbeResult {
@@ -33,21 +42,22 @@ impl CursorColorProbeResult {
 fn cursor_color_at_current_position(
     buffer_handle: BufferHandle,
     probe_policy: ProbePolicy,
-) -> Result<Option<u32>> {
+) -> std::result::Result<Option<u32>, CursorColorProbeReadError> {
     let extmark_fallback = if probe_policy.allows_cursor_color_extmark_fallback() {
         CursorColorExtmarkFallback::SyntaxThenExtmarks
     } else {
         CursorColorExtmarkFallback::SyntaxOnly
     };
     let value = installed_host_bridge()?.cursor_color_at_cursor(extmark_fallback)?;
-    let probe_result = parse_cursor_color_probe_result(value)?;
+    let probe_result =
+        parse_cursor_color_probe_result(value).map_err(CursorColorProbeReadError::Decode)?;
     if probe_result.used_extmark_fallback {
         record_probe_extmark_fallback(buffer_handle, ProbeKind::CursorColor);
     }
     Ok(probe_result.color)
 }
 
-fn parse_cursor_color_probe_result(value: Object) -> Result<CursorColorProbeResult> {
+fn parse_cursor_color_probe_result(value: Object) -> CursorResult<CursorColorProbeResult> {
     if value.is_nil() {
         return Ok(CursorColorProbeResult::new(None, false));
     }
@@ -67,10 +77,7 @@ fn parse_cursor_color_probe_result(value: Object) -> Result<CursorColorProbeResu
         used_extmark_fallback,
     )
     .map_err(|source| {
-        nvim_oxi::Error::from(cursor_parse_error(
-            "cursor_color_host_bridge.used_extmark_fallback",
-            source,
-        ))
+        cursor_parse_error("cursor_color_host_bridge.used_extmark_fallback", source)
     })?;
     let color = dict
         .get(&NvimString::from("color"))
@@ -82,21 +89,17 @@ fn parse_cursor_color_probe_result(value: Object) -> Result<CursorColorProbeResu
     Ok(CursorColorProbeResult::new(color, used_extmark_fallback))
 }
 
-fn parse_cursor_color_host_bridge_color(value: Object) -> Result<u32> {
-    let parsed = i64_from_object_typed("cursor_color_host_bridge", value).map_err(|source| {
-        nvim_oxi::Error::from(cursor_parse_error("cursor_color_host_bridge", source))
-    })?;
-    Ok(u32::try_from(parsed).map_err(|_| {
-        crate::host::api::Error::Other(
-            "cursor_color_host_bridge parse failed: color out of range".into(),
-        )
-    })?)
+fn parse_cursor_color_host_bridge_color(value: Object) -> CursorResult<u32> {
+    let parsed = i64_from_object_typed("cursor_color_host_bridge", value)
+        .map_err(|source| cursor_parse_error("cursor_color_host_bridge", source))?;
+    u32::try_from(parsed)
+        .map_err(|_| CursorReadError::from(CursorParseError::ColorOutOfRange { value: parsed }))
 }
 
 pub(crate) fn sampled_cursor_color_at_current_position(
     buffer_handle: BufferHandle,
     probe_policy: ProbePolicy,
-) -> Result<Option<u32>> {
+) -> std::result::Result<Option<u32>, CursorColorProbeReadError> {
     cursor_color_at_current_position(buffer_handle, probe_policy)
 }
 

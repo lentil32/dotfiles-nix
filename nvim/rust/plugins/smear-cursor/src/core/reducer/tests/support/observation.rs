@@ -463,10 +463,11 @@ pub(in crate::core::reducer::tests) fn cursor_color_probe_report(
 
 pub(in crate::core::reducer::tests) fn cursor_color_probe_failed(
     request: &PendingObservation,
+    failure: ProbeFailure,
 ) -> Event {
     Event::ProbeReported(ProbeReportedEvent::CursorColorFailed {
         observation_id: request.observation_id(),
-        failure: ProbeFailure::ShellReadFailed,
+        failure,
     })
 }
 

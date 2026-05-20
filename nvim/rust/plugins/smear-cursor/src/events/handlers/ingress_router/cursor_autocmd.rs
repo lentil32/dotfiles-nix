@@ -10,10 +10,12 @@ use crate::core::state::BufferPerfClass;
 use crate::core::state::ExternalDemandKind;
 use crate::core::state::IngressObservationSurface;
 use crate::core::types::Millis;
-use crate::events::cursor::cursor_observation_for_mode_with_probe_policy;
+use crate::events::cursor::CursorReadError;
+use crate::events::cursor::cursor_observation_for_mode_with_probe_policy_typed_with;
 use crate::events::cursor::smear_outside_cmd_row;
 use crate::events::handlers::core_dispatch::dispatch_core_events_with_default_scheduler;
 use crate::events::handlers::source_selection::should_request_observation_for_autocmd;
+use crate::events::handlers::viewport::IngressFastPathSurfaceCapture;
 use crate::events::handlers::viewport::surface_for_ingress_fast_path_with_current_editor;
 use crate::events::ingress::CursorAutocmdIngress;
 use crate::events::logging::warn;
@@ -26,9 +28,11 @@ use crate::events::runtime::record_cursor_autocmd_fast_path_continued;
 use crate::events::runtime::record_cursor_autocmd_fast_path_dropped;
 use crate::events::runtime::to_core_millis;
 use crate::events::runtime::with_core_read;
+use crate::events::surface::WindowSurfaceReadError;
 use crate::events::surface::current_window_surface_snapshot;
 use crate::host::BufferHandle;
 use crate::host::CurrentEditorPort;
+use crate::host::CursorReadPort;
 use crate::host::NeovimHost;
 use crate::host::api;
 use crate::position::CursorObservation;
@@ -60,6 +64,25 @@ enum CursorAutocmdFastPathResult {
         window: api::Window,
         buffer: api::Buffer,
     },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum IngressObservationSurfaceCapture {
+    Captured(IngressObservationSurface),
+    InvalidCurrentWindow,
+    InvalidCurrentBuffer,
+    SurfaceReadFailed,
+    BufferMismatch {
+        expected: BufferHandle,
+        actual: BufferHandle,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum IngressFastPathCursorCapture {
+    Captured(CursorObservation),
+    HostReadFailed,
+    DecodeFailed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,7 +143,7 @@ fn on_cursor_event_core_for_autocmd_with(
     } else {
         None
     };
-    let ingress_observation_surface = ingress_observation_surface(
+    let ingress_observation_surface_capture = ingress_observation_surface_capture(
         host,
         &window,
         &buffer,
@@ -128,6 +151,13 @@ fn on_cursor_event_core_for_autocmd_with(
         current_cursor,
         mode,
     );
+    let ingress_observation_surface = match ingress_observation_surface_capture {
+        IngressObservationSurfaceCapture::Captured(surface) => Some(surface),
+        IngressObservationSurfaceCapture::InvalidCurrentWindow
+        | IngressObservationSurfaceCapture::InvalidCurrentBuffer
+        | IngressObservationSurfaceCapture::SurfaceReadFailed
+        | IngressObservationSurfaceCapture::BufferMismatch { .. } => None,
+    };
     let observed_at = to_core_millis(now_ms());
     let events = build_cursor_autocmd_events(
         ingress,
@@ -177,15 +207,35 @@ fn current_cursor_observation_for_fast_path(
     smear_to_cmd: bool,
     mode: &str,
     surface_snapshot: Option<&WindowSurfaceSnapshot>,
-) -> Option<CursorObservation> {
-    cursor_observation_for_mode_with_probe_policy(
+) -> IngressFastPathCursorCapture {
+    current_cursor_observation_for_fast_path_with(
+        &NeovimHost,
+        window,
+        smear_to_cmd,
+        mode,
+        surface_snapshot,
+    )
+}
+
+fn current_cursor_observation_for_fast_path_with(
+    host: &impl CursorReadPort,
+    window: &api::Window,
+    smear_to_cmd: bool,
+    mode: &str,
+    surface_snapshot: Option<&WindowSurfaceSnapshot>,
+) -> IngressFastPathCursorCapture {
+    match cursor_observation_for_mode_with_probe_policy_typed_with(
+        host,
         window,
         mode,
         smear_to_cmd,
         ProbePolicy::exact(),
         surface_snapshot,
-    )
-    .ok()
+    ) {
+        Ok(cursor) => IngressFastPathCursorCapture::Captured(cursor),
+        Err(CursorReadError::Shell(_)) => IngressFastPathCursorCapture::HostReadFailed,
+        Err(CursorReadError::Parse(_)) => IngressFastPathCursorCapture::DecodeFailed,
+    }
 }
 
 pub(super) fn tracked_cursor_matches_live_surface_handles(
@@ -361,18 +411,29 @@ fn maybe_drop_unchanged_cursor_autocmd_with(
         return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
     }
 
-    let Some(current_surface) =
-        surface_for_ingress_fast_path_with_current_editor(host, &window, &buffer)
-    else {
-        return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
+    let current_surface_capture =
+        surface_for_ingress_fast_path_with_current_editor(host, &window, &buffer);
+    let current_surface = match current_surface_capture {
+        IngressFastPathSurfaceCapture::Captured(surface) => surface,
+        IngressFastPathSurfaceCapture::InvalidCurrentWindow
+        | IngressFastPathSurfaceCapture::InvalidCurrentBuffer
+        | IngressFastPathSurfaceCapture::SurfaceReadFailed
+        | IngressFastPathSurfaceCapture::BufferMismatch { .. } => {
+            return Ok(continue_cursor_autocmd_fast_path(ingress, window, buffer));
+        }
     };
     let mode = host.current_mode();
-    let current_cursor = current_cursor_observation_for_fast_path(
+    let current_cursor_capture = current_cursor_observation_for_fast_path(
         &window,
         fast_path_snapshot.smear_to_cmd,
         &mode,
         Some(&current_surface),
     );
+    let current_cursor = match current_cursor_capture {
+        IngressFastPathCursorCapture::Captured(cursor) => Some(cursor),
+        IngressFastPathCursorCapture::HostReadFailed
+        | IngressFastPathCursorCapture::DecodeFailed => None,
+    };
     let current_tracked_cursor =
         current_cursor.map(|cursor| TrackedCursor::new(current_surface, cursor.buffer_line()));
     let current_target_position = current_cursor
@@ -417,26 +478,58 @@ fn drop_cursor_autocmd_fast_path(ingress: CursorAutocmdIngress) -> CursorAutocmd
     CursorAutocmdFastPathResult::Dropped
 }
 
-fn ingress_observation_surface(
+fn ingress_observation_surface_capture(
     host: &impl CurrentEditorPort,
     window: &api::Window,
     buffer: &api::Buffer,
     current_surface: Option<WindowSurfaceSnapshot>,
     current_cursor: Option<CursorObservation>,
     mode: String,
-) -> Option<IngressObservationSurface> {
-    if !host.window_is_valid(window) || !host.buffer_is_valid(buffer) {
-        return None;
+) -> IngressObservationSurfaceCapture {
+    ingress_observation_surface_capture_with_reader(
+        host,
+        window,
+        buffer,
+        current_surface,
+        current_cursor,
+        mode,
+        current_window_surface_snapshot,
+    )
+}
+
+fn ingress_observation_surface_capture_with_reader(
+    host: &impl CurrentEditorPort,
+    window: &api::Window,
+    buffer: &api::Buffer,
+    current_surface: Option<WindowSurfaceSnapshot>,
+    current_cursor: Option<CursorObservation>,
+    mode: String,
+    read_surface: impl FnOnce(
+        &api::Window,
+    ) -> std::result::Result<WindowSurfaceSnapshot, WindowSurfaceReadError>,
+) -> IngressObservationSurfaceCapture {
+    if !host.window_is_valid(window) {
+        return IngressObservationSurfaceCapture::InvalidCurrentWindow;
+    }
+    if !host.buffer_is_valid(buffer) {
+        return IngressObservationSurfaceCapture::InvalidCurrentBuffer;
     }
 
     let surface = match current_surface {
         Some(surface) => surface,
-        None => current_window_surface_snapshot(window)
-            .ok()
-            .filter(|surface| surface.id().buffer_handle() == BufferHandle::from_buffer(buffer))?,
+        None => match read_surface(window) {
+            Ok(surface) => surface,
+            Err(_) => return IngressObservationSurfaceCapture::SurfaceReadFailed,
+        },
     };
 
-    Some(IngressObservationSurface::new(
+    let expected = BufferHandle::from_buffer(buffer);
+    let actual = surface.id().buffer_handle();
+    if actual != expected {
+        return IngressObservationSurfaceCapture::BufferMismatch { expected, actual };
+    }
+
+    IngressObservationSurfaceCapture::Captured(IngressObservationSurface::new(
         surface,
         current_cursor,
         mode,
@@ -446,12 +539,131 @@ fn ingress_observation_surface(
 #[cfg(test)]
 mod tests {
     use super::CursorAutocmdFastPathResult;
+    use super::IngressFastPathCursorCapture;
+    use super::IngressObservationSurfaceCapture;
+    use super::current_cursor_observation_for_fast_path_with;
+    use super::ingress_observation_surface_capture_with_reader;
     use super::maybe_drop_unchanged_cursor_autocmd_with;
+    use crate::core::state::IngressObservationSurface;
     use crate::events::ingress::CursorAutocmdIngress;
     use crate::events::runtime::reset_transient_event_state;
+    use crate::events::surface::WindowSurfaceReadError;
+    use crate::host::BufferHandle;
     use crate::host::CurrentEditorCall;
+    use crate::host::CursorReadCall;
     use crate::host::FakeCurrentEditorPort;
+    use crate::host::FakeCursorReadPort;
+    use crate::host::api;
+    use crate::position::BufferLine;
+    use crate::position::CursorObservation;
+    use crate::position::ScreenCell;
+    use crate::position::SurfaceId;
+    use crate::position::ViewportBounds;
+    use crate::position::WindowSurfaceSnapshot;
+    use nvim_oxi::Dictionary;
+    use nvim_oxi::Object;
     use pretty_assertions::assert_eq;
+
+    fn surface_snapshot(window_handle: i64, buffer_handle: i64) -> WindowSurfaceSnapshot {
+        WindowSurfaceSnapshot::new(
+            SurfaceId::new(window_handle, buffer_handle).expect("surface id"),
+            BufferLine::new(1).expect("topline"),
+            0,
+            0,
+            ScreenCell::new(1, 1).expect("origin"),
+            ViewportBounds::new(24, 80).expect("viewport"),
+        )
+    }
+
+    fn screenpos_object(row: i64, col: i64) -> Object {
+        let mut dict = Dictionary::new();
+        dict.insert("row", Object::from(row));
+        dict.insert("col", Object::from(col));
+        Object::from(dict)
+    }
+
+    fn capture_with_current_surface(
+        host: &FakeCurrentEditorPort,
+        window: &api::Window,
+        buffer: &api::Buffer,
+        surface: WindowSurfaceSnapshot,
+    ) -> IngressObservationSurfaceCapture {
+        ingress_observation_surface_capture_with_reader(
+            host,
+            window,
+            buffer,
+            Some(surface),
+            None,
+            "n".to_string(),
+            |_| unreachable!("current surface should bypass fallback surface reads"),
+        )
+    }
+
+    #[test]
+    fn current_cursor_observation_for_fast_path_returns_captured_cursor() {
+        let host = FakeCursorReadPort::default();
+        host.set_window_cursor(11, 23, 0);
+        host.push_screenpos(screenpos_object(7, 13));
+
+        let capture = current_cursor_observation_for_fast_path_with(
+            &host,
+            &api::Window::from(11),
+            false,
+            "n",
+            None,
+        );
+
+        assert_eq!(
+            (capture, host.calls(),),
+            (
+                IngressFastPathCursorCapture::Captured(CursorObservation::new(
+                    BufferLine::new(23).expect("positive buffer line"),
+                    ScreenCell::new(7, 13)
+                        .map(crate::position::ObservedCell::Exact)
+                        .expect("one-based screen cell"),
+                )),
+                vec![
+                    CursorReadCall::WindowCursor { window_handle: 11 },
+                    CursorReadCall::Screenpos {
+                        window_handle: 11,
+                        line: 23,
+                        col1: 1,
+                    },
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn current_cursor_observation_for_fast_path_classifies_host_read_failure() {
+        let host = FakeCursorReadPort::default();
+
+        let capture = current_cursor_observation_for_fast_path_with(
+            &host,
+            &api::Window::from(11),
+            false,
+            "n",
+            None,
+        );
+
+        assert_eq!(capture, IngressFastPathCursorCapture::HostReadFailed);
+    }
+
+    #[test]
+    fn current_cursor_observation_for_fast_path_classifies_decode_failure() {
+        let host = FakeCursorReadPort::default();
+        host.push_screenpos(Object::from("invalid-screenpos"));
+
+        let capture = current_cursor_observation_for_fast_path_with(
+            &host,
+            &api::Window::from(11),
+            false,
+            "n",
+            None,
+        );
+
+        assert_eq!(capture, IngressFastPathCursorCapture::DecodeFailed);
+    }
 
     #[test]
     fn cursor_autocmd_fast_path_reads_current_handles_through_current_editor_port() {
@@ -476,5 +688,79 @@ mod tests {
             ],
         );
         reset_transient_event_state();
+    }
+
+    #[test]
+    fn ingress_observation_surface_capture_returns_captured_surface_for_matching_handles() {
+        let host = FakeCurrentEditorPort::default();
+        let window = api::Window::from(11);
+        let buffer = api::Buffer::from(17);
+        let surface = surface_snapshot(11, 17);
+
+        assert_eq!(
+            capture_with_current_surface(&host, &window, &buffer, surface),
+            IngressObservationSurfaceCapture::Captured(IngressObservationSurface::new(
+                surface,
+                None,
+                "n".to_string(),
+            )),
+        );
+    }
+
+    #[test]
+    fn ingress_observation_surface_capture_classifies_invalid_current_handles() {
+        let host = FakeCurrentEditorPort::default();
+        let window = api::Window::from(11);
+        let buffer = api::Buffer::from(17);
+        let surface = surface_snapshot(11, 17);
+
+        host.set_window_validity(11, false);
+        assert_eq!(
+            capture_with_current_surface(&host, &window, &buffer, surface),
+            IngressObservationSurfaceCapture::InvalidCurrentWindow,
+        );
+
+        host.set_window_validity(11, true);
+        host.set_buffer_validity(17, false);
+        assert_eq!(
+            capture_with_current_surface(&host, &window, &buffer, surface),
+            IngressObservationSurfaceCapture::InvalidCurrentBuffer,
+        );
+    }
+
+    #[test]
+    fn ingress_observation_surface_capture_classifies_surface_read_failure() {
+        let host = FakeCurrentEditorPort::default();
+        let window = api::Window::from(11);
+        let buffer = api::Buffer::from(17);
+
+        assert_eq!(
+            ingress_observation_surface_capture_with_reader(
+                &host,
+                &window,
+                &buffer,
+                None,
+                None,
+                "n".to_string(),
+                |_| Err(WindowSurfaceReadError::Shell(crate::other_error("surface"))),
+            ),
+            IngressObservationSurfaceCapture::SurfaceReadFailed,
+        );
+    }
+
+    #[test]
+    fn ingress_observation_surface_capture_classifies_buffer_mismatch() {
+        let host = FakeCurrentEditorPort::default();
+        let window = api::Window::from(11);
+        let buffer = api::Buffer::from(17);
+        let surface = surface_snapshot(11, 19);
+
+        assert_eq!(
+            capture_with_current_surface(&host, &window, &buffer, surface),
+            IngressObservationSurfaceCapture::BufferMismatch {
+                expected: BufferHandle::from(17_i64),
+                actual: BufferHandle::from(19_i64),
+            },
+        );
     }
 }

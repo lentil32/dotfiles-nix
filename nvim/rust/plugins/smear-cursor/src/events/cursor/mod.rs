@@ -5,10 +5,12 @@ mod screenpos;
 
 pub(super) use buffer_meta::BufferMetadata;
 pub(in crate::events) use buffer_meta::BufferMetadataCache;
+pub(in crate::events) use color_probe::CursorColorProbeReadError;
 pub(super) use color_probe::sampled_cursor_color_at_current_position;
 pub(super) use screenpos::current_mode;
 pub(super) use screenpos::cursor_observation_for_mode_with_probe_policy;
 pub(in crate::events) use screenpos::cursor_observation_for_mode_with_probe_policy_typed;
+pub(in crate::events) use screenpos::cursor_observation_for_mode_with_probe_policy_typed_with;
 pub(super) use screenpos::smear_outside_cmd_row;
 
 use crate::lua::LuaParseError;
@@ -42,6 +44,8 @@ pub(in crate::events) enum CursorParseError {
         #[source]
         source: LuaParseError,
     },
+    #[error("cursor_color_host_bridge parse failed: color out of range: {value}")]
+    ColorOutOfRange { value: i64 },
 }
 
 #[derive(Debug, thiserror::Error)]

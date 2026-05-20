@@ -14,6 +14,9 @@ use crate::core::types::Generation;
 use crate::events::cursor::CursorReadError;
 use crate::events::cursor::cursor_observation_for_mode_with_probe_policy_typed;
 use crate::events::handlers::viewport::maybe_scroll_shift_for_core_event;
+use crate::events::runtime::EffectExecutionError;
+use crate::events::runtime::EffectExecutionResult;
+use crate::events::runtime::ObservationCancellationReason;
 use crate::events::runtime::buffer_text_revision;
 use crate::events::runtime::editor_viewport_for_bounds;
 use crate::events::runtime::note_cursor_color_observation_boundary;
@@ -70,6 +73,34 @@ impl From<ObservationReadError> for nvim_oxi::Error {
                 crate::host::api::Error::Other(error.to_string()).into()
             }
         }
+    }
+}
+
+impl ObservationReadError {
+    fn cancellation_reason(&self) -> Option<ObservationCancellationReason> {
+        match self {
+            Self::MissingWindow => Some(ObservationCancellationReason::CurrentWindow),
+            Self::MissingBuffer => Some(ObservationCancellationReason::CurrentBuffer),
+            Self::MissingViewport => Some(ObservationCancellationReason::CurrentViewport),
+            Self::Surface(error) if error.is_observation_cancellation_race() => {
+                Some(ObservationCancellationReason::Surface)
+            }
+            Self::Shell(_)
+            | Self::Surface(_)
+            | Self::Cursor(_)
+            | Self::MissingBufferTextRevision => None,
+        }
+    }
+}
+
+impl From<ObservationReadError> for EffectExecutionError {
+    fn from(error: ObservationReadError) -> Self {
+        let cancellation_reason = error.cancellation_reason();
+        let source = nvim_oxi::Error::from(error);
+        if let Some(reason) = cancellation_reason {
+            return Self::benign_observation_cancellation(source, reason);
+        }
+        Self::reportable(source)
     }
 }
 
@@ -340,9 +371,9 @@ fn collect_observation_basis(
 
 pub(crate) fn execute_core_request_observation_base_effect(
     payload: RequestObservationBaseEffect,
-) -> Result<Vec<CoreEvent>> {
+) -> EffectExecutionResult<Vec<CoreEvent>> {
     let (basis, cursor_color_probe_generations, motion) =
-        collect_observation_basis(&payload).map_err(nvim_oxi::Error::from)?;
+        collect_observation_basis(&payload).map_err(EffectExecutionError::from)?;
     Ok(vec![CoreEvent::ObservationBaseCollected(
         ObservationBaseCollectedEvent {
             observation_id: payload.request.observation_id(),
@@ -364,6 +395,10 @@ mod tests {
     use super::current_window_snapshot;
     use super::window_from_ingress_surface;
     use crate::core::state::IngressObservationSurface;
+    use crate::events::runtime::EffectExecutionError;
+    use crate::events::runtime::EffectExecutionFailureKind;
+    use crate::events::runtime::ObservationCancellationReason;
+    use crate::events::surface::WindowSurfaceReadError;
     use crate::host::CurrentEditorCall;
     use crate::host::FakeCurrentEditorPort;
     use crate::host::api;
@@ -588,6 +623,85 @@ mod tests {
             snapshot.current_viewport(),
             Err(ObservationReadError::MissingViewport)
         ));
+    }
+
+    fn assert_benign_observation_cancellation(
+        error: ObservationReadError,
+        expected_reason: ObservationCancellationReason,
+    ) {
+        let error = EffectExecutionError::from(error);
+
+        assert_eq!(
+            error.kind(),
+            EffectExecutionFailureKind::BenignObservationCancellation {
+                reason: expected_reason,
+            }
+        );
+        assert!(
+            !error.should_report_scheduled_work_failure(),
+            "a deferred observation cancellation should recover without warning"
+        );
+    }
+
+    #[test]
+    fn missing_window_read_error_preserves_observation_cancellation_reason() {
+        assert_benign_observation_cancellation(
+            ObservationReadError::MissingWindow,
+            ObservationCancellationReason::CurrentWindow,
+        );
+    }
+
+    #[test]
+    fn missing_buffer_read_error_preserves_observation_cancellation_reason() {
+        assert_benign_observation_cancellation(
+            ObservationReadError::MissingBuffer,
+            ObservationCancellationReason::CurrentBuffer,
+        );
+    }
+
+    #[test]
+    fn missing_viewport_read_error_preserves_observation_cancellation_reason() {
+        assert_benign_observation_cancellation(
+            ObservationReadError::MissingViewport,
+            ObservationCancellationReason::CurrentViewport,
+        );
+    }
+
+    #[test]
+    fn empty_surface_read_result_preserves_surface_cancellation_reason() {
+        assert_benign_observation_cancellation(
+            ObservationReadError::Surface(WindowSurfaceReadError::GetwininfoUnexpectedLen {
+                len: 0,
+            }),
+            ObservationCancellationReason::Surface,
+        );
+    }
+
+    #[test]
+    fn matching_error_text_without_observation_read_type_remains_reportable() {
+        let source: nvim_oxi::Error = api::Error::Other("current window unavailable".into()).into();
+        let error = EffectExecutionError::from(source);
+
+        assert_eq!(error.kind(), EffectExecutionFailureKind::Reportable);
+        assert!(error.should_report_scheduled_work_failure());
+    }
+
+    #[test]
+    fn missing_text_revision_observation_read_error_remains_reportable() {
+        let error = EffectExecutionError::from(ObservationReadError::MissingBufferTextRevision);
+
+        assert_eq!(error.kind(), EffectExecutionFailureKind::Reportable);
+        assert!(error.should_report_scheduled_work_failure());
+    }
+
+    #[test]
+    fn malformed_surface_read_error_remains_reportable() {
+        let error = EffectExecutionError::from(ObservationReadError::Surface(
+            WindowSurfaceReadError::MissingField { field: "width" },
+        ));
+
+        assert_eq!(error.kind(), EffectExecutionFailureKind::Reportable);
+        assert!(error.should_report_scheduled_work_failure());
     }
 
     #[test]

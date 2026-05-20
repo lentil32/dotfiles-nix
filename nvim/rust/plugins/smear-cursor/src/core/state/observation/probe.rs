@@ -117,7 +117,13 @@ pub(crate) enum ProbeReuse {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProbeFailure {
-    ShellReadFailed,
+    MissingWitness,
+    WitnessReadFailed,
+    CacheAccessFailed,
+    MissingRequest,
+    RuntimeAccessFailed,
+    HostBridgeFailed,
+    DecodeFailed,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

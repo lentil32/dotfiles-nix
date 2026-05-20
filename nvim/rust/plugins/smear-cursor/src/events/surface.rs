@@ -23,8 +23,8 @@ pub(crate) enum WindowSurfaceReadError {
     Shell(#[from] nvim_oxi::Error),
     #[error("getwininfo returned invalid list")]
     GetwininfoInvalidList,
-    #[error("getwininfo returned unexpected list length")]
-    GetwininfoUnexpectedLen,
+    #[error("getwininfo returned unexpected list length {len}")]
+    GetwininfoUnexpectedLen { len: usize },
     #[error("getwininfo returned invalid dictionary")]
     GetwininfoDictionary,
     #[error("getwininfo missing {field}")]
@@ -55,6 +55,17 @@ pub(crate) enum WindowSurfaceReadError {
 impl From<crate::host::api::Error> for WindowSurfaceReadError {
     fn from(error: crate::host::api::Error) -> Self {
         Self::Shell(error.into())
+    }
+}
+
+impl WindowSurfaceReadError {
+    pub(crate) fn is_observation_cancellation_race(&self) -> bool {
+        matches!(
+            self,
+            Self::Shell(_)
+                | Self::GetwininfoUnexpectedLen { len: 0 }
+                | Self::InvalidSurfaceId { .. }
+        )
     }
 }
 
@@ -91,10 +102,12 @@ fn getwininfo_dict(
     host: &impl WindowSurfacePort,
     window: &api::Window,
 ) -> WindowSurfaceReadResult<Dictionary> {
-    let [entry]: [Object; 1] = Vec::<Object>::from_object(host.getwininfo(window)?)
-        .map_err(|_| WindowSurfaceReadError::GetwininfoInvalidList)?
+    let entries = Vec::<Object>::from_object(host.getwininfo(window)?)
+        .map_err(|_| WindowSurfaceReadError::GetwininfoInvalidList)?;
+    let len = entries.len();
+    let [entry]: [Object; 1] = entries
         .try_into()
-        .map_err(|_| WindowSurfaceReadError::GetwininfoUnexpectedLen)?;
+        .map_err(|_| WindowSurfaceReadError::GetwininfoUnexpectedLen { len })?;
     Dictionary::from_object(entry).map_err(|_| WindowSurfaceReadError::GetwininfoDictionary)
 }
 
@@ -198,8 +211,12 @@ mod tests {
         ])
     }
 
+    fn getwininfo_entries(entries: impl IntoIterator<Item = Object>) -> Object {
+        Object::from(Array::from_iter(entries))
+    }
+
     fn getwininfo_object(dict: Dictionary) -> Object {
-        Object::from(Array::from_iter([Object::from(dict)]))
+        getwininfo_entries([Object::from(dict)])
     }
 
     #[test]
@@ -227,6 +244,45 @@ mod tests {
                     WindowSurfaceCall::WindowBufferHandle { window_handle: 11 },
                 ],
             )
+        );
+    }
+
+    #[test]
+    fn current_window_surface_snapshot_preserves_empty_getwininfo_length() {
+        let host = FakeWindowSurfacePort::default();
+        host.push_getwininfo(getwininfo_entries(std::iter::empty::<Object>()));
+
+        let error = current_window_surface_snapshot_with(&host, &api::Window::from(11))
+            .expect_err("empty getwininfo result should be rejected");
+
+        assert!(matches!(
+            error,
+            WindowSurfaceReadError::GetwininfoUnexpectedLen { len: 0 }
+        ));
+        assert!(
+            error.is_observation_cancellation_race(),
+            "an empty getwininfo result is the closed-window surface race shape"
+        );
+    }
+
+    #[test]
+    fn current_window_surface_snapshot_preserves_multi_entry_getwininfo_length() {
+        let host = FakeWindowSurfacePort::default();
+        host.push_getwininfo(getwininfo_entries([
+            Object::from(canonical_getwininfo_dict()),
+            Object::from(canonical_getwininfo_dict()),
+        ]));
+
+        let error = current_window_surface_snapshot_with(&host, &api::Window::from(11))
+            .expect_err("multi-entry getwininfo result should be rejected");
+
+        assert!(matches!(
+            error,
+            WindowSurfaceReadError::GetwininfoUnexpectedLen { len: 2 }
+        ));
+        assert!(
+            !error.is_observation_cancellation_race(),
+            "a malformed multi-entry getwininfo result should remain reportable"
         );
     }
 

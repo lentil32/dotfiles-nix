@@ -435,7 +435,7 @@ pub(in crate::events) fn cursor_observation_for_mode_with_probe_policy_typed(
     )
 }
 
-fn cursor_observation_for_mode_with_probe_policy_typed_with(
+pub(in crate::events) fn cursor_observation_for_mode_with_probe_policy_typed_with(
     host: &impl CursorReadPort,
     window: &api::Window,
     mode: &str,
