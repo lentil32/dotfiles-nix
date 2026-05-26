@@ -46,7 +46,10 @@ let
       desc = "OpenAI Codex Desktop";
       cask = "codex-app";
     }
-    { cask = "steipete/tap/codexbar"; }
+    {
+      desc = "Menu bar usage monitor for Codex and Claude";
+      cask = "codexbar";
+    }
     { formulae = "ollama"; }
     {
       desc = "Agent terminal notifications + voice packs";
@@ -64,11 +67,6 @@ let
     { formulae = "yt-dlp"; }
 
     # Media
-    { cask = "anki"; }
-    {
-      desc = "Video player";
-      cask = "iina";
-    }
     { cask = "ogdesign-eagle"; }
     { cask = "transmission"; }
     {

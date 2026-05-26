@@ -24,6 +24,7 @@ local M = {}
 
 ---@class SnacksPreviewBridge.ImagePlacementApi
 ---@field new fun(buf: integer, src: string, opts: table): SnacksPreviewBridge.Placement
+---@field clean fun(buf?: integer)
 
 ---@class SnacksPreviewBridge.ImageModule
 ---@field config SnacksPreviewBridge.ImageConfig
@@ -47,6 +48,15 @@ local function fail(reason)
   return nil, reason
 end
 
+-- Preview windows load snacks.image before the scheduled config patch may run,
+-- so force the local image cleanup patches before creating placements here.
+local function install_image_patches()
+  local ok, image_opts = pcall(require, "myLuaConf.plugins.snacks_image")
+  if ok and type(image_opts) == "table" and type(image_opts.install_patches) == "function" then
+    pcall(image_opts.install_patches)
+  end
+end
+
 ---@param args SnacksPreviewBridge.Args
 ---@return fun()|nil cleanup
 ---@return string|nil err
@@ -65,6 +75,7 @@ function M.snacks_open_preview(args)
   if type(win_module) ~= "table" or type(image_module) ~= "table" then
     return fail("snacks image preview API unavailable")
   end
+  install_image_patches()
   ---@cast win_module SnacksPreviewBridge.WinModule
   ---@cast image_module SnacksPreviewBridge.ImageModule
   if not (win_module.resolve and image_module.placement and image_module.placement.new and image_module.config) then
@@ -130,18 +141,27 @@ function M.snacks_open_preview(args)
   end)
   if not ok_placement or not placement or type(placement) ~= "table" then
     pcall(function()
-      win:close()
+      win:close({ buf = true })
     end)
     return fail("failed to create image placement")
   end
   ---@cast placement SnacksPreviewBridge.Placement
 
+  local preview_buf = win.buf
+  local cleaned = false
   local function cleanup()
+    if cleaned then
+      return
+    end
+    cleaned = true
     pcall(function()
       placement:close()
     end)
     pcall(function()
-      win:close()
+      image_module.placement.clean(preview_buf)
+    end)
+    pcall(function()
+      win:close({ buf = true })
     end)
   end
   return cleanup, nil

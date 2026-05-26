@@ -43,7 +43,14 @@
     nixCats.url = "github:BirdeeHub/nixCats-nvim";
 
     # Homebrew management
-    nix-homebrew.url = "github:zhaofengli/nix-homebrew";
+    brew-src = {
+      url = "github:Homebrew/brew/5.1.14";
+      flake = false;
+    };
+    nix-homebrew = {
+      url = "github:zhaofengli/nix-homebrew";
+      inputs.brew-src.follows = "brew-src";
+    };
 
     nur = {
       url = "github:nix-community/NUR";
@@ -79,10 +86,6 @@
       url = "github:PeonPing/homebrew-tap";
       flake = false;
     };
-    homebrew-steipete = {
-      url = "github:steipete/homebrew-tap";
-      flake = false;
-    };
   };
 
   outputs =
@@ -109,7 +112,6 @@
       homebrew-anomalyco,
       homebrew-wordbricks,
       homebrew-peonping,
-      homebrew-steipete,
       nixCats,
       ...
     }@inputs:
@@ -277,7 +279,6 @@
                   "anomalyco/homebrew-tap" = homebrew-anomalyco;
                   "wordbricks/homebrew-tap" = homebrew-wordbricks;
                   "peonping/homebrew-tap" = homebrew-peonping;
-                  "steipete/homebrew-tap" = homebrew-steipete;
                 };
               };
             }

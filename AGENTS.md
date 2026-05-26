@@ -2,6 +2,7 @@
 
 ```bash
 make               # Build and apply the system configuration (darwin)
+make help          # See all make commands
 make darwin-debug  # Build with verbose tracing
 make fmt           # Format Nix files via nixfmt (treefmt)
 make check         # Run flake checks

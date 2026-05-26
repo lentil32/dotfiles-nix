@@ -3,6 +3,8 @@ local colorscheme = require("myLuaConf.colorscheme")
 local oil = require("myLuaConf.oil")
 ---@module "nvimrs_plugin_util"
 local plugin_util = require("nvimrs_plugin_util")
+---@module "nvimrs_autocmds"
+local nvimrs_autocmds = require("nvimrs_autocmds")
 local project = require("myLuaConf.project")
 ---@module "nvimrs_readline"
 local readline = require("nvimrs_readline")
@@ -163,7 +165,7 @@ function M.list()
       end,
       desc = "Search project (word)",
     },
-    { "<leader><Tab>", "<cmd>b#<cr>", desc = "Last buffer" },
+    { "<leader><Tab>", nvimrs_autocmds.switch_to_last_buffer, desc = "Last buffer" },
     {
       "<leader>'",
       function()
@@ -636,6 +638,7 @@ function M.list()
 
   add({
     -- Window
+    { "<leader><leader>", "<cmd>wincmd w<cr>", desc = "Next window" },
     { "<leader>w", group = "window" },
     { "<leader>wx", plugin_util.kill_window_and_buffer, desc = "Close window" },
     { "<leader>wo", "<cmd>only<cr>", desc = "Only window" },

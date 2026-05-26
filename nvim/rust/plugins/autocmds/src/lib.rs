@@ -2,6 +2,7 @@ mod integrations;
 mod machines;
 mod types;
 
+use machines::buffer_mru::BufferMruState;
 use machines::oil_last_buf::OilLastBufEvent;
 use machines::oil_last_buf::OilLastBufState;
 use nvim_oxi::Array;
@@ -42,6 +43,7 @@ const LOG_CONTEXT: &str = "autocmds";
 
 #[derive(Default)]
 struct AutocmdState {
+    buffer_mru: BufferMruState,
     oil_last_buf: OilLastBufState,
 }
 
@@ -264,6 +266,63 @@ fn is_valid_buffer_handle(handle: BufHandle) -> bool {
     handle.valid_buffer().is_some()
 }
 
+fn buffer_is_listed(buf: &Buffer) -> bool {
+    let opt_opts = OptionOpts::builder().buf(buf.clone()).build();
+    api::get_option_value::<bool>("buflisted", &opt_opts).unwrap_or(false)
+}
+
+fn is_oil_buffer_name(name: &str) -> bool {
+    name.starts_with("oil://")
+}
+
+fn should_track_buffer_mru(buf: &Buffer, name: &str) -> bool {
+    buf.is_valid() && (buffer_is_listed(buf) || is_oil_buffer_name(name))
+}
+
+fn track_buffer_mru(buf: &Buffer, name: &str) {
+    if !should_track_buffer_mru(buf, name) {
+        return;
+    }
+    let mut state = state_lock();
+    state.buffer_mru.enter(BufHandle::from_buffer(buf));
+}
+
+fn track_current_buffer_mru() {
+    let buf = api::get_current_buf();
+    let Ok(name) = buf.get_name() else {
+        return;
+    };
+    track_buffer_mru(&buf, name.to_string_lossy().as_ref());
+}
+
+fn buffer_mru_candidate(buf_handle: BufHandle) -> bool {
+    let Some(buf) = buf_handle.valid_buffer() else {
+        return false;
+    };
+    let Ok(name) = buf.get_name() else {
+        return false;
+    };
+    should_track_buffer_mru(&buf, name.to_string_lossy().as_ref())
+}
+
+fn switch_to_last_buffer() -> Result<()> {
+    let current = BufHandle::from_buffer(&api::get_current_buf());
+    let target = {
+        let mut state = state_lock();
+        state
+            .buffer_mru
+            .previous_buffer(current, buffer_mru_candidate)
+    };
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let Some(buf) = target.valid_buffer() else {
+        return Ok(());
+    };
+    api::set_current_buf(&buf)?;
+    Ok(())
+}
+
 fn apply_oil_last_buf_event(event: OilLastBufEvent) {
     let mut state = state_lock();
     let _ = state.oil_last_buf.reduce(event);
@@ -310,8 +369,10 @@ fn on_file_cwd(args: &AutocmdCallbackArgs) -> Result<AutocmdAction> {
     let name = args.buffer.get_name()?;
     let name = name.to_string_lossy();
 
+    track_buffer_mru(&args.buffer, name.as_ref());
+
     // Oil buffers use URI names and non-file buftype; route before generic file handling.
-    if name.starts_with("oil://") {
+    if is_oil_buffer_name(name.as_ref()) {
         return on_oil_buf(args);
     }
 
@@ -356,6 +417,8 @@ fn on_win_closed(args: &AutocmdCallbackArgs) -> AutocmdAction {
 fn on_buf_wipeout(args: &AutocmdCallbackArgs) -> AutocmdAction {
     let buf_handle = BufHandle::from_buffer(&args.buffer);
     apply_oil_last_buf_event(OilLastBufEvent::BufWiped { buf: buf_handle });
+    let mut state = state_lock();
+    state.buffer_mru.wipe(buf_handle);
     AutocmdAction::Keep
 }
 
@@ -451,6 +514,7 @@ fn setup() -> Result<()> {
     setup_oil_last_buf_autocmds()?;
     setup_oil_rename_autocmd()?;
     integrations::setup_wezterm_autocmd()?;
+    track_current_buffer_mru();
     Ok(())
 }
 
@@ -461,6 +525,10 @@ fn nvimrs_autocmds() -> Dictionary {
     api.insert(
         "oil_last_buf_for_win",
         Function::<Option<i64>, Option<i64>>::from_fn(oil_last_buf_for_win),
+    );
+    api.insert(
+        "switch_to_last_buffer",
+        Function::<(), ()>::from_fn(|()| switch_to_last_buffer()),
     );
     api
 }
