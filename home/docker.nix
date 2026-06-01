@@ -3,7 +3,7 @@
   # Docker-related packages
   home.packages = [
     pkgs-unstable.colima # Docker runtime with minimal setup
-    pkgs.docker # Docker CLI and engine
+    pkgs.docker_29 # Docker CLI and engine
     pkgs.hadolint # Docker linter
     pkgs.docker-buildx # Docker Buildx for multi-platform builds
   ];
