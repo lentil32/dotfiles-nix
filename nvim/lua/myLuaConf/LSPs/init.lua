@@ -96,7 +96,7 @@ require("lze").load({
       require("lazydev").setup({
         library = {
           { path = "monokai-pro.nvim", mods = { "monokai-pro" } },
-          { words = { "nixCats" }, path = nixCats.nixCatsPath .. "/lua" },
+          { words = { "nixCats" },     path = nixCats.nixCatsPath .. "/lua" },
           {
             path = nixCats.nixCatsPath .. "/lua/myLuaConf/types",
             mods = {
@@ -210,6 +210,22 @@ require("lze").load({
     lsp = {
       filetypes = { "yaml" },
       on_attach = on_attach_without_formatting,
+    },
+  },
+  {
+    "astro",
+    enabled = nixCats("lsp") or false,
+    lsp = {
+      cmd = { "astro-ls", "--stdio" },
+      filetypes = { "astro" },
+      on_attach = on_attach_without_formatting,
+      root_markers = {
+        "astro.config.mjs",
+        "astro.config.ts",
+        "package.json",
+        "tsconfig.json",
+        ".git",
+      },
     },
   },
   {

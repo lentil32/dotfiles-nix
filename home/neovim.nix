@@ -227,6 +227,7 @@ in
               vim.lazydev-nvim
             ];
             runtimeDeps = [
+              p.astro-language-server
               p.nil
               p.rust-analyzer
               p.emmylua-ls
