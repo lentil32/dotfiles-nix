@@ -75,7 +75,18 @@ let
     }
 
     # Development
-    { cask = "cyberduck"; }
+    {
+      desc = "Android SDK command-line tools for sdkmanager and avdmanager";
+      cask = "android-commandlinetools";
+    }
+    {
+      desc = "Android platform tools for adb and fastboot";
+      cask = "android-platform-tools";
+    }
+    {
+      desc = "Java runtime used by Android command-line tools";
+      formulae = "openjdk";
+    }
     {
       desc = "Python needs arm64 version";
       formulae = "libb2";

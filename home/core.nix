@@ -228,14 +228,15 @@ in
     java.enable = true;
     mise = {
       enable = true;
+      package = pkgs-unstable.mise;
       enableZshIntegration = true;
       globalConfig = {
-        alias = {
-          nix = "aqua:https://github.com/joshbode/mise-nix";
-        };
         settings = {
           experimental = true;
-          idiomatic_version_file_enable_tools = [ "bun" ];
+          idiomatic_version_file_enable_tools = [
+            "bun"
+            "node"
+          ];
         };
         # Not works yet... due to hook non-existence
         # tools = {
