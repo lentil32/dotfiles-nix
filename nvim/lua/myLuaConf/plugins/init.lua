@@ -157,6 +157,11 @@ lze.load({
       local sidekick = require("sidekick")
       local sidekick_opts = {
         cli = {
+          tools = {
+            codex = {
+              cmd = { "mise", "exec", "--", "codex" },
+            },
+          },
           win = {
             keys = {
               close_wx = { "<leader>wx", "close", mode = "n", desc = "Close Sidekick" },
