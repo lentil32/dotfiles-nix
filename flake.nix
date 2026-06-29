@@ -141,12 +141,31 @@
 
       defaultMachine = machines.${m5ProHost};
 
+      miseOciLayerTestWorkaround = _final: prev: {
+        mise = prev.mise.overrideAttrs (old: {
+          checkFlags = (old.checkFlags or [ ]) ++ [
+            # TODO: Remove when the upstream nixpkgs fix is merged:
+            # https://github.com/NixOS/nixpkgs/pull/534965
+            # Darwin sandboxing strips special permission bits in this
+            # upstream test, matching the existing Linux skip reason.
+            "--skip=oci::layer::tests::preserve_metadata_dir_layer_keeps_special_permission_bits"
+          ];
+        });
+      };
+
+      pkgsUnstableFor =
+        system:
+        import nixpkgs-unstable {
+          inherit system;
+          overlays = [ miseOciLayerTestWorkaround ];
+        };
+
       nixpkgsConfig = {
         overlays = [
           rust-overlay.overlays.default
           nur.overlays.default
-          (final: prev: {
-            pkgs-unstable = nixpkgs-unstable.legacyPackages.${prev.system};
+          (_final: prev: {
+            pkgs-unstable = pkgsUnstableFor prev.stdenv.hostPlatform.system;
           })
         ];
       };
@@ -167,7 +186,7 @@
         inherit (defaultMachine) system;
         inherit (nixpkgsConfig) overlays;
       };
-      pkgs-unstable = nixpkgs-unstable.legacyPackages.${defaultMachine.system};
+      pkgs-unstable = pkgsUnstableFor defaultMachine.system;
       craneLib = crane.mkLib pkgs;
       rustSrc = craneLib.cleanCargoSource ./nvim/rust;
       rustLockHashes = import ./nvim/rust/lock-hashes.nix;
