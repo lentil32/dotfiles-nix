@@ -52,6 +52,13 @@ impl ScheduledDrainHarness {
         );
     }
 
+    pub(super) fn stage_non_coalescible_waves(&self, count: usize) {
+        self.stage_effect_batches(
+            (0..count).map(|_| vec![non_coalescible_effect()]),
+            "non-coalescible waves",
+        );
+    }
+
     pub(super) fn queued_work_count(&self) -> usize {
         queued_work_count()
     }

@@ -306,8 +306,13 @@ pub(crate) struct CompactRenderWindowsSummary {
     pub(crate) closed_visible_windows: usize,
     pub(crate) pruned_windows: usize,
     pub(crate) invalid_removed_windows: usize,
+    pub(crate) cleared_prepaint_overlays: usize,
+    pub(crate) cleared_quarantined_resources: usize,
+    pub(crate) teardown_attempts: usize,
     pub(crate) has_visible_windows_after: bool,
     pub(crate) has_pending_work_after: bool,
+    pub(crate) potential_visual_change: bool,
+    pub(crate) close_stalled: bool,
 }
 
 impl CompactRenderWindowsSummary {
@@ -318,13 +323,15 @@ impl CompactRenderWindowsSummary {
     }
 
     pub(crate) fn had_visual_change(self) -> bool {
-        self.closed_visible_windows > 0
+        self.potential_visual_change
     }
 
     pub(crate) fn made_progress(self) -> bool {
         self.closed_visible_windows > 0
             || self.pruned_windows > 0
             || self.invalid_removed_windows > 0
+            || self.cleared_prepaint_overlays > 0
+            || self.cleared_quarantined_resources > 0
     }
 }
 
@@ -388,6 +395,10 @@ impl Default for TabWindows {
 }
 
 impl TabWindows {
+    pub(crate) fn tracked_resource_handles(&self) -> impl Iterator<Item = WindowBufferHandle> + '_ {
+        self.windows.iter().map(|cached| cached.handles)
+    }
+
     pub(crate) fn cached_payload_matches(&self, window_id: i32, payload_hash: u64) -> bool {
         self.payload_by_window
             .get(&window_id)

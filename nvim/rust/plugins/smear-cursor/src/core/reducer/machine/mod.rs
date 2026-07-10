@@ -18,6 +18,7 @@ use observation::reduce_initialize;
 use observation::reduce_observation_base_collected;
 use observation::reduce_probe_reported;
 pub(crate) use planning::build_planned_render;
+use timers::reduce_timer_lost_with_token;
 use timers::reduce_timer_signal_with_token;
 
 pub(crate) fn reduce_owned(state: CoreState, event: Event) -> Transition {
@@ -39,7 +40,7 @@ pub(crate) fn reduce_owned(state: CoreState, event: Event) -> Transition {
             reduce_timer_signal_with_token(state, payload.token, payload.observed_at)
         }
         Event::TimerLostWithToken(payload) => {
-            reduce_timer_signal_with_token(state, payload.token, payload.observed_at)
+            reduce_timer_lost_with_token(state, payload.token, payload.observed_at)
         }
         Event::EffectFailed(payload) => reduce_effect_failed(state, payload),
     }

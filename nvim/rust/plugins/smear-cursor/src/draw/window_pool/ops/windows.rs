@@ -66,14 +66,14 @@ fn close_cached_window(
         log_draw_error("clear cached render namespace", &err);
     }
     if let Some(window) = window_from_handle_i32(handles.window_id) {
-        outcome = outcome.merge(crate::draw::close_floating_window_with(
+        outcome = outcome.merge(crate::draw::close_floating_window_with_autocmds_suppressed(
             &host,
             window,
             "close cached render window",
         ));
     }
     if let Some(buffer) = buffer.take() {
-        outcome = outcome.merge(crate::draw::delete_floating_buffer_with(
+        outcome = outcome.merge(crate::draw::delete_floating_buffer_with_autocmds_suppressed(
             &host,
             buffer,
             "delete cached render buffer",

@@ -204,7 +204,7 @@ mod state_ownership_doc_sync {
             "`RuntimeState.target` owns target `position`, `shape`, `tracked_cursor`, and `retarget_epoch`. `CursorTarget::retarget_key()` derives the reviewable equality surface, including the discrete target cell and retarget surface, so those derived facts are not stored separately. Target corners are derived on demand by `CursorTarget::corners()`.",
             "`ProtocolSharedState.demand` owns at most one pending `ExternalDemand` per `ExternalDemandKind`; same-kind ingress coalesces in place while dequeue order is still derived from the occupied demand sequences.",
             "`ProtocolSharedState.timers` owns timer-slot generations and armed/disarmed lifecycle state. `TimerToken`s are derived views of the currently armed slots, not a second stored owner.",
-            "`ProtocolSharedState.render_cleanup` owns cleanup thermal phase and deadlines only through `RenderCleanupState::{Hot, Cooling, Cold}`. Retention budgets are derived from the current runtime config instead of being copied into scheduler state.",
+            "`ProtocolSharedState.render_cleanup` owns cleanup thermal phase, deadlines, and timer-rearm quiescence only through `RenderCleanupState::{Hot, Cooling, Cold}`. Retention and per-tick resource-teardown attempt budgets are derived from the current runtime config instead of being copied into scheduler state.",
             "`ProtocolState.phase` is the only workflow owner. There is no separate workflow/slot matrix.",
             "Identity is derived only from the observation root demand sequence: `PendingObservation.demand.seq()` while collecting and `ObservationSnapshot.demand.seq()` once active. `ObservationId` accessors compute from that root; neither the snapshot nor active probe lifecycle state stores a mirrored current-observation id.",
             "`PendingObservation.requested_probes` is the only owner of probe policy before activation. `ObservationSnapshot::new()` consumes it to initialize active probe lifecycle state. The policy chooses freshness, reuse, and fallback cost only; it does not choose between raw and projected cursor coordinate systems.",
@@ -231,7 +231,7 @@ mod state_ownership_doc_sync {
             "Current mode, current window, current buffer, and current-handle validity checks used by lifecycle and ingress observation code cross through `CurrentEditorPort`.",
             "`WindowSurfaceSnapshot` is parsed by `src/events/surface.rs` from `getwininfo` and window-buffer host reads that cross through `WindowSurfacePort`.",
             "Cursor observation reads for window cursor position, `screenpos()`, command-line cursor position, conceal probes, and cursor text-context rows cross through `CursorReadPort`.",
-            "Draw resource creation, option writes, namespace clears, extmark writes, and orphan-resource scans cross the host boundary through `DrawResourcePort`.",
+            "Cleanup and recovery operate only on tracked resources and exact quarantined handles; they never scan unrelated Neovim windows or buffers.",
             "`ShellState.buffer_perf_telemetry_cache` records callback EWMA and probe-pressure signals used to explain or derive future buffer performance policy.",
             "host notification and error output go through `HostLoggingPort` and cannot change reducer events, effects, or state transitions.",
         ];

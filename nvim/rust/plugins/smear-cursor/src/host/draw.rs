@@ -20,7 +20,7 @@ impl FloatingWindowEnter {
     }
 }
 
-pub(crate) trait DrawResourcePort {
+pub(crate) trait DrawResourcePort: super::HostLoggingPort {
     fn eventignore(&self) -> Result<String>;
     fn set_eventignore(&self, value: &str) -> Result<()>;
     fn create_scratch_buffer(&self) -> Result<api::Buffer>;
@@ -52,7 +52,6 @@ pub(crate) trait DrawResourcePort {
         name: &str,
         value: i64,
     ) -> Result<()>;
-    fn buffer_string_option(&self, buffer: &api::Buffer, name: &str) -> Result<String>;
     fn clear_buffer_namespace(
         &self,
         buffer: &mut api::Buffer,
@@ -67,9 +66,6 @@ pub(crate) trait DrawResourcePort {
     fn window_from_handle_i32_unchecked(&self, handle: i32) -> api::Window;
     fn buffer_from_handle_unchecked(&self, handle: BufferHandle) -> Option<api::Buffer>;
     fn current_tab_snapshot(&self) -> HostTabSnapshot;
-    fn list_buffers(&self) -> Vec<api::Buffer>;
-    fn list_windows(&self) -> Vec<api::Window>;
-    fn window_buffer(&self, window: &api::Window) -> Result<api::Buffer>;
     fn set_buffer_extmark(
         &self,
         buffer: &mut api::Buffer,
@@ -163,11 +159,6 @@ impl DrawResourcePort for NeovimHost {
         Ok(())
     }
 
-    fn buffer_string_option(&self, buffer: &api::Buffer, name: &str) -> Result<String> {
-        let opts = api::opts::OptionOpts::builder().buf(buffer.clone()).build();
-        Ok(api::get_option_value(name, &opts)?)
-    }
-
     fn clear_buffer_namespace(
         &self,
         buffer: &mut api::Buffer,
@@ -227,18 +218,6 @@ impl DrawResourcePort for NeovimHost {
         }
     }
 
-    fn list_buffers(&self) -> Vec<api::Buffer> {
-        api::list_bufs().collect()
-    }
-
-    fn list_windows(&self) -> Vec<api::Window> {
-        api::list_wins().collect()
-    }
-
-    fn window_buffer(&self, window: &api::Window) -> Result<api::Buffer> {
-        Ok(window.get_buf()?)
-    }
-
     fn set_buffer_extmark(
         &self,
         buffer: &mut api::Buffer,
@@ -257,6 +236,9 @@ impl DrawResourcePort for NeovimHost {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DrawResourceCall {
+    WriteError {
+        message: String,
+    },
     Eventignore,
     SetEventignore {
         value: String,
@@ -289,10 +271,6 @@ pub(crate) enum DrawResourceCall {
         name: String,
         value: i64,
     },
-    BufferStringOption {
-        buffer: BufferHandle,
-        name: String,
-    },
     ClearBufferNamespace {
         buffer: BufferHandle,
         namespace_id: NamespaceId,
@@ -304,11 +282,6 @@ pub(crate) enum DrawResourceCall {
         window_id: i32,
     },
     CurrentTabSnapshot,
-    ListBuffers,
-    ListWindows,
-    WindowBuffer {
-        window_id: i32,
-    },
     SetBufferExtmark {
         buffer: BufferHandle,
         namespace_id: NamespaceId,
@@ -323,6 +296,8 @@ pub(crate) struct FakeDrawResourcePort {
     calls: std::cell::RefCell<Vec<DrawResourceCall>>,
     eventignore_results: std::cell::RefCell<std::collections::VecDeque<Result<String>>>,
     current_tab_snapshot: std::cell::Cell<HostTabSnapshot>,
+    delete_buffer_failures: std::cell::Cell<usize>,
+    close_window_failures: std::cell::Cell<usize>,
 }
 
 #[cfg(test)]
@@ -335,6 +310,8 @@ impl Default for FakeDrawResourcePort {
                 tab_handle: TabHandle::from_raw_for_test(/*value*/ 1),
                 tab_number: Some(1),
             }),
+            delete_buffer_failures: std::cell::Cell::new(0),
+            close_window_failures: std::cell::Cell::new(0),
         }
     }
 }
@@ -351,8 +328,31 @@ impl FakeDrawResourcePort {
         self.calls.borrow().clone()
     }
 
+    pub(crate) fn fail_next_buffer_delete(&self) {
+        self.delete_buffer_failures
+            .set(self.delete_buffer_failures.get().saturating_add(1));
+    }
+
+    pub(crate) fn fail_next_window_close(&self) {
+        self.close_window_failures
+            .set(self.close_window_failures.get().saturating_add(1));
+    }
+
     fn record(&self, call: DrawResourceCall) {
         self.calls.borrow_mut().push(call);
+    }
+}
+
+#[cfg(test)]
+impl super::HostLoggingPort for FakeDrawResourcePort {
+    fn write_error(&self, message: &str) {
+        self.record(DrawResourceCall::WriteError {
+            message: message.to_owned(),
+        });
+    }
+
+    fn notify(&self, _message: &str, _level: crate::config::LogLevel) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -452,14 +452,6 @@ impl DrawResourcePort for FakeDrawResourcePort {
         Ok(())
     }
 
-    fn buffer_string_option(&self, buffer: &api::Buffer, name: &str) -> Result<String> {
-        self.record(DrawResourceCall::BufferStringOption {
-            buffer: BufferHandle::from_buffer(buffer),
-            name: name.to_owned(),
-        });
-        Ok(String::new())
-    }
-
     fn clear_buffer_namespace(
         &self,
         buffer: &mut api::Buffer,
@@ -476,6 +468,11 @@ impl DrawResourcePort for FakeDrawResourcePort {
         self.record(DrawResourceCall::DeleteBufferForce {
             buffer: BufferHandle::from_buffer(&buffer),
         });
+        if self.delete_buffer_failures.get() > 0 {
+            self.delete_buffer_failures
+                .set(self.delete_buffer_failures.get().saturating_sub(1));
+            return Err(api::Error::Other("injected buffer delete failure".to_owned()).into());
+        }
         Ok(())
     }
 
@@ -483,6 +480,11 @@ impl DrawResourcePort for FakeDrawResourcePort {
         self.record(DrawResourceCall::CloseWindowForce {
             window_id: window.handle(),
         });
+        if self.close_window_failures.get() > 0 {
+            self.close_window_failures
+                .set(self.close_window_failures.get().saturating_sub(1));
+            return Err(api::Error::Other("injected window close failure".to_owned()).into());
+        }
         Ok(())
     }
 
@@ -516,23 +518,6 @@ impl DrawResourcePort for FakeDrawResourcePort {
     fn current_tab_snapshot(&self) -> HostTabSnapshot {
         self.record(DrawResourceCall::CurrentTabSnapshot);
         self.current_tab_snapshot.get()
-    }
-
-    fn list_buffers(&self) -> Vec<api::Buffer> {
-        self.record(DrawResourceCall::ListBuffers);
-        Vec::new()
-    }
-
-    fn list_windows(&self) -> Vec<api::Window> {
-        self.record(DrawResourceCall::ListWindows);
-        Vec::new()
-    }
-
-    fn window_buffer(&self, window: &api::Window) -> Result<api::Buffer> {
-        self.record(DrawResourceCall::WindowBuffer {
-            window_id: window.handle(),
-        });
-        Err(api::Error::Other("fake draw port missing window buffer response".to_owned()).into())
     }
 
     fn set_buffer_extmark(

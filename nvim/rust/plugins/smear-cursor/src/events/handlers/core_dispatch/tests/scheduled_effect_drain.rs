@@ -10,6 +10,7 @@ use super::scheduled_effect_drain_support::scheduled_drain_thermal;
 use super::*;
 use crate::core::effect::OrderedEffect;
 use crate::core::state::RenderThermalState;
+use crate::events::runtime::MAX_SCHEDULED_WORK_ITEMS_PER_EDGE;
 use crate::test_support::proptest::stateful_config;
 use pretty_assertions::assert_eq;
 use proptest::collection::vec;
@@ -222,10 +223,16 @@ fn scheduled_drain_budget_shapes_match_expected_tables() {
             3,
         ),
         (
-            "cooling thermal budget drains the full queued snapshot",
+            "cooling thermal budget yields at the ordinary edge cap",
             BudgetKind::Thermal(RenderThermalState::Cooling),
             40,
-            40,
+            32,
+        ),
+        (
+            "cooling thermal budget clamps a large snapshot to the ordinary edge cap",
+            BudgetKind::Thermal(RenderThermalState::Cooling),
+            117,
+            32,
         ),
     ];
 
@@ -241,6 +248,24 @@ fn scheduled_drain_budget_shapes_match_expected_tables() {
 
         assert_eq!(actual_budget, expected_budget, "{label}");
     }
+}
+
+#[test]
+fn cooling_edge_yields_after_the_ordinary_work_cap() {
+    let harness = ScheduledDrainHarness::with_cleanup_thermal(RenderThermalState::Cooling);
+    harness.stage_non_coalescible_waves(/*count*/ 117);
+    let mut executor = ExecutorPlan::new().build();
+
+    let has_more_items = harness.drain_next_edge(&mut executor);
+
+    assert_eq!(
+        (
+            executor.executed_effects.len(),
+            harness.queued_work_count(),
+            has_more_items,
+        ),
+        (MAX_SCHEDULED_WORK_ITEMS_PER_EDGE, 85, true)
+    );
 }
 
 #[test]

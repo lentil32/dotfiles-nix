@@ -220,12 +220,7 @@ fn clock_discontinuity_transition(state: &mut RuntimeState, mode: &str) -> Curso
     // A broken or oversized wall-clock sample severs motion continuity. Snap reducer truth to the
     // latest target, discard residual tail state and cold particle storage, and force the shell to
     // clear stale smear output.
-    state.start_new_trail_stroke();
-    state.settle_at_target();
-    state.clear_particles();
-    state.release_cleanup_cold_storage();
-    reset_animation_timing(state);
-    state.stop_animation();
+    state.recover_from_clock_discontinuity();
     CursorTransitions::clear_all(mode)
         .with_motion_class(MotionClass::DiscontinuousJump)
         .with_render_cleanup_action(RenderCleanupAction::Schedule)

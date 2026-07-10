@@ -1,6 +1,7 @@
 use super::RuntimeAccessError;
 
 mod cell;
+mod clock;
 mod diagnostics;
 mod diagnostics_lane;
 mod dispatch_queue;
@@ -29,6 +30,7 @@ pub(crate) use cell::flush_redraw_capability;
 pub(super) use cell::read_event_loop_state;
 pub(crate) use cell::restore_draw_prepaint_by_tab;
 pub(crate) use cell::restore_draw_render_tabs;
+pub(crate) use cell::restore_draw_resource_quarantine;
 #[cfg(test)]
 pub(crate) use cell::runtime_render_tab_handles_for_test;
 pub(crate) use cell::set_flush_redraw_capability;
@@ -36,12 +38,15 @@ pub(super) use cell::set_runtime_log_level;
 pub(super) use cell::should_runtime_log;
 pub(crate) use cell::take_draw_prepaint_by_tab;
 pub(crate) use cell::take_draw_render_tabs;
+pub(crate) use cell::take_draw_resource_quarantine;
 pub(super) use cell::with_dispatch_queue;
 pub(super) use cell::with_event_loop_state;
 #[cfg(test)]
 pub(super) use cell::with_event_loop_state_for_test;
 pub(super) use cell::with_runtime_log_file_handle;
 pub(crate) use cell::with_runtime_palette_lane;
+pub(super) use clock::now_ms;
+pub(super) use clock::to_core_millis;
 pub(super) use diagnostics::diagnostics_report;
 pub(super) use diagnostics::reset_transient_event_state;
 pub(super) use diagnostics::validation_counters_report;
@@ -55,6 +60,7 @@ pub(super) use dispatch_queue::ScheduledWorkItem;
 pub(super) use dispatch_queue::ScheduledWorkUnit;
 pub(super) use dispatch_queue::ShellOnlyStep;
 pub(super) use effects::EffectExecutionError;
+#[cfg(test)]
 pub(super) use effects::EffectExecutionFailureKind;
 pub(super) use effects::EffectExecutionResult;
 pub(super) use effects::EffectExecutor;
@@ -181,8 +187,6 @@ pub(super) use telemetry::telemetry_instant_now;
 #[cfg(test)]
 pub(super) use timer_bridge::CoreTimerHandle;
 pub(super) use timers::dispatch_core_timer_fired;
-pub(super) use timers::now_ms;
-pub(super) use timers::to_core_millis;
 
 #[cfg(test)]
 use super::event_loop::reset_for_test as reset_event_loop_for_test;

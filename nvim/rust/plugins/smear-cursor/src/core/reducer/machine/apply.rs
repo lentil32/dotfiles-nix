@@ -22,9 +22,9 @@ use crate::core::event::RenderCleanupAppliedEvent;
 use crate::core::event::RenderCleanupRetainedResourcesObservedEvent;
 use crate::core::event::RenderPlanComputedEvent;
 use crate::core::event::RenderPlanFailedEvent;
-use crate::core::runtime_reducer::render_cleanup_delay_ms;
 use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
-use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
+use crate::core::runtime_reducer::render_cleanup_max_teardown_attempts_per_tick;
+use crate::core::runtime_reducer::render_cleanup_retry_policy;
 use crate::core::state::CoreState;
 use crate::core::state::ProtocolPhaseKind;
 use crate::core::state::QueuedDemand;
@@ -114,17 +114,16 @@ pub(super) fn reduce_render_cleanup_applied(
     }
 
     let previous_cleanup = state.render_cleanup();
-    let next_progress_compaction_delay_ms = render_cleanup_delay_ms(&state.runtime().config);
     let next_cleanup = cleanup_state_after_applied(
         previous_cleanup,
         payload.action,
         payload.observed_at,
-        next_progress_compaction_delay_ms,
+        &state.runtime().config,
     );
     let next_realization = state.realization().clone().cleanup_applied();
     let next_cleanup_target_budget = render_cleanup_idle_target_budget(&state.runtime().config);
-    let next_cleanup_max_prune_per_tick =
-        render_cleanup_max_prune_per_tick(&state.runtime().config);
+    let next_cleanup_max_teardown_attempts_per_tick =
+        render_cleanup_max_teardown_attempts_per_tick(&state.runtime().config);
     let cleanup_converged_to_cold = !matches!(
         previous_cleanup,
         crate::core::state::RenderCleanupState::Cold
@@ -134,6 +133,9 @@ pub(super) fn reduce_render_cleanup_applied(
         .with_render_cleanup(next_cleanup);
     if cleanup_converged_to_cold {
         next_state.runtime_mut().release_cleanup_cold_storage();
+    }
+    if next_cleanup.timer_rearm_is_quiesced() {
+        return Transition::stay_owned(next_state);
     }
     if matches!(
         payload.action,
@@ -148,7 +150,7 @@ pub(super) fn reduce_render_cleanup_applied(
                 ApplyRenderCleanupEffect {
                     execution: RenderCleanupExecution::CompactToBudget {
                         target_budget: next_cleanup_target_budget,
-                        max_prune_per_tick: next_cleanup_max_prune_per_tick,
+                        max_teardown_attempts_per_tick: next_cleanup_max_teardown_attempts_per_tick,
                     },
                 },
             )],
@@ -194,14 +196,18 @@ pub(super) fn reduce_render_cleanup_retained_resources_observed(
         return Transition::stay_owned(state);
     }
 
-    let retry_delay_ms = render_cleanup_delay_ms(&state.runtime().config);
+    let retry_policy = render_cleanup_retry_policy(&state.runtime().config);
     let previous_cleanup = state.render_cleanup();
     let next_cleanup = previous_cleanup
-        .retry_hard_purge_after_observed_retained_resources(payload.observed_at, retry_delay_ms);
+        .retry_hard_purge_after_observed_retained_resources(payload.observed_at, retry_policy);
     let next_realization = state.realization().clone().cleanup_applied();
     let next_state = state
         .with_realization(next_realization)
         .with_render_cleanup(next_cleanup);
+
+    if next_cleanup.timer_rearm_is_quiesced() {
+        return Transition::stay_owned(next_state);
+    }
 
     if next_cleanup == previous_cleanup
         && next_state.timers().active_token(TimerId::Cleanup).is_some()

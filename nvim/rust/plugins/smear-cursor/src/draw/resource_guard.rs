@@ -6,6 +6,9 @@ use super::prepaint::close_prepaint_overlay;
 use super::prepaint::retained_prepaint_overlay_after_close;
 use super::prepaint::valid_prepaint_handles;
 use super::resource_close::TrackedWindowBufferCloseOutcome;
+use super::resource_quarantine::quarantine_buffer;
+use super::resource_quarantine::quarantine_window;
+use crate::host::BufferHandle;
 use crate::host::NamespaceId;
 use crate::host::TabHandle;
 use crate::host::api;
@@ -91,20 +94,29 @@ impl Drop for StagedFloatingWindow {
         let Some(buffer) = self.buffer.take() else {
             return;
         };
-        delete_floating_buffer(buffer, self.delete_buffer_context);
+        let buffer_handle = BufferHandle::from_buffer(&buffer);
+        let outcome = delete_floating_buffer(buffer, self.delete_buffer_context);
+        if outcome.should_retain() {
+            quarantine_buffer(buffer_handle);
+        }
     }
 }
 
 impl Drop for AttachedFloatingWindow {
     fn drop(&mut self) {
         if let Some(window) = self.window.take() {
-            let _ = close_floating_window(window, self.close_window_context);
+            let window_id = window.handle();
+            if close_floating_window(window, self.close_window_context).should_retain() {
+                quarantine_window(window_id);
+            }
         }
 
-        let Some(buffer) = self.buffer.take() else {
-            return;
-        };
-        delete_floating_buffer(buffer, self.delete_buffer_context);
+        if let Some(buffer) = self.buffer.take() {
+            let buffer_handle = BufferHandle::from_buffer(&buffer);
+            if delete_floating_buffer(buffer, self.delete_buffer_context).should_retain() {
+                quarantine_buffer(buffer_handle);
+            }
+        }
     }
 }
 

@@ -70,11 +70,13 @@ pub(crate) use runtime::record_projection_reuse_hit;
 pub(crate) use runtime::record_projection_reuse_miss;
 pub(crate) use runtime::restore_draw_prepaint_by_tab;
 pub(crate) use runtime::restore_draw_render_tabs;
+pub(crate) use runtime::restore_draw_resource_quarantine;
 #[cfg(test)]
 pub(crate) use runtime::runtime_render_tab_handles_for_test;
 pub(crate) use runtime::set_flush_redraw_capability;
 pub(crate) use runtime::take_draw_prepaint_by_tab;
 pub(crate) use runtime::take_draw_render_tabs;
+pub(crate) use runtime::take_draw_resource_quarantine;
 pub(crate) use runtime::with_runtime_palette_lane;
 pub(crate) use timers::on_core_timer_fired_event;
 pub(crate) use timers::schedule_guarded;

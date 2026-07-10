@@ -125,6 +125,8 @@ pub(super) struct TimerBridge {
     // shell-side witnesses needed to allocate, cancel, and retry host callbacks.
     handles: CoreTimerHandles,
     pending_retries: PendingCoreTimerRetries,
+    // Delayed host callbacks can outlive a transient reset, so this process-lifetime allocator
+    // must stay monotone while handles and retries are cleared.
     next_host_callback_id: u64,
 }
 
@@ -164,14 +166,12 @@ impl TimerBridge {
     pub(super) fn reset_transient(&mut self) -> Vec<CoreTimerHandle> {
         let handles = self.clear_handles();
         self.clear_pending_retries();
-        self.next_host_callback_id = 0;
         handles
     }
 
     pub(super) fn clear_recovered_transient(&mut self) {
         let _ = self.clear_handles();
         self.clear_pending_retries();
-        self.next_host_callback_id = 0;
     }
 
     pub(super) fn recovery_state(&self) -> TimerBridgeRecoveryState {

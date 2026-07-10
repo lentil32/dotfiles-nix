@@ -199,3 +199,4 @@ mod probe_refresh_retry_budget;
 mod probe_retry;
 mod protocol_boundary_rejections;
 mod timer_interleavings;
+mod timer_loss;

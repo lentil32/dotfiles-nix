@@ -299,7 +299,7 @@ fn trace_summary_snapshot_renders_phase_owned_state_and_effects() {
     let cleanup_effect = Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
         execution: RenderCleanupExecution::CompactToBudget {
             target_budget: 2,
-            max_prune_per_tick: 5,
+            max_teardown_attempts_per_tick: 5,
         },
     });
 

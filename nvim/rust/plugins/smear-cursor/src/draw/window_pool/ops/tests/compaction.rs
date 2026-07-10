@@ -10,7 +10,7 @@ enum CompactionLifecycleSpec {
 struct CompactionFixture {
     render_tabs: HashMap<TabHandle, TabWindows>,
     target_budget: usize,
-    max_prune_per_tick: usize,
+    max_teardown_attempts_per_tick: usize,
 }
 
 fn compaction_window_lifecycle_spec() -> BoxedStrategy<CompactionLifecycleSpec> {
@@ -113,7 +113,7 @@ fn compaction_fixture() -> BoxedStrategy<CompactionFixture> {
             0_usize..=budget_limit,
         )
     })
-    .prop_map(|(tab_specs, target_budget, max_prune_per_tick)| {
+    .prop_map(|(tab_specs, target_budget, max_teardown_attempts_per_tick)| {
         let render_tabs = tab_specs
             .into_iter()
             .enumerate()
@@ -130,10 +130,115 @@ fn compaction_fixture() -> BoxedStrategy<CompactionFixture> {
         CompactionFixture {
             render_tabs,
             target_budget,
-            max_prune_per_tick,
+            max_teardown_attempts_per_tick,
         }
     })
     .boxed()
+}
+
+#[test]
+fn compaction_bounds_all_teardown_attempts_across_visible_invalid_and_reusable_windows() {
+    let lifecycles = [
+        CompactionLifecycleSpec::AvailableVisible { last_used_epoch: 1 },
+        CompactionLifecycleSpec::AvailableVisible { last_used_epoch: 2 },
+        CompactionLifecycleSpec::Invalid,
+        CompactionLifecycleSpec::Invalid,
+        CompactionLifecycleSpec::Invalid,
+        CompactionLifecycleSpec::AvailableHidden { last_used_epoch: 3 },
+        CompactionLifecycleSpec::AvailableHidden { last_used_epoch: 4 },
+        CompactionLifecycleSpec::AvailableHidden { last_used_epoch: 5 },
+    ];
+    let mut render_tabs = HashMap::from([(
+        tab_handle(/*value*/ 1),
+        compaction_tab_windows(/*tab_offset*/ 0, &lifecycles, /*cached_budget*/ 8),
+    )]);
+    let mut close_attempts = 0_usize;
+    let mut close_cached = |tab_windows: &mut TabWindows, _namespace_id, index| {
+        close_attempts = close_attempts.saturating_add(1);
+        let _ = tab_windows.swap_remove_window(index);
+        TrackedResourceCloseOutcome::ClosedOrGone
+    };
+
+    let summary = compact_tabs_to_budget_with_closer(
+        &mut render_tabs,
+        NamespaceId::new(/*value*/ 7),
+        /*target_budget*/ 0,
+        /*max_teardown_attempts_per_tick*/ 4,
+        &mut close_cached,
+    );
+
+    assert_eq!(
+        (close_attempts, summary),
+        (
+            4,
+            CompactRenderWindowsSummary {
+                target_budget: 0,
+                total_windows_after: 4,
+                closed_visible_windows: 2,
+                pruned_windows: 0,
+                invalid_removed_windows: 2,
+                cleared_prepaint_overlays: 0,
+                cleared_quarantined_resources: 0,
+                teardown_attempts: 4,
+                has_visible_windows_after: false,
+                has_pending_work_after: true,
+                potential_visual_change: true,
+                close_stalled: false,
+            },
+        ),
+    );
+}
+
+#[test]
+fn retained_visible_close_is_not_retried_as_invalid_in_the_same_compaction_tick() {
+    let lifecycles = [
+        CompactionLifecycleSpec::AvailableVisible { last_used_epoch: 1 },
+        CompactionLifecycleSpec::Invalid,
+        CompactionLifecycleSpec::AvailableHidden { last_used_epoch: 2 },
+    ];
+    let mut render_tabs = HashMap::from([(
+        tab_handle(/*value*/ 1),
+        compaction_tab_windows(/*tab_offset*/ 0, &lifecycles, /*cached_budget*/ 3),
+    )]);
+    let mut attempted_handles = Vec::new();
+    let mut retain_close = |tab_windows: &mut TabWindows, _namespace_id, index| {
+        let Some(mut cached) = tab_windows.swap_remove_window(index) else {
+            return TrackedResourceCloseOutcome::ClosedOrGone;
+        };
+        attempted_handles.push(cached.handles);
+        cached.mark_invalid();
+        tab_windows.push_cached_window(cached);
+        TrackedResourceCloseOutcome::Retained
+    };
+
+    let summary = compact_tabs_to_budget_with_closer(
+        &mut render_tabs,
+        NamespaceId::new(/*value*/ 7),
+        /*target_budget*/ 0,
+        /*max_teardown_attempts_per_tick*/ 8,
+        &mut retain_close,
+    );
+
+    assert_eq!(
+        (attempted_handles.len(), summary),
+        (
+            1,
+            CompactRenderWindowsSummary {
+                target_budget: 0,
+                total_windows_after: 3,
+                closed_visible_windows: 0,
+                pruned_windows: 0,
+                invalid_removed_windows: 0,
+                cleared_prepaint_overlays: 0,
+                cleared_quarantined_resources: 0,
+                teardown_attempts: 1,
+                has_visible_windows_after: false,
+                has_pending_work_after: true,
+                potential_visual_change: true,
+                close_stalled: true,
+            },
+        ),
+    );
 }
 
 proptest! {
@@ -146,14 +251,14 @@ proptest! {
         let expected = global_compaction_prune_plan_sort_baseline(
             &fixture.render_tabs,
             fixture.target_budget,
-            fixture.max_prune_per_tick,
+            fixture.max_teardown_attempts_per_tick,
         );
 
         prop_assert_eq!(
             global_compaction_prune_plan(
                 &fixture.render_tabs,
                 fixture.target_budget,
-                fixture.max_prune_per_tick,
+                fixture.max_teardown_attempts_per_tick,
             ),
             expected,
         );
@@ -163,19 +268,19 @@ proptest! {
 fn global_compaction_prune_plan_sort_baseline(
     render_tabs: &HashMap<TabHandle, TabWindows>,
     target_budget: usize,
-    max_prune_per_tick: usize,
+    max_teardown_attempts_per_tick: usize,
 ) -> HashMap<TabHandle, Vec<usize>> {
     let total_windows = render_tabs
         .values()
         .map(|tab_windows| tab_windows.windows.len())
         .sum::<usize>();
-    if total_windows <= target_budget || max_prune_per_tick == 0 {
+    if total_windows <= target_budget || max_teardown_attempts_per_tick == 0 {
         return HashMap::new();
     }
 
     let prune_goal = total_windows
         .saturating_sub(target_budget)
-        .min(max_prune_per_tick);
+        .min(max_teardown_attempts_per_tick);
     let mut candidates = render_tabs
         .iter()
         .flat_map(|(tab_handle, tab_windows)| {

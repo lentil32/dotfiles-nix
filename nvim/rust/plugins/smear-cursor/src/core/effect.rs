@@ -612,9 +612,11 @@ pub(crate) enum RenderCleanupExecution {
     },
     CompactToBudget {
         target_budget: usize,
-        max_prune_per_tick: usize,
+        max_teardown_attempts_per_tick: usize,
     },
-    HardPurge,
+    CompactToZero {
+        max_teardown_attempts_per_tick: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

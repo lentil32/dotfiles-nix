@@ -22,7 +22,8 @@ use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderDecision;
 use crate::core::runtime_reducer::render_cleanup_delay_ms;
 use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
-use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
+use crate::core::runtime_reducer::render_cleanup_max_teardown_attempts_per_tick;
+use crate::core::runtime_reducer::render_cleanup_retry_policy;
 use crate::core::runtime_reducer::render_hard_cleanup_delay_ms;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::BufferPerfClass;
@@ -120,7 +121,9 @@ fn hot_cleanup_state(state: &CoreState, observed_at: Millis) -> RenderCleanupSta
 fn scheduled_cleanup_state(state: &CoreState, observed_at: Millis) -> RenderCleanupState {
     match state.render_cleanup() {
         RenderCleanupState::Cold => hot_cleanup_state(state, observed_at),
-        RenderCleanupState::Hot(_) | RenderCleanupState::Cooling(_) => state.render_cleanup(),
+        RenderCleanupState::Hot(_) | RenderCleanupState::Cooling(_) => {
+            state.render_cleanup().revive_timer_rearm()
+        }
     }
 }
 
@@ -442,6 +445,9 @@ pub(super) fn arm_render_cleanup_timer(
     state: CoreState,
     requested_at: Millis,
 ) -> (CoreState, Vec<Effect>) {
+    if state.render_cleanup().timer_rearm_is_quiesced() {
+        return (state, Vec::new());
+    }
     let Some(deadline) = state.render_cleanup().next_deadline() else {
         return (state, Vec::new());
     };
@@ -481,11 +487,6 @@ pub(super) fn cleanup_effect_for_timer_fire(
 ) -> Option<Effect> {
     match cleanup {
         RenderCleanupState::Hot(schedule) => {
-            if observed_at.value() >= schedule.hard_purge_due_at().value() {
-                return Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
-                    execution: RenderCleanupExecution::HardPurge,
-                }));
-            }
             if observed_at.value() < schedule.next_compaction_due_at().value() {
                 return None;
             }
@@ -496,9 +497,23 @@ pub(super) fn cleanup_effect_for_timer_fire(
             }))
         }
         RenderCleanupState::Cooling(schedule) => {
+            if !schedule.has_compaction_attempted()
+                && observed_at.value() >= schedule.next_compaction_due_at().value()
+            {
+                return Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+                    execution: RenderCleanupExecution::CompactToBudget {
+                        target_budget: render_cleanup_idle_target_budget(config),
+                        max_teardown_attempts_per_tick:
+                            render_cleanup_max_teardown_attempts_per_tick(config),
+                    },
+                }));
+            }
             if observed_at.value() >= schedule.hard_purge_due_at().value() {
                 return Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
-                    execution: RenderCleanupExecution::HardPurge,
+                    execution: RenderCleanupExecution::CompactToZero {
+                        max_teardown_attempts_per_tick:
+                            render_cleanup_max_teardown_attempts_per_tick(config),
+                    },
                 }));
             }
             if observed_at.value() < schedule.next_compaction_due_at().value() {
@@ -507,7 +522,9 @@ pub(super) fn cleanup_effect_for_timer_fire(
             Some(Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
                 execution: RenderCleanupExecution::CompactToBudget {
                     target_budget: render_cleanup_idle_target_budget(config),
-                    max_prune_per_tick: render_cleanup_max_prune_per_tick(config),
+                    max_teardown_attempts_per_tick: render_cleanup_max_teardown_attempts_per_tick(
+                        config,
+                    ),
                 },
             }))
         }
@@ -519,14 +536,18 @@ pub(super) fn cleanup_state_after_applied(
     cleanup: RenderCleanupState,
     action: RenderCleanupAppliedAction,
     observed_at: Millis,
-    progress_compaction_delay_ms: u64,
+    config: &crate::config::RuntimeConfig,
 ) -> RenderCleanupState {
+    let progress_compaction_delay_ms = render_cleanup_delay_ms(config);
+    let retry_policy = render_cleanup_retry_policy(config);
     match action {
         RenderCleanupAppliedAction::SoftCleared {
             retained_resources: 0,
-        } => cleanup.enter_cooling(observed_at),
-        RenderCleanupAppliedAction::SoftCleared { .. } => cleanup
-            .retry_hard_purge_after_retained_resources(observed_at, progress_compaction_delay_ms),
+        } => cleanup
+            .enter_cooling_after_soft_clear(observed_at, render_hard_cleanup_delay_ms(config)),
+        RenderCleanupAppliedAction::SoftCleared { .. } => {
+            cleanup.retry_hard_purge_after_retained_resources(observed_at, retry_policy)
+        }
         RenderCleanupAppliedAction::CompactedToBudget {
             converged_to_idle: true,
             ..
@@ -534,16 +555,18 @@ pub(super) fn cleanup_state_after_applied(
         RenderCleanupAppliedAction::CompactedToBudget {
             converged_to_idle: false,
             progress: RenderCleanupCompactionProgress::MadeProgress,
-        } => cleanup.continue_cooling_after_progress(observed_at, progress_compaction_delay_ms),
+        } => cleanup.continue_cooling_after_progress(
+            observed_at,
+            progress_compaction_delay_ms,
+            render_hard_cleanup_delay_ms(config),
+        ),
         RenderCleanupAppliedAction::CompactedToBudget {
             converged_to_idle: false,
             progress: RenderCleanupCompactionProgress::NoProgress,
         } => cleanup.await_hard_purge_after_stalled_compaction(observed_at),
-        RenderCleanupAppliedAction::HardPurged {
-            retained_resources: 0,
-        } => cleanup.converge_to_cold(),
-        RenderCleanupAppliedAction::HardPurged { .. } => cleanup
-            .retry_hard_purge_after_retained_resources(observed_at, progress_compaction_delay_ms),
+        RenderCleanupAppliedAction::CleanupStalled => {
+            cleanup.retry_hard_purge_after_retained_resources(observed_at, retry_policy)
+        }
     }
 }
 

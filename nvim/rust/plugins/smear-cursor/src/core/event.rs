@@ -111,9 +111,7 @@ pub(crate) enum RenderCleanupAppliedAction {
         converged_to_idle: bool,
         progress: RenderCleanupCompactionProgress,
     },
-    HardPurged {
-        retained_resources: usize,
-    },
+    CleanupStalled,
 }
 
 impl RenderCleanupAppliedAction {
@@ -123,7 +121,7 @@ impl RenderCleanupAppliedAction {
             Self::CompactedToBudget {
                 converged_to_idle, ..
             } => converged_to_idle,
-            Self::HardPurged { retained_resources } => retained_resources == 0,
+            Self::CleanupStalled => false,
         }
     }
 }

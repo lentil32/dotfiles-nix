@@ -11,7 +11,10 @@ use super::support::record_event_loop_metric;
 use super::support::reset_recovery_attempt;
 use super::support::schedule_timer_with_delay;
 use super::support::start_boundary_refresh_observation;
+use crate::core::effect::ApplyRenderCleanupEffect;
+use crate::core::effect::Effect;
 use crate::core::effect::EventLoopMetricEffect;
+use crate::core::effect::RenderCleanupExecution;
 use crate::core::state::CoreState;
 use crate::core::types::Millis;
 use crate::core::types::TimerId;
@@ -128,6 +131,83 @@ pub(super) fn reduce_timer_signal_with_token(
                     arm_render_cleanup_timer(disarmed_state, observed_at);
                 Transition::new(scheduled_state, effects)
             }
+        }
+    }
+}
+
+pub(super) fn reduce_timer_lost_with_token(
+    state: CoreState,
+    token: TimerToken,
+    observed_at: Millis,
+) -> Transition {
+    let timer_id = token.id();
+    if !state.timers().is_active(token) {
+        if timer_id == TimerId::Cleanup {
+            return Transition::stay_owned(state);
+        }
+        return Transition::new(
+            state,
+            vec![record_event_loop_metric(EventLoopMetricEffect::StaleToken)],
+        );
+    }
+
+    let timers = state.timers().clear_matching(token);
+    let mut disarmed_state = state.with_timers(timers);
+    match timer_id {
+        TimerId::Animation => {
+            if disarmed_state.needs_initialize()
+                || !matches!(
+                    disarmed_state.lifecycle(),
+                    crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
+                )
+            {
+                return Transition::stay_owned(disarmed_state);
+            }
+            disarmed_state
+                .runtime_mut()
+                .recover_from_clock_discontinuity();
+            let max_kept_windows = disarmed_state.runtime().config.max_kept_windows;
+            Transition::new(
+                disarmed_state,
+                vec![Effect::ApplyRenderCleanup(ApplyRenderCleanupEffect {
+                    execution: RenderCleanupExecution::SoftClear { max_kept_windows },
+                })],
+            )
+        }
+        TimerId::Ingress => {
+            let ingress_policy = disarmed_state.ingress_policy().clear_pending_delay();
+            let cleared_state = disarmed_state.with_ingress_policy(ingress_policy);
+            if !matches!(
+                cleared_state.lifecycle(),
+                crate::core::types::Lifecycle::Primed | crate::core::types::Lifecycle::Ready
+            ) {
+                return Transition::stay_owned(cleared_state);
+            }
+            transition_ready_or_observe(cleared_state)
+        }
+        TimerId::Recovery => {
+            if disarmed_state.lifecycle() != crate::core::types::Lifecycle::Recovering {
+                return Transition::stay_owned(disarmed_state);
+            }
+            let settled = if disarmed_state.restore_retained_observation_to_ready() {
+                reset_recovery_attempt(disarmed_state)
+            } else {
+                reset_recovery_attempt(disarmed_state.into_primed())
+            };
+            Transition::stay_owned(settled)
+        }
+        TimerId::Cleanup => {
+            let cleanup = disarmed_state.render_cleanup().quiesce_timer_rearm();
+            let disarmed_state = disarmed_state.with_render_cleanup(cleanup);
+            // A lost cleanup timer usually means `timer_start` failed immediately. Only execute
+            // work that was already due; otherwise quiesce without making an active animation
+            // disappear early or spinning on another failed timer registration.
+            let effect = cleanup_effect_for_timer_fire(
+                disarmed_state.render_cleanup(),
+                &disarmed_state.runtime().config,
+                observed_at,
+            );
+            Transition::new(disarmed_state, effect.into_iter().collect())
         }
     }
 }

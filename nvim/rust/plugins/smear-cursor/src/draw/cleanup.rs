@@ -8,13 +8,21 @@ use super::context::take_prepaint_by_tab;
 use super::context::take_render_tabs;
 use super::context::with_prepaint_by_tab;
 use super::context::with_render_tabs;
+use super::prepaint::ClearPrepaintOverlaysSummary;
 use super::prepaint::PrepaintOverlay;
 use super::prepaint::clear_all_prepaint_tracked_with_close_summary;
+use super::prepaint::clear_prepaint_for_tab_for_cleanup;
 use super::prepaint::close_prepaint_overlay;
 use super::prepaint::retained_prepaint_overlay_after_close;
+use super::prepaint_compaction::compact_prepaint_overlays;
+use super::resource_quarantine::has_quarantined_resources;
+use super::resource_quarantine::purge_quarantined_resources;
+use super::resource_quarantine::purge_quarantined_resources_up_to;
 use super::window_pool;
 use super::window_pool::CompactRenderWindowsSummary;
+use crate::host::DrawResourcePort;
 use crate::host::NamespaceId;
+use crate::host::NeovimHost;
 use crate::host::TabHandle;
 use std::collections::HashMap;
 
@@ -28,10 +36,9 @@ pub(crate) struct ClearActiveRenderWindowsSummary {
 
 impl ClearActiveRenderWindowsSummary {
     pub(crate) fn had_visual_change(self) -> bool {
+        // Namespace clearing can succeed before a later hide mutation fails. A current-tab float
+        // that was visible when SoftClear began therefore always needs one conservative redraw.
         self.had_visible_windows_before_clear
-            && (self.pruned_windows > 0
-                || self.hidden_windows > 0
-                || self.invalid_removed_windows > 0)
     }
 }
 
@@ -44,24 +51,28 @@ pub(crate) struct PurgeRenderWindowsSummary {
     pub(crate) closed_visible_prepaint_overlays: usize,
     pub(crate) retained_render_windows: usize,
     pub(crate) retained_prepaint_overlays: usize,
-    pub(crate) closed_orphan_windows: usize,
-    pub(crate) retained_orphan_resources: usize,
+    pub(crate) closed_quarantined_windows: usize,
+    pub(crate) pending_resources: usize,
+    pub(crate) potential_visual_change: bool,
 }
 
 impl PurgeRenderWindowsSummary {
+    #[cfg(test)]
     pub(crate) fn had_visual_change(self) -> bool {
-        let closed_render_windows = self
-            .purged_windows
-            .saturating_sub(self.retained_render_windows);
-        (self.had_visible_render_windows_before_purge && closed_render_windows > 0)
+        // An Invalid tracked entry may still own a host float after a failed hide, so any
+        // tracked render teardown attempt conservatively requests one redraw. The window may have
+        // closed even when buffer deletion made the aggregate outcome Retained.
+        self.purged_windows > 0
             || (self.had_visible_prepaint_before_purge && self.closed_visible_prepaint_overlays > 0)
-            || self.closed_orphan_windows > 0
+            || self.closed_quarantined_windows > 0
+            || self.potential_visual_change
     }
 
+    #[cfg(test)]
     pub(crate) fn retained_resources(self) -> usize {
         self.retained_render_windows
             .saturating_add(self.retained_prepaint_overlays)
-            .saturating_add(self.retained_orphan_resources)
+            .saturating_add(self.pending_resources)
     }
 }
 
@@ -130,34 +141,72 @@ pub(crate) fn clear_active_render_windows(
     namespace_id: NamespaceId,
     max_kept_windows: usize,
 ) -> ClearActiveRenderWindowsSummary {
+    if namespace_id.is_global() {
+        return ClearActiveRenderWindowsSummary::default();
+    }
+    clear_active_render_windows_for_tab_with(
+        &NeovimHost,
+        namespace_id,
+        max_kept_windows,
+        super::apply::current_tab_handle(),
+    )
+}
+
+pub(crate) fn clear_current_tab_render_artifacts(
+    namespace_id: NamespaceId,
+    max_kept_windows: usize,
+) -> (
+    ClearActiveRenderWindowsSummary,
+    ClearPrepaintOverlaysSummary,
+) {
+    if namespace_id.is_global() {
+        return (
+            ClearActiveRenderWindowsSummary::default(),
+            ClearPrepaintOverlaysSummary::default(),
+        );
+    }
+    let current_tab_handle = super::apply::current_tab_handle();
+    (
+        clear_active_render_windows_for_tab_with(
+            &NeovimHost,
+            namespace_id,
+            max_kept_windows,
+            current_tab_handle,
+        ),
+        clear_prepaint_for_tab_for_cleanup(namespace_id, current_tab_handle),
+    )
+}
+
+fn clear_active_render_windows_for_tab_with(
+    host: &impl DrawResourcePort,
+    namespace_id: NamespaceId,
+    _max_kept_windows: usize,
+    current_tab_handle: TabHandle,
+) -> ClearActiveRenderWindowsSummary {
     with_render_tabs(|render_tabs| {
         let mut summary = ClearActiveRenderWindowsSummary::default();
-        let mut tab_handles = render_tabs.keys().copied().collect::<Vec<_>>();
-        tab_handles.sort_unstable();
-
-        for tab_handle in tab_handles {
-            let Some(tab_windows) = render_tabs.get_mut(&tab_handle) else {
-                continue;
-            };
+        if let Some(tab_windows) = render_tabs.get_mut(&current_tab_handle) {
             let tab_summary = {
                 let had_visible_windows_before_clear =
                     window_pool::tab_has_visible_windows(tab_windows);
-                if !window_pool::tab_has_pending_clear_work(tab_windows, max_kept_windows) {
+                if !had_visible_windows_before_clear {
                     ClearActiveRenderWindowsSummary {
                         had_visible_windows_before_clear,
                         ..ClearActiveRenderWindowsSummary::default()
                     }
                 } else {
                     window_pool::begin_cleanup_frame(tab_windows);
-                    let pruned_windows =
-                        window_pool::prune_tab(tab_windows, namespace_id, max_kept_windows);
-                    let closed_windows =
-                        window_pool::close_shell_visible_tab(tab_windows, namespace_id);
-                    let release_summary =
-                        window_pool::release_unused_in_tab(tab_windows, namespace_id);
+                    // SoftClear only performs the visual transition. Destructive disposal is
+                    // spread across bounded Cooling ticks so wake-up cannot synchronously close a
+                    // large retained pool.
+                    let release_summary = window_pool::hide_unused_in_tab_for_cleanup_with(
+                        host,
+                        tab_windows,
+                        namespace_id,
+                    );
                     ClearActiveRenderWindowsSummary {
                         had_visible_windows_before_clear,
-                        pruned_windows: pruned_windows.saturating_add(closed_windows),
+                        pruned_windows: 0,
                         hidden_windows: release_summary.hidden_windows,
                         invalid_removed_windows: release_summary.invalid_removed_windows,
                     }
@@ -323,18 +372,48 @@ pub(crate) fn prune_stale_tab_resources(
 pub(crate) fn compact_render_windows(
     namespace_id: NamespaceId,
     target_budget: usize,
-    max_prune_per_tick: usize,
+    max_teardown_attempts_per_tick: usize,
 ) -> CompactRenderWindowsSummary {
-    with_render_tabs(|render_tabs| {
+    let mut summary = with_render_tabs(|render_tabs| {
         let summary = window_pool::compact_tabs_to_budget(
             render_tabs,
             namespace_id,
             target_budget,
-            max_prune_per_tick,
+            max_teardown_attempts_per_tick,
         );
         evict_empty_render_tab_entries(render_tabs);
         summary
-    })
+    });
+    let remaining_budget = if summary.close_stalled {
+        0
+    } else {
+        max_teardown_attempts_per_tick.saturating_sub(summary.teardown_attempts)
+    };
+    let prepaint_summary = compact_prepaint_overlays(namespace_id, remaining_budget);
+    summary.cleared_prepaint_overlays = prepaint_summary.cleared_overlays;
+    summary.teardown_attempts = summary
+        .teardown_attempts
+        .saturating_add(prepaint_summary.attempted_overlays);
+    summary.potential_visual_change |= prepaint_summary.potential_visual_change;
+    summary.close_stalled |= prepaint_summary.retained_overlays > 0;
+    summary.has_pending_work_after |= prepaint_summary.has_pending_work_after;
+
+    let remaining_budget = if summary.close_stalled {
+        0
+    } else {
+        max_teardown_attempts_per_tick.saturating_sub(summary.teardown_attempts)
+    };
+    let quarantine_summary = purge_quarantined_resources_up_to(namespace_id, remaining_budget);
+    summary.cleared_quarantined_resources = quarantine_summary.cleared_resources;
+    summary.teardown_attempts = summary
+        .teardown_attempts
+        .saturating_add(quarantine_summary.attempted_resources);
+    summary.potential_visual_change |= quarantine_summary.potential_visual_change;
+    summary.close_stalled |= quarantine_summary.close_stalled;
+    summary.has_pending_work_after |=
+        quarantine_summary.pending_resources > 0 || has_quarantined_resources();
+    debug_assert!(summary.teardown_attempts <= max_teardown_attempts_per_tick);
+    summary
 }
 
 fn purge_tracked_resources_with_closers<P, C>(
@@ -389,23 +468,37 @@ fn purge_tracked_resources(
     )
 }
 
-pub(crate) fn purge_render_windows(namespace_id: NamespaceId) -> PurgeRenderWindowsSummary {
+pub(crate) fn purge_tracked_render_windows(namespace_id: NamespaceId) -> PurgeRenderWindowsSummary {
     let mut render_tabs = take_render_tabs();
     let mut prepaint_by_tab = take_prepaint_by_tab();
-    let mut summary = purge_tracked_resources(&mut render_tabs, &mut prepaint_by_tab, namespace_id);
+    let summary = purge_tracked_resources(&mut render_tabs, &mut prepaint_by_tab, namespace_id);
     restore_render_tabs(render_tabs);
     restore_prepaint_by_tab(prepaint_by_tab);
-    // Hard purge is the terminal draw reset. Sweep any host objects that escaped tracking after a
-    // failed mutation so disable/recovery never depends on bookkeeping remaining intact.
-    let orphan_summary = window_pool::close_orphan_smear_resources(namespace_id);
-    summary.closed_orphan_windows = orphan_summary.closed_windows;
-    summary.retained_orphan_resources = orphan_summary.retained_resources;
     summary
 }
 
-pub(crate) fn recover_all_namespaces(namespace_id: NamespaceId) {
+fn merge_quarantined_resource_summary(
+    summary: &mut PurgeRenderWindowsSummary,
+    namespace_id: NamespaceId,
+) {
+    let quarantine_summary = purge_quarantined_resources(namespace_id);
+    summary.closed_quarantined_windows = summary
+        .closed_quarantined_windows
+        .saturating_add(quarantine_summary.closed_windows);
+    summary.pending_resources = summary
+        .pending_resources
+        .saturating_add(quarantine_summary.pending_resources);
+    summary.potential_visual_change |= quarantine_summary.potential_visual_change;
+}
+
+pub(crate) fn purge_render_windows(namespace_id: NamespaceId) -> PurgeRenderWindowsSummary {
+    let mut summary = purge_tracked_render_windows(namespace_id);
+    merge_quarantined_resource_summary(&mut summary, namespace_id);
+    summary
+}
+
+pub(crate) fn recover_draw_resources(namespace_id: NamespaceId) {
     let _ = purge_render_windows(namespace_id);
-    let _ = super::apply::clear_namespace_all_buffers(namespace_id);
 }
 
 #[cfg(test)]
@@ -414,7 +507,8 @@ mod tests {
     use super::PruneClosedWindowResourcesSummary;
     use super::PruneStaleTabResourcesSummary;
     use super::PurgeRenderWindowsSummary;
-    use super::clear_active_render_windows;
+    use super::clear_active_render_windows_for_tab_with;
+    use super::compact_render_windows;
     use super::evict_empty_render_tab_entries;
     use super::prune_closed_window_resources;
     use super::prune_stale_tab_resources;
@@ -431,12 +525,15 @@ mod tests {
     use crate::draw::prepaint::PrepaintPlacement;
     use crate::draw::prepaint::insert_prepaint_overlay_for_test;
     use crate::draw::prepaint::prepaint_snapshot_for_test;
+    use crate::draw::resource_quarantine::quarantine_window;
     use crate::draw::test_support::with_isolated_draw_context;
     use crate::draw::window_pool;
     use crate::draw::window_pool::TabPoolSnapshot;
     use crate::draw::window_pool::WindowBufferHandle;
     use crate::draw::window_pool::WindowPlacement;
     use crate::host::BufferHandle;
+    use crate::host::DrawResourceCall;
+    use crate::host::FakeDrawResourcePort;
     use crate::host::NamespaceId;
     use crate::host::TabHandle;
     use pretty_assertions::assert_eq;
@@ -449,21 +546,104 @@ mod tests {
     #[test]
     fn clear_active_render_windows_evicts_empty_tab_registry_entries() {
         with_isolated_draw_context(|| {
+            let host = FakeDrawResourcePort::default();
             with_render_tab(tab_handle(17), |tab_windows| {
                 tab_windows.cache_payload(77, 707)
             });
             assert_eq!(render_tab_handles_for_test(), vec![tab_handle(17)]);
 
             assert_eq!(
-                clear_active_render_windows(
+                clear_active_render_windows_for_tab_with(
+                    &host,
                     NamespaceId::new(/*value*/ 99),
                     /*max_kept_windows*/ 32,
+                    tab_handle(/*value*/ 17),
                 ),
                 ClearActiveRenderWindowsSummary::default()
             );
             assert!(
                 render_tab_handles_for_test().is_empty(),
                 "soft cleanup should evict empty tab bookkeeping instead of retaining dead metadata"
+            );
+        });
+    }
+
+    #[test]
+    fn compaction_stays_nonconverged_while_an_exact_handle_is_quarantined() {
+        with_isolated_draw_context(|| {
+            quarantine_window(/*window_id*/ 17);
+
+            let summary = compact_render_windows(
+                NamespaceId::new(/*value*/ 99),
+                /*target_budget*/ 2,
+                /*max_teardown_attempts_per_tick*/ 0,
+            );
+
+            assert_eq!(
+                (summary.has_pending_work_after, summary.converged_to_idle()),
+                (true, false),
+            );
+        });
+    }
+
+    #[test]
+    fn soft_clear_touches_only_the_current_tab_before_bounded_cooling() {
+        with_isolated_draw_context(|| {
+            let host = FakeDrawResourcePort::default();
+            let placement = WindowPlacement {
+                row: 2,
+                col: 3,
+                width: 1,
+                zindex: 80,
+            };
+            for (tab, window_id, buffer_id) in [(7, 7, 107), (9, 9, 109)] {
+                with_render_tab(tab_handle(tab), |tab_windows| {
+                    tab_windows.push_test_visible_window(
+                        WindowBufferHandle {
+                            window_id,
+                            buffer_id: BufferHandle::from_raw_for_test(buffer_id),
+                        },
+                        placement,
+                        1,
+                    );
+                });
+            }
+
+            let summary = clear_active_render_windows_for_tab_with(
+                &host,
+                NamespaceId::new(/*value*/ 99),
+                /*max_kept_windows*/ 32,
+                tab_handle(/*value*/ 7),
+            );
+
+            assert_eq!(
+                (
+                    summary,
+                    with_render_tab(tab_handle(7), |tab_windows| {
+                        window_pool::tab_has_visible_windows(tab_windows)
+                    }),
+                    with_render_tab(tab_handle(9), |tab_windows| {
+                        window_pool::tab_has_visible_windows(tab_windows)
+                    }),
+                    host.calls(),
+                ),
+                (
+                    ClearActiveRenderWindowsSummary {
+                        had_visible_windows_before_clear: true,
+                        pruned_windows: 0,
+                        hidden_windows: 1,
+                        invalid_removed_windows: 0,
+                    },
+                    false,
+                    true,
+                    vec![
+                        DrawResourceCall::ClearBufferNamespace {
+                            buffer: BufferHandle::from_raw_for_test(/*value*/ 107),
+                            namespace_id: NamespaceId::new(/*value*/ 99),
+                        },
+                        DrawResourceCall::SetWindowConfig { window_id: 7 },
+                    ],
+                ),
             );
         });
     }
@@ -721,8 +901,9 @@ mod tests {
                 closed_visible_prepaint_overlays: 0,
                 retained_render_windows: 1,
                 retained_prepaint_overlays: 1,
-                closed_orphan_windows: 0,
-                retained_orphan_resources: 0,
+                closed_quarantined_windows: 0,
+                pending_resources: 0,
+                potential_visual_change: false,
             }
         );
         assert_eq!(
@@ -791,8 +972,9 @@ mod tests {
                 closed_visible_prepaint_overlays: 1,
                 retained_render_windows: 0,
                 retained_prepaint_overlays: 1,
-                closed_orphan_windows: 0,
-                retained_orphan_resources: 0,
+                closed_quarantined_windows: 0,
+                pending_resources: 0,
+                potential_visual_change: false,
             }
         );
         assert!(summary.had_visual_change());
@@ -856,8 +1038,9 @@ mod tests {
                     closed_visible_prepaint_overlays: 0,
                     retained_render_windows: 0,
                     retained_prepaint_overlays: 0,
-                    closed_orphan_windows: 0,
-                    retained_orphan_resources: 0,
+                    closed_quarantined_windows: 0,
+                    pending_resources: 0,
+                    potential_visual_change: false,
                 }
             );
             assert!(summary.had_visual_change());
@@ -865,14 +1048,25 @@ mod tests {
     }
 
     #[test]
-    fn hard_purge_summary_accounts_orphan_resource_results() {
+    fn tracked_purge_summary_accounts_for_exact_quarantine_results() {
         let summary = PurgeRenderWindowsSummary {
-            closed_orphan_windows: 1,
-            retained_orphan_resources: 2,
+            closed_quarantined_windows: 1,
+            pending_resources: 2,
             ..PurgeRenderWindowsSummary::default()
         };
 
         assert!(summary.had_visual_change());
         assert_eq!(summary.retained_resources(), 2);
+    }
+
+    #[test]
+    fn tracked_purge_redraws_when_a_teardown_partially_retains() {
+        let summary = PurgeRenderWindowsSummary {
+            purged_windows: 1,
+            retained_render_windows: 1,
+            ..PurgeRenderWindowsSummary::default()
+        };
+
+        assert!(summary.had_visual_change());
     }
 }

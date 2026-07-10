@@ -10,7 +10,7 @@ use crate::core::runtime_reducer::CursorVisibilityEffect;
 use crate::core::runtime_reducer::RenderCleanupAction;
 use crate::core::runtime_reducer::RenderSideEffects;
 use crate::core::runtime_reducer::render_cleanup_idle_target_budget;
-use crate::core::runtime_reducer::render_cleanup_max_prune_per_tick;
+use crate::core::runtime_reducer::render_cleanup_max_teardown_attempts_per_tick;
 use crate::core::state::AnimationSchedule;
 use crate::core::state::ApplyFailureKind;
 use crate::core::state::CoreState;
@@ -266,25 +266,25 @@ fn render_cleanup_state_summary(
 ) -> String {
     match cleanup.thermal() {
         RenderThermalState::Hot => format!(
-            "hot(next_compaction_due_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_prune_per_tick={})",
+            "hot(next_compaction_due_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_teardown_attempts_per_tick={})",
             optional_millis_summary(cleanup.next_compaction_due_at()),
             optional_millis_summary(cleanup.hard_purge_due_at()),
             config.max_kept_windows,
             render_cleanup_idle_target_budget(config),
-            render_cleanup_max_prune_per_tick(config),
+            render_cleanup_max_teardown_attempts_per_tick(config),
         ),
         RenderThermalState::Cooling => format!(
-            "cooling(entered_cooling_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_prune_per_tick={})",
+            "cooling(entered_cooling_at={} hard_purge_due_at={} max_kept_windows={} idle_target_budget={} max_teardown_attempts_per_tick={})",
             optional_millis_summary(cleanup.entered_cooling_at()),
             optional_millis_summary(cleanup.hard_purge_due_at()),
             config.max_kept_windows,
             render_cleanup_idle_target_budget(config),
-            render_cleanup_max_prune_per_tick(config),
+            render_cleanup_max_teardown_attempts_per_tick(config),
         ),
         RenderThermalState::Cold => format!(
-            "cold(idle_target_budget={} max_prune_per_tick={})",
+            "cold(idle_target_budget={} max_teardown_attempts_per_tick={})",
             render_cleanup_idle_target_budget(config),
-            render_cleanup_max_prune_per_tick(config),
+            render_cleanup_max_teardown_attempts_per_tick(config),
         ),
     }
 }
@@ -428,11 +428,11 @@ pub(super) fn render_cleanup_execution_summary(execution: RenderCleanupExecution
         }
         RenderCleanupExecution::CompactToBudget {
             target_budget,
-            max_prune_per_tick,
+            max_teardown_attempts_per_tick,
         } => format!(
-            "compact_to_budget(target_budget={target_budget} max_prune_per_tick={max_prune_per_tick})"
+            "compact_to_budget(target_budget={target_budget} max_teardown_attempts_per_tick={max_teardown_attempts_per_tick})"
         ),
-        RenderCleanupExecution::HardPurge => "hard_purge".to_string(),
+        RenderCleanupExecution::CompactToZero { .. } => "compact_to_zero".to_string(),
     }
 }
 

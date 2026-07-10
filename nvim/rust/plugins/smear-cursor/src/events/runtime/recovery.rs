@@ -15,7 +15,7 @@ use super::timers::reset_core_timer_bridge;
 use super::timers::stop_recovered_core_timer_handles;
 use crate::config::RuntimeConfig;
 use crate::draw::next_palette_recovery_epoch;
-use crate::draw::recover_all_namespaces;
+use crate::draw::recover_draw_resources;
 use crate::draw::recover_palette_to_epoch;
 #[cfg(test)]
 use std::sync::Mutex;
@@ -169,7 +169,7 @@ impl RuntimeRecoveryPlan {
             }
             RuntimeRecoveryAction::RecoverDrawResources => {
                 if let Some(namespace_id) = self.shell_recovery_state.namespace_id {
-                    recover_all_namespaces(namespace_id);
+                    recover_draw_resources(namespace_id);
                 }
             }
             RuntimeRecoveryAction::StopRecoveredCoreTimerHandles => {

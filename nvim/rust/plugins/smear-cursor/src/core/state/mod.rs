@@ -4,6 +4,7 @@ mod policy;
 mod projection_view;
 mod protocol;
 mod realization;
+mod render_cleanup;
 mod scene;
 
 pub(crate) use crate::core::types::AnimationSchedule;
@@ -13,4 +14,5 @@ pub(crate) use policy::*;
 pub(crate) use projection_view::*;
 pub(crate) use protocol::*;
 pub(crate) use realization::*;
+pub(crate) use render_cleanup::*;
 pub(crate) use scene::*;

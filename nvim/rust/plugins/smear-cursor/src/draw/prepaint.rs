@@ -9,7 +9,9 @@ use super::floating_windows::FloatingWindowPlacement;
 use super::floating_windows::FloatingWindowVisibility;
 use super::floating_windows::clear_namespace_and_hide_floating_window_with;
 use super::floating_windows::close_floating_window_with;
+use super::floating_windows::close_floating_window_with_autocmds_suppressed;
 use super::floating_windows::delete_floating_buffer_with;
+use super::floating_windows::delete_floating_buffer_with_autocmds_suppressed;
 use super::floating_windows::initialize_floating_buffer_options_with;
 use super::floating_windows::initialize_floating_window_options_with;
 use super::floating_windows::open_floating_window_config;
@@ -41,6 +43,7 @@ use std::collections::HashMap;
 pub(crate) struct ClearPrepaintOverlaysSummary {
     pub(crate) had_visible_prepaint_before_clear: bool,
     pub(crate) cleared_prepaint_overlays: usize,
+    // Counts visible overlays removed from the screen, whether hidden for reuse or closed.
     pub(crate) closed_visible_prepaint_overlays: usize,
     pub(crate) retained_prepaint_overlays: usize,
 }
@@ -82,19 +85,59 @@ pub(super) fn close_prepaint_overlay(
     overlay: PrepaintOverlay,
 ) -> TrackedWindowBufferCloseOutcome {
     let host = NeovimHost;
+    let mut close_window = |window, context| close_floating_window_with(&host, window, context);
+    let mut delete_buffer = |buffer, context| delete_floating_buffer_with(&host, buffer, context);
+    close_prepaint_overlay_with(
+        &host,
+        namespace_id,
+        overlay,
+        &mut close_window,
+        &mut delete_buffer,
+    )
+}
+
+pub(super) fn close_prepaint_overlay_with_autocmds_suppressed(
+    host: &impl DrawResourcePort,
+    namespace_id: NamespaceId,
+    overlay: PrepaintOverlay,
+) -> TrackedWindowBufferCloseOutcome {
+    let mut close_window =
+        |window, context| close_floating_window_with_autocmds_suppressed(host, window, context);
+    let mut delete_buffer =
+        |buffer, context| delete_floating_buffer_with_autocmds_suppressed(host, buffer, context);
+    close_prepaint_overlay_with(
+        host,
+        namespace_id,
+        overlay,
+        &mut close_window,
+        &mut delete_buffer,
+    )
+}
+
+fn close_prepaint_overlay_with<C, D>(
+    host: &impl DrawResourcePort,
+    namespace_id: NamespaceId,
+    overlay: PrepaintOverlay,
+    close_window: &mut C,
+    delete_buffer: &mut D,
+) -> TrackedWindowBufferCloseOutcome
+where
+    C: FnMut(api::Window, &'static str) -> TrackedResourceCloseOutcome,
+    D: FnMut(api::Buffer, &'static str) -> TrackedResourceCloseOutcome,
+{
     let mut buffer = host.valid_buffer(overlay.buffer_id);
     if let Some(existing_buffer) = buffer.as_mut()
         && let Err(err) = host.clear_buffer_namespace(existing_buffer, namespace_id)
     {
-        super::context::log_draw_error("clear prepaint namespace", &err);
+        super::context::log_draw_error_with(host, "clear prepaint namespace", &err);
     }
     let window = if let Some(window) = host.valid_window_i32(overlay.window_id) {
-        close_floating_window_with(&host, window, "close prepaint overlay window")
+        close_window(window, "close prepaint overlay window")
     } else {
         TrackedResourceCloseOutcome::ClosedOrGone
     };
     let buffer = if let Some(buffer) = buffer.take() {
-        delete_floating_buffer_with(&host, buffer, "delete prepaint overlay buffer")
+        delete_buffer(buffer, "delete prepaint overlay buffer")
     } else {
         TrackedResourceCloseOutcome::ClosedOrGone
     };
@@ -304,22 +347,55 @@ pub(crate) fn clear_prepaint_for_current_tab(
     }
 
     let tab_handle = super::apply::current_tab_handle();
+    clear_prepaint_for_tab(namespace_id, tab_handle).1
+}
+
+pub(super) fn clear_prepaint_for_tab_for_cleanup(
+    namespace_id: NamespaceId,
+    tab_handle: TabHandle,
+) -> ClearPrepaintOverlaysSummary {
+    if namespace_id.is_global() {
+        return ClearPrepaintOverlaysSummary::default();
+    }
+
+    clear_prepaint_for_tab(namespace_id, tab_handle).0
+}
+
+fn clear_prepaint_for_tab(
+    namespace_id: NamespaceId,
+    tab_handle: TabHandle,
+) -> (
+    ClearPrepaintOverlaysSummary,
+    TrackedWindowBufferCloseSummary,
+) {
     with_prepaint_by_tab(|prepaint_by_tab| {
         let mut close_summary = TrackedWindowBufferCloseSummary::default();
+        let mut summary = ClearPrepaintOverlaysSummary::default();
         let mut overlay_slot = PrepaintOverlaySlot::detach(prepaint_by_tab, tab_handle);
+        let was_visible = overlay_slot
+            .overlay()
+            .is_some_and(|overlay| overlay.placement.is_some());
+        summary.had_visible_prepaint_before_clear = was_visible;
         let hide_succeeded = match overlay_slot.overlay_mut() {
             Some(entry) => hide_prepaint_overlay(namespace_id, entry),
-            None => return close_summary,
+            None => return (summary, close_summary),
         };
+        summary.cleared_prepaint_overlays = 1;
         if hide_succeeded {
-            return close_summary;
+            summary.closed_visible_prepaint_overlays = usize::from(was_visible);
+            return (summary, close_summary);
         }
-        close_prepaint_slot_and_record(&mut overlay_slot, namespace_id, &mut close_summary);
-        close_summary
+        let outcome =
+            close_prepaint_slot_and_record(&mut overlay_slot, namespace_id, &mut close_summary);
+        summary.closed_visible_prepaint_overlays =
+            usize::from(was_visible && outcome.window_closed_or_gone());
+        summary.retained_prepaint_overlays = usize::from(outcome.should_retain());
+        (summary, close_summary)
     })
 }
 
-pub(super) fn clear_all_prepaint_tracked(
+#[cfg(test)]
+fn clear_all_prepaint_tracked(
     prepaint_by_tab: &mut HashMap<TabHandle, PrepaintOverlay>,
     namespace_id: NamespaceId,
 ) -> ClearPrepaintOverlaysSummary {
@@ -327,7 +403,8 @@ pub(super) fn clear_all_prepaint_tracked(
     clear_all_prepaint_tracked_with_closer(prepaint_by_tab, namespace_id, &mut close_overlay)
 }
 
-pub(super) fn clear_all_prepaint_tracked_with_closer<C>(
+#[cfg(test)]
+fn clear_all_prepaint_tracked_with_closer<C>(
     prepaint_by_tab: &mut HashMap<TabHandle, PrepaintOverlay>,
     namespace_id: NamespaceId,
     close_overlay: &mut C,
@@ -381,9 +458,8 @@ where
     (summary, close_summary)
 }
 
-pub(crate) fn clear_all_prepaint_overlays(
-    namespace_id: NamespaceId,
-) -> ClearPrepaintOverlaysSummary {
+#[cfg(test)]
+fn clear_all_prepaint_overlays(namespace_id: NamespaceId) -> ClearPrepaintOverlaysSummary {
     if namespace_id.is_global() {
         return ClearPrepaintOverlaysSummary::default();
     }
@@ -418,6 +494,7 @@ mod tests {
     use super::clear_all_prepaint_overlays;
     use super::clear_all_prepaint_tracked_with_close_summary;
     use super::clear_all_prepaint_tracked_with_closer;
+    use super::clear_prepaint_for_tab;
     use super::insert_prepaint_overlay_for_test;
     use super::prepaint_count_for_test;
     use super::prepaint_snapshot_for_test;
@@ -494,6 +571,56 @@ mod tests {
 
             assert!(with_render_tab(tab_handle(17), |tab_windows| tab_windows
                 .cached_payload_matches(77, 707)));
+        });
+    }
+
+    #[test]
+    fn soft_clear_removes_only_the_current_tab_prepaint_before_cooling() {
+        with_isolated_draw_context(|| {
+            let placement = Some(PrepaintPlacement {
+                cell: crate::position::ScreenCell::new(3, 4)
+                    .expect("test prepaint cell should be in bounds"),
+                zindex: 120,
+            });
+            for (tab, window_id) in [(17, -17), (23, -23)] {
+                insert_prepaint_overlay_for_test(
+                    tab_handle(tab),
+                    PrepaintOverlay {
+                        window_id,
+                        buffer_id: BufferHandle::from_raw_for_test(i64::from(window_id - 100)),
+                        placement,
+                    },
+                );
+            }
+
+            let (summary, close_summary) =
+                clear_prepaint_for_tab(NamespaceId::new(/*value*/ 99), tab_handle(/*value*/ 17));
+
+            assert_eq!(
+                (summary, close_summary, prepaint_snapshot_for_test()),
+                (
+                    ClearPrepaintOverlaysSummary {
+                        had_visible_prepaint_before_clear: true,
+                        cleared_prepaint_overlays: 1,
+                        closed_visible_prepaint_overlays: 1,
+                        retained_prepaint_overlays: 0,
+                    },
+                    TrackedWindowBufferCloseSummary {
+                        window_closed_or_gone: 1,
+                        window_retained: 0,
+                        buffer_closed_or_gone: 1,
+                        buffer_retained: 0,
+                    },
+                    HashMap::from([(
+                        tab_handle(23),
+                        PrepaintOverlay {
+                            window_id: -23,
+                            buffer_id: BufferHandle::from_raw_for_test(/*value*/ -123),
+                            placement,
+                        },
+                    )]),
+                ),
+            );
         });
     }
 

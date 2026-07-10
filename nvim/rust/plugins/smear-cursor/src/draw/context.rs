@@ -1,15 +1,20 @@
 //! Draw-resource bookkeeping detached during mutation so shell callbacks stay re-entrant.
 
 use super::prepaint::PrepaintOverlay;
+use super::resource_quarantine::ResourceQuarantine;
+use super::resource_quarantine::quarantine_buffer;
+use super::resource_quarantine::quarantine_window;
 use super::window_pool;
 #[cfg(test)]
 use crate::events::clear_runtime_draw_context_for_test;
 use crate::events::restore_draw_prepaint_by_tab;
 use crate::events::restore_draw_render_tabs;
+use crate::events::restore_draw_resource_quarantine;
 #[cfg(test)]
 use crate::events::runtime_render_tab_handles_for_test;
 use crate::events::take_draw_prepaint_by_tab;
 use crate::events::take_draw_render_tabs;
+use crate::events::take_draw_resource_quarantine;
 use crate::host::HostLoggingPort;
 use crate::host::NeovimHost;
 use crate::host::TabHandle;
@@ -23,6 +28,7 @@ use std::panic::resume_unwind;
 struct DrawContext {
     render_tabs: HashMap<TabHandle, window_pool::TabWindows>,
     prepaint_by_tab: HashMap<TabHandle, PrepaintOverlay>,
+    resource_quarantine: ResourceQuarantine,
 }
 
 impl DrawContext {
@@ -30,6 +36,7 @@ impl DrawContext {
         Self {
             render_tabs: HashMap::with_capacity(4),
             prepaint_by_tab: HashMap::with_capacity(2),
+            resource_quarantine: ResourceQuarantine::default(),
         }
     }
 }
@@ -74,6 +81,17 @@ impl DrawResourcesLane {
         self.context.borrow_mut().prepaint_by_tab = prepaint_by_tab;
     }
 
+    pub(crate) fn take_resource_quarantine(&self) -> ResourceQuarantine {
+        std::mem::take(&mut self.context.borrow_mut().resource_quarantine)
+    }
+
+    pub(crate) fn restore_resource_quarantine(&self, quarantine: ResourceQuarantine) {
+        self.context
+            .borrow_mut()
+            .resource_quarantine
+            .merge(quarantine);
+    }
+
     #[cfg(test)]
     pub(crate) fn render_tab_handles_for_test(&self) -> Vec<TabHandle> {
         let context = self.context.borrow();
@@ -86,6 +104,7 @@ impl DrawResourcesLane {
     pub(crate) fn clear_for_test(&self) {
         self.restore_render_tabs(HashMap::with_capacity(4));
         self.restore_prepaint_by_tab(HashMap::with_capacity(2));
+        let _ = self.take_resource_quarantine();
     }
 }
 
@@ -93,7 +112,11 @@ pub(crate) fn log_draw_error(context: &str, err: &impl std::fmt::Display) {
     log_draw_error_with(&NeovimHost, context, err);
 }
 
-fn log_draw_error_with(host: &impl HostLoggingPort, context: &str, err: &impl std::fmt::Display) {
+pub(super) fn log_draw_error_with(
+    host: &impl HostLoggingPort,
+    context: &str,
+    err: &impl std::fmt::Display,
+) {
     host.write_error(&format!("[smear_cursor][draw] {context} failed: {err}"));
 }
 
@@ -113,6 +136,14 @@ pub(super) fn restore_prepaint_by_tab(prepaint_by_tab: HashMap<TabHandle, Prepai
     restore_draw_prepaint_by_tab(prepaint_by_tab);
 }
 
+pub(super) fn take_resource_quarantine() -> ResourceQuarantine {
+    take_draw_resource_quarantine()
+}
+
+pub(super) fn restore_resource_quarantine(quarantine: ResourceQuarantine) {
+    restore_draw_resource_quarantine(quarantine);
+}
+
 pub(super) fn with_render_tabs<R>(
     mutator: impl FnOnce(&mut HashMap<TabHandle, window_pool::TabWindows>) -> R,
 ) -> R {
@@ -123,7 +154,12 @@ pub(super) fn with_render_tabs<R>(
             output
         }
         Err(panic_payload) => {
-            restore_render_tabs(HashMap::with_capacity(4));
+            for tab_windows in render_tabs.values() {
+                for handles in tab_windows.tracked_resource_handles() {
+                    quarantine_window(handles.window_id);
+                    quarantine_buffer(handles.buffer_id);
+                }
+            }
             resume_unwind(panic_payload);
         }
     }
@@ -141,7 +177,24 @@ pub(super) fn with_prepaint_by_tab<R>(
             output
         }
         Err(panic_payload) => {
-            restore_prepaint_by_tab(HashMap::with_capacity(2));
+            for overlay in prepaint_by_tab.values() {
+                quarantine_window(overlay.window_id);
+                quarantine_buffer(overlay.buffer_id);
+            }
+            resume_unwind(panic_payload);
+        }
+    }
+}
+
+pub(super) fn with_resource_quarantine<R>(mutator: impl FnOnce(&mut ResourceQuarantine) -> R) -> R {
+    let mut quarantine = take_resource_quarantine();
+    match catch_unwind(AssertUnwindSafe(|| mutator(&mut quarantine))) {
+        Ok(output) => {
+            restore_resource_quarantine(quarantine);
+            output
+        }
+        Err(panic_payload) => {
+            restore_resource_quarantine(quarantine);
             resume_unwind(panic_payload);
         }
     }
@@ -228,7 +281,13 @@ pub(super) fn clear_draw_context_for_test() {
 mod tests {
     use super::log_draw_error_with;
     use super::render_pool_diagnostics;
+    use super::with_prepaint_by_tab;
     use super::with_render_tab;
+    use super::with_render_tabs;
+    use crate::draw::prepaint::PrepaintOverlay;
+    use crate::draw::prepaint::insert_prepaint_overlay_for_test;
+    use crate::draw::prepaint::prepaint_snapshot_for_test;
+    use crate::draw::resource_quarantine::resource_quarantine_snapshot_for_test;
     use crate::draw::test_support::with_isolated_draw_context;
     use crate::draw::window_pool::WindowBufferHandle;
     use crate::draw::window_pool::WindowPlacement;
@@ -237,6 +296,8 @@ mod tests {
     use crate::host::HostLoggingCall;
     use crate::host::TabHandle;
     use pretty_assertions::assert_eq;
+    use std::panic::AssertUnwindSafe;
+    use std::panic::catch_unwind;
 
     fn tab_handle(value: i32) -> TabHandle {
         TabHandle::from_raw_for_test(value)
@@ -314,5 +375,64 @@ mod tests {
                     .to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn panicking_detached_draw_maps_preserve_exact_handles_for_recovery() {
+        with_isolated_draw_context(|| {
+            with_render_tab(tab_handle(11), |tab_windows| {
+                tab_windows.push_test_visible_window(
+                    WindowBufferHandle {
+                        window_id: 101,
+                        buffer_id: BufferHandle::from_raw_for_test(/*value*/ 201),
+                    },
+                    WindowPlacement {
+                        row: 1,
+                        col: 2,
+                        width: 1,
+                        zindex: 40,
+                    },
+                    1,
+                );
+            });
+            insert_prepaint_overlay_for_test(
+                tab_handle(22),
+                PrepaintOverlay {
+                    window_id: 301,
+                    buffer_id: BufferHandle::from_raw_for_test(/*value*/ 401),
+                    placement: None,
+                },
+            );
+
+            let render_panic = catch_unwind(AssertUnwindSafe(|| {
+                with_render_tabs(|_| panic!("injected render-map panic"));
+            }));
+            let prepaint_panic = catch_unwind(AssertUnwindSafe(|| {
+                with_prepaint_by_tab(|_| panic!("injected prepaint-map panic"));
+            }));
+
+            assert_eq!(
+                (
+                    render_panic.is_err(),
+                    prepaint_panic.is_err(),
+                    super::render_tab_handles_for_test(),
+                    prepaint_snapshot_for_test(),
+                    resource_quarantine_snapshot_for_test(),
+                ),
+                (
+                    true,
+                    true,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                    (
+                        vec![101, 301],
+                        vec![
+                            BufferHandle::from_raw_for_test(/*value*/ 201),
+                            BufferHandle::from_raw_for_test(/*value*/ 401),
+                        ],
+                    ),
+                ),
+            );
+        });
     }
 }

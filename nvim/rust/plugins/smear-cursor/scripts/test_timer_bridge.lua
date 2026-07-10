@@ -1,4 +1,4 @@
-local EXPECTED_HOST_BRIDGE_REVISION = 15
+local EXPECTED_HOST_BRIDGE_REVISION = 16
 
 local function prepend_runtimepath(path)
   if path == nil or path == "" then
@@ -100,6 +100,7 @@ local function main()
   local autocmd_dispatch_result = vim.fn["nvimrs_smear_cursor#host_bridge#dispatch_autocmd"](
     "OptionSet",
     0,
+    "",
     ""
   )
   if autocmd_dispatch_result ~= 0 then

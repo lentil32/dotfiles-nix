@@ -94,9 +94,11 @@ pub(super) fn scheduled_drain_budget_for_thermal(
         RenderThermalState::Cooling => {
             // Surprising: Cooling still drains only the snapshot that was already queued when this
             // edge started. Refresh-required probe retries must remain deferred to the next edge,
-            // so aggressive convergence expands the snapshot budget instead of recursively draining
-            // follow-up work staged mid-pass.
-            queued_work_units
+            // so aggressive convergence expands the snapshot budget without recursively draining
+            // follow-up work staged mid-pass. Cooling may contain arbitrary reducer/probe/cleanup
+            // work, so use the ordinary per-edge ceiling rather than the larger shell-only chain
+            // ceiling. This bounds the first callback after a long suspend.
+            queued_work_units.min(MAX_SCHEDULED_WORK_ITEMS_PER_EDGE)
         }
         RenderThermalState::Hot | RenderThermalState::Cold => {
             scheduled_drain_budget_for_depth(queued_work_units)

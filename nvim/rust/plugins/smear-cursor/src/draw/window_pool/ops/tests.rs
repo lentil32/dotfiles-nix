@@ -2,12 +2,13 @@
 mod tests {
     use super::{
         ADAPTIVE_POOL_HARD_MAX_BUDGET, ADAPTIVE_POOL_MIN_BUDGET, AcquireError, AdaptiveBudgetState,
-        AllocationPolicy, CachedRenderWindow, CachedWindowLifecycle, FrameCapacityTarget,
-        FrameEpoch, ReuseFailureCounters, TabPoolSnapshot, TabWindows, WindowBufferHandle,
-        WindowPlacement, acquire, available_window_index_for_placement, begin_tab_frame,
-        frame_capacity_target, global_compaction_prune_plan, has_pending_clear_work,
-        lru_prune_indices, next_adaptive_budget, purge_tab_with_closer, rollover_in_use_windows,
-        tab_pool_snapshot_from_tab,
+        AllocationPolicy, CachedRenderWindow, CachedWindowLifecycle, CompactRenderWindowsSummary,
+        FrameCapacityTarget, FrameEpoch, ReuseFailureCounters, TabPoolSnapshot, TabWindows,
+        WindowBufferHandle, WindowPlacement, acquire, available_window_index_for_placement,
+        begin_tab_frame,
+        compact_tabs_to_budget_with_closer, frame_capacity_target, global_compaction_prune_plan,
+        has_pending_clear_work, lru_prune_indices, next_adaptive_budget, purge_tab_with_closer,
+        rollover_in_use_windows, tab_pool_snapshot_from_tab,
     };
     use crate::draw::TrackedResourceCloseOutcome;
     use crate::draw::TrackedResourceCloseSummary;

@@ -9,6 +9,9 @@ use super::super::trace::timer_token_summary;
 use super::RuntimeAccessResult;
 use super::cell::restore_timer_bridge;
 use super::cell::take_timer_bridge;
+use super::clock::duration_to_micros;
+use super::clock::now_ms;
+use super::clock::to_core_millis;
 use super::telemetry::record_host_timer_rearm;
 use super::telemetry::record_stale_token_event;
 use super::telemetry::record_timer_fire_duration;
@@ -33,11 +36,8 @@ use crate::host::NeovimHost;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::panic::resume_unwind;
-use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
-
-const MONOTONIC_CLOCK_OFFSET_MS: f64 = 1.0;
 
 fn with_timer_bridge<R>(accessor: impl FnOnce(&mut TimerBridge) -> R) -> RuntimeAccessResult<R> {
     let mut bridge = take_timer_bridge()?;
@@ -58,6 +58,13 @@ pub(super) fn mutate_timer_bridge_for_test<R>(
 
 fn allocate_host_callback_id() -> RuntimeAccessResult<HostCallbackId> {
     with_timer_bridge(TimerBridge::allocate_host_callback_id)
+}
+
+fn timer_lost_event(token: TimerToken) -> Event {
+    Event::TimerLostWithToken(TimerLostWithTokenEvent {
+        token,
+        observed_at: to_core_millis(now_ms()),
+    })
 }
 
 #[cfg(test)]
@@ -292,10 +299,7 @@ pub(crate) fn schedule_core_timer_effect(
             warn(&format!(
                 "timer bridge re-entered while allocating core timer callback id; dropping timer effect: {err}"
             ));
-            return vec![Event::TimerLostWithToken(TimerLostWithTokenEvent {
-                token,
-                observed_at: requested_at,
-            })];
+            return vec![timer_lost_event(token)];
         }
     };
     let timeout = Duration::from_millis(delay_ms);
@@ -342,20 +346,14 @@ pub(crate) fn schedule_core_timer_effect(
                             "failed to stop unslotted core timer after state re-entry: {stop_err}"
                         ));
                     }
-                    vec![Event::TimerLostWithToken(TimerLostWithTokenEvent {
-                        token,
-                        observed_at: requested_at,
-                    })]
+                    vec![timer_lost_event(token)]
                 }
             }
         }
         Err(err) => {
             trace_lazy(|| format!("timer_schedule_failed {timer_schedule_summary} error={err}"));
             warn(&format!("failed to schedule core timer: {err}"));
-            vec![Event::TimerLostWithToken(TimerLostWithTokenEvent {
-                token,
-                observed_at: requested_at,
-            })]
+            vec![timer_lost_event(token)]
         }
     }
 }
@@ -376,30 +374,6 @@ pub(crate) fn resolved_timer_delay_ms(timer_id: TimerId, delay: DelayBudgetMs) -
         };
     }
     delay.value()
-}
-
-pub(crate) fn to_core_millis(value_ms: f64) -> Millis {
-    if !value_ms.is_finite() || value_ms <= 0.0 {
-        return Millis::new(0);
-    }
-    let Ok(duration) = Duration::try_from_secs_f64(value_ms / 1000.0) else {
-        return Millis::new(u64::MAX);
-    };
-    Millis::new(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-}
-
-pub(crate) fn duration_to_micros(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
-pub(crate) fn now_ms() -> f64 {
-    static CLOCK_START: OnceLock<Instant> = OnceLock::new();
-    CLOCK_START
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_secs_f64()
-        * 1000.0
-        + MONOTONIC_CLOCK_OFFSET_MS
 }
 
 #[cfg(test)]
@@ -601,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn timer_bridge_reset_clears_handles_retries_and_callback_allocator() {
+    fn timer_bridge_reset_clears_handles_and_retries_without_reusing_callback_ids() {
         let mut bridge = TimerBridge::default();
         let retry = fired_timer(23, 29);
         let handle = CoreTimerHandle {
@@ -621,6 +595,16 @@ mod tests {
 
         assert_eq!(bridge.has_timer_id(TimerId::Animation), false);
         assert_eq!(bridge.pending_retry_contains(retry), false);
+        assert_eq!(bridge.allocate_host_callback_id().get(), 2);
+    }
+
+    #[test]
+    fn timer_bridge_recovery_clear_does_not_reuse_callback_ids() {
+        let mut bridge = TimerBridge::default();
+
         assert_eq!(bridge.allocate_host_callback_id().get(), 1);
+        bridge.clear_recovered_transient();
+
+        assert_eq!(bridge.allocate_host_callback_id().get(), 2);
     }
 }

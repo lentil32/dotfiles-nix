@@ -25,6 +25,7 @@ pub(super) enum AutocmdIngress {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum AutocmdDispatchRoute {
     Cursor(CursorAutocmdIngress),
+    CursorAfterCoolingVisibilityFence(CursorAutocmdIngress),
     NonCursor(NonCursorAutocmdIngress),
     ColorScheme,
     ShellOnlyTeardown(TeardownAutocmdIngress),
@@ -169,7 +170,9 @@ impl AutocmdIngress {
             Self::VimResized => {
                 AutocmdDispatchRoute::NonCursor(NonCursorAutocmdIngress::VimResized)
             }
-            Self::WinEnter => AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::WinEnter),
+            Self::WinEnter => AutocmdDispatchRoute::CursorAfterCoolingVisibilityFence(
+                CursorAutocmdIngress::WinEnter,
+            ),
             Self::WinClosed => {
                 AutocmdDispatchRoute::ShellOnlyTeardown(TeardownAutocmdIngress::WinClosed)
             }
@@ -274,7 +277,9 @@ mod tests {
             ),
             (
                 AutocmdIngress::WinEnter,
-                AutocmdDispatchRoute::Cursor(CursorAutocmdIngress::WinEnter),
+                AutocmdDispatchRoute::CursorAfterCoolingVisibilityFence(
+                    CursorAutocmdIngress::WinEnter,
+                ),
             ),
             (
                 AutocmdIngress::WinClosed,

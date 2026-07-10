@@ -15,15 +15,18 @@ use crate::host::api::types::WindowConfig;
 use crate::host::api::types::WindowRelativeTo;
 use crate::host::api::types::WindowStyle;
 use nvim_oxi::Result;
+#[cfg(test)]
 use std::collections::BinaryHeap;
 #[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 
 include!("ops/adaptive.rs");
 include!("ops/windows.rs");
 include!("ops/acquire.rs");
 include!("ops/cleanup.rs");
+include!("ops/compaction.rs");
 include!("ops/snapshot.rs");
 #[cfg(test)]
 include!("ops/tests.rs");

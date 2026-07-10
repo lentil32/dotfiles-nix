@@ -49,6 +49,7 @@ fn next_adaptive_budget(previous: AdaptiveBudgetState, frame_demand: usize) -> A
     }
 }
 
+#[cfg(test)]
 fn effective_keep_budget(adaptive_budget: usize, max_kept_windows: usize) -> usize {
     adaptive_budget.min(max_kept_windows)
 }
@@ -57,7 +58,8 @@ pub(crate) fn tab_has_visible_windows(tab_windows: &TabWindows) -> bool {
     tab_windows.visible_window_count() > 0
 }
 
-pub(crate) fn tab_has_pending_clear_work(
+#[cfg(test)]
+fn tab_has_pending_clear_work(
     tab_windows: &TabWindows,
     max_kept_windows: usize,
 ) -> bool {
@@ -82,6 +84,7 @@ pub(crate) fn has_pending_clear_work(
         .any(|tab_windows| tab_has_pending_clear_work(tab_windows, max_kept_windows))
 }
 
+#[cfg(test)]
 fn lru_prune_indices(windows: &[CachedRenderWindow], keep_count: usize) -> Vec<usize> {
     let available: Vec<(usize, FrameEpoch)> = windows
         .iter()

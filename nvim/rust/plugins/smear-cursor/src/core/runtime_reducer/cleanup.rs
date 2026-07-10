@@ -102,6 +102,15 @@ pub(crate) fn render_hard_cleanup_delay_ms(config: &RuntimeConfig) -> u64 {
     scaled.max(MIN_RENDER_HARD_PURGE_DELAY_MS)
 }
 
+pub(crate) fn render_cleanup_retry_policy(
+    config: &RuntimeConfig,
+) -> crate::core::state::RenderCleanupRetryPolicy {
+    crate::core::state::RenderCleanupRetryPolicy::new(
+        render_cleanup_delay_ms(config),
+        render_hard_cleanup_delay_ms(config).max(DEFAULT_MAX_RENDER_CLEANUP_RETRY_DELAY_MS),
+    )
+}
+
 pub(crate) const fn render_cleanup_idle_target_budget(config: &RuntimeConfig) -> usize {
     if config.max_kept_windows < DEFAULT_IDLE_RETENTION_BUDGET {
         config.max_kept_windows
@@ -110,16 +119,20 @@ pub(crate) const fn render_cleanup_idle_target_budget(config: &RuntimeConfig) ->
     }
 }
 
-pub(crate) const fn render_cleanup_max_prune_per_tick(config: &RuntimeConfig) -> usize {
+pub(crate) const fn render_cleanup_max_teardown_attempts_per_tick(config: &RuntimeConfig) -> usize {
     if config.max_kept_windows == 0 {
         1
-    } else {
+    } else if config.max_kept_windows < DEFAULT_MAX_TEARDOWN_ATTEMPTS_PER_TICK {
         config.max_kept_windows
+    } else {
+        DEFAULT_MAX_TEARDOWN_ATTEMPTS_PER_TICK
     }
 }
 use crate::config::RuntimeConfig;
 
 const DEFAULT_IDLE_RETENTION_BUDGET: usize = 2;
+const DEFAULT_MAX_TEARDOWN_ATTEMPTS_PER_TICK: usize = 8;
 pub(crate) const MIN_RENDER_CLEANUP_DELAY_MS: u64 = 200;
 pub(crate) const MIN_RENDER_HARD_PURGE_DELAY_MS: u64 = 3_000;
+const DEFAULT_MAX_RENDER_CLEANUP_RETRY_DELAY_MS: u64 = 30_000;
 pub(crate) const RENDER_HARD_PURGE_DELAY_MULTIPLIER: u64 = 8;

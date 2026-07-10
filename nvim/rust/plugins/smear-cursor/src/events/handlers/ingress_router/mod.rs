@@ -9,6 +9,7 @@ use crate::events::runtime::record_ingress_received;
 use crate::host::BufferHandle;
 use nvim_oxi::Result;
 
+mod cooling_visibility;
 mod cursor_autocmd;
 mod deferred_teardown;
 mod non_cursor_autocmd;
@@ -78,6 +79,12 @@ fn on_autocmd_ingress(
             Ok(IngressDispatchOutcome::Dropped)
         }
         AutocmdDispatchRoute::ColorScheme => non_cursor_autocmd::on_colorscheme_ingress(),
+        AutocmdDispatchRoute::CursorAfterCoolingVisibilityFence(cursor_ingress) => {
+            // Neovim emits WinEnter before TabEnter for a tab switch. Fence while the previous
+            // cleanup state is still Cooling, before cursor demand heats it back to Hot.
+            let _ = cooling_visibility::on_current_tab_ingress()?;
+            cursor_autocmd::on_cursor_event_core_for_autocmd(cursor_ingress)
+        }
         AutocmdDispatchRoute::NonCursor(non_cursor_ingress) => {
             non_cursor_autocmd::on_non_cursor_autocmd_ingress(non_cursor_ingress, context)
         }

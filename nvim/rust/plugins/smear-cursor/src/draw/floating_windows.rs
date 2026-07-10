@@ -162,23 +162,6 @@ pub(crate) fn set_existing_floating_window_config_with(
     host.set_window_config(window, &config)
 }
 
-pub(crate) fn clear_namespace_and_hide_floating_window(
-    namespace_id: NamespaceId,
-    buffer: &mut api::Buffer,
-    window: &mut api::Window,
-    clear_context: &'static str,
-    hide_context: &'static str,
-) -> Result<()> {
-    clear_namespace_and_hide_floating_window_with(
-        &NeovimHost,
-        namespace_id,
-        buffer,
-        window,
-        clear_context,
-        hide_context,
-    )
-}
-
 pub(crate) fn clear_namespace_and_hide_floating_window_with(
     host: &impl DrawResourcePort,
     namespace_id: NamespaceId,
@@ -188,13 +171,13 @@ pub(crate) fn clear_namespace_and_hide_floating_window_with(
     hide_context: &'static str,
 ) -> Result<()> {
     if let Err(err) = host.clear_buffer_namespace(buffer, namespace_id) {
-        super::context::log_draw_error(clear_context, &err);
+        super::context::log_draw_error_with(host, clear_context, &err);
         return Err(err);
     }
     if let Err(err) =
         set_existing_floating_window_config_with(host, window, hide_floating_window_config())
     {
-        super::context::log_draw_error(hide_context, &err);
+        super::context::log_draw_error_with(host, hide_context, &err);
         return Err(err);
     }
     Ok(())
@@ -230,10 +213,30 @@ pub(crate) fn delete_floating_buffer_with(
     }
 
     let _event_ignore = EventIgnoreGuard::set_all_with(host);
+    delete_valid_floating_buffer(host, buffer, context)
+}
+
+pub(crate) fn delete_floating_buffer_with_autocmds_suppressed(
+    host: &impl DrawResourcePort,
+    buffer: api::Buffer,
+    context: &str,
+) -> TrackedResourceCloseOutcome {
+    if !host.buffer_is_valid(&buffer) {
+        return TrackedResourceCloseOutcome::ClosedOrGone;
+    }
+
+    delete_valid_floating_buffer(host, buffer, context)
+}
+
+fn delete_valid_floating_buffer(
+    host: &impl DrawResourcePort,
+    buffer: api::Buffer,
+    context: &str,
+) -> TrackedResourceCloseOutcome {
     match host.delete_buffer_force(buffer) {
         Ok(()) => TrackedResourceCloseOutcome::ClosedOrGone,
         Err(err) => {
-            super::context::log_draw_error(context, &err);
+            super::context::log_draw_error_with(host, context, &err);
             TrackedResourceCloseOutcome::Retained
         }
     }
@@ -256,10 +259,30 @@ pub(crate) fn close_floating_window_with(
     }
 
     let _event_ignore = EventIgnoreGuard::set_all_with(host);
+    close_valid_floating_window(host, window, context)
+}
+
+pub(crate) fn close_floating_window_with_autocmds_suppressed(
+    host: &impl DrawResourcePort,
+    window: api::Window,
+    context: &str,
+) -> TrackedResourceCloseOutcome {
+    if !host.window_is_valid(&window) {
+        return TrackedResourceCloseOutcome::ClosedOrGone;
+    }
+
+    close_valid_floating_window(host, window, context)
+}
+
+fn close_valid_floating_window(
+    host: &impl DrawResourcePort,
+    window: api::Window,
+    context: &str,
+) -> TrackedResourceCloseOutcome {
     match host.close_window_force(window) {
         Ok(()) => TrackedResourceCloseOutcome::ClosedOrGone,
         Err(err) => {
-            super::context::log_draw_error(context, &err);
+            super::context::log_draw_error_with(host, context, &err);
             TrackedResourceCloseOutcome::Retained
         }
     }
@@ -278,8 +301,12 @@ pub(crate) fn initialize_floating_window_options_with(
 #[cfg(test)]
 mod tests {
     use super::EventIgnoreGuard;
+    use super::close_floating_window_with_autocmds_suppressed;
+    use super::delete_floating_buffer_with_autocmds_suppressed;
+    use crate::draw::TrackedResourceCloseOutcome;
     use crate::host::DrawResourceCall;
     use crate::host::FakeDrawResourcePort;
+    use crate::host::api;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -302,6 +329,69 @@ mod tests {
                     value: "old-eventignore".to_owned()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn autocmd_suppressed_close_skips_host_mutations_for_already_gone_resources() {
+        let host = FakeDrawResourcePort::default();
+
+        let outcomes = (
+            delete_floating_buffer_with_autocmds_suppressed(
+                &host,
+                api::Buffer::from(/*value*/ -1),
+                "delete gone buffer",
+            ),
+            close_floating_window_with_autocmds_suppressed(
+                &host,
+                api::Window::from(/*value*/ -1),
+                "close gone window",
+            ),
+        );
+
+        assert_eq!(
+            (outcomes, host.calls()),
+            (
+                (
+                    TrackedResourceCloseOutcome::ClosedOrGone,
+                    TrackedResourceCloseOutcome::ClosedOrGone,
+                ),
+                Vec::new(),
+            )
+        );
+    }
+
+    #[test]
+    fn autocmd_suppressed_close_does_not_nest_an_eventignore_guard() {
+        let host = FakeDrawResourcePort::default();
+
+        let outcomes = (
+            delete_floating_buffer_with_autocmds_suppressed(
+                &host,
+                api::Buffer::from(/*value*/ 7),
+                "delete buffer",
+            ),
+            close_floating_window_with_autocmds_suppressed(
+                &host,
+                api::Window::from(/*value*/ 11),
+                "close window",
+            ),
+        );
+
+        assert_eq!(
+            (outcomes, host.calls()),
+            (
+                (
+                    TrackedResourceCloseOutcome::ClosedOrGone,
+                    TrackedResourceCloseOutcome::ClosedOrGone,
+                ),
+                vec![
+                    DrawResourceCall::DeleteBufferForce {
+                        buffer: crate::host::BufferHandle::from_raw_for_test(/*value*/ 7),
+                    },
+                    DrawResourceCall::CloseWindowForce { window_id: 11 },
+                ],
+            )
         );
     }
 }

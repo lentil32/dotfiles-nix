@@ -2,6 +2,8 @@ use super::super::handlers;
 use super::super::host_bridge::InstalledHostBridge;
 use super::super::host_bridge::installed_host_bridge;
 use super::super::logging::trace_lazy;
+use super::clock::duration_to_micros;
+use super::clock::now_ms;
 use super::telemetry::note_observation_request_now;
 use super::telemetry::record_observation_request_executed;
 use super::telemetry::record_post_burst_convergence;
@@ -9,8 +11,6 @@ use super::telemetry::record_probe_duration;
 use super::telemetry::record_probe_refresh_budget_exhausted;
 use super::telemetry::record_probe_refresh_retried;
 use super::telemetry::record_stale_token_event;
-use super::timers::duration_to_micros;
-use super::timers::now_ms;
 use super::timers::resolved_timer_delay_ms;
 use super::timers::schedule_core_timer_effect;
 use super::to_core_millis;
@@ -81,6 +81,7 @@ impl EffectExecutionError {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> EffectExecutionFailureKind {
         self.kind
     }

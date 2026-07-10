@@ -401,6 +401,15 @@ impl RuntimeState {
         }
     }
 
+    pub(crate) fn recover_from_clock_discontinuity(&mut self) {
+        self.start_new_trail_stroke();
+        self.settle_at_target();
+        self.clear_particles();
+        self.release_cleanup_cold_storage();
+        self.reset_animation_timing();
+        self.stop_animation();
+    }
+
     pub(crate) fn tracked_cursor(&self) -> Option<TrackedCursor> {
         self.tracked_cursor_ref().cloned()
     }

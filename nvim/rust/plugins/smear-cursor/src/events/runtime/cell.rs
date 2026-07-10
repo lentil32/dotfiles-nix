@@ -12,6 +12,7 @@ use crate::config::LogLevel;
 use crate::draw::DrawResourcesLane;
 use crate::draw::PaletteStateLane;
 use crate::draw::PrepaintOverlay;
+use crate::draw::ResourceQuarantine;
 use crate::draw::TabWindows;
 use crate::host::TabHandle;
 use std::cell::RefCell;
@@ -277,6 +278,18 @@ pub(crate) fn restore_draw_prepaint_by_tab(prepaint_by_tab: HashMap<TabHandle, P
         runtime
             .draw_resources
             .restore_prepaint_by_tab(prepaint_by_tab);
+    });
+}
+
+pub(crate) fn take_draw_resource_quarantine() -> ResourceQuarantine {
+    RUNTIME_CELL.with(|runtime| runtime.draw_resources.take_resource_quarantine())
+}
+
+pub(crate) fn restore_draw_resource_quarantine(quarantine: ResourceQuarantine) {
+    RUNTIME_CELL.with(|runtime| {
+        runtime
+            .draw_resources
+            .restore_resource_quarantine(quarantine);
     });
 }
 

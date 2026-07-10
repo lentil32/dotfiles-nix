@@ -64,25 +64,6 @@ pub(crate) fn current_tab_handle() -> TabHandle {
     snapshot.tab_handle
 }
 
-pub(crate) fn clear_namespace_all_buffers(namespace_id: NamespaceId) -> usize {
-    let host = NeovimHost;
-    let mut cleared_buffers = 0_usize;
-    for mut buffer in host.list_buffers() {
-        if !host.buffer_is_valid(&buffer) {
-            continue;
-        }
-        match host.clear_buffer_namespace(&mut buffer, namespace_id) {
-            Ok(()) => {
-                cleared_buffers = cleared_buffers.saturating_add(1);
-            }
-            Err(err) => {
-                log_draw_error("clear render namespace", &err);
-            }
-        }
-    }
-    cleared_buffers
-}
-
 fn highlight_group(group_names: &HighlightGroupNames, reference: HighlightRef) -> &str {
     match reference {
         HighlightRef::Normal(level) => group_names.normal_name(level),
