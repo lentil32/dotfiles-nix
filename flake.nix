@@ -42,9 +42,11 @@
 
     nixCats.url = "github:BirdeeHub/nixCats-nvim";
 
-    # Homebrew management
+    # Homebrew management. nix-homebrew still pins 6.0.12, while current
+    # core/cask taps require install-step and cask DSL additions from 6.0.13.
+    # Drop this override once nix-homebrew itself pins 6.0.13 or newer.
     brew-src = {
-      url = "github:Homebrew/brew/5.1.14";
+      url = "github:Homebrew/brew/6.0.13";
       flake = false;
     };
     nix-homebrew = {
@@ -82,10 +84,6 @@
       url = "github:wordbricks/homebrew-tap";
       flake = false;
     };
-    homebrew-peonping = {
-      url = "github:PeonPing/homebrew-tap";
-      flake = false;
-    };
   };
 
   outputs =
@@ -103,6 +101,7 @@
       claude-code-nix,
       codex-cli-nix,
       gemini-cli-nix,
+      brew-src,
       nix-homebrew,
       nur,
       homebrew-core,
@@ -111,7 +110,6 @@
       homebrew-pear,
       homebrew-anomalyco,
       homebrew-wordbricks,
-      homebrew-peonping,
       nixCats,
       ...
     }@inputs:
@@ -141,23 +139,10 @@
 
       defaultMachine = machines.${m5ProHost};
 
-      miseOciLayerTestWorkaround = _final: prev: {
-        mise = prev.mise.overrideAttrs (old: {
-          checkFlags = (old.checkFlags or [ ]) ++ [
-            # TODO: Remove when the upstream nixpkgs fix is merged:
-            # https://github.com/NixOS/nixpkgs/pull/534965
-            # Darwin sandboxing strips special permission bits in this
-            # upstream test, matching the existing Linux skip reason.
-            "--skip=oci::layer::tests::preserve_metadata_dir_layer_keeps_special_permission_bits"
-          ];
-        });
-      };
-
       pkgsUnstableFor =
         system:
         import nixpkgs-unstable {
           inherit system;
-          overlays = [ miseOciLayerTestWorkaround ];
         };
 
       nixpkgsConfig = {
@@ -264,7 +249,6 @@
             sops-nix.darwinModules.sops
             ./modules/secrets.nix
             ./modules/services/aerospace.nix
-            ./modules/services/ntfy.nix
           ]
           ++ (
             if machine ? extraModulesDir then
@@ -289,6 +273,13 @@
                 enable = true;
                 user = machine.username;
                 mutableTaps = false;
+                # Keep the patched package metadata aligned with the overridden
+                # source; nix-homebrew otherwise labels it with its own 6.0.12.
+                package = brew-src // {
+                  name = "brew-6.0.13";
+                  version = "6.0.13";
+                };
+                trust.casks = [ "pear-devs/pear/pear-desktop" ];
                 # In Homebrew, the repo part of all taps always have homebrew- prepended.
                 taps = {
                   "homebrew/homebrew-core" = homebrew-core;
@@ -297,7 +288,6 @@
                   "pear-devs/homebrew-pear" = homebrew-pear;
                   "anomalyco/homebrew-tap" = homebrew-anomalyco;
                   "wordbricks/homebrew-tap" = homebrew-wordbricks;
-                  "peonping/homebrew-tap" = homebrew-peonping;
                 };
               };
             }

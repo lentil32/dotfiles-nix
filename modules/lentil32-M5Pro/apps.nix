@@ -51,10 +51,6 @@ let
       cask = "codexbar";
     }
     { formulae = "ollama"; }
-    {
-      desc = "Agent terminal notifications + voice packs";
-      formulae = "peonping/tap/peon-ping";
-    }
 
     # IM & audio & video
     { cask = "discord"; }
