@@ -43,10 +43,10 @@
     nixCats.url = "github:BirdeeHub/nixCats-nvim";
 
     # Homebrew management. nix-homebrew still pins 6.0.12, while current
-    # core/cask taps require install-step and cask DSL additions from 6.0.13.
-    # Drop this override once nix-homebrew itself pins 6.0.13 or newer.
+    # core/cask taps require install-step and cask DSL additions from 6.0.14.
+    # Drop this override once nix-homebrew itself pins 6.0.14 or newer.
     brew-src = {
-      url = "github:Homebrew/brew/6.0.13";
+      url = "github:Homebrew/brew/6.0.14";
       flake = false;
     };
     nix-homebrew = {
@@ -276,9 +276,13 @@
                 # Keep the patched package metadata aligned with the overridden
                 # source; nix-homebrew otherwise labels it with its own 6.0.12.
                 package = brew-src // {
-                  name = "brew-6.0.13";
-                  version = "6.0.13";
+                  name = "brew-6.0.14";
+                  version = "6.0.14";
                 };
+                trust.taps = [
+                  "anomalyco/tap"
+                  "wordbricks/tap"
+                ];
                 trust.casks = [ "pear-devs/pear/pear-desktop" ];
                 # In Homebrew, the repo part of all taps always have homebrew- prepended.
                 taps = {

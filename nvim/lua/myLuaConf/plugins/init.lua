@@ -184,7 +184,7 @@ lze.load({
         return
       end
       require("nvimrs_smear_cursor").setup({
-        logging_level = 0,
+        logging_level = 5,
         smear_terminal_mode = true,
       })
     end,
