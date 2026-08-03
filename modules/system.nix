@@ -113,6 +113,7 @@
         ".GlobalPreferences" = {
           # automatically switch to a new space when switching to the application
           AppleSpacesSwitchOnActivate = true;
+          CGDisableCursorLocationMagnification = true; # disable shake mouse pointer to locate
         };
         NSGlobalDomain = {
           # Add a context menu item for showing the Web Inspector in web views

@@ -144,6 +144,8 @@ in
 
     onActivation = {
       autoUpdate = true;
+      # NOTE: Casks marked `auto_updates true` are skipped by `make deploy-all`.
+      # Upgrade them manually with `brew upgrade --cask --greedy <cask>`.
       upgrade = true;
       # Keep Homebrew declarative without zapping per-app data from protected
       # macOS Library paths during darwin-rebuild activation.

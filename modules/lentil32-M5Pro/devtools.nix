@@ -1,6 +1,7 @@
 {
   lib,
   pkgs,
+  pkgs-unstable,
   ...
 }:
 let
@@ -65,7 +66,7 @@ in
     with pkgs;
     [
       zsh
-      git
+      pkgs-unstable.git
       vim
       man-pages
       man-pages-posix

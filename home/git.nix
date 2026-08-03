@@ -1,4 +1,9 @@
-{ lib, config, ... }:
+{
+  lib,
+  config,
+  pkgs-unstable,
+  ...
+}:
 let
   homeDir = config.home.homeDirectory;
   maintenanceSecretFile = ../secrets/git-maintenance.yaml;
@@ -26,6 +31,7 @@ in
 
   programs.git = {
     enable = true;
+    package = pkgs-unstable.git;
     lfs.enable = true;
 
     includes = [
