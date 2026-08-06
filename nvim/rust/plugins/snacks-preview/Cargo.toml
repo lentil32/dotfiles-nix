@@ -16,3 +16,6 @@ nvimrs-nvim-utils = { workspace = true }
 nvimrs-nvim-oxi-utils = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 nvimrs-support = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

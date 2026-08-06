@@ -25,6 +25,10 @@ fn nvimrs_snacks_preview() -> Dictionary {
         Function::<i64, ()>::from_fn(preview::close_doc_preview_lua),
     );
     api.insert(
+        "close_doc_preview_for_window",
+        Function::<i64, ()>::from_fn(preview::close_doc_preview_for_window_lua),
+    );
+    api.insert(
         "reset_state",
         Function::<(), ()>::from_fn(|()| preview::reset_state_lua()),
     );

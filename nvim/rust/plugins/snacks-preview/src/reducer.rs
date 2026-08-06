@@ -15,6 +15,10 @@ impl BufKey {
             None => None,
         }
     }
+
+    pub const fn raw(self) -> i64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,15 +74,9 @@ pub struct RestoreNamePlan {
     pub preview_name: String,
 }
 
-impl RestoreNamePlan {
-    fn from_state(state: &DocPreviewState) -> Option<Self> {
-        state.restore_name_plan.clone()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewEffect {
-    RestoreName(RestoreNamePlan),
+    RestoreName { key: BufKey, plan: RestoreNamePlan },
     DeleteAugroup(u32),
     CloseCleanup(i64),
 }
@@ -92,6 +90,7 @@ pub type PreviewTransition = Transition<PreviewEffect, PreviewCommand>;
 
 #[derive(Debug, Clone)]
 pub enum PreviewEvent {
+    Reset,
     Close {
         key: BufKey,
     },
@@ -122,9 +121,9 @@ pub struct PreviewRegistry {
 }
 
 impl PreviewRegistry {
-    fn transition_from_closed(removed: Option<DocPreviewState>) -> PreviewTransition {
+    fn transition_from_closed(key: BufKey, removed: Option<DocPreviewState>) -> PreviewTransition {
         removed
-            .map(|old| Self::close_effects(&old))
+            .map(|old| Self::close_effects(key, old))
             .map_or_else(PreviewTransition::default, PreviewTransition::with_effects)
     }
 
@@ -163,6 +162,7 @@ impl PreviewRegistry {
         let _ = self.previews.insert_replacing(key, state);
     }
 
+    #[cfg(test)]
     pub fn get_preview(&self, key: BufKey) -> Option<&DocPreviewState> {
         self.previews.get(key)
     }
@@ -180,14 +180,24 @@ impl PreviewRegistry {
         self.previews.take_by_key(key)
     }
 
-    fn remove_preview_by_token(&mut self, token: PreviewToken) -> Option<DocPreviewState> {
-        self.previews.take_by_index_two(token).map(|(_, old)| old)
+    fn remove_preview_by_token(
+        &mut self,
+        token: PreviewToken,
+    ) -> Option<(BufKey, DocPreviewState)> {
+        self.previews.take_by_index_two(token)
     }
 
-    fn close_effects(state: &DocPreviewState) -> Vec<PreviewEffect> {
+    fn restore_name_effect(key: BufKey, state: &mut DocPreviewState) -> Option<PreviewEffect> {
+        state
+            .restore_name_plan
+            .take()
+            .map(|plan| PreviewEffect::RestoreName { key, plan })
+    }
+
+    fn close_effects(key: BufKey, mut state: DocPreviewState) -> Vec<PreviewEffect> {
         let mut effects = Vec::new();
-        if let Some(plan) = RestoreNamePlan::from_state(state) {
-            effects.push(PreviewEffect::RestoreName(plan));
+        if let Some(effect) = Self::restore_name_effect(key, &mut state) {
+            effects.push(effect);
         }
         if let Some(group) = state.group {
             effects.push(PreviewEffect::DeleteAugroup(group));
@@ -213,11 +223,30 @@ impl PreviewRegistry {
 
     pub fn reduce(&mut self, event: PreviewEvent) -> PreviewTransition {
         match event {
+            PreviewEvent::Reset => {
+                let mut keys = self
+                    .previews
+                    .iter()
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>();
+                keys.sort_unstable_by_key(|key| key.raw());
+                let mut effects = Vec::new();
+                for key in keys {
+                    if let Some(state) = self.remove_preview_by_key(key) {
+                        effects.extend(Self::close_effects(key, state));
+                    }
+                }
+                PreviewTransition::with_effects(effects)
+            }
             PreviewEvent::Close { key } => {
-                Self::transition_from_closed(self.remove_preview_by_key(key))
+                let removed = self.remove_preview_by_key(key);
+                Self::transition_from_closed(key, removed)
             }
             PreviewEvent::CloseByToken { token } => {
-                Self::transition_from_closed(self.remove_preview_by_token(token))
+                let Some((key, removed)) = self.remove_preview_by_token(token) else {
+                    return PreviewTransition::default();
+                };
+                Self::transition_from_closed(key, Some(removed))
             }
             PreviewEvent::Register {
                 key,
@@ -232,7 +261,7 @@ impl PreviewRegistry {
                 if let Some((old_key, old)) = self.previews.take_by_index_one(win)
                     && old_key != key
                 {
-                    effects.extend(Self::close_effects(&old));
+                    effects.extend(Self::close_effects(old_key, old));
                 }
                 let token = self.next_token();
                 let unexpected_evicted = self.previews.insert_replacing(
@@ -256,7 +285,7 @@ impl PreviewRegistry {
                         EvictionReason::IndexOne
                         | EvictionReason::IndexTwo
                         | EvictionReason::IndexOneAndIndexTwo => {
-                            effects.extend(Self::close_effects(&evicted.value));
+                            effects.extend(Self::close_effects(evicted.key, evicted.value));
                         }
                     }
                 }
@@ -264,12 +293,17 @@ impl PreviewRegistry {
                 transition.set_command(PreviewCommand::RequestDocFind(token));
                 transition
             }
-            PreviewEvent::DocFindArrived { key, token } => self
-                .get_preview(key)
-                .filter(|entry| entry.token == token)
-                .and_then(RestoreNamePlan::from_state)
-                .map(|plan| vec![PreviewEffect::RestoreName(plan)])
-                .map_or_else(PreviewTransition::default, PreviewTransition::with_effects),
+            PreviewEvent::DocFindArrived { key, token } => {
+                let Some(entry) = self.get_preview_mut(key) else {
+                    return PreviewTransition::default();
+                };
+                if entry.token != token {
+                    return PreviewTransition::default();
+                }
+                Self::restore_name_effect(key, entry)
+                    .map(|effect| vec![effect])
+                    .map_or_else(PreviewTransition::default, PreviewTransition::with_effects)
+            }
             PreviewEvent::CleanupOpened {
                 key,
                 token,
@@ -301,7 +335,12 @@ impl Machine for PreviewRegistry {
 }
 
 #[cfg(test)]
+mod reset_tests;
+
+#[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
+
     use super::*;
 
     fn key(raw: i64) -> Result<BufKey, &'static str> {
@@ -335,7 +374,6 @@ mod tests {
                 assert!(cleanup_id > 0);
             }
             if let Some(plan) = &state.restore_name_plan {
-                assert!(!plan.name.is_empty());
                 assert!(!plan.preview_name.is_empty());
                 assert_ne!(plan.name, plan.preview_name);
             }
@@ -407,10 +445,13 @@ mod tests {
         assert_eq!(
             transition.effects,
             vec![
-                PreviewEffect::RestoreName(RestoreNamePlan {
-                    name: "a".to_string(),
-                    preview_name: "b".to_string(),
-                }),
+                PreviewEffect::RestoreName {
+                    key,
+                    plan: RestoreNamePlan {
+                        name: "a".to_string(),
+                        preview_name: "b".to_string(),
+                    },
+                },
                 PreviewEffect::DeleteAugroup(17),
                 PreviewEffect::CloseCleanup(23),
             ]
@@ -534,10 +575,13 @@ mod tests {
         assert_eq!(
             transition.effects,
             vec![
-                PreviewEffect::RestoreName(RestoreNamePlan {
-                    name: "doc".to_string(),
-                    preview_name: "doc.preview".to_string(),
-                }),
+                PreviewEffect::RestoreName {
+                    key,
+                    plan: RestoreNamePlan {
+                        name: "doc".to_string(),
+                        preview_name: "doc.preview".to_string(),
+                    },
+                },
                 PreviewEffect::DeleteAugroup(33),
                 PreviewEffect::CloseCleanup(44),
             ]
@@ -610,10 +654,13 @@ mod tests {
         assert_eq!(
             transition.effects,
             vec![
-                PreviewEffect::RestoreName(RestoreNamePlan {
-                    name: "old".to_string(),
-                    preview_name: "old.preview".to_string(),
-                }),
+                PreviewEffect::RestoreName {
+                    key: key_a,
+                    plan: RestoreNamePlan {
+                        name: "old".to_string(),
+                        preview_name: "old.preview".to_string(),
+                    },
+                },
                 PreviewEffect::DeleteAugroup(41),
                 PreviewEffect::CloseCleanup(42),
             ]
@@ -733,6 +780,46 @@ mod tests {
     }
 
     #[test]
+    fn doc_find_arrived_consumes_restore_obligation() -> Result<(), &'static str> {
+        let mut registry = PreviewRegistry::default();
+        let key = key(19)?;
+        registry.insert_preview(
+            key,
+            DocPreviewState {
+                token: token(34)?,
+                win: win(4)?,
+                group: Some(1),
+                cleanup: None,
+                restore_name_plan: Some(RestoreNamePlan {
+                    name: String::new(),
+                    preview_name: "doc.md.snacks-preview".to_string(),
+                }),
+            },
+        );
+
+        let arrived = registry.reduce(PreviewEvent::DocFindArrived {
+            key,
+            token: token(34)?,
+        });
+        let closed = registry.reduce(PreviewEvent::Close { key });
+
+        assert_eq!(
+            (arrived, closed),
+            (
+                PreviewTransition::with_effects(vec![PreviewEffect::RestoreName {
+                    key,
+                    plan: RestoreNamePlan {
+                        name: String::new(),
+                        preview_name: "doc.md.snacks-preview".to_string(),
+                    },
+                }]),
+                PreviewTransition::with_effects(vec![PreviewEffect::DeleteAugroup(1)]),
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
     fn doc_find_arrived_for_stale_token_is_noop() -> Result<(), &'static str> {
         let mut registry = PreviewRegistry::default();
         let key = BufKey::try_new(12).ok_or("expected valid key")?;
@@ -778,10 +865,13 @@ mod tests {
         });
         assert_eq!(
             current.effects,
-            vec![PreviewEffect::RestoreName(RestoreNamePlan {
-                name: "new".to_string(),
-                preview_name: "new.preview".to_string(),
-            })]
+            vec![PreviewEffect::RestoreName {
+                key,
+                plan: RestoreNamePlan {
+                    name: "new".to_string(),
+                    preview_name: "new.preview".to_string(),
+                },
+            }]
         );
         assert_eq!(current.command, None);
         Ok(())

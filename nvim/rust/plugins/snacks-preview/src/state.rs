@@ -24,20 +24,20 @@ pub struct State {
 }
 
 impl State {
-    const fn next_cleanup_id(&mut self) -> i64 {
-        self.next_cleanup_id = if self.next_cleanup_id == i64::MAX {
-            1
-        } else {
-            self.next_cleanup_id + 1
-        };
-        self.next_cleanup_id
-    }
-
     fn insert_cleanup(&mut self, cleanup_key: mlua::RegistryKey) -> i64 {
-        let cleanup_id = self.next_cleanup_id();
-        let replaced = self.cleanups.insert(cleanup_id, cleanup_key);
-        debug_assert!(replaced.is_none());
-        cleanup_id
+        loop {
+            self.next_cleanup_id = if self.next_cleanup_id == i64::MAX {
+                1
+            } else {
+                self.next_cleanup_id + 1
+            };
+            if !self.cleanups.contains_key(&self.next_cleanup_id) {
+                let cleanup_id = self.next_cleanup_id;
+                let replaced = self.cleanups.insert(cleanup_id, cleanup_key);
+                debug_assert!(replaced.is_none());
+                return cleanup_id;
+            }
+        }
     }
 
     fn take_cleanup(&mut self, cleanup_id: i64) -> Option<mlua::RegistryKey> {
@@ -102,12 +102,9 @@ impl PreviewContext {
         state.take_cleanup(cleanup_id)
     }
 
-    pub fn take_all_cleanup_keys_and_reset(&self) -> Vec<mlua::RegistryKey> {
+    pub fn take_all_cleanup_keys(&self) -> Vec<mlua::RegistryKey> {
         let mut state = self.state_lock();
-        let cleanup_keys = state.take_all_cleanups();
-        state.registry = PreviewRegistry::default();
-        state.next_cleanup_id = 0;
-        cleanup_keys
+        state.take_all_cleanups()
     }
 }
 

@@ -81,9 +81,14 @@ fn run_preview_cleanup(cleanup_id: i64) {
     }
 }
 
-fn execute_effect(buf_handle: BufHandle, effect: PreviewEffect) {
+fn execute_effect(effect: PreviewEffect) {
     match effect {
-        PreviewEffect::RestoreName(plan) => restore_doc_preview_name(buf_handle, &plan),
+        PreviewEffect::RestoreName { key, plan } => {
+            let Some(buf_handle) = BufHandle::try_from_i64(key.raw()) else {
+                return;
+            };
+            restore_doc_preview_name(buf_handle, &plan);
+        }
         PreviewEffect::DeleteAugroup(group) => {
             if let Err(err) = api::del_augroup_by_id(group) {
                 notify::warn(LOG_CONTEXT, &format!("delete augroup failed: {err}"));
@@ -93,17 +98,14 @@ fn execute_effect(buf_handle: BufHandle, effect: PreviewEffect) {
     }
 }
 
-fn execute_effects(buf_handle: BufHandle, effects: Vec<PreviewEffect>) {
+fn execute_effects(effects: Vec<PreviewEffect>) {
     for effect in effects {
-        execute_effect(buf_handle, effect);
+        execute_effect(effect);
     }
 }
 
-fn execute_transition(
-    buf_handle: BufHandle,
-    transition: PreviewTransition,
-) -> Option<PreviewCommand> {
-    execute_effects(buf_handle, transition.effects);
+fn execute_transition(transition: PreviewTransition) -> Option<PreviewCommand> {
+    execute_effects(transition.effects);
     transition.command
 }
 
@@ -124,62 +126,67 @@ fn close_doc_preview(buf_handle: BufHandle) -> bool {
     if transition.is_empty() {
         return false;
     }
-    let command = execute_transition(buf_handle, transition);
+    let command = execute_transition(transition);
     log_unexpected_command("close", command.as_ref());
     true
 }
 
-fn close_doc_preview_by_token(buf_handle: BufHandle, token: PreviewToken) -> bool {
+fn close_doc_preview_by_token(token: PreviewToken) -> bool {
     let transition = context().apply_event(PreviewEvent::CloseByToken { token });
     if transition.is_empty() {
         return false;
     }
-    let command = execute_transition(buf_handle, transition);
+    let command = execute_transition(transition);
     log_unexpected_command("close_by_token", command.as_ref());
     true
 }
 
-fn close_doc_preview_for_window(buf_handle: BufHandle, win_handle: WinHandle) -> bool {
+fn close_doc_preview_for_window(win_handle: WinHandle) -> bool {
     let Some(win) = win_key(win_handle) else {
         return false;
     };
     let Some(token) = context().token_for_win(win) else {
         return false;
     };
-    close_doc_preview_by_token(buf_handle, token)
+    close_doc_preview_by_token(token)
 }
 
-fn close_preview_or_delete_group(buf_handle: BufHandle, group: u32) {
-    if !close_doc_preview(buf_handle)
-        && let Err(err) = api::del_augroup_by_id(group)
-    {
-        notify::warn(LOG_CONTEXT, &format!("delete augroup failed: {err}"));
-    }
+fn close_doc_preview_owners(buf_handle: BufHandle, win_handle: WinHandle) {
+    let _ = close_doc_preview(buf_handle);
+    let _ = close_doc_preview_for_window(win_handle);
 }
 
-fn run_scheduled_close_autocmd(label: &'static str, buf_handle: BufHandle, group: u32) {
+fn run_scheduled_close_autocmd(label: &'static str, token: PreviewToken) {
     guard::with_panic(
         (),
         || {
-            close_preview_or_delete_group(buf_handle, group);
+            let _ = close_doc_preview_by_token(token);
         },
         |info| report_panic(label, &info),
     );
 }
 
-fn run_close_autocmd(label: &'static str, buf_handle: BufHandle, group: u32) -> bool {
-    schedule(move |()| run_scheduled_close_autocmd(label, buf_handle, group));
+fn run_close_autocmd(label: &'static str, token: PreviewToken) -> bool {
+    schedule(move |()| run_scheduled_close_autocmd(label, token));
     false
 }
 
+fn preview_target_is_current(buf_handle: BufHandle, win_handle: WinHandle) -> bool {
+    win_handle
+        .valid_window()
+        .and_then(|window| window.get_buf().ok())
+        .is_some_and(|buf| BufHandle::from_buffer(&buf) == buf_handle)
+}
+
 fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) -> Result<()> {
+    close_doc_preview_owners(buf_handle, win_handle);
+
     let Some(buf) = buf_handle.valid_buffer() else {
         return Ok(());
     };
 
     let ft = filetype_for_path(path)?;
     if !is_doc_preview_filetype(&ft) {
-        let _ = close_doc_preview_for_window(buf_handle, win_handle);
         return Ok(());
     }
 
@@ -189,60 +196,12 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
         notify::warn(LOG_CONTEXT, &format!("set filetype failed: {err}"));
     }
 
-    let _ = close_doc_preview_for_window(buf_handle, win_handle);
-
     if !snacks_has_doc_preview() {
         return Ok(());
     }
 
-    if win_handle.valid_window().is_none() {
+    if !preview_target_is_current(buf_handle, win_handle) {
         return Ok(());
-    }
-
-    let group_name = format!("snacks.doc_preview.{}", buf_handle.raw());
-    let group = api::create_augroup(
-        &group_name,
-        &CreateAugroupOpts::builder().clear(true).build(),
-    )?;
-
-    let buf_handle_for_event = buf_handle;
-    let group_for_event = group;
-    let opts = CreateAutocmdOpts::builder()
-        .group(group)
-        .buffer(buf.clone())
-        .callback(move |_args: AutocmdCallbackArgs| {
-            run_close_autocmd(
-                "doc_preview_buf_close",
-                buf_handle_for_event,
-                group_for_event,
-            )
-        })
-        .build();
-    api::create_autocmd(["BufWipeout", "BufHidden"], &opts)?;
-
-    let buf_handle_for_win = buf_handle;
-    let group_for_win = group;
-    let win_id_str = win_handle.raw().to_string();
-    let win_opts = CreateAutocmdOpts::builder()
-        .group(group)
-        .patterns([win_id_str.as_str()])
-        .callback(move |_args: AutocmdCallbackArgs| {
-            run_close_autocmd("doc_preview_win_close", buf_handle_for_win, group_for_win)
-        })
-        .build();
-    api::create_autocmd(["WinClosed"], &win_opts)?;
-
-    let original_name = buf.get_name()?.to_string_lossy().into_owned();
-    let preview_name = format!("{path}.snacks-preview");
-    let restore_name_plan = (original_name != preview_name).then(|| RestoreNamePlan {
-        name: original_name,
-        preview_name: preview_name.clone(),
-    });
-    if restore_name_plan.is_some() {
-        let mut buf = buf;
-        if let Err(err) = buf.set_name(Path::new(&preview_name)) {
-            notify::warn(LOG_CONTEXT, &format!("set preview name failed: {err}"));
-        }
     }
 
     let Some(key) = buf_key(buf_handle) else {
@@ -251,14 +210,37 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
     let Some(win) = win_key(win_handle) else {
         return Ok(());
     };
+
+    let original_name = buf.get_name()?.to_string_lossy().into_owned();
+    let preview_name = format!("{path}.snacks-preview");
+    let group_name = format!("snacks.doc_preview.{}", buf_handle.raw());
+    let group = api::create_augroup(
+        &group_name,
+        &CreateAugroupOpts::builder().clear(true).build(),
+    )?;
+    let restore_name_plan = if original_name.is_empty() {
+        let mut named_buf = buf.clone();
+        match named_buf.set_name(Path::new(&preview_name)) {
+            Ok(()) => Some(RestoreNamePlan {
+                name: original_name,
+                preview_name,
+            }),
+            Err(err) => {
+                notify::warn(LOG_CONTEXT, &format!("set preview name failed: {err}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let transition = context().apply_event(PreviewEvent::Register {
         key,
         win,
         group,
         restore_name_plan,
     });
-    let Some(PreviewCommand::RequestDocFind(token)) = execute_transition(buf_handle, transition)
-    else {
+    let Some(PreviewCommand::RequestDocFind(token)) = execute_transition(transition) else {
         notify::warn(
             LOG_CONTEXT,
             "missing doc find token during preview registration",
@@ -266,9 +248,37 @@ fn attach_doc_preview(buf_handle: BufHandle, path: &str, win_handle: WinHandle) 
         let _ = close_doc_preview(buf_handle);
         return Ok(());
     };
+
+    let token_for_buf = token;
+    let opts = CreateAutocmdOpts::builder()
+        .group(group)
+        .buffer(buf)
+        .callback(move |_args: AutocmdCallbackArgs| {
+            run_close_autocmd("doc_preview_buf_close", token_for_buf)
+        })
+        .build();
+    if let Err(err) = api::create_autocmd(["BufWipeout", "BufHidden"], &opts) {
+        let _ = close_doc_preview_by_token(token);
+        return Err(err.into());
+    }
+
+    let token_for_win = token;
+    let win_id_str = win_handle.raw().to_string();
+    let win_opts = CreateAutocmdOpts::builder()
+        .group(group)
+        .patterns([win_id_str.as_str()])
+        .callback(move |_args: AutocmdCallbackArgs| {
+            run_close_autocmd("doc_preview_win_close", token_for_win)
+        })
+        .build();
+    if let Err(err) = api::create_autocmd(["WinClosed"], &win_opts) {
+        let _ = close_doc_preview_by_token(token);
+        return Err(err.into());
+    }
+
     if let Err(err) = snacks_doc_find(buf_handle, token, win_handle) {
         notify::warn(LOG_CONTEXT, &format!("snacks doc find failed: {err}"));
-        let _ = close_doc_preview(buf_handle);
+        let _ = close_doc_preview_by_token(token);
     }
 
     Ok(())
@@ -294,11 +304,11 @@ fn on_doc_find_inner(args: DocFindArgs) {
     let Some(key) = buf_key(buf_handle) else {
         return;
     };
-    let arrived_transition = context().apply_event(PreviewEvent::DocFindArrived { key, token });
-    if arrived_transition.is_empty() {
+    if !context().is_current_preview_token(key, token) {
         return;
     }
-    let command = execute_transition(buf_handle, arrived_transition);
+    let arrived_transition = context().apply_event(PreviewEvent::DocFindArrived { key, token });
+    let command = execute_transition(arrived_transition);
     log_unexpected_command("doc_find_arrived", command.as_ref());
 
     let Some(src) = img_src else {
@@ -313,7 +323,8 @@ fn on_doc_find_inner(args: DocFindArgs) {
                 if !context().is_current_preview_token(key, token) {
                     return;
                 }
-                if win_handle.valid_window().is_none() {
+                if !preview_target_is_current(buf_handle, win_handle) {
+                    let _ = close_doc_preview_by_token(token);
                     return;
                 }
                 let Some(cleanup_id) = create_preview_cleanup(win_handle, &src) else {
@@ -328,7 +339,7 @@ fn on_doc_find_inner(args: DocFindArgs) {
                     token,
                     cleanup_id,
                 });
-                let command = execute_transition(buf_handle, cleanup_effects);
+                let command = execute_transition(cleanup_effects);
                 log_unexpected_command("cleanup_opened", command.as_ref());
             },
             |info| report_panic("doc_preview_schedule", &info),
@@ -376,6 +387,16 @@ pub fn close_doc_preview_lua(buf_handle: i64) {
     let _ = close_doc_preview(buf_handle);
 }
 
+pub fn close_doc_preview_for_window_lua(win_handle: i64) {
+    let Some(win_handle) = WinHandle::try_from_i64(win_handle) else {
+        return;
+    };
+    let _ = close_doc_preview_for_window(win_handle);
+}
+
 pub fn reset_state_lua() {
+    let transition = context().apply_event(PreviewEvent::Reset);
+    let command = execute_transition(transition);
+    log_unexpected_command("reset", command.as_ref());
     reset_preview_state();
 }

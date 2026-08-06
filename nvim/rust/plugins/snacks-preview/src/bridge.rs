@@ -210,7 +210,7 @@ pub fn snacks_close_preview(cleanup_id: i64) -> Result<()> {
 }
 
 pub fn reset_preview_state() {
-    let cleanup_keys = context().take_all_cleanup_keys_and_reset();
+    let cleanup_keys = context().take_all_cleanup_keys();
     for cleanup_key in cleanup_keys {
         if let Err(err) = run_cleanup_registry_key(cleanup_key) {
             notify::warn(LOG_CONTEXT, &format!("preview cleanup reset failed: {err}"));

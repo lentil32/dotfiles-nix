@@ -437,6 +437,7 @@ dependencies = [
  "nvimrs-nvim-oxi-utils",
  "nvimrs-nvim-utils",
  "nvimrs-support",
+ "pretty_assertions",
  "serde",
 ]
 

@@ -18,6 +18,7 @@
 ---@field on_doc_find fun(args: nvimrs_snacks_preview.DocFindArgs)
 ---@field attach_doc_preview fun(args: nvimrs_snacks_preview.AttachDocPreviewArgs)
 ---@field close_doc_preview fun(buf: integer)
+---@field close_doc_preview_for_window fun(win: integer)
 ---@field reset_state fun()
 
 ---@type nvimrs_snacks_preview
@@ -31,6 +32,9 @@ function M.attach_doc_preview(args) end
 
 ---@param buf integer
 function M.close_doc_preview(buf) end
+
+---@param win integer
+function M.close_doc_preview_for_window(win) end
 
 function M.reset_state() end
 
