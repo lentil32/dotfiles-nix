@@ -30,7 +30,13 @@ in
           ControlPath = "~/.ssh/cm-%C";
         };
       };
-      "*" = { };
+      "mango" = {
+        hostname = "mango.tail55193.ts.net";
+        user = "wordbricks";
+      };
+      "*" = {
+        identityAgent = ''"~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"'';
+      };
     };
   };
 }
