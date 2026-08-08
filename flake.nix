@@ -185,14 +185,20 @@
         version = "0.0.0";
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      rustToolchain = devShellPkgs.rust-bin.stable.latest.default.override {
-        targets = [ "wasm32-unknown-unknown" ];
-        extensions = [
-          "clippy"
-          "rust-analyzer"
-          "rust-src"
-        ];
-      };
+      rustToolchainFor =
+        rustPkgs:
+        rustPkgs.rust-bin.selectLatestNightlyWith (
+          toolchain:
+          toolchain.default.override {
+            targets = [ "wasm32-unknown-unknown" ];
+            extensions = [
+              "clippy"
+              "rust-analyzer"
+              "rust-src"
+            ];
+          }
+        );
+      rustToolchain = rustToolchainFor devShellPkgs;
       rustDevShell = devShellPkgs.mkShell {
         packages = [
           rustToolchain
@@ -216,6 +222,7 @@
         inherit
           inputs
           pkgs-unstable
+          rustToolchainFor
           useremail
           ;
       };

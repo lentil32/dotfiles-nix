@@ -229,7 +229,6 @@ in
             runtimeDeps = [
               p.astro-language-server
               p.nil
-              p.rust-analyzer
               p.emmylua-ls
               p.ruff
               p.yaml-language-server

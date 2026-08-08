@@ -3,6 +3,7 @@
   lib,
   pkgs,
   pkgs-unstable,
+  rustToolchainFor,
   ...
 }:
 let
@@ -117,14 +118,7 @@ in
     mermaid-cli
     opam
 
-    # Rust overlay
-    (rust-bin.stable.latest.default.override {
-      targets = [ "wasm32-unknown-unknown" ];
-      extensions = [
-        "rust-analyzer"
-        "clippy"
-      ];
-    })
+    (rustToolchainFor pkgs)
     wasm-pack
     wasm-bindgen-cli
 
@@ -146,7 +140,7 @@ in
     shfmt
     taplo
     typescript-language-server
-    vscode-langservers-extracted
+    pkgs-unstable.vscode-langservers-extracted
     yapf
 
     # Productivity
